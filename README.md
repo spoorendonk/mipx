@@ -21,7 +21,7 @@ cutting planes, presolve, and primal heuristics — no external solver dependenc
 HiGHS-style progress table during solve:
 
 ```
-mip-exact v0.1
+mipx v0.1
   Variables   : 1024 (512 binary, 128 integer, 384 continuous)
   Constraints : 768
   Threads     : 8
