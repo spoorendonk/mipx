@@ -1,5 +1,6 @@
 add_library(mipx STATIC
     core.cpp
+    lp/sparse_matrix.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
