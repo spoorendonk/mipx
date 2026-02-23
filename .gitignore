@@ -1,0 +1,4 @@
+build/
+benchmark-results/
+tests/data/*.mps
+tests/data/*.mps.gz
