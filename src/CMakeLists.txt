@@ -1,6 +1,11 @@
 add_library(mipx STATIC
     core.cpp
     lp/sparse_matrix.cpp
+    lp/lp_problem.cpp
+    io/mps_reader.cpp
+    io/mps_writer.cpp
+    io/lp_reader.cpp
+    io/solu_reader.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
