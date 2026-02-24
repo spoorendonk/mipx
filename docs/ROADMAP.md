@@ -175,9 +175,13 @@ Each step builds on the previous, produces something testable, and is scoped for
 - CLI tool `mipx-solve` with MPS file input
 - HiGHS comparison benchmark script (`tests/benchmark_vs_highs.py`)
 
-**Deferred to optimization pass:**
-- Devex pricing (approximate steepest-edge) — currently using Dantzig/Harris
-- Bound Flipping Ratio Test (BFRT) — currently single-flip per pivot
+**Optimization pass (complete):**
+- Devex approximate steepest-edge pricing for CHUZR
+- Bound Flipping Ratio Test (BFRT) in CHUZC
+- Row-wise pivot row computation (CSR access)
+- Reduced per-iteration overhead (avoid lazy CSC rebuild, eliminate temp allocations)
+
+**Deferred:**
 - Hyper-sparsity exploitation in FTRAN/BTRAN
 - PAMI/SIP parallelism
 

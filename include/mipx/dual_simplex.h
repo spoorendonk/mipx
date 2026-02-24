@@ -110,6 +110,11 @@ private:
     Int iter_limit_ = 1000000;
     bool loaded_ = false;
 
+    // Devex pricing weights.
+    std::vector<Real> devex_weights_;  // size num_rows, one per basis position
+    Int devex_reset_count_ = 0;
+    static constexpr Int kDevexResetFreq = 200;  // reset every N pivots
+
     // Tolerances.
     static constexpr Real kPrimalTol = 1e-7;
     static constexpr Real kDualTol = 1e-7;
