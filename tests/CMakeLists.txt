@@ -4,6 +4,7 @@ add_executable(mipx-tests
     test_lp_problem.cpp
     test_benchmark.cpp
     test_lp_solver.cpp
+    test_lu.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
