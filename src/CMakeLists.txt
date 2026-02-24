@@ -2,6 +2,7 @@ add_library(mipx STATIC
     core.cpp
     lp/sparse_matrix.cpp
     lp/lp_problem.cpp
+    lp/lp_solver.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
     io/lp_reader.cpp
