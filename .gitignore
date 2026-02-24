@@ -1,4 +1,6 @@
 build/
 benchmark-results/
-tests/data/*.mps
-tests/data/*.mps.gz
+tests/data/netlib/
+tests/data/miplib/
+tests/data/.cache/
+tests/data/*_roundtrip.mps

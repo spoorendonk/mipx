@@ -81,11 +81,13 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 ctest --test-dir build -j$(nproc)
 ```
 
-MIPLIB instances are not included in the repo. Download them before running benchmarks:
+Netlib and MIPLIB instances are not included in the repo. Download them before running benchmarks:
 
 ```bash
-./tests/data/download_miplib.sh          # MIPLIB 2017 benchmark set
-./tests/data/download_miplib.sh --small  # curated small subset
+./tests/data/download_netlib.sh          # full Netlib LP set
+./tests/data/download_netlib.sh --small  # curated small subset (CI)
+./tests/data/download_miplib.sh          # MIPLIB 2017 collection
+./tests/data/download_miplib.sh --small  # curated small subset (CI)
 ```
 
 Tests that require missing instances are skipped automatically.
@@ -129,7 +131,7 @@ docs/              Documentation and roadmap
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the full implementation plan.
 
-**Current focus:** Project skeleton → sparse matrix → LP solver → branch-and-bound.
+**Current focus:** LP solver interface → LU factorization → dual simplex.
 
 **Future work:** Barrier/IPM, PDLP+GPU, column generation.
 

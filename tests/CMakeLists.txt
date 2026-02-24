@@ -2,6 +2,7 @@ add_executable(mipx-tests
     test_core.cpp
     test_sparse_matrix.cpp
     test_lp_problem.cpp
+    test_benchmark.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
