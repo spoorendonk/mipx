@@ -6,6 +6,8 @@ import time
 import sys
 import os
 import glob
+import gzip
+import tempfile
 import re
 
 try:
@@ -79,18 +81,30 @@ def solve_mipx(filepath: str) -> dict:
 def solve_highs(filepath: str) -> dict:
     """Solve with HiGHS, return dict with obj, iters, time, status."""
     result = {"obj": None, "iters": None, "time": None, "status": "error"}
+    tmp_path = None
     try:
+        # HiGHS can't read .gz files directly; decompress if needed.
+        if filepath.endswith(".gz"):
+            with gzip.open(filepath, "rb") as f:
+                data = f.read()
+            tmp = tempfile.NamedTemporaryFile(suffix=".mps", delete=False)
+            tmp.write(data)
+            tmp.close()
+            tmp_path = tmp.name
+            read_path = tmp_path
+        else:
+            read_path = filepath
+
         h = highspy.Highs()
         h.setOptionValue("output_flag", False)
 
         start = time.perf_counter()
-        h.readModel(filepath)
+        h.readModel(read_path)
         h.run()
         elapsed = time.perf_counter() - start
         result["time"] = elapsed
 
-        status = h.getInfoValue("primal_solution_status")[1]
-        result["obj"] = h.getInfoValue("objective_function_value")[1]
+        result["obj"] = h.getObjectiveValue()
         result["iters"] = int(h.getInfoValue("simplex_iteration_count")[1])
 
         model_status = h.getModelStatus()
@@ -105,6 +119,9 @@ def solve_highs(filepath: str) -> dict:
 
     except Exception as e:
         result["status"] = f"error: {e}"
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     return result
 
