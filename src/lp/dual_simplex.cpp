@@ -1,0 +1,1178 @@
+#include "mipx/dual_simplex.h"
+
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <numeric>
+#include <stdexcept>
+#include <vector>
+
+namespace mipx {
+
+// ---------------------------------------------------------------------------
+//  Load
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::load(const LpProblem& problem) {
+    num_cols_ = problem.num_cols;
+    num_rows_ = problem.num_rows;
+    sense_ = problem.sense;
+    obj_offset_ = problem.obj_offset;
+
+    // Copy objective (negate for maximize).
+    obj_ = problem.obj;
+    if (sense_ == Sense::Maximize) {
+        for (auto& c : obj_) c = -c;
+    }
+
+    col_lower_ = problem.col_lower;
+    col_upper_ = problem.col_upper;
+    row_lower_ = problem.row_lower;
+    row_upper_ = problem.row_upper;
+    matrix_ = problem.matrix;
+
+    // Apply scaling.
+    computeScaling();
+    applyScaling();
+
+    // Build augmented matrix [A | I].
+    buildAugmentedMatrix();
+
+    status_ = Status::Error;
+    iterations_ = 0;
+    loaded_ = true;
+}
+
+// ---------------------------------------------------------------------------
+//  Scaling: equilibration
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::computeScaling() {
+    row_scale_.assign(num_rows_, 1.0);
+    col_scale_.assign(num_cols_, 1.0);
+
+    // Row scaling: max absolute value in each row.
+    for (Index i = 0; i < num_rows_; ++i) {
+        auto rv = matrix_.row(i);
+        Real maxval = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            maxval = std::max(maxval, std::abs(rv.values[k]));
+        }
+        if (maxval > kZeroTol) {
+            row_scale_[i] = 1.0 / maxval;
+        }
+    }
+
+    // Column scaling: max absolute value in each column (after row scaling).
+    for (Index j = 0; j < num_cols_; ++j) {
+        auto cv = matrix_.col(j);
+        Real maxval = 0.0;
+        for (Index k = 0; k < cv.size(); ++k) {
+            maxval = std::max(maxval, std::abs(cv.values[k] * row_scale_[cv.indices[k]]));
+        }
+        if (maxval > kZeroTol) {
+            col_scale_[j] = 1.0 / maxval;
+        }
+    }
+
+    scaled_ = true;
+}
+
+void DualSimplexSolver::applyScaling() {
+    if (!scaled_) return;
+
+    // Scale the matrix: A' = R * A * C where R = diag(row_scale_), C = diag(col_scale_).
+    // We need to rebuild from triplets since we can't modify CSR in-place easily.
+    std::vector<Triplet> triplets;
+    triplets.reserve(matrix_.numNonzeros());
+    for (Index i = 0; i < num_rows_; ++i) {
+        auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            Real val = rv.values[k] * row_scale_[i] * col_scale_[rv.indices[k]];
+            if (std::abs(val) > kZeroTol) {
+                triplets.push_back({i, rv.indices[k], val});
+            }
+        }
+    }
+    matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+
+    // Scale bounds: row bounds *= row_scale, col bounds /= col_scale (since x = C * x').
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (row_lower_[i] != -kInf) row_lower_[i] *= row_scale_[i];
+        if (row_upper_[i] != kInf) row_upper_[i] *= row_scale_[i];
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        // x_j = col_scale_[j] * x'_j, so x'_j = x_j / col_scale_[j]
+        // bounds: l_j / col_scale_[j] <= x'_j <= u_j / col_scale_[j]
+        // But col_scale_ = 1/maxval, so we multiply bounds by maxval = 1/col_scale_.
+        // Actually: x = C*x', so l <= x <= u becomes l <= C*x' <= u
+        // For component j: l_j <= col_scale_j * x'_j <= u_j
+        // So: l_j / col_scale_j <= x'_j <= u_j / col_scale_j
+        if (col_lower_[j] != -kInf) col_lower_[j] /= col_scale_[j];
+        if (col_upper_[j] != kInf) col_upper_[j] /= col_scale_[j];
+        // Objective: c^T x = c^T C x' = (C c)^T x'. So c'_j = c_j * col_scale_j.
+        obj_[j] *= col_scale_[j];
+    }
+}
+
+void DualSimplexSolver::unscaleResults() {
+    if (!scaled_) return;
+
+    // Unscale primal values: x_j = col_scale_j * x'_j for structural, row_scale_i * s'_i for slack.
+    for (Index j = 0; j < num_cols_; ++j) {
+        primal_[j] *= col_scale_[j];
+    }
+    for (Index i = 0; i < num_rows_; ++i) {
+        primal_[num_cols_ + i] /= row_scale_[i];
+    }
+
+    // Unscale duals: y'_i was computed for scaled problem. Original y_i = y'_i * row_scale_i.
+    for (Index i = 0; i < num_rows_; ++i) {
+        dual_[i] *= row_scale_[i];
+    }
+
+    // Unscale reduced costs for structural vars.
+    for (Index j = 0; j < num_cols_; ++j) {
+        reduced_cost_[j] /= col_scale_[j];
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Build augmented matrix [A | I]
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::buildAugmentedMatrix() {
+    // Build [A | I] as a sparse matrix with num_rows rows and (num_cols + num_rows) cols.
+    std::vector<Triplet> triplets;
+    triplets.reserve(matrix_.numNonzeros() + num_rows_);
+
+    for (Index i = 0; i < num_rows_; ++i) {
+        auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            triplets.push_back({i, rv.indices[k], rv.values[k]});
+        }
+        // Identity column for slack.
+        triplets.push_back({i, num_cols_ + i, 1.0});
+    }
+
+    augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
+}
+
+// ---------------------------------------------------------------------------
+//  Variable bounds and costs
+// ---------------------------------------------------------------------------
+
+Real DualSimplexSolver::varLower(Index k) const {
+    if (k < num_cols_) return col_lower_[k];
+    // Slack variable for row (k - num_cols_): s = Ax component.
+    // Row i: row_lower_[i] <= a_i^T x <= row_upper_[i]
+    // Slack s_i = a_i^T x, so row_lower_[i] <= s_i <= row_upper_[i].
+    return row_lower_[k - num_cols_];
+}
+
+Real DualSimplexSolver::varUpper(Index k) const {
+    if (k < num_cols_) return col_upper_[k];
+    return row_upper_[k - num_cols_];
+}
+
+Real DualSimplexSolver::varCost(Index k) const {
+    if (k < num_cols_) return obj_[k];
+    return 0.0;  // slacks have zero cost
+}
+
+// ---------------------------------------------------------------------------
+//  Initial basis
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::setupInitialBasis() {
+    Index n = numVars();
+
+    basis_.resize(num_rows_);
+    nonbasic_.clear();
+    nonbasic_.reserve(num_cols_);
+    basis_pos_.assign(n, -1);
+    var_status_.resize(n);
+    primal_.resize(n);
+    dual_.resize(num_rows_);
+    reduced_cost_.resize(n);
+
+    // All slacks basic.
+    for (Index i = 0; i < num_rows_; ++i) {
+        Index slack = num_cols_ + i;
+        basis_[i] = slack;
+        basis_pos_[slack] = i;
+        var_status_[slack] = BasisStatus::Basic;
+    }
+
+    // Structural variables nonbasic.
+    // With all-slack basis, y = 0 (slack costs are 0), so reduced_cost_j = c_j.
+    // For dual feasibility: rc_j >= 0 if at lower, rc_j <= 0 if at upper.
+    for (Index j = 0; j < num_cols_; ++j) {
+        Real lb = col_lower_[j];
+        Real ub = col_upper_[j];
+        Real cj = obj_[j];
+
+        bool has_lower = (lb != -kInf);
+        bool has_upper = (ub != kInf);
+
+        if (has_lower && has_upper && std::abs(lb - ub) < kZeroTol) {
+            // Fixed.
+            var_status_[j] = BasisStatus::Fixed;
+            primal_[j] = lb;
+        } else if (!has_lower && !has_upper) {
+            // Free variable. Place at 0 and apply cost shifting for dual feasibility.
+            var_status_[j] = BasisStatus::Free;
+            primal_[j] = 0.0;
+        } else if (cj >= 0.0 && has_lower) {
+            // rc = c_j >= 0, at lower is dual feasible.
+            var_status_[j] = BasisStatus::AtLower;
+            primal_[j] = lb;
+        } else if (cj < 0.0 && has_upper) {
+            // rc = c_j < 0, at upper is dual feasible.
+            var_status_[j] = BasisStatus::AtUpper;
+            primal_[j] = ub;
+        } else if (has_lower) {
+            // Only lower bound. rc = c_j must be >= 0 for dual feasibility.
+            // If c_j < 0, apply cost shifting: shift c_j up to 0.
+            var_status_[j] = BasisStatus::AtLower;
+            primal_[j] = lb;
+        } else {
+            // Only upper bound.
+            var_status_[j] = BasisStatus::AtUpper;
+            primal_[j] = ub;
+        }
+
+        nonbasic_.push_back(j);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Compute primals: x_B = B^{-1} * (b - N * x_N)
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::computePrimals() {
+    // Compute rhs = b_eff - sum over nonbasic j: a_j * x_j
+    // where b_eff for each row is the slack value contribution.
+    // Actually: the system is A_aug * x = 0 style? No.
+    // The augmented system: [A | I] * [x; s] has no explicit rhs.
+    // The constraint is: A*x + s = something? No.
+    // With slacks: row i is row_lower_i <= a_i^T x <= row_upper_i.
+    // We define slack s_i = a_i^T x. So a_i^T x - s_i = 0, i.e., [A | -I][x; s] = 0.
+    // But we used [A | I] for the augmented matrix. Let me reconsider.
+    //
+    // The augmented approach: we have variables x_1..x_n, s_1..s_m.
+    // The basis equation: B * x_B = -N * x_N + some rhs?
+    //
+    // Actually, the standard approach: the constraints are encoded as
+    // A*x = b has no single rhs. The row bounds define row_lower <= Ax <= row_upper.
+    // The slack s_i represents the activity of row i. Constraint: s_i = a_i^T x.
+    // Written as: A*x - s = 0, so [A | -I][x; s] = 0.
+    // Total: [A | -I]*[x; s] = 0.
+    //
+    // With augmented = [A | I], we'd have [A|I][x; s] = 2*something... that's wrong.
+    //
+    // Let me use the standard formulation. The constraint system is:
+    //   For each row: a_i^T x = s_i   (slack = activity)
+    //   row_lower_i <= s_i <= row_upper_i
+    //   col_lower_j <= x_j <= col_upper_j
+    //
+    // So the "constraint" for the basis is: A*x - s = 0, but we have [A | -I] as the
+    // "augmented" matrix. However our augmented_ is [A | I].
+    //
+    // For the basis matrix approach: we pick m variables from {x_1,...,x_n, s_1,...,s_m}.
+    // The equality is: sum over all vars k of a_augmented_col_k * var_k = 0
+    //   where for structural vars, a_augmented_col_j = A's column j
+    //         for slack s_i, a_augmented_col_{n+i} = -e_i (negative identity)
+    //
+    // BUT our augmented_ has +I for slacks. So the equation is:
+    //   A*x + I*s = 0 would be wrong. We need A*x = s, i.e., A*x - s = 0.
+    //
+    // Two options: (1) use [A | -I] or (2) keep [A | I] and handle the sign.
+    // Since SparseLU::factorize takes the matrix and basis_cols, and extracts those columns,
+    // let's just use [A | -I]. Let me rebuild the augmented matrix.
+    //
+    // Actually wait. Let's think about it differently. With [A | I] and the equation
+    // [A | I] * [x; s] = rhs, what is rhs? It's not 0.
+    // We have a_i^T x = activity. If s_i is the slack = activity, then:
+    //   a_i^T x + 0*s_i = activity = s_i... that's circular.
+    //
+    // The standard LP formulation is: the constraints A*x = b (equality form).
+    // For ranged rows: we introduce slacks and have A*x + s = b_upper (or similar).
+    //
+    // The simplest correct approach: define the "activity" of row i as:
+    //   act_i = a_i^T x
+    // And we want row_lower_i <= act_i <= row_upper_i.
+    //
+    // We can add slack: act_i = a_i^T x, with row_lower_i <= act_i <= row_upper_i.
+    // Treat act_i as a variable bounded by [row_lower_i, row_upper_i].
+    //
+    // The basis system: select m of the (n+m) variables. The linear system is:
+    //   B * x_B = -N * x_N
+    // where the "augmented" constraint is A_aug * x = 0, with A_aug being the m x (n+m) matrix.
+    //
+    // For structural column j: the j-th column of A_aug is a_j (the j-th column of A).
+    // For slack column (n+i): the column should be -e_i (so that a_i^T x - s_i = 0).
+    //
+    // So A_aug = [A | -I]. Then A_aug * [x; s] = A*x - s = 0 means s = A*x. Correct.
+    //
+    // So the B*x_B + N*x_N = 0 decomposition gives x_B = -B^{-1} * N * x_N.
+    // Actually: A_aug * x_all = 0 => B * x_B + N * x_N = 0 => x_B = -(B^{-1}) * N * x_N.
+    //
+    // Wait but B^{-1} * N * x_N involves the full N which is expensive. The standard
+    // approach is to compute: x_B = B^{-1} * b where b = -N * x_N.
+    //
+    // For each nonbasic variable k with value x_k:
+    //   b -= a_augmented_col_k * x_k
+    //
+    // Then x_B = B^{-1} * (-b) actually. Let me be more careful.
+    //
+    // A_aug * x = 0
+    // Sum_{k in B} a_k * x_k + Sum_{k in N} a_k * x_k = 0
+    // B * x_B = - Sum_{k in N} a_k * x_k
+    // x_B = B^{-1} * (- Sum_{k in N} a_k * x_k)
+    //
+    // For structural var j nonbasic: a_k = column j of A (the j-th col of augmented_).
+    //   Contribution = -a_j * x_j.
+    // For slack var (n+i) nonbasic: a_k = -e_i (col n+i of A_aug = [A|-I]).
+    //   Contribution = -(-e_i) * x_{n+i} = e_i * x_{n+i}.
+    //
+    // But we built augmented_ as [A | I], not [A | -I]. So col n+i of augmented_ is +e_i.
+    // We need col n+i of A_aug to be -e_i.
+    //
+    // Fix: rebuild augmented as [A | -I], or handle the sign in the rhs computation.
+    // Let me handle the sign:
+    //   rhs_i = -Sum_{nonbasic structural j} A_{i,j} * x_j + Sum_{nonbasic slack (n+k)} x_{n+k} * delta_{i,k}
+    // and for basis factorization, the slack basis columns also need -e_i.
+    //
+    // Actually, the simplest correct approach used in practice: don't use [A|I] at all.
+    // Instead, the basis is always m columns from the "extended" matrix where:
+    //  - Structural columns: columns of A
+    //  - Slack columns: -e_i
+    //
+    // When factorizing, SparseLU::factorize takes a SparseMatrix and column indices.
+    // So we need a matrix that has the right columns. If we use [A | -I], then
+    // SparseLU::factorize(augmented_neg, basis_cols) works directly.
+    //
+    // Let me rebuild augmented_ as [A | -I].
+
+    // rhs = - sum_{k in N} a_k * x_k
+    // where a_k is column k of A_aug = [A | -I].
+    std::vector<Real> rhs(num_rows_, 0.0);
+
+    for (Index k : nonbasic_) {
+        Real xk = primal_[k];
+        if (std::abs(xk) < kZeroTol) continue;
+
+        if (k < num_cols_) {
+            // Structural: a_k = column k of A.
+            auto cv = matrix_.col(k);
+            for (Index p = 0; p < cv.size(); ++p) {
+                rhs[cv.indices[p]] -= cv.values[p] * xk;
+            }
+        } else {
+            // Slack (n+i): a_k = -e_i in [A|-I]. So contribution = -(-e_i)*x_k = e_i * x_k.
+            Index i = k - num_cols_;
+            rhs[i] += xk;
+        }
+    }
+
+    // Solve B * x_B = rhs using FTRAN.
+    lu_.ftran(rhs);
+
+    // Assign basic variable values.
+    for (Index i = 0; i < num_rows_; ++i) {
+        primal_[basis_[i]] = rhs[i];
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Compute duals and reduced costs
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::computeDuals() {
+    // y = B^{-T} * c_B
+    // Reduced cost: rc_k = c_k - y^T * a_k
+    //   For structural k: rc_k = c_k - y^T * A_col_k
+    //   For slack (n+i): rc_{n+i} = 0 - y^T * (-e_i) = y_i
+
+    std::vector<Real> cb(num_rows_, 0.0);
+    for (Index i = 0; i < num_rows_; ++i) {
+        cb[i] = varCost(basis_[i]);
+    }
+
+    // BTRAN: y = B^{-T} * c_B
+    lu_.btran(cb);
+    dual_ = cb;
+
+    // Reduced costs.
+    for (Index k = 0; k < numVars(); ++k) {
+        if (var_status_[k] == BasisStatus::Basic) {
+            reduced_cost_[k] = 0.0;
+        } else if (k < num_cols_) {
+            // Structural: rc = c_k - y^T * A_col_k.
+            Real rc = obj_[k];
+            auto cv = matrix_.col(k);
+            for (Index p = 0; p < cv.size(); ++p) {
+                rc -= dual_[cv.indices[p]] * cv.values[p];
+            }
+            reduced_cost_[k] = rc;
+        } else {
+            // Slack (n+i): rc = 0 - y^T * (-e_i) = y_i.
+            reduced_cost_[k] = dual_[k - num_cols_];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Refactorize
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::refactorize() {
+    // Build the basis matrix: for each basis position i, the column of [A | -I].
+    // We need a SparseMatrix whose column j is the basis_[j] column of [A | -I].
+    // SparseLU::factorize(matrix, basis_cols) extracts columns basis_cols[i] from matrix.
+    // So we need augmented_ to be [A | -I] and pass basis_ as basis_cols.
+
+    lu_.factorize(augmented_, basis_);
+}
+
+// ---------------------------------------------------------------------------
+//  Solve
+// ---------------------------------------------------------------------------
+
+LpResult DualSimplexSolver::solve() {
+    if (!loaded_) {
+        return {Status::Error, 0.0, 0};
+    }
+
+    // Rebuild augmented matrix as [A | -I] for correct basis representation.
+    {
+        std::vector<Triplet> triplets;
+        triplets.reserve(matrix_.numNonzeros() + num_rows_);
+        for (Index i = 0; i < num_rows_; ++i) {
+            auto rv = matrix_.row(i);
+            for (Index k = 0; k < rv.size(); ++k) {
+                triplets.push_back({i, rv.indices[k], rv.values[k]});
+            }
+            triplets.push_back({i, num_cols_ + i, -1.0});
+        }
+        augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
+    }
+
+    // Set up initial basis.
+    setupInitialBasis();
+
+    // Factorize initial basis (all slacks => B = -I).
+    refactorize();
+
+    // Compute initial primal and dual values.
+    computePrimals();
+    computeDuals();
+
+    // Ensure initial dual feasibility by cost shifting.
+    // With all-slack basis: y = 0, so rc_j = c_j for structural vars, rc_{n+i} = 0 for slacks.
+    // For nonbasic structural at lower: need rc >= -dualTol => c_j >= -dualTol
+    // For nonbasic structural at upper: need rc <= dualTol  => c_j <= dualTol
+    // For free vars at 0: need rc = 0.
+    // We shift costs to ensure this, tracking the total shift for later removal.
+    std::vector<Real> cost_shift(num_cols_, 0.0);
+    for (Index j = 0; j < num_cols_; ++j) {
+        if (var_status_[j] == BasisStatus::Basic) continue;
+        Real rc = reduced_cost_[j];
+        if (var_status_[j] == BasisStatus::AtLower) {
+            if (rc < -kDualTol) {
+                cost_shift[j] = -rc + kDualTol;
+                obj_[j] += cost_shift[j];
+                reduced_cost_[j] = kDualTol;
+            }
+        } else if (var_status_[j] == BasisStatus::AtUpper) {
+            if (rc > kDualTol) {
+                cost_shift[j] = -rc - kDualTol;
+                obj_[j] += cost_shift[j];
+                reduced_cost_[j] = -kDualTol;
+            }
+        } else if (var_status_[j] == BasisStatus::Free) {
+            if (std::abs(rc) > kDualTol) {
+                cost_shift[j] = -rc;
+                obj_[j] += cost_shift[j];
+                reduced_cost_[j] = 0.0;
+            }
+        }
+    }
+
+    // Check if any cost was shifted.
+    bool has_cost_shift = false;
+    for (Index j = 0; j < num_cols_; ++j) {
+        if (std::abs(cost_shift[j]) > kZeroTol) {
+            has_cost_shift = true;
+            break;
+        }
+    }
+
+    // Recompute duals after cost shift (since c_B may have changed).
+    if (has_cost_shift) {
+        computeDuals();
+    }
+
+    // Work vectors for the iteration.
+    std::vector<Real> pivot_row_alpha(numVars(), 0.0);
+    std::vector<Real> pivot_col(num_rows_, 0.0);
+    std::vector<Real> work(num_rows_, 0.0);
+
+    // Log header.
+    std::printf("  Iter      Objective   PrimalInf\n");
+
+    // Main dual simplex loop.
+    while (iterations_ < iter_limit_) {
+        // Log every kLogFrequency iterations.
+        if (iterations_ % kLogFrequency == 0) {
+            // Compute current objective.
+            Real obj_val = 0.0;
+            for (Index k = 0; k < numVars(); ++k) {
+                obj_val += varCost(k) * primal_[k];
+            }
+
+            // Compute primal infeasibility.
+            Real pinf = 0.0;
+            for (Index i = 0; i < num_rows_; ++i) {
+                Index k = basis_[i];
+                Real xk = primal_[k];
+                Real lb = varLower(k);
+                Real ub = varUpper(k);
+                if (xk < lb - kPrimalTol) pinf += lb - xk;
+                else if (xk > ub + kPrimalTol) pinf += xk - ub;
+            }
+            std::printf("%6d  %13.6e  %10.3e\n", iterations_, obj_val, pinf);
+        }
+
+        // ---- CHUZR: Find leaving variable ----
+        Index leaving_row = -1;
+        Real max_violation = kPrimalTol;
+
+        for (Index i = 0; i < num_rows_; ++i) {
+            Index k = basis_[i];
+            Real xk = primal_[k];
+            Real lb = varLower(k);
+            Real ub = varUpper(k);
+
+            Real viol = 0.0;
+            if (xk < lb - kPrimalTol) viol = lb - xk;
+            else if (xk > ub + kPrimalTol) viol = xk - ub;
+
+            if (viol > max_violation) {
+                max_violation = viol;
+                leaving_row = i;
+            }
+        }
+
+        if (leaving_row < 0) {
+            // All basic variables are primal feasible.
+
+            if (has_cost_shift) {
+                // Phase 1 complete: remove cost shifts.
+                for (Index j = 0; j < num_cols_; ++j) {
+                    obj_[j] -= cost_shift[j];
+                    cost_shift[j] = 0.0;
+                }
+                has_cost_shift = false;
+                computeDuals();
+
+                // Flip dual-infeasible nonbasic variables to their other bound.
+                bool flipped = false;
+                for (Index k : nonbasic_) {
+                    Real rc = reduced_cost_[k];
+                    BasisStatus st = var_status_[k];
+                    if (st == BasisStatus::AtLower && rc < -kDualTol &&
+                        varUpper(k) != kInf) {
+                        primal_[k] = varUpper(k);
+                        var_status_[k] = BasisStatus::AtUpper;
+                        flipped = true;
+                    } else if (st == BasisStatus::AtUpper && rc > kDualTol &&
+                               varLower(k) != -kInf) {
+                        primal_[k] = varLower(k);
+                        var_status_[k] = BasisStatus::AtLower;
+                        flipped = true;
+                    }
+                }
+                if (flipped) {
+                    computePrimals();
+                }
+                continue;  // Flipping may have created primal infeasibility.
+            }
+
+            // No cost shifts active. Check dual feasibility.
+            Index entering_p = -1;
+            Real worst_rc = 0.0;
+            for (Index k : nonbasic_) {
+                Real rc = reduced_cost_[k];
+                BasisStatus st = var_status_[k];
+                bool dual_inf =
+                    (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                    (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                    (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
+                    worst_rc = rc;
+                    entering_p = k;
+                }
+            }
+
+            if (entering_p < 0) {
+                status_ = Status::Optimal;
+                break;
+            }
+
+            // Primal feasible but not dual feasible: primal simplex pivot.
+
+            // FTRAN: compute pivot column eta = B^{-1} * a_entering.
+            std::fill(pivot_col.begin(), pivot_col.end(), 0.0);
+            if (entering_p < num_cols_) {
+                auto cv = augmented_.col(entering_p);
+                for (Index p = 0; p < cv.size(); ++p) {
+                    if (cv.indices[p] < num_rows_) {
+                        pivot_col[cv.indices[p]] = cv.values[p];
+                    }
+                }
+            } else {
+                pivot_col[entering_p - num_cols_] = -1.0;
+            }
+            lu_.ftran(pivot_col);
+
+            // Direction: entering moves to improve objective.
+            Real delta_dir;
+            if (var_status_[entering_p] == BasisStatus::AtLower) {
+                delta_dir = 1.0;  // increase (rc < 0)
+            } else if (var_status_[entering_p] == BasisStatus::AtUpper) {
+                delta_dir = -1.0;  // decrease (rc > 0)
+            } else {
+                delta_dir = (worst_rc < 0) ? 1.0 : -1.0;
+            }
+
+            // Primal ratio test: find leaving variable.
+            Index leaving_row_p = -1;
+            Real min_step = kInf;
+            for (Index i = 0; i < num_rows_; ++i) {
+                Real f = pivot_col[i] * delta_dir;
+                // x_B[i]_new = x_B[i]_old - f * step
+                if (std::abs(f) < kPivotTol) continue;
+
+                Index bvar = basis_[i];
+                Real lb = varLower(bvar);
+                Real ub = varUpper(bvar);
+                Real xval = primal_[bvar];
+
+                Real step;
+                if (f > 0) {
+                    // x_B[i] decreases: limited by lower bound.
+                    step = (lb == -kInf) ? kInf : (xval - lb) / f;
+                } else {
+                    // x_B[i] increases: limited by upper bound.
+                    step = (ub == kInf) ? kInf : (ub - xval) / (-f);
+                }
+
+                if (step >= -kPrimalTol && step < min_step) {
+                    min_step = step;
+                    leaving_row_p = i;
+                }
+            }
+
+            // Check entering variable's opposite bound.
+            Real entering_bound_step = kInf;
+            if (delta_dir > 0 && varUpper(entering_p) != kInf) {
+                entering_bound_step =
+                    varUpper(entering_p) - primal_[entering_p];
+            } else if (delta_dir < 0 && varLower(entering_p) != -kInf) {
+                entering_bound_step =
+                    primal_[entering_p] - varLower(entering_p);
+            }
+
+            if (min_step == kInf && entering_bound_step == kInf) {
+                status_ = Status::Unbounded;
+                break;
+            }
+
+            Real step = std::min(min_step, entering_bound_step);
+            if (step < 0) step = 0;
+            Real delta_entering = delta_dir * step;
+
+            // Update primals.
+            for (Index i = 0; i < num_rows_; ++i) {
+                primal_[basis_[i]] -= pivot_col[i] * delta_entering;
+            }
+            primal_[entering_p] += delta_entering;
+
+            if (entering_bound_step <= min_step) {
+                // Entering variable hits its opposite bound. No basis change.
+                if (delta_dir > 0) {
+                    primal_[entering_p] = varUpper(entering_p);
+                    var_status_[entering_p] = BasisStatus::AtUpper;
+                } else {
+                    primal_[entering_p] = varLower(entering_p);
+                    var_status_[entering_p] = BasisStatus::AtLower;
+                }
+                ++iterations_;
+                continue;
+            }
+
+            // Basis swap: entering enters, leaving exits.
+            Index leaving_var_p = basis_[leaving_row_p];
+            Real pivot_elem = pivot_col[leaving_row_p];
+
+            // BTRAN for dual update.
+            std::fill(work.begin(), work.end(), 0.0);
+            work[leaving_row_p] = 1.0;
+            lu_.btran(work);
+
+            // Compute pivot row alphas for dual update.
+            for (Index k : nonbasic_) {
+                if (k == entering_p) continue;
+                if (k < num_cols_) {
+                    auto cv = matrix_.col(k);
+                    Real dot = 0.0;
+                    for (Index pp = 0; pp < cv.size(); ++pp) {
+                        dot += work[cv.indices[pp]] * cv.values[pp];
+                    }
+                    pivot_row_alpha[k] = dot;
+                } else {
+                    pivot_row_alpha[k] = -work[k - num_cols_];
+                }
+            }
+
+            // Update reduced costs.
+            Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
+            for (Index k : nonbasic_) {
+                if (k == entering_p) continue;
+                if (std::abs(pivot_row_alpha[k]) > kZeroTol) {
+                    reduced_cost_[k] -= theta_d_p * pivot_row_alpha[k];
+                }
+            }
+            reduced_cost_[entering_p] = 0.0;
+            reduced_cost_[leaving_var_p] = -theta_d_p;
+
+            // Update duals.
+            for (Index i = 0; i < num_rows_; ++i) {
+                dual_[i] += theta_d_p * work[i];
+            }
+
+            // Determine leaving variable status.
+            Real leaving_lb = varLower(leaving_var_p);
+            Real leaving_ub = varUpper(leaving_var_p);
+            BasisStatus leaving_st;
+            if (leaving_lb != -kInf && leaving_ub != kInf &&
+                std::abs(leaving_lb - leaving_ub) < kZeroTol) {
+                leaving_st = BasisStatus::Fixed;
+            } else if (pivot_col[leaving_row_p] * delta_dir > 0) {
+                // x_B decreased -> hit lower bound.
+                primal_[leaving_var_p] = leaving_lb;
+                leaving_st = BasisStatus::AtLower;
+            } else {
+                primal_[leaving_var_p] = leaving_ub;
+                leaving_st = BasisStatus::AtUpper;
+            }
+
+            // Swap basis.
+            basis_[leaving_row_p] = entering_p;
+            basis_pos_[entering_p] = leaving_row_p;
+            basis_pos_[leaving_var_p] = -1;
+            var_status_[entering_p] = BasisStatus::Basic;
+            var_status_[leaving_var_p] = leaving_st;
+
+            for (Index idx = 0;
+                 idx < static_cast<Index>(nonbasic_.size()); ++idx) {
+                if (nonbasic_[idx] == entering_p) {
+                    nonbasic_[idx] = leaving_var_p;
+                    break;
+                }
+            }
+
+            // LU update.
+            if (entering_p < num_cols_) {
+                auto cv = augmented_.col(entering_p);
+                lu_.update(leaving_row_p, cv.indices, cv.values);
+            } else {
+                Index si = entering_p - num_cols_;
+                std::vector<Index> idx_vec = {si};
+                std::vector<Real> val_vec = {-1.0};
+                lu_.update(leaving_row_p, idx_vec, val_vec);
+            }
+
+            if (lu_.needsRefactorization()) {
+                refactorize();
+                computePrimals();
+                computeDuals();
+            }
+
+            ++iterations_;
+            continue;
+        }
+
+        Index leaving_var = basis_[leaving_row];
+        Real leaving_val = primal_[leaving_var];
+        Real leaving_lb = varLower(leaving_var);
+        Real leaving_ub = varUpper(leaving_var);
+
+        // Direction: +1 if below lower bound, -1 if above upper bound.
+        Real sigma = (leaving_val < leaving_lb) ? 1.0 : -1.0;
+
+        // ---- BTRAN: Compute pivot row representation ----
+        // y = B^{-T} * e_{leaving_row}
+        std::fill(work.begin(), work.end(), 0.0);
+        work[leaving_row] = 1.0;
+        lu_.btran(work);
+
+        // Compute alpha_j = y^T * a_j for each nonbasic j.
+        // a_j is column j of [A | -I].
+        for (Index k : nonbasic_) {
+            if (k < num_cols_) {
+                auto cv = matrix_.col(k);
+                Real dot = 0.0;
+                for (Index p = 0; p < cv.size(); ++p) {
+                    dot += work[cv.indices[p]] * cv.values[p];
+                }
+                pivot_row_alpha[k] = dot;
+            } else {
+                // Slack (n+i): col is -e_i.
+                pivot_row_alpha[k] = -work[k - num_cols_];
+            }
+        }
+
+        // ---- CHUZC: Dual ratio test (Harris) ----
+        // Find entering variable.
+        //
+        // Eligibility: the primal step theta_p = (x_B[r] - target) / alpha_entering
+        // must have the right sign for the entering variable to move away from its bound.
+        //
+        // For leaving below lower (sigma=+1): x_B[r] - target < 0.
+        //   AtLower: need theta_p > 0, so alpha < 0.
+        //   AtUpper: need theta_p < 0, so alpha > 0.
+        //
+        // For leaving above upper (sigma=-1): x_B[r] - target > 0.
+        //   AtLower: need theta_p > 0, so alpha > 0.
+        //   AtUpper: need theta_p < 0, so alpha < 0.
+        Index entering_var = -1;
+        Real harris_tol = 1e-6;
+
+        auto isEligible = [&](Index k, Real alpha) -> bool {
+            if (std::abs(alpha) < kPivotTol) return false;
+            BasisStatus st = var_status_[k];
+            if (st == BasisStatus::Fixed) return false;  // Can't move, degenerate pivot.
+            if (st == BasisStatus::Free) return true;
+            if (sigma > 0.0) {
+                if (st == BasisStatus::AtLower && alpha < -kPivotTol) return true;
+                if (st == BasisStatus::AtUpper && alpha > kPivotTol) return true;
+            } else {
+                if (st == BasisStatus::AtLower && alpha > kPivotTol) return true;
+                if (st == BasisStatus::AtUpper && alpha < -kPivotTol) return true;
+            }
+            return false;
+        };
+
+        // First pass: find minimum ratio with Harris tolerance.
+        Real min_ratio = kInf;
+        for (Index k : nonbasic_) {
+            Real alpha = pivot_row_alpha[k];
+            if (!isEligible(k, alpha)) continue;
+            Real ratio = std::abs(reduced_cost_[k] / alpha);
+            min_ratio = std::min(min_ratio, ratio);
+        }
+
+        if (min_ratio == kInf) {
+            // Dual unbounded => primal infeasible.
+            status_ = Status::Infeasible;
+            break;
+        }
+
+        // Second pass: among all candidates with ratio <= min_ratio + harris_tol,
+        // pick the one with largest |alpha| (best numerical pivot).
+        Real threshold = min_ratio + harris_tol;
+        Real best_alpha = 0.0;
+
+        for (Index k : nonbasic_) {
+            Real alpha = pivot_row_alpha[k];
+            if (!isEligible(k, alpha)) continue;
+            Real ratio = std::abs(reduced_cost_[k] / alpha);
+            if (ratio <= threshold && std::abs(alpha) > best_alpha) {
+                best_alpha = std::abs(alpha);
+                entering_var = k;
+            }
+        }
+
+        if (entering_var < 0) {
+            status_ = Status::Infeasible;
+            break;
+        }
+
+        Real alpha_entering = pivot_row_alpha[entering_var];
+
+        // ---- FTRAN: Compute pivot column ----
+        // aq = B^{-1} * a_entering
+        std::fill(pivot_col.begin(), pivot_col.end(), 0.0);
+        if (entering_var < num_cols_) {
+            auto cv = augmented_.col(entering_var);
+            for (Index p = 0; p < cv.size(); ++p) {
+                if (cv.indices[p] < num_rows_) {
+                    pivot_col[cv.indices[p]] = cv.values[p];
+                }
+            }
+        } else {
+            // Slack (n+i): col of [A|-I] is -e_i.
+            pivot_col[entering_var - num_cols_] = -1.0;
+        }
+        lu_.ftran(pivot_col);
+
+        Real pivot_element = pivot_col[leaving_row];
+        if (std::abs(pivot_element) < kPivotTol) {
+            // Numerically degenerate pivot. Refactorize and retry.
+            refactorize();
+            computePrimals();
+            computeDuals();
+            continue;
+        }
+
+        // ---- UPDATE ----
+        // Dual step size: delta_dual = sigma * (bound violation) / alpha_entering? No.
+        // The dual step: theta_d = -rc_entering / alpha_entering (to drive rc_entering to 0
+        // in the correct direction). Actually:
+        // theta_d = best_ratio (the dual ratio test result).
+        // But we need the sign right.
+        //
+        // Standard dual simplex update:
+        // Primal step for leaving var:
+        //   If below lower: leaving moves to lower bound. Step = (lower - val) / pivot_element.
+        //   But pivot_element = (B^{-1} a_entering)[leaving_row].
+        //
+        // Let's use the direct approach:
+        // theta_p = primal step = (target - leaving_val) / pivot_element
+        // where target is the bound we're moving toward.
+        Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
+        Real theta_p = (leaving_val - target) / pivot_element;
+
+        // Update primal values of basic variables.
+        for (Index i = 0; i < num_rows_; ++i) {
+            if (i != leaving_row) {
+                primal_[basis_[i]] -= theta_p * pivot_col[i];
+            }
+        }
+        primal_[leaving_var] = target;  // leaving goes to its bound
+
+        // Entering variable primal: x_entering changes by theta_p.
+        Real old_entering_val = primal_[entering_var];
+        primal_[entering_var] = old_entering_val + theta_p;
+
+        // Update reduced costs.
+        Real theta_d = reduced_cost_[entering_var] / alpha_entering;
+        for (Index k : nonbasic_) {
+            if (k == entering_var) continue;
+            Real alpha_k = pivot_row_alpha[k];
+            if (std::abs(alpha_k) > kZeroTol) {
+                reduced_cost_[k] -= theta_d * alpha_k;
+            }
+        }
+        reduced_cost_[entering_var] = 0.0;  // entering becomes basic
+
+        // Update dual values.
+        for (Index i = 0; i < num_rows_; ++i) {
+            dual_[i] += theta_d * work[i];  // work still holds btran result
+        }
+
+        // Reduced cost of leaving var (now nonbasic).
+        // The leaving var was basic (rc=0). Its column through B^{-1} gives e_r.
+        // So alpha_leaving_self = rho^T * a_leaving = 1.
+        // rc_leaving_new = 0 - theta_d * 1 = -theta_d.
+        reduced_cost_[leaving_var] = -theta_d;
+
+        // ---- Swap basis ----
+        // Entering goes into basis at leaving_row position.
+        // Leaving goes nonbasic.
+        basis_[leaving_row] = entering_var;
+        basis_pos_[entering_var] = leaving_row;
+        basis_pos_[leaving_var] = -1;
+
+        var_status_[entering_var] = BasisStatus::Basic;
+
+        // Set leaving variable status based on which bound it moved to.
+        if (sigma > 0.0) {
+            // Moved to lower bound.
+            Real lb = varLower(leaving_var);
+            Real ub = varUpper(leaving_var);
+            if (lb != -kInf && ub != kInf && std::abs(lb - ub) < kZeroTol) {
+                var_status_[leaving_var] = BasisStatus::Fixed;
+            } else {
+                var_status_[leaving_var] = BasisStatus::AtLower;
+            }
+        } else {
+            Real lb = varLower(leaving_var);
+            Real ub = varUpper(leaving_var);
+            if (lb != -kInf && ub != kInf && std::abs(lb - ub) < kZeroTol) {
+                var_status_[leaving_var] = BasisStatus::Fixed;
+            } else {
+                var_status_[leaving_var] = BasisStatus::AtUpper;
+            }
+        }
+
+        // Update nonbasic list.
+        // Remove entering_var, add leaving_var.
+        for (Index idx = 0; idx < static_cast<Index>(nonbasic_.size()); ++idx) {
+            if (nonbasic_[idx] == entering_var) {
+                nonbasic_[idx] = leaving_var;
+                break;
+            }
+        }
+
+        // ---- LU update ----
+        // Update LU with the new basis column.
+        // The entering column in the augmented matrix.
+        if (entering_var < num_cols_) {
+            auto cv = augmented_.col(entering_var);
+            lu_.update(leaving_row, cv.indices, cv.values);
+        } else {
+            Index si = entering_var - num_cols_;
+            std::vector<Index> idx = {si};
+            std::vector<Real> val = {-1.0};
+            lu_.update(leaving_row, idx, val);
+        }
+
+        // Check if refactorization needed.
+        if (lu_.needsRefactorization()) {
+            refactorize();
+            computePrimals();
+            computeDuals();
+
+            // Re-apply cost shifts if still active.
+            if (has_cost_shift) {
+                // Recompute reduced costs with shifted costs (already in obj_).
+                computeDuals();
+            }
+        }
+
+        ++iterations_;
+    }
+
+    if (iterations_ >= iter_limit_ && status_ != Status::Optimal && status_ != Status::Infeasible) {
+        status_ = Status::IterLimit;
+    }
+
+    // Final log.
+    {
+        Real obj_val = 0.0;
+        for (Index k = 0; k < numVars(); ++k) {
+            obj_val += varCost(k) * primal_[k];
+        }
+        std::printf("%6d  %13.6e  (final)\n", iterations_, obj_val);
+    }
+
+    // Unscale results.
+    unscaleResults();
+
+    return {status_, getObjective(), iterations_};
+}
+
+// ---------------------------------------------------------------------------
+//  Getters
+// ---------------------------------------------------------------------------
+
+Real DualSimplexSolver::getObjective() const {
+    Real obj = obj_offset_;
+    for (Index j = 0; j < num_cols_; ++j) {
+        // Use unscaled obj: if scaled, obj_ was scaled by col_scale. After unscale,
+        // primal_ is unscaled. But obj_ still has the scaling and possible cost shifts.
+        // We need original objective. Let's compute from primal values and original costs.
+        // Actually, the simplest: c^T x where c is internal obj and x is current primal.
+        // After unscaling primals, we need to also undo objective scaling.
+        // obj_internal_j = obj_original_j * col_scale_j (if maximize, also negated).
+        // x_unscaled_j = primal_[j] (already unscaled).
+        // So c_original_j * x_j = (obj_internal_j / col_scale_j) * x_j.
+        // But if maximize, obj_internal = -obj_original * col_scale, so
+        //   obj_original = -obj_internal / col_scale.
+        // Hmm, let's just recompute directly.
+        obj += obj_[j] / (scaled_ ? col_scale_[j] : 1.0) * primal_[j];
+    }
+    if (sense_ == Sense::Maximize) {
+        obj = -obj;
+    }
+    return obj;
+}
+
+std::vector<Real> DualSimplexSolver::getPrimalValues() const {
+    return std::vector<Real>(primal_.begin(), primal_.begin() + num_cols_);
+}
+
+std::vector<Real> DualSimplexSolver::getDualValues() const {
+    std::vector<Real> result = dual_;
+    if (sense_ == Sense::Maximize) {
+        for (auto& d : result) d = -d;
+    }
+    return result;
+}
+
+std::vector<Real> DualSimplexSolver::getReducedCosts() const {
+    std::vector<Real> result(reduced_cost_.begin(), reduced_cost_.begin() + num_cols_);
+    if (sense_ == Sense::Maximize) {
+        for (auto& rc : result) rc = -rc;
+    }
+    return result;
+}
+
+std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
+    return std::vector<BasisStatus>(var_status_.begin(),
+                                     var_status_.begin() + num_cols_ + num_rows_);
+}
+
+void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
+    // External basis: first num_cols are structural, next num_rows are slacks.
+    if (static_cast<Index>(basis.size()) != numVars()) return;
+
+    basis_.clear();
+    nonbasic_.clear();
+    basis_pos_.assign(numVars(), -1);
+
+    for (Index k = 0; k < numVars(); ++k) {
+        var_status_[k] = basis[k];
+        if (basis[k] == BasisStatus::Basic) {
+            basis_pos_[k] = static_cast<Index>(basis_.size());
+            basis_.push_back(k);
+        } else {
+            nonbasic_.push_back(k);
+            // Set primal value based on status.
+            if (basis[k] == BasisStatus::AtLower || basis[k] == BasisStatus::Fixed) {
+                primal_[k] = varLower(k);
+            } else if (basis[k] == BasisStatus::AtUpper) {
+                primal_[k] = varUpper(k);
+            } else {
+                primal_[k] = 0.0;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  Stub implementations for Step 8
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::addRows(
+    [[maybe_unused]] std::span<const Index> starts,
+    [[maybe_unused]] std::span<const Index> indices,
+    [[maybe_unused]] std::span<const Real> values,
+    [[maybe_unused]] std::span<const Real> lower,
+    [[maybe_unused]] std::span<const Real> upper) {
+    // Stub: will be implemented in Step 8 (warm-start modifications).
+}
+
+void DualSimplexSolver::removeRows(
+    [[maybe_unused]] std::span<const Index> rows) {
+    // Stub: will be implemented in Step 8.
+}
+
+void DualSimplexSolver::setColBounds(
+    [[maybe_unused]] Index col,
+    [[maybe_unused]] Real lower,
+    [[maybe_unused]] Real upper) {
+    // Stub: will be implemented in Step 8.
+}
+
+void DualSimplexSolver::setObjective(
+    [[maybe_unused]] std::span<const Real> obj) {
+    // Stub: will be implemented in Step 8.
+}
+
+}  // namespace mipx

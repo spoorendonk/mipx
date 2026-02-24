@@ -4,6 +4,7 @@ add_library(mipx STATIC
     lp/lp_problem.cpp
     lp/lp_solver.cpp
     lp/lu.cpp
+    lp/dual_simplex.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
     io/lp_reader.cpp

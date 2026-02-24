@@ -158,23 +158,28 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 7: Dual Simplex
+## Step 7: Dual Simplex ✅
 
 **Goal:** Working LP solver. First real solves.
 
-**Deliverables:**
-- Dual simplex Phase 1 (find feasible basis) + Phase 2 (optimize)
-- Pricing: Dantzig rule → Devex (approximate steepest-edge) — Devex alone can halve iteration counts
-- Bound Flipping Ratio Test (BFRT) with Harris tolerance — one pivot does the work of several by flipping nonbasics at their bounds
-- Scaling: equilibration scaling (row/col)
-- Hyper-sparsity exploitation: detect when FTRAN/BTRAN results are 99%+ zero, switch to sparse scatter/gather (order-of-magnitude speedup on large instances)
-- **Solver output:** HiGHS-style progress table — iteration count, objective value, infeasibilities, time
+**Status:** Complete. Solves all 4 Netlib test instances (afiro, sc50a, blend, adlittle) to optimality.
 
-**Key techniques (priority order):**
-1. Devex pricing — biggest iteration-count win
-2. BFRT — biggest per-iteration work reduction
-3. Hyper-sparsity — biggest wall-clock win on large sparse LPs
-4. PAMI/SIP parallelism — defer to future (significant complexity)
+**Deliverables:**
+- Dual simplex Phase 1 (cost perturbation for initial dual feasibility) + Phase 2 (bound flipping + primal simplex fallback)
+- Harris dual ratio test with anti-cycling (fixed variables excluded from entering selection)
+- Equilibration scaling (row/col max-norm)
+- Augmented matrix formulation `[A | -I]` with slack variables
+- Primal simplex pivot fallback for dual-infeasible cleanup after perturbation removal
+- Unbounded detection via primal ratio test
+- Solver output: iteration count, objective value, primal infeasibility
+- CLI tool `mipx-solve` with MPS file input
+- HiGHS comparison benchmark script (`tests/benchmark_vs_highs.py`)
+
+**Deferred to optimization pass:**
+- Devex pricing (approximate steepest-edge) — currently using Dantzig/Harris
+- Bound Flipping Ratio Test (BFRT) — currently single-flip per pivot
+- Hyper-sparsity exploitation in FTRAN/BTRAN
+- PAMI/SIP parallelism
 
 **Test criteria:** Solve all Netlib instances to optimality. Objective matches `.solu` values within tolerance. Competitive iteration counts vs. reference.
 
