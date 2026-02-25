@@ -21,6 +21,7 @@ namespace mipx {
 
 enum class RootLpPolicy {
     DualDefault,
+    BarrierRoot,
     ConcurrentRootExperimental,
 };
 
@@ -66,6 +67,7 @@ public:
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
+    void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
 
 private:
@@ -99,6 +101,7 @@ private:
 
     // Check if all integer variables are integral in the given solution.
     bool isFeasibleMip(const std::vector<Real>& primals) const;
+    bool isFeasibleLp(const std::vector<Real>& primals) const;
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;
@@ -139,6 +142,7 @@ private:
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
+    bool barrier_use_gpu_ = true;
     MipLpStats lp_stats_{};
     mutable Logger log_;
 

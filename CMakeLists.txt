@@ -11,9 +11,15 @@ include(cmake/CompilerFlags.cmake)
 # --- Dependencies ---
 
 find_package(ZLIB REQUIRED)
+find_package(CUDAToolkit QUIET)
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
+option(MIPX_USE_CUDA "Enable CUDA acceleration in barrier solver" ${CUDAToolkit_FOUND})
+
+if(MIPX_USE_CUDA AND NOT CUDAToolkit_FOUND)
+    message(FATAL_ERROR "MIPX_USE_CUDA=ON but CUDAToolkit was not found")
+endif()
 
 # SIMD codegen policy:
 # - default is native for maximum local performance
