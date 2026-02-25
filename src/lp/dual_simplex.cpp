@@ -536,7 +536,7 @@ LpResult DualSimplexSolver::solve() {
     Index partial_price_offset = 0;
 
     // Log header.
-    std::printf("  Iter      Objective   PrimalInf\n");
+    if (verbose_) std::printf("  Iter      Objective   PrimalInf\n");
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
@@ -558,7 +558,7 @@ LpResult DualSimplexSolver::solve() {
                 if (xk < lb - kPrimalTol) pinf += lb - xk;
                 else if (xk > ub + kPrimalTol) pinf += xk - ub;
             }
-            std::printf("%6d  %13.6e  %10.3e\n", iterations_, obj_val, pinf);
+            if (verbose_) std::printf("%6d  %13.6e  %10.3e\n", iterations_, obj_val, pinf);
         }
 
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
@@ -1166,7 +1166,7 @@ LpResult DualSimplexSolver::solve() {
         for (Index k = 0; k < numVars(); ++k) {
             obj_val += varCost(k) * primal_[k];
         }
-        std::printf("%6d  %13.6e  (final)\n", iterations_, obj_val);
+        if (verbose_) std::printf("%6d  %13.6e  (final)\n", iterations_, obj_val);
     }
 
     // Note: primals are kept in internal (scaled) coordinates.

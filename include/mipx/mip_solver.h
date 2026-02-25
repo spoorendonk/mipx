@@ -104,7 +104,8 @@ private:
 
     // Log a progress line.
     void logProgress(Int nodes, Int open, Int lp_iters,
-                     Real incumbent, Real best_bound, double elapsed) const;
+                     Real incumbent, Real best_bound, double elapsed,
+                     bool new_incumbent = false) const;
 
     /// Process a single node. Returns true if children were created.
     bool processNode(DualSimplexSolver& lp, BnbNode& node,

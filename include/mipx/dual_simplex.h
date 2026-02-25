@@ -39,6 +39,7 @@ public:
     void setObjective(std::span<const Real> obj) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+    void setVerbose(bool v) { verbose_ = v; }
 
     /// Access work unit counter (includes LU work).
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -133,6 +134,7 @@ private:
     Int iter_limit_ = 1000000;
     bool loaded_ = false;
     bool has_basis_ = false;  // true after first solve or setBasis()
+    bool verbose_ = true;
 
     // Devex pricing weights.
     std::vector<Real> devex_weights_;  // size num_rows, one per basis position
