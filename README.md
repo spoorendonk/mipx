@@ -155,6 +155,31 @@ python3 tests/perf/check_regression.py \
   --candidate /tmp/netlib_candidate.csv
 ```
 
+Generate reproducible HiGHS/highspy wall-clock baselines:
+
+```bash
+./tests/perf/generate_highspy_baselines.sh
+```
+
+Baselines are stored in `tests/perf/baselines/`.
+
+Example comparison against stored highspy LP baseline:
+
+```bash
+./tests/perf/run_netlib_lp_bench.sh \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --output /tmp/netlib_candidate.csv \
+  --repeats 3 \
+  --solver-arg --quiet
+
+python3 tests/perf/check_regression.py \
+  --baseline tests/perf/baselines/highspy_lp_netlib_small.csv \
+  --candidate /tmp/netlib_candidate.csv \
+  --metric time_seconds \
+  --max-regression-pct 100000
+```
+
 Use `--metric time_seconds` if you need wall-clock gating instead of
 deterministic work-unit gating.
 Use `--max-regression-pct` to relax the gate; default is strict `0.0%`.

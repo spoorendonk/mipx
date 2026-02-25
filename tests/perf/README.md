@@ -17,6 +17,19 @@ Full LP+MIP gate example (single command):
   --solver-arg --quiet
 ```
 
+Generate and store HiGHS/highspy wall-clock baselines:
+
+```bash
+./tests/perf/generate_highspy_baselines.sh
+```
+
+This writes:
+- `tests/perf/baselines/highspy_lp_netlib_small.csv`
+- `tests/perf/baselines/highspy_mip_miplib_small.csv`
+
+The MIP highspy baseline uses the stable small trio:
+`p0201,gt2,flugpl`.
+
 LP example (Netlib, gate on `work_units`):
 
 ```bash
@@ -55,3 +68,29 @@ python3 tests/perf/check_regression.py \
 The regression gate fails if the median candidate metric regresses by more
 than the configured percentage. Default gate is strict: `0.0%` allowed median
 regression.
+
+To compare mipx against HiGHS/highspy, use `--metric time_seconds` and one of
+the stored highspy baseline CSV files as `--baseline`.
+These comparisons are informational (cross-solver wall-clock), not strict
+no-regression gates.
+
+MIP comparison example (same instance set as highspy MIP baseline):
+
+```bash
+./tests/perf/run_miplib_mip_bench.sh \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --output /tmp/mipx_mip_candidate_highspyset.csv \
+  --repeats 1 \
+  --threads 1 \
+  --time-limit 30 \
+  --instances p0201,gt2,flugpl \
+  --solver-arg --quiet
+
+python3 tests/perf/check_regression.py \
+  --baseline tests/perf/baselines/highspy_mip_miplib_small.csv \
+  --candidate /tmp/mipx_mip_candidate_highspyset.csv \
+  --metric time_seconds \
+  --max-regression-pct 100000 \
+  --min-common-instances 3
+```
