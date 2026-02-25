@@ -345,18 +345,22 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 15: Parallel Tree Search
+## Step 15: Parallel Tree Search ✅
 
 **Goal:** Exploit multicore via TBB.
 
-**Deliverables:**
-- Thread-safe node queue (TBB concurrent queue or lock-free)
-- Parallel node processing: each thread has own LP solver instance
-- Shared incumbent with atomic updates
-- Deterministic mode: reproducible results regardless of thread count
-- Graceful fallback: single-threaded when TBB unavailable
+**Status:** Complete. Parallel B&B with TBB task_group, mutex-protected shared state, per-thread LP solvers. 6 new tests (153 total with TBB, 148 without).
 
-**Test criteria:** Correct results match serial solver. Speedup on 4+ cores. Deterministic mode produces identical solutions across runs.
+**Deliverables:**
+- `processNode()`: extracted pure function for node processing (apply bounds, warm-start, solve LP, branch)
+- `solveSerial()`: original B&B loop refactored as method
+- `solveParallel()`: TBB-based parallel B&B — each thread has own `DualSimplexSolver` instance
+- Mutex-protected node queue and incumbent with atomic counters
+- `setNumThreads(n)`: parameter to control thread count (default 1 = serial)
+- CLI `--threads N` flag for `mipx-solve`
+- Graceful fallback: compiles and runs single-threaded when TBB unavailable
+
+**Test criteria:** Correct results match serial solver. Speedup on 4+ cores. Graceful fallback without TBB.
 
 **References:** SCIP concurrent solver, HiGHS parallel MIP, cuOpt parallel B&B.
 

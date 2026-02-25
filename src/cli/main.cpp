@@ -9,14 +9,23 @@
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::println("Usage: mipx-solve <mps-file>");
+        std::println("Usage: mipx-solve <mps-file> [--threads N]");
         return 1;
     }
 
     std::string filename = argv[1];
+    int num_threads = 1;
+
+    // Parse optional arguments.
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--threads" && i + 1 < argc) {
+            num_threads = std::atoi(argv[++i]);
+        }
+    }
 
     try {
-        std::println("mipx-solve v0.2");
+        std::println("mipx-solve v0.3");
         std::println("Reading: {}", filename);
 
         auto lp = mipx::readMps(filename);
@@ -27,6 +36,7 @@ int main(int argc, char* argv[]) {
         if (lp.hasIntegers()) {
             // MIP solve.
             mipx::MipSolver solver;
+            solver.setNumThreads(num_threads);
             solver.load(lp);
             auto result = solver.solve();
 
