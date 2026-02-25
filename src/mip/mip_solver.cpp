@@ -1006,7 +1006,7 @@ MipResult MipSolver::solve() {
     }
 
     // Check if root solution is integer feasible.
-    auto root_basis = lp.getBasis();
+    root_basis = lp.getBasis();
     Real incumbent = kInf;
     std::vector<Real> best_solution;
 
