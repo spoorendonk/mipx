@@ -651,6 +651,13 @@ LpResult DualSimplexSolver::solve() {
             std::printf("%6d  %13.6e  %10.3e\n", iterations_, obj_val, pinf);
         }
 
+        bool sip_numerical_gate = true;
+        if (options_.sip_parallel_disable_on_stall &&
+            options_.sip_parallel_stall_pivots > 0 &&
+            degenerate_pivot_streak >= options_.sip_parallel_stall_pivots) {
+            sip_numerical_gate = false;
+        }
+
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
         work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
         Index leaving_row = -1;
@@ -676,7 +683,8 @@ LpResult DualSimplexSolver::solve() {
         if (options_.enable_sip_parallel_chuzr &&
             num_rows_ >= options_.sip_parallel_min_rows &&
             options_.sip_parallel_row_grain > 0 &&
-            sipThreadGatePass()) {
+            sipThreadGatePass() &&
+            sip_numerical_gate) {
             struct ChuzrBest {
                 Index row = -1;
                 Real score = 0.0;
@@ -775,7 +783,8 @@ LpResult DualSimplexSolver::solve() {
             if (options_.enable_sip_parallel_dual_scan &&
                 nnb >= options_.sip_parallel_min_nonbasic &&
                 options_.sip_parallel_grain > 0 &&
-                sipThreadGatePass()) {
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
                 struct DualScanBest {
                     Index var = -1;
                     Index pos = -1;
@@ -1125,7 +1134,8 @@ LpResult DualSimplexSolver::solve() {
             if (options_.enable_sip_parallel_candidates &&
                 count >= options_.sip_parallel_min_nonbasic &&
                 options_.sip_parallel_grain > 0 &&
-                sipThreadGatePass()) {
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
                 tbb::enumerable_thread_specific<std::vector<BfrtCand>> locals;
                 const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
                 tbb::parallel_for(tbb::blocked_range<Index>(0, count, grain),
@@ -1390,12 +1400,10 @@ LpResult DualSimplexSolver::solve() {
                        std::span<const Real>(&neg_one, 1));
         }
 
-        if (options_.enable_adaptive_refactorization) {
-            if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
-                ++degenerate_pivot_streak;
-            } else {
-                degenerate_pivot_streak = 0;
-            }
+        if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
+            ++degenerate_pivot_streak;
+        } else {
+            degenerate_pivot_streak = 0;
         }
 
         // Check if refactorization needed.
