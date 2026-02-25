@@ -12,6 +12,7 @@
 #endif
 
 #include "mipx/cut_pool.h"
+#include "mipx/barrier.h"
 #include "mipx/gomory.h"
 #include "mipx/heuristics.h"
 
@@ -55,6 +56,15 @@ void countVarTypes(const LpProblem& problem,
     }
 }
 
+const char* rootPolicyName(RootLpPolicy p) {
+    switch (p) {
+        case RootLpPolicy::DualDefault: return "dual";
+        case RootLpPolicy::BarrierRoot: return "barrier";
+        case RootLpPolicy::ConcurrentRootExperimental: return "concurrent";
+        default: return "dual";
+    }
+}
+
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
@@ -66,6 +76,32 @@ bool MipSolver::isFeasibleMip(const std::vector<Real>& primals) const {
     for (Index j = 0; j < problem_.num_cols; ++j) {
         if (problem_.col_type[j] == VarType::Continuous) continue;
         if (!isIntegral(primals[j], kIntTol)) return false;
+    }
+    return true;
+}
+
+bool MipSolver::isFeasibleLp(const std::vector<Real>& primals) const {
+    if (static_cast<Index>(primals.size()) != problem_.num_cols) return false;
+    const Real tol = 1e-6;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (std::isfinite(problem_.col_lower[j]) && primals[j] < problem_.col_lower[j] - tol) {
+            return false;
+        }
+        if (std::isfinite(problem_.col_upper[j]) && primals[j] > problem_.col_upper[j] + tol) {
+            return false;
+        }
+    }
+
+    if (problem_.num_rows == 0) return true;
+    std::vector<Real> activity(static_cast<size_t>(problem_.num_rows), 0.0);
+    problem_.matrix.multiply(primals, activity);
+    for (Index i = 0; i < problem_.num_rows; ++i) {
+        if (std::isfinite(problem_.row_lower[i]) && activity[i] < problem_.row_lower[i] - tol) {
+            return false;
+        }
+        if (std::isfinite(problem_.row_upper[i]) && activity[i] > problem_.row_upper[i] + tol) {
+            return false;
+        }
     }
     return true;
 }
@@ -692,6 +728,10 @@ MipResult MipSolver::solve() {
         if (!presolve_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "presolve=off ");
         if (!cuts_enabled_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cuts=off ");
         if (max_cut_rounds_ != 20) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cut_rounds=%d ", max_cut_rounds_);
+        if (root_lp_policy_ != RootLpPolicy::DualDefault) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "root_lp=%s ", rootPolicyName(root_lp_policy_));
+        }
         if (sp > settings) {
             // Trim trailing space.
             if (sp > settings && *(sp - 1) == ' ') *(sp - 1) = '\0';
@@ -824,13 +864,37 @@ MipResult MipSolver::solve() {
     // Solve root LP.
     DualSimplexSolver lp;
     lp.load(problem_);
-    lp.setVerbose(verbose_);
-    if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
-        log_.log("Root concurrent mode requested, but alternate LP backend "
-                 "is not integrated. Falling back to dual simplex.\n");
-    }
+    lp.setVerbose(false);
+
+    bool root_used_dual = true;
+    std::vector<Real> root_primals;
+    std::vector<BasisStatus> root_basis;
+
     auto t0 = std::chrono::steady_clock::now();
-    auto root_result = lp.solve();
+    LpResult root_result;
+    if (root_lp_policy_ == RootLpPolicy::BarrierRoot) {
+        root_used_dual = false;
+        BarrierSolver barrier;
+        BarrierOptions bopts;
+        bopts.verbose = verbose_;
+        bopts.use_gpu = barrier_use_gpu_;
+        barrier.setOptions(bopts);
+        barrier.load(problem_);
+        root_result = barrier.solve();
+        root_primals = barrier.getPrimalValues();
+        if (verbose_) {
+            log_.log("Root barrier mode%s.\n", barrier.usedGpu() ? " (GPU backend)" : "");
+        }
+    } else {
+        if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
+            log_.log("Root concurrent mode requested; barrier backend and dual simplex "
+                     "racing is not yet enabled. Falling back to dual simplex.\n");
+        }
+        lp.setVerbose(verbose_);
+        root_result = lp.solve();
+        root_primals = lp.getPrimalValues();
+        root_basis = lp.getBasis();
+    }
     lp_stats_.root_lp_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
 
@@ -871,23 +935,73 @@ MipResult MipSolver::solve() {
     }
 
     Real root_bound = root_result.objective;
-    auto root_primals = lp.getPrimalValues();
 
     if (verbose_) {
         std::fflush(stdout);  // flush LP solver's printf output before Logger write()
-        log_.log("Root LP: obj = %.10e, %d iters\n", root_bound, root_result.iterations);
+        log_.log("Root LP (%s): obj = %.10e, %d iters\n",
+                 rootPolicyName(root_lp_policy_), root_bound, root_result.iterations);
+    }
+
+    // Dual simplex supports reliable warm-starts for node LPs only after at least one solve.
+    // In barrier-root mode, run one simplex solve to initialize basis state for the tree.
+    if (!root_used_dual) {
+        auto sync = lp.solve();
+        total_lp_iters += sync.iterations;
+        total_work += sync.work_units;
+        if (sync.status == Status::Infeasible) {
+            if (verbose_) {
+                log_.log("Root sync LP infeasible after barrier solve.\n");
+            }
+            MipResult result;
+            result.status = Status::Infeasible;
+            result.nodes = 1;
+            result.lp_iterations = total_lp_iters;
+            result.work_units = total_work;
+            result.time_seconds = elapsed();
+            return result;
+        }
+        if (sync.status == Status::Unbounded) {
+            if (verbose_) {
+                log_.log("Root sync LP unbounded after barrier solve.\n");
+            }
+            MipResult result;
+            result.status = Status::Unbounded;
+            result.nodes = 1;
+            result.lp_iterations = total_lp_iters;
+            result.work_units = total_work;
+            result.time_seconds = elapsed();
+            return result;
+        }
+        if (sync.status != Status::Optimal) {
+            if (verbose_) {
+                log_.log("Root sync LP failed: status %d\n", static_cast<int>(sync.status));
+            }
+            MipResult result;
+            result.status = Status::Error;
+            result.nodes = 1;
+            result.lp_iterations = total_lp_iters;
+            result.work_units = total_work;
+            result.time_seconds = elapsed();
+            return result;
+        }
+        root_bound = sync.objective;
+        root_primals = lp.getPrimalValues();
+        root_basis = lp.getBasis();
     }
 
     // Run cutting planes at root (suppress LP iteration logs — we log per round).
     lp.setVerbose(false);
     if (cuts_enabled_ && problem_.hasIntegers()) {
-        t0 = std::chrono::steady_clock::now();
-        Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
-        lp_stats_.root_cut_lp_seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (cuts_added > 0) {
-            root_bound = lp.getObjective();
-            root_primals = lp.getPrimalValues();
+        if (root_used_dual || !root_basis.empty()) {
+            t0 = std::chrono::steady_clock::now();
+            Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
+            lp_stats_.root_cut_lp_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (cuts_added > 0) {
+                root_bound = lp.getObjective();
+                root_primals = lp.getPrimalValues();
+                root_basis = lp.getBasis();
+            }
         }
     }
 
@@ -896,7 +1010,7 @@ MipResult MipSolver::solve() {
     Real incumbent = kInf;
     std::vector<Real> best_solution;
 
-    if (isFeasibleMip(root_primals)) {
+    if (isFeasibleLp(root_primals) && isFeasibleMip(root_primals)) {
         incumbent = root_bound;
         best_solution = root_primals;
         if (verbose_) log_.log("Root solution is integer feasible!\n");
@@ -1017,6 +1131,8 @@ MipResult MipSolver::solve() {
     if (branch_var >= 0) {
         auto [left, right] = createChildren(root_node, branch_var,
                                             root_primals[branch_var]);
+        left.lp_bound = root_bound;
+        right.lp_bound = root_bound;
         queue.push(std::move(left));
         queue.push(std::move(right));
     }
