@@ -3,8 +3,6 @@
 Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex LP,
 cutting planes, presolve, and primal heuristics — no external solver dependencies.
 
-> **Disclaimer:** This project is developed entirely through [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
-
 ## Components
 
 | Component | Description |
