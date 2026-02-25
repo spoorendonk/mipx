@@ -1339,8 +1339,15 @@ void DualSimplexSolver::addRows(
         Index end = (i + 1 < num_new) ? starts[i + 1]
                                       : static_cast<Index>(values.size());
         for (Index p = start; p < end; ++p) {
-            if (std::abs(values[p]) > kZeroTol) {
-                triplets.push_back({row, indices[p], values[p]});
+            // Apply column scaling to match internal matrix representation.
+            // The input is in external space. Internal: a'_j = a_j * rs_i * cs_j.
+            // For new rows, rs_i = 1.0, so internal = a_j * cs_j.
+            Real val = values[p];
+            if (scaled_ && indices[p] < num_cols_) {
+                val *= col_scale_[indices[p]];
+            }
+            if (std::abs(val) > kZeroTol) {
+                triplets.push_back({row, indices[p], val});
             }
         }
     }
@@ -1361,13 +1368,21 @@ void DualSimplexSolver::addRows(
         basis_pos_[slack] = old_rows + i;
         var_status_[slack] = BasisStatus::Basic;
 
-        // Slack value = activity of new row.
+        // Slack value = activity of new row in internal coords.
+        // The new row in internal matrix: sum_j (a_j * cs_j) * x'_j.
+        // This equals sum_j a_j * cs_j * (x_j / cs_j) = sum_j a_j * x_j = external activity.
+        // But primal_[indices[p]] is in internal coords (x'_j), so:
+        // activity = sum_j (a_j * cs_j) * x'_j.
         Real activity = 0.0;
         Index start = starts[i];
         Index end = (i + 1 < num_new) ? starts[i + 1]
                                       : static_cast<Index>(values.size());
         for (Index p = start; p < end; ++p) {
-            activity += values[p] * primal_[indices[p]];
+            Real val = values[p];
+            if (scaled_ && indices[p] < num_cols_) {
+                val *= col_scale_[indices[p]];
+            }
+            activity += val * primal_[indices[p]];
         }
         primal_[slack] = activity;
     }
@@ -1432,6 +1447,80 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     // After removing rows, the basis is invalidated (slack renumbering).
     // Trigger cold start on next solve.
     has_basis_ = false;
+}
+
+// ---------------------------------------------------------------------------
+//  getTableauRow — for cut generation
+// ---------------------------------------------------------------------------
+
+void DualSimplexSolver::getTableauRow(Index basis_pos,
+                                       std::vector<Real>& tableau_row) {
+    Index nv = numVars();
+    tableau_row.assign(static_cast<std::size_t>(nv), 0.0);
+
+    // BTRAN: compute rho = B^{-T} * e_{basis_pos}.
+    std::vector<Real> rho(static_cast<std::size_t>(num_rows_), 0.0);
+    rho[basis_pos] = 1.0;
+    lu_.btran(rho);
+
+    // Compute tableau row: alpha_j = rho^T * a_j for each variable j.
+    // Structural: alpha_j = rho^T * A_col_j.
+    // Slack (n+i): alpha_{n+i} = rho^T * (-e_i) = -rho[i].
+
+    // Row-wise computation (faster when rho is dense):
+    for (Index i = 0; i < num_rows_; ++i) {
+        Real rho_i = rho[i];
+        if (std::abs(rho_i) < kZeroTol) continue;
+        auto rv = matrix_.row(i);
+        for (Index p = 0; p < rv.size(); ++p) {
+            tableau_row[rv.indices[p]] += rho_i * rv.values[p];
+        }
+    }
+
+    // Slack entries.
+    for (Index i = 0; i < num_rows_; ++i) {
+        tableau_row[num_cols_ + i] = -rho[i];
+    }
+
+    // Convert to external (unscaled) coordinates.
+    // Internal: x'_bvar + sum_j alpha_j^int * x'_j = b^int
+    // External: x_bvar + sum_j alpha_j^ext * x_j = b^ext
+    //
+    // Relations: x'_j = x_j / cs_j (structural), s'_k = s_k * rs_k (slack)
+    // x'_bvar = x_bvar / cs_bvar (assuming bvar is structural)
+    //
+    // Substituting into internal equation and multiplying by cs_bvar:
+    //   x_bvar + sum_j (alpha_j^int * cs_bvar / cs_j) * x_j
+    //          + sum_k (alpha_{n+k}^int * cs_bvar / (1/rs_k)) * ... = b^ext
+    //
+    // More carefully for slacks: s'_k = s_k * rs_k, so x'_{n+k} = s_k * rs_k
+    //   alpha_{n+k}^int * s'_k = alpha_{n+k}^int * rs_k * s_k
+    //   = alpha_{n+k}^int * cs_bvar * rs_k * s_k / cs_bvar
+    // After multiplying by cs_bvar:
+    //   alpha_{n+k}^ext * s_k = alpha_{n+k}^int * cs_bvar * rs_k * s_k
+    // So alpha_{n+k}^ext = alpha_{n+k}^int * cs_bvar * rs_k
+    if (scaled_) {
+        Index bvar = basis_[basis_pos];
+        Real cs_bvar = (bvar < num_cols_) ? col_scale_[bvar] : 1.0;
+        // For slacks as basic variable: cs_bvar should be 1/rs_k
+        // Actually, the basic variable could be a slack. In that case,
+        // x'_{n+k} = s_k * rs_k, so the "scale" for the basic slack is rs_k.
+        // The equation becomes: s'_k + sum = b^int
+        // In external: s_k * rs_k + sum = b^int
+        // s_k + (1/rs_k) * sum = b^int / rs_k = b^ext
+        // So the "multiplier" is 1/rs_k for a slack basic variable.
+        if (bvar >= num_cols_) {
+            Index ridx = bvar - num_cols_;
+            cs_bvar = 1.0 / row_scale_[ridx];
+        }
+
+        for (Index j = 0; j < num_cols_; ++j) {
+            tableau_row[j] *= cs_bvar / col_scale_[j];
+        }
+        for (Index k = 0; k < num_rows_; ++k) {
+            tableau_row[num_cols_ + k] *= cs_bvar * row_scale_[k];
+        }
+    }
 }
 
 }  // namespace mipx

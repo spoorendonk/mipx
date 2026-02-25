@@ -16,6 +16,8 @@ add_library(mipx STATIC
     heuristics/rounding.cpp
     heuristics/diving.cpp
     presolve/presolve.cpp
+    cuts/cut_pool.cpp
+    cuts/gomory.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)

@@ -39,6 +39,24 @@ public:
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
 
+    /// Get a tableau row for basis position `basis_pos` in external (unscaled) space.
+    /// Returns a dense vector of size num_cols + num_rows (structural + slacks).
+    /// The tableau row satisfies: x_i + sum_{j nonbasic} alpha_j * x_j = 0
+    /// where the sum includes both structural and slack variables.
+    void getTableauRow(Index basis_pos, std::vector<Real>& tableau_row);
+
+    /// Get the basis position of a variable, or -1 if nonbasic.
+    [[nodiscard]] Index basisPosition(Index var) const {
+        if (var < 0 || var >= static_cast<Index>(basis_pos_.size())) return -1;
+        return basis_pos_[var];
+    }
+
+    /// Get the number of rows in the current problem.
+    [[nodiscard]] Index numRows() const { return num_rows_; }
+
+    /// Get the number of structural columns in the current problem.
+    [[nodiscard]] Index numCols() const { return num_cols_; }
+
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
