@@ -18,6 +18,7 @@
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/parallel_for.h>
 #include <tbb/blocked_range.h>
+#include <tbb/task_arena.h>
 #endif
 
 namespace mipx {
@@ -620,6 +621,13 @@ LpResult DualSimplexSolver::solve() {
     // Log header.
     std::printf("  Iter      Objective   PrimalInf\n");
 
+#ifdef MIPX_HAS_TBB
+    auto sipThreadGatePass = [&]() -> bool {
+        Int need = std::max<Int>(1, options_.sip_parallel_min_threads);
+        return static_cast<Int>(tbb::this_task_arena::max_concurrency()) >= need;
+    };
+#endif
+
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
         // Log every kLogFrequency iterations.
@@ -667,7 +675,8 @@ LpResult DualSimplexSolver::solve() {
 #ifdef MIPX_HAS_TBB
         if (options_.enable_sip_parallel_chuzr &&
             num_rows_ >= options_.sip_parallel_min_rows &&
-            options_.sip_parallel_row_grain > 0) {
+            options_.sip_parallel_row_grain > 0 &&
+            sipThreadGatePass()) {
             struct ChuzrBest {
                 Index row = -1;
                 Real score = 0.0;
@@ -765,7 +774,8 @@ LpResult DualSimplexSolver::solve() {
 #ifdef MIPX_HAS_TBB
             if (options_.enable_sip_parallel_dual_scan &&
                 nnb >= options_.sip_parallel_min_nonbasic &&
-                options_.sip_parallel_grain > 0) {
+                options_.sip_parallel_grain > 0 &&
+                sipThreadGatePass()) {
                 struct DualScanBest {
                     Index var = -1;
                     Index pos = -1;
@@ -1114,7 +1124,8 @@ LpResult DualSimplexSolver::solve() {
 #ifdef MIPX_HAS_TBB
             if (options_.enable_sip_parallel_candidates &&
                 count >= options_.sip_parallel_min_nonbasic &&
-                options_.sip_parallel_grain > 0) {
+                options_.sip_parallel_grain > 0 &&
+                sipThreadGatePass()) {
                 tbb::enumerable_thread_specific<std::vector<BfrtCand>> locals;
                 const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
                 tbb::parallel_for(tbb::blocked_range<Index>(0, count, grain),
