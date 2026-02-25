@@ -192,7 +192,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 4. Pricing and scan reduction (partial pricing + periodic full refresh fallback) — **done**
 5. LU/FTRAN-BTRAN hot-path memory optimization (no per-row heap allocations in Markowitz updates, reusable solve/update scratch buffers) — **done**
 6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — **done** (runtime toggles, adaptive refactorization guard, AVX2-gated dense kernels for dual/slack-vector updates, O(1) nonbasic position map, and configurable SIMD build targeting with native default landed)
-7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — **done** (dual-infeasibility scan, CHUZC candidate scan, and CHUZR leaving-row scan now have TBB-backed parallel paths behind runtime options, with min-size/min-thread gates plus stall-based serial fallback; default remains off)
+7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — **done** (dual-infeasibility scan, CHUZC candidate scan + optional candidate sort, and CHUZR leaving-row scan have TBB-backed parallel paths behind runtime options, with min-size/min-thread gates plus stall-based serial fallback; default remains off)
 
 **Wave notes:**
 - Tree solve remains dual-simplex-first for MIP warm-start and basis continuity.
