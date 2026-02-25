@@ -724,10 +724,6 @@ MipResult MipSolver::solve() {
         if (cuts_added > 0) {
             root_bound = lp.getObjective();
             root_primals = lp.getPrimalValues();
-            if (verbose_) {
-                log_.log("After cuts: obj = %.10e, %d cuts added\n",
-                         root_bound, cuts_added);
-            }
         }
     }
 
@@ -856,6 +852,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     gomory.setMaxCuts(max_cuts_per_round_);
 
     Int total_cuts = 0;
+    Int rounds_done = 0;
+    Real start_obj = lp.getObjective();
 
     for (Int round = 0; round < max_cut_rounds_; ++round) {
         auto primals = lp.getPrimalValues();
@@ -866,12 +864,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
         Int new_cuts = gomory.separate(lp, problem_, primals, pool);
 
-        if (new_cuts == 0) {
-            if (verbose_) {
-                log_.log("  Cut round %d: no cuts generated, stopping.\n", round + 1);
-            }
-            break;
-        }
+        if (new_cuts == 0) break;
 
         auto top_indices = pool.topByEfficacy(max_cuts_per_round_);
 
@@ -904,32 +897,24 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         total_lp_iters += result.iterations;
         total_work += result.work_units;
 
-        if (result.status != Status::Optimal) {
-            if (verbose_) {
-                log_.log("  Cut round %d: LP solve failed after adding cuts.\n", round + 1);
-            }
-            break;
-        }
+        if (result.status != Status::Optimal) break;
 
         total_cuts += cuts_this_round;
+        rounds_done = round + 1;
         Real new_obj = result.objective;
         Real improvement = std::abs(new_obj - prev_obj);
-
-        if (verbose_) {
-            log_.log("  Cut round %d: %d cuts, obj %.10e -> %.10e (improve %.2e)\n",
-                     round + 1, cuts_this_round, prev_obj, new_obj, improvement);
-        }
 
         auto new_primals = lp.getPrimalValues();
         pool.ageAll(new_primals);
         pool.purge(10);
 
-        if (improvement < kCutImprovementTol) {
-            if (verbose_) {
-                log_.log("  Improvement below tolerance, stopping cut rounds.\n");
-            }
-            break;
-        }
+        if (improvement < kCutImprovementTol) break;
+    }
+
+    if (verbose_ && total_cuts > 0) {
+        Real end_obj = lp.getObjective();
+        log_.log("Cutting planes: %d rounds, %d cuts, obj %.10e -> %.10e\n",
+                 rounds_done, total_cuts, start_obj, end_obj);
     }
 
     return total_cuts;
