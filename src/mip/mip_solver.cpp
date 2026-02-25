@@ -597,9 +597,10 @@ MipResult MipSolver::solve() {
             did_presolve = true;
             if (verbose_) {
                 log_.log("Presolve: %d vars removed, %d rows removed, "
-                         "%d bounds tightened, %d rounds\n\n",
+                         "%d bounds tightened, %d rounds (%d changed), %.3fs\n\n",
                          stats.vars_removed, stats.rows_removed,
-                         stats.bounds_tightened, stats.rounds);
+                         stats.bounds_tightened, stats.rounds,
+                         stats.rounds_with_changes, stats.time_seconds);
             }
         } else {
             working_problem = problem_;

@@ -144,6 +144,26 @@ static LpProblem buildForcingRowProblem() {
     return lp;
 }
 
+/// Build an infeasible empty-row problem: 1 <= 0.
+static LpProblem buildInfeasibleEmptyRowProblem() {
+    LpProblem lp;
+    lp.name = "infeasible_empty_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 0;
+    lp.obj = {};
+    lp.col_lower = {};
+    lp.col_upper = {};
+    lp.col_type = {};
+    lp.col_names = {};
+
+    lp.num_rows = 1;
+    lp.row_lower = {1.0};
+    lp.row_upper = {0.0};
+    lp.row_names = {"c1"};
+    lp.matrix = SparseMatrix(1, 0, std::vector<Triplet>{});
+    return lp;
+}
+
 /// Build a small MIP for round-trip testing.
 /// min -x - 2y  s.t. x + y <= 4, x <= 3, y <= 3, x,y >= 0, x,y integer
 static LpProblem buildSmallMip() {
@@ -463,4 +483,29 @@ TEST_CASE("Presolve: no reductions on dense problem", "[presolve]") {
     // No fixed vars, no singleton rows, etc.
     CHECK(reduced.num_cols == 2);
     CHECK(reduced.num_rows == 2);
+}
+
+TEST_CASE("Presolve: detects infeasible empty row", "[presolve]") {
+    auto lp = buildInfeasibleEmptyRowProblem();
+
+    Presolver presolver;
+    (void)presolver.presolve(lp);
+
+    CHECK(presolver.isInfeasible());
+}
+
+TEST_CASE("Presolve: reusable object resets state between runs", "[presolve]") {
+    Presolver presolver;
+
+    auto infeasible_lp = buildInfeasibleEmptyRowProblem();
+    (void)presolver.presolve(infeasible_lp);
+    CHECK(presolver.isInfeasible());
+
+    auto feasible_lp = buildFixedVarProblem();
+    auto reduced = presolver.presolve(feasible_lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(reduced.num_cols < feasible_lp.num_cols);
+    CHECK(presolver.stats().vars_removed >= 1);
+    CHECK(presolver.stats().time_seconds >= 0.0);
 }
