@@ -78,20 +78,28 @@ Real MipSolver::computeGap(Real incumbent, Real best_bound) const {
 
 void MipSolver::logProgress(Int nodes, Int open, Int lp_iters,
                              Real incumbent, Real best_bound,
-                             double elapsed, bool new_incumbent) const {
+                             double elapsed, bool new_incumbent,
+                             Int int_inf) const {
     if (!verbose_) return;
 
-    char lp_buf[16];
-    Logger::formatCount(lp_iters, lp_buf, sizeof(lp_buf));
     const char* prefix = new_incumbent ? " *" : "  ";
+    Int lpit_per_node = (nodes > 0) ? lp_iters / nodes : 0;
+
+    char int_inf_buf[16];
+    if (int_inf >= 0)
+        std::snprintf(int_inf_buf, sizeof(int_inf_buf), "%6d", int_inf);
+    else
+        std::snprintf(int_inf_buf, sizeof(int_inf_buf), "%6s", "-");
 
     if (incumbent < kInf) {
         Real gap = computeGap(incumbent, best_bound) * 100.0;
-        log_.log("%s%8d  %8d  %10s  %14.6e  %14.6e  %7.2f%%  %7.1fs\n",
-                 prefix, nodes, open, lp_buf, incumbent, best_bound, gap, elapsed);
+        log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14.6e  %7.2f%%  %5.1fs\n",
+                 prefix, nodes, open, lpit_per_node, int_inf_buf,
+                 best_bound, incumbent, gap, elapsed);
     } else {
-        log_.log("%s%8d  %8d  %10s  %14s  %14.6e  %7s  %7.1fs\n",
-                 prefix, nodes, open, lp_buf, "-", best_bound, "-", elapsed);
+        log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14s  %7s  %5.1fs\n",
+                 prefix, nodes, open, lpit_per_node, int_inf_buf,
+                 best_bound, "-", "-", elapsed);
     }
 }
 
@@ -105,10 +113,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              std::vector<Real>& current_lower,
                              std::vector<Real>& current_upper,
                              std::vector<Index>& touched_vars,
-                             NodeWorkStats& node_stats) {
+                             NodeWorkStats& node_stats,
+                             Int& int_inf_out) {
     children_out.clear();
     node_iters_out = 0;
     node_work_out = 0.0;
+    int_inf_out = -1;
     ++node_stats.nodes_solved;
 
     // Skip if pruned by bound (might have changed since pop).
@@ -203,8 +213,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_obj_out = node_result.objective;
     node_primals_out = lp.getPrimalValues();
 
+    // Count integer infeasibilities (fractional integer variables).
+    Int frac_count = 0;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Continuous) continue;
+        if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+    }
+    int_inf_out = frac_count;
+
     // Check integer feasibility.
-    if (isFeasibleMip(node_primals_out)) {
+    if (frac_count == 0) {
         return false;  // Caller handles incumbent update.
     }
 
@@ -272,12 +290,13 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         std::vector<Real> node_primals;
         Int node_iters = 0;
         double node_work = 0.0;
+        Int node_int_inf = -1;
 
         bool branched = processNode(lp, node, incumbent,
                                     children, node_obj, node_primals, node_iters,
                                     node_work,
                                     current_lower, current_upper, touched_vars,
-                                    node_stats);
+                                    node_stats, node_int_inf);
         total_lp_iters += node_iters;
         total_work += node_work;
 
@@ -287,18 +306,18 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
             logProgress(nodes_explored, queue.size(), total_lp_iters,
                        incumbent,
                        queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                       now);
+                       now, false, node_int_inf);
             last_log_time = now;
         }
 
-        if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
+        if (!branched && !node_primals.empty() && node_int_inf == 0) {
             if (node_obj < incumbent) {
                 incumbent = node_obj;
                 best_solution = node_primals;
                 logProgress(nodes_explored, queue.size(), total_lp_iters,
                            incumbent,
                            queue.empty() ? incumbent : queue.bestBound(),
-                           elapsed(), true);
+                           elapsed(), true, 0);
                 queue.prune(incumbent - 1e-6);
             }
         }
@@ -402,12 +421,13 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             std::vector<Real> node_primals;
             Int node_iters = 0;
             double node_work = 0.0;
+            Int node_int_inf = -1;
 
             bool branched = processNode(local_lp, node, inc_snapshot,
                                         children, node_obj, node_primals, node_iters,
                                         node_work,
                                         current_lower, current_upper, touched_vars,
-                                        local_node_stats);
+                                        local_node_stats, node_int_inf);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
             // Atomically add work (relaxed is fine for accumulation).
             auto old_w = atomic_work.load(std::memory_order_relaxed);
@@ -416,7 +436,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 
             // Check for new incumbent.
             bool found_incumbent = false;
-            if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
+            if (!branched && !node_primals.empty() && node_int_inf == 0) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
                 if (node_obj < incumbent) {
                     incumbent = node_obj;
@@ -442,7 +462,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                            atomic_lp_iters.load(),
                            incumbent,
                            queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                           elapsed(), found_incumbent);
+                           elapsed(), found_incumbent, node_int_inf);
             }
         }
 
@@ -637,8 +657,23 @@ MipResult MipSolver::solve() {
 
     // If no integers, solve as LP directly.
     if (!problem_.hasIntegers()) {
+        if (verbose_) {
+            log_.log("mipx v0.3\n");
+            unsigned logical = std::thread::hardware_concurrency();
+            const char* tbb_str = "";
+#ifdef MIPX_HAS_TBB
+            tbb_str = ", TBB";
+#endif
+            log_.log("Thread count: %u logical processors, using up to 1 thread%s\n",
+                     logical, tbb_str);
+            log_.log("Solving LP with:\n  %d rows, %d cols, %d nonzeros\n\n",
+                     problem_.num_rows, problem_.num_cols,
+                     problem_.matrix.numNonzeros());
+        }
+
         DualSimplexSolver lp;
         lp.load(problem_);
+        lp.setVerbose(verbose_);
         auto lr = lp.solve();
 
         MipResult result;
@@ -652,6 +687,11 @@ MipResult MipSolver::solve() {
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
+            if (verbose_) {
+                std::fflush(stdout);
+                log_.log("\nOptimal: %.10e (%d iterations)\n",
+                         result.objective, lr.iterations);
+            }
         }
         applyPostsolve(result);
         return result;
@@ -753,8 +793,9 @@ MipResult MipSolver::solve() {
 
     // Branch-and-bound.
     if (verbose_) {
-        log_.log("\n%10s  %8s  %10s  %14s  %14s  %7s  %7s\n",
-                 "Nodes", "Open", "LP iters", "Incumbent", "Best bound", "Gap", "Time");
+        log_.log("\n%10s  %8s  %6s  %6s  %14s  %14s  %7s  %5s\n",
+                 "Nodes", "Active", "LPit/n", "IntInf",
+                 "BestBound", "BestSolution", "Gap", "Time");
     }
 
     NodeQueue queue(NodePolicy::BestFirst);

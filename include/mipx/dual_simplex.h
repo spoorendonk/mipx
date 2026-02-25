@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <vector>
 
 #include "mipx/core.h"
@@ -149,6 +150,9 @@ private:
     static constexpr Int kLogFrequency = 200;
     static constexpr Int kPartialPricingChunkMin = 512;
     static constexpr Int kPartialPricingFullScanFreq = 25;
+
+    // Timing for iteration log.
+    std::chrono::steady_clock::time_point solve_start_;
 
     // Deterministic work counter.
     WorkUnits work_;

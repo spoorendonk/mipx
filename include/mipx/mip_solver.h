@@ -106,7 +106,7 @@ private:
     // Log a progress line.
     void logProgress(Int nodes, Int open, Int lp_iters,
                      Real incumbent, Real best_bound, double elapsed,
-                     bool new_incumbent = false) const;
+                     bool new_incumbent = false, Int int_inf = -1) const;
 
     /// Process a single node. Returns true if children were created.
     bool processNode(DualSimplexSolver& lp, BnbNode& node,
@@ -119,7 +119,8 @@ private:
                      std::vector<Real>& current_lower,
                      std::vector<Real>& current_upper,
                      std::vector<Index>& touched_vars,
-                     NodeWorkStats& node_stats);
+                     NodeWorkStats& node_stats,
+                     Int& int_inf_out);
 
     // Problem data.
     LpProblem problem_;
