@@ -50,6 +50,86 @@ MipResult MipSolver::solve() {
         return std::chrono::duration<double>(now - start_time).count();
     };
 
+    // Presolve.
+    Presolver presolver;
+    LpProblem working_problem;
+    bool did_presolve = false;
+
+    if (presolve_) {
+        working_problem = presolver.presolve(problem_);
+        const auto& stats = presolver.stats();
+        if (stats.vars_removed > 0 || stats.rows_removed > 0) {
+            did_presolve = true;
+            if (verbose_) {
+                std::println("Presolve: {} vars removed, {} rows removed, "
+                             "{} bounds tightened, {} rounds",
+                             stats.vars_removed, stats.rows_removed,
+                             stats.bounds_tightened, stats.rounds);
+            }
+        } else {
+            // No reductions — use original problem.
+            working_problem = problem_;
+        }
+    } else {
+        working_problem = problem_;
+    }
+
+    // If presolve detected infeasibility, return immediately.
+    if (presolver.isInfeasible()) {
+        MipResult result;
+        result.status = Status::Infeasible;
+        result.nodes = 0;
+        result.lp_iterations = 0;
+        result.time_seconds = elapsed();
+        if (verbose_) {
+            std::println("Presolve detected infeasibility.");
+        }
+        return result;
+    }
+
+    // If presolve emptied the problem, return immediately.
+    if (working_problem.num_cols == 0) {
+        MipResult result;
+        result.status = Status::Optimal;
+        result.objective = working_problem.obj_offset;
+        result.best_bound = working_problem.obj_offset;
+        result.gap = 0.0;
+        result.nodes = 0;
+        result.lp_iterations = 0;
+        result.time_seconds = elapsed();
+        if (did_presolve) {
+            result.solution = presolver.postsolve({});
+        }
+        return result;
+    }
+
+    // Swap in the working problem for the solve. We'll swap back at the end
+    // if we need postsolve.
+    LpProblem original_problem;
+    if (did_presolve) {
+        original_problem = std::move(problem_);
+        problem_ = std::move(working_problem);
+    }
+
+    // Helper to apply postsolve and adjust objective.
+    auto applyPostsolve = [&](MipResult& result) {
+        if (did_presolve) {
+            // Adjust objective to include presolve offset.
+            if (result.status == Status::Optimal || !result.solution.empty()) {
+                result.objective += problem_.obj_offset;
+                result.best_bound += problem_.obj_offset;
+                result.solution = presolver.postsolve(result.solution);
+            } else {
+                result.objective += problem_.obj_offset;
+                if (result.best_bound != kInf && result.best_bound != -kInf) {
+                    result.best_bound += problem_.obj_offset;
+                }
+            }
+            // Restore original problem.
+            problem_ = std::move(original_problem);
+        }
+    };
+
     // If no integers, solve as LP directly.
     if (!problem_.hasIntegers()) {
         DualSimplexSolver lp;
@@ -67,6 +147,7 @@ MipResult MipSolver::solve() {
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
         }
+        applyPostsolve(result);
         return result;
     }
 
@@ -331,6 +412,9 @@ MipResult MipSolver::solve() {
         }
         result.best_bound = queue.empty() ? kInf : queue.bestBound();
     }
+
+    // Apply postsolve to recover full solution.
+    applyPostsolve(result);
 
     if (verbose_) {
         std::println("");
