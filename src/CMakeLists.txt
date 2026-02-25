@@ -9,6 +9,7 @@ add_library(mipx STATIC
     io/mps_writer.cpp
     io/lp_reader.cpp
     io/solu_reader.cpp
+    mip/domain.cpp
     mip/node_queue.cpp
     mip/branching.cpp
 )
