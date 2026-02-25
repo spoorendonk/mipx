@@ -194,16 +194,19 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 8: Incremental LP Updates
+## Step 8: Incremental LP Updates ✅
 
 **Goal:** Efficient LP modifications for branch-and-cut use.
 
+**Status:** Complete. All incremental operations implemented and tested (8 test cases).
+
 **Deliverables:**
-- Add rows (cuts) without full refactorization — extend basis with slacks
-- Remove rows (inactive cuts) — shrink basis, maintain feasibility
-- Bound changes — update basis status, detect infeasibility cheaply
-- Warm-start: save/restore basis for tree node LP resolves
-- Objective changes for branching (variable fixing)
+- `setColBounds()`: update variable bounds with scaling, adjust nonbasic status/value
+- `setObjective()`: update objective with sign flip and scaling
+- `addRows()`: extend constraint matrix, row bounds, and basis with new slack variables
+- `removeRows()`: remove rows, compact data, invalidate basis for cold restart
+- Warm-start `solve()`: reuse existing basis (skip `setupInitialBasis()`), re-scale nonbasic primals
+- Fixed `setBasis()` to allocate solution vectors before use
 
 **Test criteria:** Add rows, re-solve, verify optimal. Warm-started solve uses fewer iterations than cold start. Bound change + re-solve matches fresh solve.
 

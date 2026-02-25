@@ -109,6 +109,7 @@ private:
     Int iterations_ = 0;
     Int iter_limit_ = 1000000;
     bool loaded_ = false;
+    bool has_basis_ = false;  // true after first solve or setBasis()
 
     // Devex pricing weights.
     std::vector<Real> devex_weights_;  // size num_rows, one per basis position
