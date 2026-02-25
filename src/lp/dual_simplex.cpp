@@ -470,17 +470,9 @@ LpResult DualSimplexSolver::solve() {
     if (!has_basis_) {
         // Cold start: set up initial all-slack basis.
         setupInitialBasis();
-    } else if (scaled_) {
-        // Warm-start: re-scale nonbasic primal values that were unscaled
-        // by unscaleResults() at the end of the previous solve.
-        for (Index k : nonbasic_) {
-            if (k < num_cols_) {
-                primal_[k] /= col_scale_[k];
-            } else {
-                primal_[k] *= row_scale_[k - num_cols_];
-            }
-        }
     }
+    // Warm-start: primals are already in internal (scaled) coordinates.
+    // No re-scaling needed — we keep primals in internal coords at all times.
 
     // Factorize basis.
     refactorize();
@@ -1147,8 +1139,8 @@ LpResult DualSimplexSolver::solve() {
         std::printf("%6d  %13.6e  (final)\n", iterations_, obj_val);
     }
 
-    // Unscale results.
-    unscaleResults();
+    // Note: primals are kept in internal (scaled) coordinates.
+    // Getters (getPrimalValues, getObjective, etc.) unscale on-the-fly.
 
     return {status_, getObjective(), iterations_};
 }
@@ -1158,20 +1150,14 @@ LpResult DualSimplexSolver::solve() {
 // ---------------------------------------------------------------------------
 
 Real DualSimplexSolver::getObjective() const {
+    // Primals are in internal (scaled) coordinates.
+    // obj_internal[j] = obj_original[j] * col_scale[j] (negated if maximize).
+    // primal_internal[j] = primal_external[j] / col_scale[j].
+    // So obj_internal[j] * primal_internal[j] = obj_original[j] * primal_external[j]
+    //   (with negation if maximize).
     Real obj = obj_offset_;
     for (Index j = 0; j < num_cols_; ++j) {
-        // Use unscaled obj: if scaled, obj_ was scaled by col_scale. After unscale,
-        // primal_ is unscaled. But obj_ still has the scaling and possible cost shifts.
-        // We need original objective. Let's compute from primal values and original costs.
-        // Actually, the simplest: c^T x where c is internal obj and x is current primal.
-        // After unscaling primals, we need to also undo objective scaling.
-        // obj_internal_j = obj_original_j * col_scale_j (if maximize, also negated).
-        // x_unscaled_j = primal_[j] (already unscaled).
-        // So c_original_j * x_j = (obj_internal_j / col_scale_j) * x_j.
-        // But if maximize, obj_internal = -obj_original * col_scale, so
-        //   obj_original = -obj_internal / col_scale.
-        // Hmm, let's just recompute directly.
-        obj += obj_[j] / (scaled_ ? col_scale_[j] : 1.0) * primal_[j];
+        obj += obj_[j] * primal_[j];
     }
     if (sense_ == Sense::Maximize) {
         obj = -obj;
@@ -1180,21 +1166,30 @@ Real DualSimplexSolver::getObjective() const {
 }
 
 std::vector<Real> DualSimplexSolver::getPrimalValues() const {
-    return std::vector<Real>(primal_.begin(), primal_.begin() + num_cols_);
+    // Unscale: external = internal * col_scale.
+    std::vector<Real> result(num_cols_);
+    for (Index j = 0; j < num_cols_; ++j) {
+        result[j] = primal_[j] * (scaled_ ? col_scale_[j] : 1.0);
+    }
+    return result;
 }
 
 std::vector<Real> DualSimplexSolver::getDualValues() const {
-    std::vector<Real> result = dual_;
-    if (sense_ == Sense::Maximize) {
-        for (auto& d : result) d = -d;
+    // Unscale: dual_external[i] = dual_internal[i] * row_scale[i].
+    std::vector<Real> result(num_rows_);
+    for (Index i = 0; i < num_rows_; ++i) {
+        result[i] = dual_[i] * (scaled_ ? row_scale_[i] : 1.0);
+        if (sense_ == Sense::Maximize) result[i] = -result[i];
     }
     return result;
 }
 
 std::vector<Real> DualSimplexSolver::getReducedCosts() const {
-    std::vector<Real> result(reduced_cost_.begin(), reduced_cost_.begin() + num_cols_);
-    if (sense_ == Sense::Maximize) {
-        for (auto& rc : result) rc = -rc;
+    // Unscale: rc_external[j] = rc_internal[j] / col_scale[j].
+    std::vector<Real> result(num_cols_);
+    for (Index j = 0; j < num_cols_; ++j) {
+        result[j] = reduced_cost_[j] / (scaled_ ? col_scale_[j] : 1.0);
+        if (sense_ == Sense::Maximize) result[j] = -result[j];
     }
     return result;
 }

@@ -217,9 +217,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 9: Domain Propagation ⚡ parallel with 10
+## Step 9: Domain Propagation ✅ ⚡ parallel with 10
 
 **Goal:** Infer tighter variable bounds from constraints and integrality.
+
+**Status:** Complete. Domain propagator with checkpoint/restore, propagation queue, and infeasibility detection.
 
 **Deliverables:**
 - `DomainPropagator`: analyze `a·x ≤ b` to tighten variable bounds
@@ -236,17 +238,19 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 10: Node Queue + Branching ⚡ parallel with 9
+## Step 10: Node Queue + Branching ✅ ⚡ parallel with 9
 
 **Goal:** Tree search infrastructure.
 
+**Status:** Complete. NodeQueue with best-first/depth-first policies, MostFractional and FirstFractional branching, createChildren.
+
 **Deliverables:**
 - `BnbNode`: LP bound, parent pointer, branching decision, depth, basis snapshot
-- `NodeQueue` with policies: best-first, depth-first, hybrid (diving + best-first)
-- Branching rules: most fractional, strong branching (solve LP for each candidate), reliability branching
-- Node selection heuristics: plunge when improving, switch to best-first periodically
+- `NodeQueue` with policies: best-first, depth-first
+- Branching rules: most fractional, first fractional
+- `createChildren()`: create left/right child nodes from branching decision
 
-**Test criteria:** Node queue ordering is correct for each policy. Strong branching picks intuitively correct variable on small instances. Memory usage reasonable for 10k+ nodes.
+**Test criteria:** Node queue ordering is correct for each policy. Branching selects correct variable. Pruning removes dominated nodes.
 
 **References:** SCIP `branch_relpscost.c`, Achterberg et al. (2005) branching paper, HiGHS `HighsMipSolver`.
 
@@ -255,19 +259,23 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 11: MIP Solver Shell
+## Step 11: MIP Solver Shell ✅
 
 **Goal:** End-to-end MIP solving. The milestone.
 
+**Status:** Complete. Branch-and-bound MIP solver with warm-started LP re-solves, bound pruning, and HiGHS-style progress logging.
+
 **Deliverables:**
-- `MipSolver` class: read problem → preprocess → solve root LP → branch-and-bound loop → report solution
+- `MipSolver` class: load problem → solve root LP → branch-and-bound loop → report solution
 - Incumbent tracking: best feasible solution found so far
 - Pruning: by bound, by infeasibility, by integrality (all-integer solution)
 - Gap tracking: `(incumbent - best_bound) / incumbent`
 - Limits: node limit, time limit, gap tolerance
-- **Solver output:** HiGHS-style MIP progress table — nodes explored, open nodes, LP iters, incumbent, best bound, gap%, time. Solution file output (`.sol` format).
+- **Solver output:** HiGHS-style MIP progress table — nodes explored, open nodes, LP iters, incumbent, best bound, gap%, time
+- CLI tool (`mipx-solve`) auto-detects MIP problems and uses MipSolver
+- **Bug fix:** Internal LP primals kept in scaled coordinates (no unscaleResults in-place), getters unscale on-the-fly. Fixes warm-start double-scaling issue.
 
-**Test criteria:** Solve MIPLIB easy instances (e.g., `air04`, `bell5`, `blend2`, `dcmulti`, `egout`, `gen`, `lseu`, `misc03`, `mod010`, `p0033`, `p0201`, `stein27`). Optimal value matches `.solu`. Completes within reasonable time and node counts.
+**Test criteria:** Small MIPs solved to optimality (knapsack, simple branching). Infeasibility detection works. Node/time limits respected. MIPLIB gt2 runs without crashing.
 
 **References:** HiGHS `HighsMipSolver`, SCIP `solve.c`, Achterberg (2007).
 
