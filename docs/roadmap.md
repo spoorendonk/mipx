@@ -191,7 +191,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 3. Basis lifecycle hardening for reoptimization (`setBasis` fast path, row-removal remap) — **done**
 4. Pricing and scan reduction (partial pricing + periodic full refresh fallback) — **done**
 5. LU/FTRAN-BTRAN hot-path memory optimization (no per-row heap allocations in Markowitz updates, reusable solve/update scratch buffers) — **done**
-6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — planned
+6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — **in progress** (runtime toggles + adaptive refactorization guard landed; SIMD/memory-layout tuning pending)
 7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — planned
 
 **Wave notes:**
@@ -201,7 +201,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Performance regression gates (required for all optimization PRs):**
 - Correctness gate: no test regressions.
-- Performance gate: median runtime regression must stay within 2% on fixed benchmark suites.
+- Performance gate: default `work_units` regression allowance is 0% (explicit override required to relax).
 - Stability gate: no increase in numerical failures / stall rate beyond tolerance.
 - Fallback gate: new optimization stays runtime-toggleable until gates are met.
 
