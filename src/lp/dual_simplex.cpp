@@ -3,12 +3,83 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 namespace mipx {
+
+namespace {
+
+inline bool canUseSimd(const DualSimplexOptions& options, Index len) {
+    return options.enable_simd_kernels &&
+           options.simd_min_length > 0 &&
+           len >= options.simd_min_length;
+}
+
+inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alpha,
+                        const DualSimplexOptions& options) {
+    assert(dst.size() == src.size());
+    (void)options;
+#if defined(__AVX2__)
+    if (canUseSimd(options, static_cast<Index>(dst.size()))) {
+        const __m256d a = _mm256_set1_pd(alpha);
+        std::size_t i = 0;
+        const std::size_t n = dst.size();
+        for (; i + 4 <= n; i += 4) {
+            __m256d d = _mm256_loadu_pd(dst.data() + i);
+            __m256d s = _mm256_loadu_pd(src.data() + i);
+#if defined(__FMA__)
+            d = _mm256_fmadd_pd(a, s, d);
+#else
+            d = _mm256_add_pd(d, _mm256_mul_pd(a, s));
+#endif
+            _mm256_storeu_pd(dst.data() + i, d);
+        }
+        for (; i < n; ++i) {
+            dst[i] += alpha * src[i];
+        }
+        return;
+    }
+#endif
+    for (std::size_t i = 0; i < dst.size(); ++i) {
+        dst[i] += alpha * src[i];
+    }
+}
+
+inline void negateCopy(std::span<Real> dst, std::span<const Real> src,
+                       const DualSimplexOptions& options) {
+    assert(dst.size() == src.size());
+    (void)options;
+#if defined(__AVX2__)
+    if (canUseSimd(options, static_cast<Index>(dst.size()))) {
+        const __m256d z = _mm256_setzero_pd();
+        std::size_t i = 0;
+        const std::size_t n = dst.size();
+        for (; i + 4 <= n; i += 4) {
+            __m256d s = _mm256_loadu_pd(src.data() + i);
+            __m256d d = _mm256_sub_pd(z, s);
+            _mm256_storeu_pd(dst.data() + i, d);
+        }
+        for (; i < n; ++i) {
+            dst[i] = -src[i];
+        }
+        return;
+    }
+#endif
+    for (std::size_t i = 0; i < dst.size(); ++i) {
+        dst[i] = -src[i];
+    }
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 //  Load
@@ -41,6 +112,8 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 
     status_ = Status::Error;
     iterations_ = 0;
+    has_basis_ = false;
+    nonbasic_pos_.clear();
     loaded_ = true;
 }
 
@@ -191,6 +264,7 @@ void DualSimplexSolver::setupInitialBasis() {
     basis_.resize(num_rows_);
     nonbasic_.clear();
     nonbasic_.reserve(num_cols_);
+    nonbasic_pos_.assign(n, -1);
     basis_pos_.assign(n, -1);
     var_status_.resize(n);
     primal_.resize(n);
@@ -248,6 +322,7 @@ void DualSimplexSolver::setupInitialBasis() {
         }
 
         nonbasic_.push_back(j);
+        nonbasic_pos_[j] = static_cast<Index>(nonbasic_.size() - 1);
     }
 }
 
@@ -752,9 +827,11 @@ LpResult DualSimplexSolver::solve() {
                     pivot_row_alpha[rv.indices[pp]] += rho_i * rv.values[pp];
                 }
             }
-            for (Index i = 0; i < num_rows_; ++i) {
-                pivot_row_alpha[num_cols_ + i] = -work[i];
-            }
+            negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
+                                       static_cast<std::size_t>(num_rows_)),
+                       std::span<const Real>(work.data(),
+                                             static_cast<std::size_t>(num_rows_)),
+                       options_);
 
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
@@ -768,9 +845,10 @@ LpResult DualSimplexSolver::solve() {
             reduced_cost_[leaving_var_p] = -theta_d_p;
 
             // Update duals.
-            for (Index i = 0; i < num_rows_; ++i) {
-                dual_[i] += theta_d_p * work[i];
-            }
+            axpyInPlace(std::span<Real>(dual_.data(), static_cast<std::size_t>(num_rows_)),
+                        std::span<const Real>(work.data(),
+                                              static_cast<std::size_t>(num_rows_)),
+                        theta_d_p, options_);
 
             // Determine leaving variable status.
             Real leaving_lb = varLower(leaving_var_p);
@@ -795,12 +873,11 @@ LpResult DualSimplexSolver::solve() {
             var_status_[entering_p] = BasisStatus::Basic;
             var_status_[leaving_var_p] = leaving_st;
 
-            for (Index idx = 0;
-                 idx < static_cast<Index>(nonbasic_.size()); ++idx) {
-                if (nonbasic_[idx] == entering_p) {
-                    nonbasic_[idx] = leaving_var_p;
-                    break;
-                }
+            Index nb_pos = nonbasic_pos_[entering_p];
+            if (nb_pos >= 0) {
+                nonbasic_[nb_pos] = leaving_var_p;
+                nonbasic_pos_[leaving_var_p] = nb_pos;
+                nonbasic_pos_[entering_p] = -1;
             }
 
             // LU update.
@@ -853,9 +930,11 @@ LpResult DualSimplexSolver::solve() {
             }
         }
         // Slack alpha values: alpha_{n+i} = rho^T * (-e_i) = -rho[i].
-        for (Index i = 0; i < num_rows_; ++i) {
-            pivot_row_alpha[num_cols_ + i] = -work[i];
-        }
+        negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
+                                   static_cast<std::size_t>(num_rows_)),
+                   std::span<const Real>(work.data(),
+                                         static_cast<std::size_t>(num_rows_)),
+                   options_);
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
@@ -1057,9 +1136,10 @@ LpResult DualSimplexSolver::solve() {
         reduced_cost_[entering_var] = 0.0;  // entering becomes basic
 
         // Update dual values.
-        for (Index i = 0; i < num_rows_; ++i) {
-            dual_[i] += theta_d * work[i];  // work still holds btran result
-        }
+        axpyInPlace(std::span<Real>(dual_.data(), static_cast<std::size_t>(num_rows_)),
+                    std::span<const Real>(work.data(),
+                                          static_cast<std::size_t>(num_rows_)),
+                    theta_d, options_);  // work still holds btran result
 
         // Reduced cost of leaving var (now nonbasic).
         // The leaving var was basic (rc=0). Its column through B^{-1} gives e_r.
@@ -1098,11 +1178,11 @@ LpResult DualSimplexSolver::solve() {
 
         // Update nonbasic list.
         // Remove entering_var, add leaving_var.
-        for (Index idx = 0; idx < static_cast<Index>(nonbasic_.size()); ++idx) {
-            if (nonbasic_[idx] == entering_var) {
-                nonbasic_[idx] = leaving_var;
-                break;
-            }
+        Index nb_pos = nonbasic_pos_[entering_var];
+        if (nb_pos >= 0) {
+            nonbasic_[nb_pos] = leaving_var;
+            nonbasic_pos_[leaving_var] = nb_pos;
+            nonbasic_pos_[entering_var] = -1;
         }
 
         // ---- Update Devex weights ----
@@ -1275,6 +1355,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
 
     basis_.clear();
     nonbasic_.clear();
+    nonbasic_pos_.assign(n, -1);
     basis_pos_.assign(n, -1);
 
     for (Index k = 0; k < n; ++k) {
@@ -1284,6 +1365,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
             basis_.push_back(k);
         } else {
             nonbasic_.push_back(k);
+            nonbasic_pos_[k] = static_cast<Index>(nonbasic_.size() - 1);
             if (basis[k] == BasisStatus::AtLower || basis[k] == BasisStatus::Fixed) {
                 primal_[k] = varLower(k);
             } else if (basis[k] == BasisStatus::AtUpper) {
@@ -1417,6 +1499,7 @@ void DualSimplexSolver::addRows(
     // Extend basis: new slack variables enter as basic.
     Index new_total = numVars();
     basis_pos_.resize(new_total, -1);
+    nonbasic_pos_.resize(new_total, -1);
     var_status_.resize(new_total);
     primal_.resize(new_total);
     reduced_cost_.resize(new_total, 0.0);
@@ -1612,6 +1695,10 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
             primal_ = std::move(new_primal);
             reduced_cost_ = std::move(new_reduced);
             nonbasic_ = std::move(new_nonbasic);
+            nonbasic_pos_.assign(static_cast<std::size_t>(new_vars), -1);
+            for (Index pos = 0; pos < static_cast<Index>(nonbasic_.size()); ++pos) {
+                nonbasic_pos_[nonbasic_[pos]] = pos;
+            }
             dual_.assign(static_cast<std::size_t>(num_rows_), 0.0);
             devex_weights_.assign(static_cast<std::size_t>(num_rows_), 1.0);
             devex_reset_count_ = 0;
@@ -1622,6 +1709,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
 
     // Could not preserve basis safely.
     has_basis_ = false;
+    nonbasic_pos_.clear();
 }
 
 // ---------------------------------------------------------------------------
