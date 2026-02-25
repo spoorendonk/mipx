@@ -84,6 +84,7 @@ ctest --test-dir build -j$(nproc)
 Netlib and MIPLIB instances are not included in the repo. Download them before running benchmarks:
 
 ```bash
+./tests/data/download_test_instances.sh   # small Netlib + small MIPLIB (recommended)
 ./tests/data/download_netlib.sh          # full Netlib LP set
 ./tests/data/download_netlib.sh --small  # curated small subset (CI)
 ./tests/data/download_miplib.sh          # MIPLIB 2017 collection
