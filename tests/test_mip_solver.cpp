@@ -73,6 +73,63 @@ static LpProblem buildBranchingMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: root LP fractional but rounding can provide an incumbent.
+// min -x  s.t. x <= 0.49, x >= 0, x integer
+// ---------------------------------------------------------------------------
+
+static LpProblem buildRootRoundingMip() {
+    LpProblem lp;
+    lp.name = "root_rounding_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {kInf};
+    lp.col_type = {VarType::Integer};
+    lp.col_names = {"x"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {0.49};
+    lp.row_names = {"ub"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: root LP fractional where plain rounding fails; FP/RENS can still
+// provide a feasible incumbent.
+// min -x  s.t. x <= 4.6, x >= 0, x integer
+// ---------------------------------------------------------------------------
+
+static LpProblem buildRootFractionalHeuristicMip() {
+    LpProblem lp;
+    lp.name = "root_fractional_heur_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {10.0};
+    lp.col_type = {VarType::Integer};
+    lp.col_names = {"x"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {4.6};
+    lp.row_names = {"ub_x"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Helper: build infeasible MIP
 // x >= 5, x <= 3, x integer
 // ---------------------------------------------------------------------------
@@ -227,6 +284,38 @@ TEST_CASE("MipSolver: node limit", "[mip]") {
 
     // With node limit 1, we process root but can't explore children.
     CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+}
+
+TEST_CASE("MipSolver: root heuristics provide incumbent before branching", "[mip]") {
+    auto lp = buildRootRoundingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setNodeLimit(1);  // root only
+    solver.load(lp);
+    auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    REQUIRE(!result.solution.empty());
+    CHECK_THAT(result.objective, WithinAbs(0.0, 1e-6));
+    CHECK_THAT(result.solution[0], WithinAbs(0.0, 1e-6));
+}
+
+TEST_CASE("MipSolver: LP-based root portfolio can bootstrap incumbent", "[mip]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setNodeLimit(1);  // root only
+    solver.load(lp);
+    auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    REQUIRE(!result.solution.empty());
+    CHECK(result.solution[0] >= 0.0);
+    CHECK(result.solution[0] <= 4.6 + 1e-6);
 }
 
 TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {

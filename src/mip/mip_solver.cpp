@@ -13,6 +13,7 @@
 
 #include "mipx/cut_pool.h"
 #include "mipx/gomory.h"
+#include "mipx/heuristics.h"
 
 #ifdef MIPX_HAS_TBB
 #include <tbb/parallel_for.h>
@@ -260,6 +261,18 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     double last_log_time = -kLogInterval;  // ensure first node is logged
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(kRinsSubproblemIterLimit);
+    rins.setAgreementTol(kRinsAgreementTol);
+    rins.setMinFixedVars(kRinsMinFixedVars);
+    rins.setMinFixedRate(kRinsMinFixedRate);
+
+    Int rins_calls = 0;
+    Int rins_solves = 0;
+    Int rins_found = 0;
+    Int rins_skip_no_inc = 0;
+    Int rins_skip_few_fix = 0;
+    Int rins_fixed_sum = 0;
 
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
@@ -300,6 +313,30 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         total_lp_iters += node_iters;
         total_work += node_work;
 
+        if (node_int_inf > 0 && node_int_inf <= kRinsMaxIntInfForRun &&
+            incumbent < kInf && !best_solution.empty() &&
+            computeGap(incumbent, node_obj) <= kRinsMaxRelativeGapForRun &&
+            (nodes_explored % kRinsNodeFrequency == 0)) {
+            ++rins_calls;
+            auto hsol = rins.run(problem_, lp, node_primals, incumbent, best_solution);
+            total_lp_iters += rins.lastLpIterations();
+            total_work += rins.lastWorkUnits();
+            if (rins.lastExecutedSolve()) ++rins_solves;
+            if (rins.lastSkippedNoIncumbent()) ++rins_skip_no_inc;
+            if (rins.lastSkippedFewFixes()) ++rins_skip_few_fix;
+            rins_fixed_sum += rins.lastFixedCount();
+            if (hsol && hsol->objective < incumbent) {
+                incumbent = hsol->objective;
+                best_solution = std::move(hsol->values);
+                ++rins_found;
+                logProgress(nodes_explored, queue.size(), total_lp_iters,
+                           incumbent,
+                           queue.empty() ? incumbent : queue.bestBound(),
+                           elapsed(), true, node_int_inf);
+                queue.prune(incumbent - 1e-6);
+            }
+        }
+
         // Log progress periodically (time-based).
         double now = elapsed();
         if (verbose_ && (now - last_log_time >= kLogInterval || nodes_explored <= 1)) {
@@ -333,6 +370,15 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     lp_stats_.nodes_solved += node_stats.nodes_solved;
     lp_stats_.warm_starts += node_stats.warm_starts;
     lp_stats_.cold_starts += node_stats.cold_starts;
+
+    if (verbose_ && rins_calls > 0) {
+        double avg_fixed = static_cast<double>(rins_fixed_sum) /
+                           static_cast<double>(rins_calls);
+        log_.log("RINS(serial): calls=%d solves=%d found=%d avg_fixed=%.1f "
+                 "skip_no_inc=%d skip_few_fix=%d\n",
+                 rins_calls, rins_solves, rins_found, avg_fixed,
+                 rins_skip_no_inc, rins_skip_few_fix);
+    }
 }
 
 #ifdef MIPX_HAS_TBB
@@ -351,6 +397,12 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::atomic<bool> should_stop{false};
     std::mutex stats_mutex;
     double last_log_time = -kLogInterval;  // ensure first log fires
+    Int rins_calls = 0;
+    Int rins_solves = 0;
+    Int rins_found = 0;
+    Int rins_skip_no_inc = 0;
+    Int rins_skip_few_fix = 0;
+    Int rins_fixed_sum = 0;
 
     // Each thread needs its own LP solver instance.
     Int actual_threads = std::min(num_threads_, static_cast<Int>(std::thread::hardware_concurrency()));
@@ -373,6 +425,17 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         std::vector<Index> touched_vars;
         touched_vars.reserve(problem_.num_cols);
         NodeWorkStats local_node_stats;
+        RinsHeuristic rins;
+        rins.setSubproblemIterLimit(kRinsSubproblemIterLimit);
+        rins.setAgreementTol(kRinsAgreementTol);
+        rins.setMinFixedVars(kRinsMinFixedVars);
+        rins.setMinFixedRate(kRinsMinFixedRate);
+        Int local_rins_calls = 0;
+        Int local_rins_solves = 0;
+        Int local_rins_found = 0;
+        Int local_rins_skip_no_inc = 0;
+        Int local_rins_skip_few_fix = 0;
+        Int local_rins_fixed_sum = 0;
 
         while (!should_stop.load(std::memory_order_relaxed)) {
             // Check limits.
@@ -406,7 +469,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 node = queue.pop();
             }
 
-            atomic_nodes.fetch_add(1, std::memory_order_relaxed);
+            Int node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
 
             // Get current incumbent for pruning.
             Real inc_snapshot;
@@ -434,8 +497,46 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             while (!atomic_work.compare_exchange_weak(old_w, old_w + node_work,
                                                        std::memory_order_relaxed)) {}
 
-            // Check for new incumbent.
             bool found_incumbent = false;
+            std::vector<Real> incumbent_values;
+            Real rins_incumbent = kInf;
+            {
+                std::lock_guard<std::mutex> lock(incumbent_mutex);
+                if (incumbent < kInf && !best_solution.empty()) {
+                    rins_incumbent = incumbent;
+                    incumbent_values = best_solution;
+                }
+            }
+
+            if (node_int_inf > 0 && node_int_inf <= kRinsMaxIntInfForRun &&
+                rins_incumbent < kInf &&
+                computeGap(rins_incumbent, node_obj) <= kRinsMaxRelativeGapForRun &&
+                (node_num % kRinsNodeFrequency == 0)) {
+                ++local_rins_calls;
+                auto hsol = rins.run(problem_, local_lp, node_primals,
+                                     rins_incumbent, incumbent_values);
+                atomic_lp_iters.fetch_add(rins.lastLpIterations(),
+                                          std::memory_order_relaxed);
+                auto old_w2 = atomic_work.load(std::memory_order_relaxed);
+                while (!atomic_work.compare_exchange_weak(
+                    old_w2, old_w2 + rins.lastWorkUnits(),
+                    std::memory_order_relaxed)) {}
+                if (rins.lastExecutedSolve()) ++local_rins_solves;
+                if (rins.lastSkippedNoIncumbent()) ++local_rins_skip_no_inc;
+                if (rins.lastSkippedFewFixes()) ++local_rins_skip_few_fix;
+                local_rins_fixed_sum += rins.lastFixedCount();
+                if (hsol) {
+                    std::lock_guard<std::mutex> lock(incumbent_mutex);
+                    if (hsol->objective < incumbent) {
+                        incumbent = hsol->objective;
+                        best_solution = std::move(hsol->values);
+                        found_incumbent = true;
+                        ++local_rins_found;
+                    }
+                }
+            }
+
+            // Check for new incumbent.
             if (!branched && !node_primals.empty() && node_int_inf == 0) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
                 if (node_obj < incumbent) {
@@ -473,6 +574,12 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         lp_stats_.nodes_solved += local_node_stats.nodes_solved;
         lp_stats_.warm_starts += local_node_stats.warm_starts;
         lp_stats_.cold_starts += local_node_stats.cold_starts;
+        rins_calls += local_rins_calls;
+        rins_solves += local_rins_solves;
+        rins_found += local_rins_found;
+        rins_skip_no_inc += local_rins_skip_no_inc;
+        rins_skip_few_fix += local_rins_skip_few_fix;
+        rins_fixed_sum += local_rins_fixed_sum;
     };
 
     // Launch worker threads.
@@ -488,6 +595,14 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     total_work = atomic_work.load();
 
     if (verbose_) {
+        if (rins_calls > 0) {
+            double avg_fixed = static_cast<double>(rins_fixed_sum) /
+                               static_cast<double>(rins_calls);
+            log_.log("RINS(parallel): calls=%d solves=%d found=%d avg_fixed=%.1f "
+                     "skip_no_inc=%d skip_few_fix=%d\n",
+                     rins_calls, rins_solves, rins_found, avg_fixed,
+                     rins_skip_no_inc, rins_skip_few_fix);
+        }
         if (nodes_explored >= node_limit_) log_.log("Node limit reached.\n");
         else if (elapsed() >= time_limit_) log_.log("Time limit reached.\n");
     }
@@ -777,6 +892,7 @@ MipResult MipSolver::solve() {
     }
 
     // Check if root solution is integer feasible.
+    auto root_basis = lp.getBasis();
     Real incumbent = kInf;
     std::vector<Real> best_solution;
 
@@ -797,6 +913,83 @@ MipResult MipSolver::solve() {
         return result;
     }
 
+    // Root LP-based heuristic portfolio.
+    Int root_int_inf = 0;
+    Int root_int_vars = 0;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Continuous) continue;
+        ++root_int_vars;
+        if (!isIntegral(root_primals[j], kIntTol)) ++root_int_inf;
+    }
+    bool run_root_lp_heuristics =
+        (root_int_inf > 0) &&
+        (root_int_inf <= kRootHeuristicMaxIntInf) &&
+        (root_int_vars <= kRootHeuristicMaxIntVars);
+    bool root_basis_dirty = false;
+
+    {
+        RoundingHeuristic rounding;
+        auto hsol = rounding.run(problem_, lp, root_primals, incumbent);
+        if (hsol && hsol->objective < incumbent) {
+            incumbent = hsol->objective;
+            best_solution = std::move(hsol->values);
+            if (verbose_) log_.log("Root heuristic (rounding): obj = %.10e\n", incumbent);
+        }
+    }
+
+    if (run_root_lp_heuristics && incumbent == kInf) {
+        FeasibilityPumpHeuristic feaspump;
+        feaspump.setMaxIterations(kRootFeasPumpMaxIter);
+        feaspump.setSubproblemIterLimit(kRootFeasPumpSubproblemIterLimit);
+        auto hsol = feaspump.run(problem_, lp, root_primals, incumbent);
+        root_basis_dirty = true;
+        total_lp_iters += feaspump.lastLpIterations();
+        total_work += feaspump.lastWorkUnits();
+        if (hsol && hsol->objective < incumbent) {
+            incumbent = hsol->objective;
+            best_solution = std::move(hsol->values);
+            if (verbose_) log_.log("Root heuristic (feaspump): obj = %.10e\n", incumbent);
+        }
+    }
+
+    if (run_root_lp_heuristics && incumbent == kInf) {
+        RensHeuristic rens;
+        rens.setSubproblemIterLimit(kRootRensSubproblemIterLimit);
+        rens.setMinFixedVars(kRootRensMinFixedVars);
+        rens.setMinFixedRate(kRootRensMinFixedRate);
+        auto hsol = rens.run(problem_, lp, root_primals, incumbent);
+        root_basis_dirty = true;
+        total_lp_iters += rens.lastLpIterations();
+        total_work += rens.lastWorkUnits();
+        if (hsol && hsol->objective < incumbent) {
+            incumbent = hsol->objective;
+            best_solution = std::move(hsol->values);
+            if (verbose_) log_.log("Root heuristic (rens): obj = %.10e\n", incumbent);
+        }
+    }
+
+    if (run_root_lp_heuristics &&
+        incumbent < kInf && !best_solution.empty() &&
+        root_int_inf > 0 && root_int_inf <= kRinsMaxIntInfForRun) {
+        RinsHeuristic rins;
+        rins.setSubproblemIterLimit(kRinsSubproblemIterLimit);
+        rins.setAgreementTol(kRinsAgreementTol);
+        rins.setMinFixedVars(kRinsMinFixedVars);
+        rins.setMinFixedRate(kRinsMinFixedRate);
+        auto hsol = rins.run(problem_, lp, root_primals, incumbent, best_solution);
+        root_basis_dirty = true;
+        total_lp_iters += rins.lastLpIterations();
+        total_work += rins.lastWorkUnits();
+        if (hsol && hsol->objective < incumbent) {
+            incumbent = hsol->objective;
+            best_solution = std::move(hsol->values);
+            if (verbose_) log_.log("Root heuristic (rins): obj = %.10e\n", incumbent);
+        }
+    }
+    if (root_basis_dirty && !root_basis.empty()) {
+        lp.setBasis(root_basis);
+    }
+
     // Suppress LP iteration logs during tree search.
     lp.setVerbose(false);
 
@@ -811,7 +1004,6 @@ MipResult MipSolver::solve() {
     MostFractionalBranching branching;
 
     // Create root children.
-    auto root_basis = lp.getBasis();
     BnbNode root_node;
     root_node.id = 0;
     root_node.depth = 0;

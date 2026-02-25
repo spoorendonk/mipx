@@ -137,6 +137,35 @@ static LpProblem buildKnapsack() {
     return lp;
 }
 
+// ---------------------------------------------------------------------------
+// Helper: single-integer problem where LP optimum is fractional.
+// min -x  s.t. x <= 4.6, x >= 0, x integer
+// LP optimum x=4.6; integer optimum x=4.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildFractionalSingleIntMip() {
+    LpProblem lp;
+    lp.name = "single_int_frac";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {10.0};
+    lp.col_type = {VarType::Integer};
+    lp.col_names = {"x"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {4.6};
+    lp.row_names = {"ub_x"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+    return lp;
+}
+
 // ===========================================================================
 // Rounding tests
 // ===========================================================================
@@ -291,7 +320,7 @@ TEST_CASE("Diving: respects backtrack limit", "[heuristics]") {
 // RINS tests
 // ===========================================================================
 
-TEST_CASE("RinsHeuristic: finds feasible on easy MIP", "[heuristics]") {
+TEST_CASE("RinsHeuristic: requires incumbent solution", "[heuristics]") {
     auto problem = buildEasyRoundingMip();
 
     DualSimplexSolver lp;
@@ -302,16 +331,76 @@ TEST_CASE("RinsHeuristic: finds feasible on easy MIP", "[heuristics]") {
     auto primals = lp.getPrimalValues();
 
     RinsHeuristic rins;
-    rins.setSubproblemIterLimit(200);
-    rins.setAgreementTol(1.0);
     auto result = rins.run(problem, lp, primals, kInf);
 
+    CHECK(!result.has_value());
+    CHECK(rins.lastSkippedNoIncumbent());
+    CHECK_FALSE(rins.lastExecutedSolve());
+}
+
+TEST_CASE("RinsHeuristic: uses incumbent-agreement fixing", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(100);
+    rins.setMinFixedVars(1);
+    rins.setMinFixedRate(0.0);
+
+    std::vector<Real> disagree_incumbent = {0.0, 0.0};
+    auto no_fix = rins.run(problem, lp, primals, 100.0, disagree_incumbent);
+    CHECK(!no_fix.has_value());
+
+    std::vector<Real> agree_incumbent = primals;
+    auto result = rins.run(problem, lp, primals, 100.0, agree_incumbent);
     REQUIRE(result.has_value());
     CHECK(isFeasible(problem, result->values));
     CHECK_THAT(result->objective, WithinAbs(-7.0, 1e-6));
 }
 
-TEST_CASE("RinsHeuristic: respects incumbent cutoff", "[heuristics]") {
+TEST_CASE("RinsHeuristic: restores node-specific bounds after run", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.setColBounds(0, 0.0, 0.0);  // simulate node-local bound
+    auto node_lr = lp.solve();
+    REQUIRE(node_lr.status == Status::Optimal);
+    Real node_obj_before = node_lr.objective;
+
+    auto primals = lp.getPrimalValues();
+    auto incumbent_values = primals;
+
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(200);
+    rins.setMinFixedVars(1);
+    rins.setMinFixedRate(0.0);
+    auto result = rins.run(problem, lp, primals, 100.0, incumbent_values);
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+
+    Real lb = -kInf;
+    Real ub = kInf;
+    lp.getColBounds(0, lb, ub);
+    CHECK_THAT(lb, WithinAbs(0.0, 1e-9));
+    CHECK_THAT(ub, WithinAbs(0.0, 1e-9));
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(node_obj_before, 1e-6));
+}
+
+// ===========================================================================
+// RENS + Feasibility Pump tests
+// ===========================================================================
+
+TEST_CASE("RensHeuristic: finds feasible on easy MIP", "[heuristics]") {
     auto problem = buildEasyRoundingMip();
 
     DualSimplexSolver lp;
@@ -321,29 +410,69 @@ TEST_CASE("RinsHeuristic: respects incumbent cutoff", "[heuristics]") {
 
     auto primals = lp.getPrimalValues();
 
-    RinsHeuristic rins;
-    rins.setSubproblemIterLimit(200);
-    rins.setAgreementTol(1.0);
-    auto result = rins.run(problem, lp, primals, -100.0);
+    RensHeuristic rens;
+    rens.setSubproblemIterLimit(100);
+    rens.setFixTol(1.0);
+    rens.setMinFixedVars(1);
+    rens.setMinFixedRate(0.0);
+    auto result = rens.run(problem, lp, primals, kInf);
 
-    CHECK(!result.has_value());
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
 }
 
-TEST_CASE("RinsHeuristic: LP state restored after run", "[heuristics]") {
-    auto problem = buildEasyRoundingMip();
+TEST_CASE("RensHeuristic: skips when too few variables can be fixed", "[heuristics]") {
+    auto problem = buildHardRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    if (lr.status != Status::Optimal) {
+        SKIP("LP relaxation infeasible");
+    }
+
+    auto primals = lp.getPrimalValues();
+    RensHeuristic rens;
+    rens.setFixTol(1e-8);
+    rens.setMinFixedVars(2);
+    rens.setMinFixedRate(0.0);
+    auto result = rens.run(problem, lp, primals, kInf);
+    CHECK(!result.has_value());
+    CHECK(rens.lastSkippedFewFixes());
+}
+
+TEST_CASE("FeasibilityPumpHeuristic: can produce feasible integer point", "[heuristics]") {
+    auto problem = buildFractionalSingleIntMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    FeasibilityPumpHeuristic fp;
+    fp.setMaxIterations(8);
+    fp.setSubproblemIterLimit(60);
+    auto result = fp.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("FeasibilityPumpHeuristic: LP state restored after run", "[heuristics]") {
+    auto problem = buildFractionalSingleIntMip();
 
     DualSimplexSolver lp;
     lp.load(problem);
     auto lr = lp.solve();
     REQUIRE(lr.status == Status::Optimal);
     Real obj_before = lr.objective;
-
     auto primals = lp.getPrimalValues();
 
-    RinsHeuristic rins;
-    rins.setSubproblemIterLimit(200);
-    rins.setAgreementTol(1.0);
-    rins.run(problem, lp, primals, kInf);
+    FeasibilityPumpHeuristic fp;
+    fp.setMaxIterations(6);
+    fp.setSubproblemIterLimit(40);
+    fp.run(problem, lp, primals, kInf);
 
     auto lr2 = lp.solve();
     REQUIRE(lr2.status == Status::Optimal);

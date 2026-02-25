@@ -48,35 +48,20 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
 
 }  // namespace
 
-std::optional<HeuristicSolution> RinsHeuristic::run(
+std::optional<HeuristicSolution> RensHeuristic::run(
     const LpProblem& problem,
     DualSimplexSolver& lp,
     std::span<const Real> primals,
     Real incumbent) {
-    return run(problem, lp, primals, incumbent, {});
-}
-
-std::optional<HeuristicSolution> RinsHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent,
-    std::span<const Real> incumbent_values) {
 
     last_fixed_count_ = 0;
     last_executed_solve_ = false;
-    last_skipped_no_incumbent_ = false;
     last_skipped_few_fixes_ = false;
     last_found_solution_ = false;
     last_lp_iterations_ = 0;
     last_work_units_ = 0.0;
 
     const Index n = problem.num_cols;
-    if (incumbent == kInf || static_cast<Index>(incumbent_values.size()) != n) {
-        last_skipped_no_incumbent_ = true;
-        return std::nullopt;
-    }
-
     struct SavedBound {
         Index col;
         Real lower;
@@ -96,27 +81,20 @@ std::optional<HeuristicSolution> RinsHeuristic::run(
 
     for (Index j = 0; j < n; ++j) {
         if (!isIntegerVar(problem.col_type[j])) continue;
-
-        Real lp_round = std::round(primals[j]);
-        if (std::abs(primals[j] - lp_round) > agreement_tol_) continue;
-
-        Real inc_round = std::round(incumbent_values[j]);
-        if (std::abs(incumbent_values[j] - inc_round) > agreement_tol_) continue;
-        if (std::abs(lp_round - inc_round) > agreement_tol_) continue;
+        Real rounded = std::round(primals[j]);
+        if (std::abs(primals[j] - rounded) > fix_tol_) continue;
 
         Real lower = -kInf;
         Real upper = kInf;
         lp.getColBounds(j, lower, upper);
-        if (lp_round < lower - agreement_tol_ || lp_round > upper + agreement_tol_) {
-            continue;
-        }
-        if (std::abs(lower - lp_round) <= agreement_tol_ &&
-            std::abs(upper - lp_round) <= agreement_tol_) {
+        if (rounded < lower - fix_tol_ || rounded > upper + fix_tol_) continue;
+        if (std::abs(lower - rounded) <= fix_tol_ &&
+            std::abs(upper - rounded) <= fix_tol_) {
             continue;
         }
 
         saved_bounds.push_back({j, lower, upper});
-        lp.setColBounds(j, lp_round, lp_round);
+        lp.setColBounds(j, rounded, rounded);
     }
 
     last_fixed_count_ = static_cast<Int>(saved_bounds.size());

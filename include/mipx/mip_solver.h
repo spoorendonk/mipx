@@ -145,6 +145,20 @@ private:
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
     static constexpr double kLogInterval = 5.0;  // seconds between heartbeat lines
+    static constexpr Int kRinsNodeFrequency = 64;
+    static constexpr Int kRinsSubproblemIterLimit = 64;
+    static constexpr Real kRinsAgreementTol = 1e-4;
+    static constexpr Int kRinsMaxIntInfForRun = 24;
+    static constexpr Int kRinsMinFixedVars = 12;
+    static constexpr Real kRinsMinFixedRate = 0.08;
+    static constexpr Real kRinsMaxRelativeGapForRun = 0.10;
+    static constexpr Int kRootHeuristicMaxIntInf = 12;
+    static constexpr Int kRootHeuristicMaxIntVars = 96;
+    static constexpr Int kRootFeasPumpMaxIter = 3;
+    static constexpr Int kRootFeasPumpSubproblemIterLimit = 20;
+    static constexpr Int kRootRensSubproblemIterLimit = 40;
+    static constexpr Int kRootRensMinFixedVars = 16;
+    static constexpr Real kRootRensMinFixedRate = 0.25;
 };
 
 }  // namespace mipx
