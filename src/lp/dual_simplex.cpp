@@ -467,6 +467,9 @@ LpResult DualSimplexSolver::solve() {
     // Reset iteration counter for this solve call.
     iterations_ = 0;
 
+    // Snapshot work at start of solve to compute delta.
+    double work_at_start = work_.units();
+
     if (!has_basis_) {
         // Cold start: set up initial all-slack basis.
         setupInitialBasis();
@@ -558,6 +561,7 @@ LpResult DualSimplexSolver::solve() {
         }
 
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
+        work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
         Index leaving_row = -1;
         Real max_score = 0.0;
 
@@ -736,6 +740,7 @@ LpResult DualSimplexSolver::solve() {
             lu_.btran(work);
 
             // Compute pivot row alphas (row-wise).
+            work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
             std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
             for (Index i = 0; i < num_rows_; ++i) {
                 Real rho_i = work[i];
@@ -835,6 +840,7 @@ LpResult DualSimplexSolver::solve() {
         // Compute alpha_j = rho^T * a_j for all nonbasic j.
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
         // This is much faster than column-wise when rho is sparse.
+        work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
         std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
         for (Index i = 0; i < num_rows_; ++i) {
             Real rho_i = work[i];
@@ -1142,7 +1148,11 @@ LpResult DualSimplexSolver::solve() {
     // Note: primals are kept in internal (scaled) coordinates.
     // Getters (getPrimalValues, getObjective, etc.) unscale on-the-fly.
 
-    return {status_, getObjective(), iterations_};
+    // Collect LU work accumulated during this solve.
+    work_.add(lu_.workUnits());
+    lu_.resetWorkUnits();
+
+    return {status_, getObjective(), iterations_, work_.units() - work_at_start};
 }
 
 // ---------------------------------------------------------------------------

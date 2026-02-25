@@ -12,6 +12,7 @@ struct LpResult {
     Status status = Status::Error;
     Real objective = 0.0;
     Int iterations = 0;
+    double work_units = 0.0;  // deterministic work measure
 };
 
 enum class BasisStatus {

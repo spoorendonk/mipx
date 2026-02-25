@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "mipx/core.h"
+#include "mipx/work_units.h"
 
 namespace mipx {
 
@@ -39,6 +40,10 @@ public:
     [[nodiscard]] bool needsRefactorization() const;
     [[nodiscard]] Index numUpdates() const { return num_updates_; }
     [[nodiscard]] Index dimension() const { return dim_; }
+
+    /// Access work unit counter.
+    [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
+    void resetWorkUnits() { work_.reset(); }
 
 private:
     /// Apply L eta vectors forward (for FTRAN).
@@ -100,6 +105,9 @@ private:
     static constexpr Real kGrowthLimit = 1e12;
 
     Real max_u_entry_ = 0.0;  // track growth
+
+    // Deterministic work counter.
+    mutable WorkUnits work_;
 };
 
 }  // namespace mipx

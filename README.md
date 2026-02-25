@@ -129,7 +129,7 @@ docs/              Documentation and roadmap
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full implementation plan.
+See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
 **Current focus:** LP solver interface → LU factorization → dual simplex.
 

@@ -406,6 +406,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     for (auto& c : u_col_) {
         c = col_perm_inv_[c];
     }
+
+    // Count work: total nonzeros stored in L and U.
+    work_.count(static_cast<uint64_t>(eta_index_.size()) +
+                static_cast<uint64_t>(u_col_.size()));
 }
 
 // --------------------------------------------------------------------------
@@ -501,6 +505,12 @@ void SparseLU::solveUTranspose(std::span<Real> x) const {
 void SparseLU::ftran(std::span<Real> rhs) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
+    // Count work: L nnz + U nnz + FT nnz + permutation overhead.
+    work_.count(static_cast<uint64_t>(eta_index_.size()) +
+                static_cast<uint64_t>(u_col_.size()) +
+                static_cast<uint64_t>(ft_index_.size()) +
+                static_cast<uint64_t>(dim_) * 2);
+
     // B = P^T * L * U * Q^T, so B^{-1} = Q * U^{-1} * L^{-1} * P.
     // With product-form updates: B'^{-1} = E_n^{-1} * ... * E_1^{-1} * B^{-1}.
     // So x = E_n^{-1} * ... * E_1^{-1} * Q * U^{-1} * L^{-1} * P * b.
@@ -536,6 +546,12 @@ void SparseLU::ftran(std::span<Real> rhs) const {
 
 void SparseLU::btran(std::span<Real> rhs) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
+
+    // Count work: same structure as ftran.
+    work_.count(static_cast<uint64_t>(eta_index_.size()) +
+                static_cast<uint64_t>(u_col_.size()) +
+                static_cast<uint64_t>(ft_index_.size()) +
+                static_cast<uint64_t>(dim_) * 2);
 
     // B'^{-T} = B^{-T} * E_1^{-T} * ... * E_n^{-T}.
     // y = B'^{-T} * c = P^T * L^{-T} * U^{-T} * Q^T * E_1^{-T} * ... * E_n^{-T} * c.
@@ -618,6 +634,9 @@ void SparseLU::update(Index pivot_pos,
     ft_pivot_val_.push_back(pivot_val);
 
     max_u_entry_ = std::max(max_u_entry_, std::abs(pivot_val));
+
+    // Count work: scanning d vector for eta storage.
+    work_.count(static_cast<uint64_t>(dim_));
 
     ++num_updates_;
 }
