@@ -9,6 +9,8 @@ add_library(mipx STATIC
     io/mps_writer.cpp
     io/lp_reader.cpp
     io/solu_reader.cpp
+    mip/node_queue.cpp
+    mip/branching.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
