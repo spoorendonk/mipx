@@ -408,3 +408,49 @@ TEST_CASE("SparseLU: permuted identity", "[lu]") {
     CHECK_THAT(rhs2[1], WithinAbs(3.0, 1e-10));
     CHECK_THAT(rhs2[2], WithinAbs(1.0, 1e-10));
 }
+
+TEST_CASE("SparseLU: hypersparse solve paths on large sparse rhs", "[lu]") {
+    // Structured tridiagonal basis, large enough to trigger hyper-sparse gating.
+    constexpr Index n = 300;
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(3 * n));
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 4.0});
+        if (i > 0) trips.push_back({i, i - 1, -1.0});
+        if (i + 1 < n) trips.push_back({i, i + 1, 0.5});
+    }
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(n);
+    for (Index i = 0; i < n; ++i) basis[i] = i;
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    SECTION("FTRAN large sparse rhs round-trip") {
+        std::vector<Real> b(n, 0.0);
+        b[0] = 3.0;
+        b[57] = -1.5;
+        b[299] = 2.25;
+
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-9));
+        }
+    }
+
+    SECTION("BTRAN large sparse rhs round-trip") {
+        std::vector<Real> c(n, 0.0);
+        c[4] = 2.0;
+        c[120] = -0.75;
+        c[298] = 1.0;
+
+        std::vector<Real> y = c;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-9));
+        }
+    }
+}
