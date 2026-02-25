@@ -12,6 +12,7 @@ add_library(mipx STATIC
     mip/domain.cpp
     mip/node_queue.cpp
     mip/branching.cpp
+    mip/mip_solver.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
