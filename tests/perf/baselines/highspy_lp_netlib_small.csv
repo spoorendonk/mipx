@@ -1,0 +1,12 @@
+instance,time_seconds,simplex_iterations,status,objective
+adlittle,0.001071,87,optimal,225494.963162
+afiro,0.000335,6,optimal,-464.753142857
+blend,0.001173,80,optimal,-30.8121498458
+kb2,0.000512,31,optimal,-1749.90012991
+sc105,0.000763,37,optimal,-52.2020612117
+sc205,0.001561,84,optimal,-52.2020612117
+sc50a,0.000426,18,optimal,-64.5750770586
+sc50b,0.000421,18,optimal,-70
+share1b,0.002235,160,optimal,-76589.3185792
+share2b,0.001317,99,optimal,-415.732240741
+stocfor1,0.001038,53,optimal,-41131.9762194

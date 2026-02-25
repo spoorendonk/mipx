@@ -1,0 +1,4 @@
+instance,time_seconds,simplex_iterations,nodes,status,objective
+flugpl,0.089964,868,94,optimal,1201500
+gt2,0.041236,288,1,optimal,21166
+p0201,0.715795,9831,5,optimal,7615
