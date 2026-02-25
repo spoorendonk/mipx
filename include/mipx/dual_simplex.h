@@ -32,6 +32,7 @@ struct DualSimplexOptions {
     bool enable_sip_parallel_dual_scan = false;
     Int sip_parallel_min_nonbasic = 4096;
     Int sip_parallel_grain = 512;
+    Int sip_parallel_min_threads = 2;
 
     // SIP-style parallel leaving-row scan (CHUZR), guarded and off by default.
     bool enable_sip_parallel_chuzr = false;

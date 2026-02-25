@@ -384,6 +384,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.enable_sip_parallel_dual_scan = true;
     opts.sip_parallel_min_nonbasic = 1;
     opts.sip_parallel_grain = 32;
+    opts.sip_parallel_min_threads = 2;
     opts.enable_sip_parallel_chuzr = true;
     opts.sip_parallel_min_rows = 1;
     opts.sip_parallel_row_grain = 16;
@@ -401,6 +402,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     CHECK(applied.simd_min_length == 16);
     CHECK(applied.sip_parallel_min_nonbasic == 1);
     CHECK(applied.sip_parallel_grain == 32);
+    CHECK(applied.sip_parallel_min_threads == 2);
     CHECK(applied.sip_parallel_min_rows == 1);
     CHECK(applied.sip_parallel_row_grain == 16);
 
