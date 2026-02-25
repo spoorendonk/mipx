@@ -63,6 +63,7 @@ int main(int argc, char* argv[]) {
             std::println("Objective: {:.10e}", result.objective);
             std::println("Nodes: {}", result.nodes);
             std::println("LP iterations: {}", result.lp_iterations);
+            std::println("Work: {:.2f}", result.work_units);
             std::println("Time: {:.2f}s", result.time_seconds);
         } else {
             // LP solve.
@@ -89,6 +90,7 @@ int main(int argc, char* argv[]) {
             }
             std::println("Objective: {:.10e}", result.objective);
             std::println("Iterations: {}", result.iterations);
+            std::println("Work: {:.2f}", result.work_units);
         }
 
     } catch (const std::exception& e) {

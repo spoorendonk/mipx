@@ -254,3 +254,14 @@ TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {
            result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }
+
+TEST_CASE("MipSolver: work units are positive", "[mip][work_units]") {
+    auto problem = buildBranchingMip();
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.load(problem);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.work_units > 0.0);
+}

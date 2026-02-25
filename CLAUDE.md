@@ -82,12 +82,12 @@ All code under `mipx::` namespace.
 ## Documentation
 
 - `README.md` — project overview, build, usage
-- `docs/ROADMAP.md` — implementation plan with dependency graph and technical notes
+- `docs/roadmap.md` — implementation plan with dependency graph and technical notes
 - `CLAUDE.md` — this file
 
 ## Agent Coordination
 
-The roadmap (docs/ROADMAP.md) defines steps 1–15 with explicit dependencies and
+The roadmap (docs/roadmap.md) defines steps 1–15 with explicit dependencies and
 parallel opportunities marked with ⚡.
 
 **Before suggesting or starting any step:**
@@ -106,7 +106,7 @@ When the user says **"fullgate"**, run this sequence in order:
 2. **Create PR** — if no PR exists for the current branch
 3. **Sync main** — pull latest main and merge into the current feature branch, resolve conflicts
 4. **Tests** — check if new/updated tests are needed and add them
-5. **Update docs** — update docs/ROADMAP.md, README.md as needed
+5. **Update docs** — update docs/roadmap.md, README.md as needed
 6. **Push & update PR**
 7. **Review** — thoroughly review the PR (code quality, correctness, style, tests, performance)
 8. **Build** — `cmake --build build -j$(nproc)`

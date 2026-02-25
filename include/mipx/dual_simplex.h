@@ -7,6 +7,7 @@
 #include "mipx/lp_solver.h"
 #include "mipx/lu.h"
 #include "mipx/sparse_matrix.h"
+#include "mipx/work_units.h"
 
 namespace mipx {
 
@@ -38,6 +39,10 @@ public:
     void setObjective(std::span<const Real> obj) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+
+    /// Access work unit counter (includes LU work).
+    [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
+    void resetWorkUnits() { work_.reset(); lu_.resetWorkUnits(); }
 
     /// Get a tableau row for basis position `basis_pos` in external (unscaled) space.
     /// Returns a dense vector of size num_cols + num_rows (structural + slacks).
@@ -140,6 +145,9 @@ private:
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
+
+    // Deterministic work counter.
+    WorkUnits work_;
 };
 
 }  // namespace mipx

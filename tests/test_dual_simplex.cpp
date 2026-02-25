@@ -308,3 +308,60 @@ TEST_CASE("DualSimplex: basis recovery", "[dual_simplex]") {
     }
     CHECK(num_basic == lp.num_rows);
 }
+
+// ---------------------------------------------------------------------------
+// Test: Work units are positive after solving
+// ---------------------------------------------------------------------------
+TEST_CASE("DualSimplex: work units are positive", "[dual_simplex][work_units]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.work_units > 0.0);
+
+    // Total work should also be accessible from the solver.
+    CHECK(solver.workUnits().ticks() > 0);
+}
+
+TEST_CASE("DualSimplex: work units are deterministic", "[dual_simplex][work_units]") {
+    auto lp = buildTrivialLP();
+
+    // Solve twice, work should be identical.
+    DualSimplexSolver solver1;
+    solver1.load(lp);
+    auto r1 = solver1.solve();
+
+    DualSimplexSolver solver2;
+    solver2.load(lp);
+    auto r2 = solver2.solve();
+
+    REQUIRE(r1.status == Status::Optimal);
+    REQUIRE(r2.status == Status::Optimal);
+    CHECK(r1.work_units == r2.work_units);
+}
+
+TEST_CASE("DualSimplex: work units scale with problem size", "[dual_simplex][work_units][netlib]") {
+    // afiro is tiny, blend is larger — work should reflect that.
+    std::string afiro_path = testDataDir() + "/netlib/afiro.mps.gz";
+    std::string blend_path = testDataDir() + "/netlib/blend.mps.gz";
+    if (!fs::exists(afiro_path) || !fs::exists(blend_path)) {
+        SKIP("Netlib instances not downloaded");
+    }
+
+    DualSimplexSolver solver_a;
+    solver_a.load(readMps(afiro_path));
+    auto ra = solver_a.solve();
+
+    DualSimplexSolver solver_b;
+    solver_b.load(readMps(blend_path));
+    auto rb = solver_b.solve();
+
+    REQUIRE(ra.status == Status::Optimal);
+    REQUIRE(rb.status == Status::Optimal);
+
+    // blend has more rows/cols/nnz — should do more work.
+    CHECK(rb.work_units > ra.work_units);
+}

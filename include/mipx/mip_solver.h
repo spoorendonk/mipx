@@ -25,6 +25,7 @@ struct MipResult {
     Real gap = kInf;
     Int nodes = 0;
     Int lp_iterations = 0;
+    double work_units = 0.0;   // deterministic work measure
     double time_seconds = 0.0;
     std::vector<Real> solution;
 };
@@ -49,11 +50,12 @@ public:
 
 private:
     /// Run cutting plane rounds at the root node.
-    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters);
+    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                      Int& nodes_explored, Int& total_lp_iters,
+                     double& total_work,
                      Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound,
                      const std::function<double()>& elapsed);
@@ -61,6 +63,7 @@ private:
     /// Parallel branch-and-bound loop using TBB.
     void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
                        Int& nodes_explored, Int& total_lp_iters,
+                       double& total_work,
                        Real& incumbent, std::vector<Real>& best_solution,
                        Real root_bound,
                        const std::function<double()>& elapsed);
@@ -81,7 +84,8 @@ private:
                      std::vector<BnbNode>& children_out,
                      Real& node_obj_out,
                      std::vector<Real>& node_primals_out,
-                     Int& node_iters_out);
+                     Int& node_iters_out,
+                     double& node_work_out);
 
     // Problem data.
     LpProblem problem_;

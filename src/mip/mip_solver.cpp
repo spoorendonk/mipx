@@ -55,9 +55,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              std::vector<BnbNode>& children_out,
                              Real& node_obj_out,
                              std::vector<Real>& node_primals_out,
-                             Int& node_iters_out) {
+                             Int& node_iters_out,
+                             double& node_work_out) {
     children_out.clear();
     node_iters_out = 0;
+    node_work_out = 0.0;
 
     // Skip if pruned by bound (might have changed since pop).
     if (incumbent_snapshot < kInf && node.lp_bound >= incumbent_snapshot - 1e-6) {
@@ -96,6 +98,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     // Solve node LP.
     auto node_result = lp.solve();
     node_iters_out = node_result.iterations;
+    node_work_out = node_result.work_units;
 
     if (node_result.status == Status::Infeasible) {
         return false;
@@ -141,6 +144,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
 
 void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                              Int& nodes_explored, Int& total_lp_iters,
+                             double& total_work,
                              Real& incumbent, std::vector<Real>& best_solution,
                              Real root_bound,
                              const std::function<double()>& elapsed) {
@@ -172,10 +176,12 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         Real node_obj = 0.0;
         std::vector<Real> node_primals;
         Int node_iters = 0;
+        double node_work = 0.0;
 
         bool branched = processNode(lp, node, incumbent,
-                                    children, node_obj, node_primals, node_iters);
+                                    children, node_obj, node_primals, node_iters, node_work);
         total_lp_iters += node_iters;
+        total_work += node_work;
 
         // Log progress periodically.
         if (verbose_ && (nodes_explored % kLogFrequency == 0 || nodes_explored <= 10)) {
@@ -206,6 +212,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
 #ifdef MIPX_HAS_TBB
 void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
                                Int& nodes_explored, Int& total_lp_iters,
+                               double& total_work,
                                Real& incumbent, std::vector<Real>& best_solution,
                                Real root_bound,
                                const std::function<double()>& elapsed) {
@@ -214,6 +221,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::mutex incumbent_mutex;
     std::atomic<Int> atomic_nodes{nodes_explored};
     std::atomic<Int> atomic_lp_iters{total_lp_iters};
+    std::atomic<double> atomic_work{total_work};
     std::atomic<bool> should_stop{false};
 
     // Each thread needs its own LP solver instance.
@@ -282,10 +290,15 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             Real node_obj = 0.0;
             std::vector<Real> node_primals;
             Int node_iters = 0;
+            double node_work = 0.0;
 
             bool branched = processNode(local_lp, node, inc_snapshot,
-                                        children, node_obj, node_primals, node_iters);
+                                        children, node_obj, node_primals, node_iters, node_work);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
+            // Atomically add work (relaxed is fine for accumulation).
+            auto old_w = atomic_work.load(std::memory_order_relaxed);
+            while (!atomic_work.compare_exchange_weak(old_w, old_w + node_work,
+                                                       std::memory_order_relaxed)) {}
 
             // Check for new incumbent.
             if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
@@ -326,6 +339,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     // Sync back.
     nodes_explored = atomic_nodes.load();
     total_lp_iters = atomic_lp_iters.load();
+    total_work = atomic_work.load();
 
     if (verbose_) {
         if (nodes_explored >= node_limit_) std::println("Node limit reached.");
@@ -335,6 +349,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 #else
 void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& queue,
                                Int& nodes_explored, Int& total_lp_iters,
+                               double& total_work,
                                Real& incumbent, std::vector<Real>& best_solution,
                                Real root_bound,
                                const std::function<double()>& elapsed) {
@@ -347,8 +362,9 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
     lp.load(problem_);
     auto root_result = lp.solve();
     total_lp_iters += root_result.iterations;
+    total_work += root_result.work_units;
     solveSerial(lp, queue, nodes_explored, total_lp_iters,
-                incumbent, best_solution, root_bound, elapsed);
+                total_work, incumbent, best_solution, root_bound, elapsed);
 }
 #endif
 
@@ -444,6 +460,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 0;
         result.lp_iterations = lr.iterations;
+        result.work_units = lr.work_units;
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
@@ -466,6 +483,7 @@ MipResult MipSolver::solve() {
     auto root_result = lp.solve();
 
     Int total_lp_iters = root_result.iterations;
+    double total_work = root_result.work_units;
 
     if (root_result.status == Status::Infeasible) {
         if (verbose_) std::println("Root LP infeasible.");
@@ -473,6 +491,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Infeasible;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
+        result.work_units = total_work;
         result.time_seconds = elapsed();
         return result;
     }
@@ -483,6 +502,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Unbounded;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
+        result.work_units = total_work;
         result.time_seconds = elapsed();
         return result;
     }
@@ -493,6 +513,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Error;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
+        result.work_units = total_work;
         result.time_seconds = elapsed();
         return result;
     }
@@ -506,7 +527,7 @@ MipResult MipSolver::solve() {
 
     // Run cutting planes at root.
     if (cuts_enabled_ && problem_.hasIntegers()) {
-        Int cuts_added = runCuttingPlanes(lp, total_lp_iters);
+        Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
         if (cuts_added > 0) {
             root_bound = lp.getObjective();
             root_primals = lp.getPrimalValues();
@@ -532,6 +553,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
+        result.work_units = total_work;
         result.time_seconds = elapsed();
         result.solution = std::move(best_solution);
         return result;
@@ -576,15 +598,16 @@ MipResult MipSolver::solve() {
 
     if (use_parallel) {
         solveParallel(lp, queue, nodes_explored, total_lp_iters,
-                      incumbent, best_solution, root_bound, elapsed);
+                      total_work, incumbent, best_solution, root_bound, elapsed);
     } else {
         solveSerial(lp, queue, nodes_explored, total_lp_iters,
-                    incumbent, best_solution, root_bound, elapsed);
+                    total_work, incumbent, best_solution, root_bound, elapsed);
     }
 
     // Build result.
     MipResult result;
     result.lp_iterations = total_lp_iters;
+    result.work_units = total_work;
     result.nodes = nodes_explored;
     result.time_seconds = elapsed();
 
@@ -617,8 +640,8 @@ MipResult MipSolver::solve() {
 
     if (verbose_) {
         std::println("");
-        std::println("Explored {} nodes, {} LP iterations, {:.1f}s",
-                     result.nodes, result.lp_iterations, result.time_seconds);
+        std::println("Explored {} nodes, {} LP iterations, {:.2f} work, {:.1f}s",
+                     result.nodes, result.lp_iterations, result.work_units, result.time_seconds);
         if (result.status == Status::Optimal) {
             std::println("Optimal: {:.10e}", result.objective);
         } else if (incumbent < kInf) {
@@ -630,7 +653,7 @@ MipResult MipSolver::solve() {
     return result;
 }
 
-Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters) {
+Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work) {
     CutPool pool;
     GomorySeparator gomory;
     gomory.setMaxCuts(max_cuts_per_round_);
@@ -682,6 +705,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters) {
 
         auto result = lp.solve();
         total_lp_iters += result.iterations;
+        total_work += result.work_units;
 
         if (result.status != Status::Optimal) {
             if (verbose_) {
