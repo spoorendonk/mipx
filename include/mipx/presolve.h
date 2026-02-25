@@ -108,6 +108,10 @@ struct PresolveStats {
     Index forcing_row_changes = 0;
     Index dominated_row_changes = 0;
     Index coeff_tightening_changes = 0;
+    Index implied_equation_changes = 0;
+    Index activity_bound_tightening_changes = 0;
+    Index dual_fixing_changes = 0;
+    Index empty_col_changes = 0;
     Index rounds = 0;
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
@@ -169,6 +173,26 @@ private:
                                const std::vector<uint8_t>& dirty_rows,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
+    Index detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
+                                  std::vector<bool>& row_removed,
+                                  const std::vector<uint8_t>& dirty_rows,
+                                  std::vector<uint8_t>& next_dirty_rows,
+                                  std::vector<uint8_t>& next_dirty_cols);
+    Index activityBoundTightening(LpProblem& lp, std::vector<bool>& col_removed,
+                                   std::vector<bool>& row_removed,
+                                   const std::vector<uint8_t>& dirty_rows,
+                                   std::vector<uint8_t>& next_dirty_rows,
+                                   std::vector<uint8_t>& next_dirty_cols);
+    Index dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
+                      std::vector<bool>& row_removed,
+                      const std::vector<uint8_t>& dirty_cols,
+                      std::vector<uint8_t>& next_dirty_rows,
+                      std::vector<uint8_t>& next_dirty_cols);
+    Index removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                              std::vector<bool>& row_removed,
+                              const std::vector<uint8_t>& dirty_cols,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed);
 

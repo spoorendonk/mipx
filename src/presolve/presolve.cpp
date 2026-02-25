@@ -589,6 +589,326 @@ Index Presolver::removeDominatedRows(LpProblem& lp, std::vector<bool>& col_remov
     return changes;
 }
 
+Index Presolver::detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
+                                         std::vector<bool>& row_removed,
+                                         const std::vector<uint8_t>& dirty_rows,
+                                         std::vector<uint8_t>& next_dirty_rows,
+                                         std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
+        if (row_removed[i]) continue;
+        ++stats_.rows_examined;
+        if (std::abs(lp.row_upper[i] - lp.row_lower[i]) <= kTol) continue;
+
+        auto rv = lp.matrix.row(i);
+        Real act_min = 0.0;
+        Real act_max = 0.0;
+        bool has_inf_min = false;
+        bool has_inf_max = false;
+
+        for (Index k = 0; k < rv.size(); ++k) {
+            Index j = rv.indices[k];
+            if (col_removed[j]) continue;
+
+            Real a = rv.values[k];
+            Real lb = lp.col_lower[j];
+            Real ub = lp.col_upper[j];
+            if (a > 0) {
+                if (std::isinf(lb)) has_inf_min = true;
+                else act_min += a * lb;
+                if (std::isinf(ub)) has_inf_max = true;
+                else act_max += a * ub;
+            } else {
+                if (std::isinf(ub)) has_inf_min = true;
+                else act_min += a * ub;
+                if (std::isinf(lb)) has_inf_max = true;
+                else act_max += a * lb;
+            }
+        }
+
+        if (!std::isinf(lp.row_upper[i]) && !has_inf_min &&
+            std::abs(act_min - lp.row_upper[i]) <= kTol) {
+            lp.row_lower[i] = lp.row_upper[i];
+            ++changes;
+            next_dirty_rows[i] = 1;
+            markColsInRow(lp, i, col_removed, next_dirty_cols);
+        } else if (!std::isinf(lp.row_lower[i]) && !has_inf_max &&
+                   std::abs(act_max - lp.row_lower[i]) <= kTol) {
+            lp.row_upper[i] = lp.row_lower[i];
+            ++changes;
+            next_dirty_rows[i] = 1;
+            markColsInRow(lp, i, col_removed, next_dirty_cols);
+        }
+    }
+
+    return changes;
+}
+
+Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_removed,
+                                          std::vector<bool>& row_removed,
+                                          const std::vector<uint8_t>& dirty_rows,
+                                          std::vector<uint8_t>& next_dirty_rows,
+                                          std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
+        if (row_removed[i]) continue;
+        ++stats_.rows_examined;
+
+        auto rv = lp.matrix.row(i);
+        Real act_min = 0.0;
+        Real act_max = 0.0;
+        Index inf_min_count = 0;
+        Index inf_max_count = 0;
+        Index inf_min_col = -1;
+        Index inf_max_col = -1;
+
+        for (Index k = 0; k < rv.size(); ++k) {
+            Index j = rv.indices[k];
+            if (col_removed[j]) continue;
+            Real a = rv.values[k];
+
+            Real contrib_min = (a > 0) ? a * lp.col_lower[j] : a * lp.col_upper[j];
+            Real contrib_max = (a > 0) ? a * lp.col_upper[j] : a * lp.col_lower[j];
+
+            if (std::isinf(contrib_min)) {
+                ++inf_min_count;
+                inf_min_col = j;
+            } else {
+                act_min += contrib_min;
+            }
+            if (std::isinf(contrib_max)) {
+                ++inf_max_count;
+                inf_max_col = j;
+            } else {
+                act_max += contrib_max;
+            }
+        }
+
+        for (Index k = 0; k < rv.size(); ++k) {
+            Index j = rv.indices[k];
+            if (col_removed[j]) continue;
+            Real a = rv.values[k];
+
+            bool res_min_finite = false;
+            bool res_max_finite = false;
+            Real res_min = -kInf;
+            Real res_max = kInf;
+
+            if (inf_min_count == 0) {
+                res_min_finite = true;
+                Real contrib_min_j = (a > 0) ? a * lp.col_lower[j] : a * lp.col_upper[j];
+                res_min = act_min - contrib_min_j;
+            } else if (inf_min_count == 1 && inf_min_col == j) {
+                res_min_finite = true;
+                res_min = act_min;
+            }
+
+            if (inf_max_count == 0) {
+                res_max_finite = true;
+                Real contrib_max_j = (a > 0) ? a * lp.col_upper[j] : a * lp.col_lower[j];
+                res_max = act_max - contrib_max_j;
+            } else if (inf_max_count == 1 && inf_max_col == j) {
+                res_max_finite = true;
+                res_max = act_max;
+            }
+
+            bool tightened = false;
+
+            if (a > 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
+                Real new_ub = (lp.row_upper[i] - res_min) / a;
+                if (new_ub < lp.col_upper[j] - kTol) {
+                    lp.col_upper[j] = new_ub;
+                    tightened = true;
+                }
+            } else if (a < 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
+                Real new_ub = (lp.row_lower[i] - res_max) / a;
+                if (new_ub < lp.col_upper[j] - kTol) {
+                    lp.col_upper[j] = new_ub;
+                    tightened = true;
+                }
+            }
+
+            if (a > 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
+                Real new_lb = (lp.row_lower[i] - res_max) / a;
+                if (new_lb > lp.col_lower[j] + kTol) {
+                    lp.col_lower[j] = new_lb;
+                    tightened = true;
+                }
+            } else if (a < 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
+                Real new_lb = (lp.row_upper[i] - res_min) / a;
+                if (new_lb > lp.col_lower[j] + kTol) {
+                    lp.col_lower[j] = new_lb;
+                    tightened = true;
+                }
+            }
+
+            if (tightened && lp.col_type[j] != VarType::Continuous) {
+                lp.col_lower[j] = std::ceil(lp.col_lower[j] - kTol);
+                lp.col_upper[j] = std::floor(lp.col_upper[j] + kTol);
+            }
+
+            if (lp.col_lower[j] > lp.col_upper[j] + kTol) {
+                infeasible_ = true;
+                return changes;
+            }
+
+            if (tightened) {
+                ++changes;
+                ++stats_.bounds_tightened;
+                markRowsTouchingCol(lp, j, row_removed, next_dirty_rows);
+                next_dirty_cols[j] = 1;
+            }
+        }
+    }
+
+    return changes;
+}
+
+Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
+                             std::vector<bool>& row_removed,
+                             const std::vector<uint8_t>& dirty_cols,
+                             std::vector<uint8_t>& next_dirty_rows,
+                             std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (!dirty_cols[j]) continue;
+        if (col_removed[j]) continue;
+        ++stats_.cols_examined;
+
+        Index up_locks = 0;
+        Index down_locks = 0;
+        Index active_nnz = 0;
+        auto cv = lp.matrix.col(j);
+        for (Index k = 0; k < cv.size(); ++k) {
+            Index row = cv.indices[k];
+            if (row_removed[row]) continue;
+            ++active_nnz;
+            Real a = cv.values[k];
+            bool has_upper = !std::isinf(lp.row_upper[row]);
+            bool has_lower = !std::isinf(lp.row_lower[row]);
+
+            if (has_upper) {
+                if (a > 0) ++up_locks;
+                if (a < 0) ++down_locks;
+            }
+            if (has_lower) {
+                if (a < 0) ++up_locks;
+                if (a > 0) ++down_locks;
+            }
+        }
+        if (active_nnz == 0) continue;  // Handle empty columns in removeEmptyColumns().
+
+        bool prefer_down;
+        if (lp.sense == Sense::Minimize) {
+            prefer_down = (lp.obj[j] >= 0.0);
+        } else {
+            prefer_down = (lp.obj[j] <= 0.0);
+        }
+
+        bool fixed = false;
+        Real fix_value = 0.0;
+        if (prefer_down && down_locks == 0 && !std::isinf(lp.col_lower[j])) {
+            fixed = true;
+            fix_value = lp.col_lower[j];
+        } else if (!prefer_down && up_locks == 0 && !std::isinf(lp.col_upper[j])) {
+            fixed = true;
+            fix_value = lp.col_upper[j];
+        }
+        if (!fixed) continue;
+
+        col_removed[j] = true;
+        ++changes;
+        ++stats_.vars_removed;
+        lp.obj_offset += lp.obj[j] * fix_value;
+        postsolve_stack_.push(PostsolveFixVariable{j, fix_value});
+        next_dirty_cols[j] = 1;
+
+        for (Index kk = 0; kk < cv.size(); ++kk) {
+            Index row = cv.indices[kk];
+            if (row_removed[row]) continue;
+            Real shift = cv.values[kk] * fix_value;
+            if (!std::isinf(lp.row_lower[row])) lp.row_lower[row] -= shift;
+            if (!std::isinf(lp.row_upper[row])) lp.row_upper[row] -= shift;
+            next_dirty_rows[row] = 1;
+        }
+    }
+
+    return changes;
+}
+
+Index Presolver::removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                                     std::vector<bool>& row_removed,
+                                     const std::vector<uint8_t>& dirty_cols,
+                                     std::vector<uint8_t>& next_dirty_rows,
+                                     std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (!dirty_cols[j]) continue;
+        if (col_removed[j]) continue;
+        ++stats_.cols_examined;
+        if (lp.col_lower[j] > lp.col_upper[j] + kTol) {
+            infeasible_ = true;
+            return changes;
+        }
+
+        auto cv = lp.matrix.col(j);
+        Index active = 0;
+        for (Index k = 0; k < cv.size(); ++k) {
+            if (!row_removed[cv.indices[k]]) ++active;
+        }
+        if (active != 0) continue;
+
+        bool lb_finite = !std::isinf(lp.col_lower[j]);
+        bool ub_finite = !std::isinf(lp.col_upper[j]);
+        Real fix_value = 0.0;
+        if (lp.sense == Sense::Minimize) {
+            if (lp.obj[j] > kTol) {
+                if (!lb_finite) continue;  // Keep variable; objective can be unbounded below.
+                fix_value = lp.col_lower[j];
+            } else if (lp.obj[j] < -kTol) {
+                if (!ub_finite) continue;  // Keep variable; objective can be unbounded below.
+                fix_value = lp.col_upper[j];
+            } else {
+                if (!lb_finite && !ub_finite) {
+                    fix_value = 0.0;
+                } else {
+                    fix_value = lb_finite ? lp.col_lower[j] : lp.col_upper[j];
+                }
+            }
+        } else {
+            if (lp.obj[j] > kTol) {
+                if (!ub_finite) continue;  // Keep variable; objective can be unbounded above.
+                fix_value = lp.col_upper[j];
+            } else if (lp.obj[j] < -kTol) {
+                if (!lb_finite) continue;  // Keep variable; objective can be unbounded above.
+                fix_value = lp.col_lower[j];
+            } else {
+                if (!lb_finite && !ub_finite) {
+                    fix_value = 0.0;
+                } else {
+                    fix_value = lb_finite ? lp.col_lower[j] : lp.col_upper[j];
+                }
+            }
+        }
+
+        col_removed[j] = true;
+        ++changes;
+        ++stats_.vars_removed;
+        lp.obj_offset += lp.obj[j] * fix_value;
+        postsolve_stack_.push(PostsolveFixVariable{j, fix_value});
+        next_dirty_cols[j] = 1;
+        (void)next_dirty_rows;
+    }
+
+    return changes;
+}
+
 Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                       std::vector<bool>& row_removed) {
     Index changes = 0;
@@ -725,6 +1045,26 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         ch = removeDominatedRows(lp, col_removed, row_removed,
                                  dirty_rows, next_dirty_rows, next_dirty_cols);
         stats_.dominated_row_changes += ch;
+        total_changes += ch;
+
+        ch = detectImpliedEquations(lp, col_removed, row_removed,
+                                    dirty_rows, next_dirty_rows, next_dirty_cols);
+        stats_.implied_equation_changes += ch;
+        total_changes += ch;
+
+        ch = activityBoundTightening(lp, col_removed, row_removed,
+                                     dirty_rows, next_dirty_rows, next_dirty_cols);
+        stats_.activity_bound_tightening_changes += ch;
+        total_changes += ch;
+
+        ch = dualFixing(lp, col_removed, row_removed,
+                        dirty_cols, next_dirty_rows, next_dirty_cols);
+        stats_.dual_fixing_changes += ch;
+        total_changes += ch;
+
+        ch = removeEmptyColumns(lp, col_removed, row_removed,
+                                dirty_cols, next_dirty_rows, next_dirty_cols);
+        stats_.empty_col_changes += ch;
         total_changes += ch;
 
         // Coefficient tightening is currently disabled: the previous

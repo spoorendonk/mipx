@@ -191,6 +191,115 @@ static LpProblem buildSmallMip() {
     return lp;
 }
 
+/// Build a problem where a <= row is an implied equality at minimum activity.
+/// min 0  s.t. x + y <= 0, x + z <= 1, y + z <= 1, 0 <= x,y,z <= 1
+static LpProblem buildImpliedEquationProblem() {
+    LpProblem lp;
+    lp.name = "implied_eq";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {0.0, 1.0, 1.0};
+    lp.row_names = {"c1", "c2", "c3"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
+/// Build a problem where activity-based reasoning tightens x upper bound.
+/// min -x-y-z
+/// s.t. x + y <= 7, x + z <= 12, y + z <= 15
+/// with y in [5,10], x,z in [0,10], giving x <= 2 from first row.
+static LpProblem buildActivityBoundTighteningProblem() {
+    LpProblem lp;
+    lp.name = "activity_bt";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 5.0, 0.0};
+    lp.col_upper = {10.0, 10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {7.0, 12.0, 15.0};
+    lp.row_names = {"c1", "c2", "c3"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
+/// Build a problem where dual fixing can safely fix x to lower bound.
+/// min x - y - z
+/// s.t. x + y <= 10, x + z <= 12, y + z <= 15, 0 <= vars <= 10
+static LpProblem buildDualFixingProblem() {
+    LpProblem lp;
+    lp.name = "dual_fixing";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {10.0, 10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {10.0, 12.0, 15.0};
+    lp.row_names = {"c1", "c2", "c3"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
+/// Build a problem with an empty objective column x.
+/// min x + y, s.t. y <= 10, 0 <= x <= 10, 0 <= y <= 10
+static LpProblem buildEmptyColumnProblem() {
+    LpProblem lp;
+    lp.name = "empty_col";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {10.0};
+    lp.row_names = {"c1"};
+
+    std::vector<Triplet> trips = {
+        {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
 // =============================================================================
 // Tests: Fixed variable removal
 // =============================================================================
@@ -510,4 +619,52 @@ TEST_CASE("Presolve: reusable object resets state between runs", "[presolve]") {
     CHECK(reduced.num_cols < feasible_lp.num_cols);
     CHECK(presolver.stats().vars_removed >= 1);
     CHECK(presolver.stats().time_seconds >= 0.0);
+}
+
+TEST_CASE("Presolve: implied equation detection", "[presolve]") {
+    auto lp = buildImpliedEquationProblem();
+
+    Presolver presolver;
+    (void)presolver.presolve(lp);
+
+    CHECK(presolver.stats().implied_equation_changes >= 1);
+}
+
+TEST_CASE("Presolve: activity-based bound tightening", "[presolve]") {
+    auto lp = buildActivityBoundTighteningProblem();
+
+    Presolver presolver;
+    (void)presolver.presolve(lp);
+
+    CHECK(presolver.stats().activity_bound_tightening_changes >= 1);
+    CHECK(presolver.stats().bounds_tightened >= 1);
+}
+
+TEST_CASE("Presolve: dual fixing", "[presolve]") {
+    auto lp = buildDualFixingProblem();
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    CHECK(presolver.stats().dual_fixing_changes >= 1);
+
+    std::vector<Real> presolved_sol(reduced.num_cols, 0.0);
+    auto full_sol = presolver.postsolve(presolved_sol);
+    REQUIRE(full_sol.size() == 3);
+    CHECK_THAT(full_sol[0], WithinAbs(0.0, 1e-8));  // x fixed at lower bound
+}
+
+TEST_CASE("Presolve: empty column removal", "[presolve]") {
+    auto lp = buildEmptyColumnProblem();
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    CHECK(presolver.stats().empty_col_changes >= 1);
+    CHECK(reduced.num_cols < lp.num_cols);
+
+    std::vector<Real> presolved_sol(reduced.num_cols, 0.0);
+    auto full_sol = presolver.postsolve(presolved_sol);
+    REQUIRE(full_sol.size() == 2);
+    CHECK_THAT(full_sol[0], WithinAbs(0.0, 1e-8));  // empty x fixed at lower bound
 }
