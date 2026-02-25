@@ -1211,10 +1211,16 @@ std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
 
 void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     // External basis: first num_cols are structural, next num_rows are slacks.
-    if (static_cast<Index>(basis.size()) != numVars()) return;
+    Index n = numVars();
+    if (static_cast<Index>(basis.size()) != n) return;
+
+    // Fast path: identical basis status vector already installed.
+    if (has_basis_ && static_cast<Index>(var_status_.size()) == n &&
+        std::equal(basis.begin(), basis.end(), var_status_.begin())) {
+        return;
+    }
 
     // Ensure solution vectors are allocated.
-    Index n = numVars();
     var_status_.resize(n);
     primal_.resize(n, 0.0);
     dual_.resize(num_rows_, 0.0);
@@ -1403,6 +1409,9 @@ void DualSimplexSolver::addRows(
 void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     if (!loaded_ || rows.empty()) return;
 
+    Index old_rows = num_rows_;
+    Index old_vars = numVars();
+
     std::vector<Index> sorted_rows(rows.begin(), rows.end());
     std::sort(sorted_rows.begin(), sorted_rows.end());
 
@@ -1454,8 +1463,119 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     if (scaled_) row_scale_ = std::move(new_row_scale);
     matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
 
-    // After removing rows, the basis is invalidated (slack renumbering).
-    // Trigger cold start on next solve.
+    // Try to preserve basis via slack index remapping.
+    if (has_basis_) {
+        // old var index -> new var index (-1 if removed)
+        std::vector<Index> var_map(old_vars, -1);
+        for (Index j = 0; j < num_cols_; ++j) var_map[j] = j;
+        for (Index i = 0; i < old_rows; ++i) {
+            Index old_slack = num_cols_ + i;
+            if (row_map[i] >= 0) {
+                var_map[old_slack] = num_cols_ + row_map[i];
+            }
+        }
+
+        bool can_preserve = true;
+        std::vector<Index> new_basis(static_cast<std::size_t>(new_rows), -1);
+        if (static_cast<Index>(basis_.size()) != old_rows) {
+            can_preserve = false;
+        } else {
+            for (Index old_row = 0; old_row < old_rows; ++old_row) {
+                Index new_row = row_map[old_row];
+                if (new_row < 0) continue;
+                Index old_var = basis_[old_row];
+                if (old_var < 0 || old_var >= old_vars) {
+                    can_preserve = false;
+                    break;
+                }
+                Index new_var = var_map[old_var];
+                if (new_var < 0) {
+                    can_preserve = false;
+                    break;
+                }
+                new_basis[new_row] = new_var;
+            }
+            for (Index i = 0; i < new_rows; ++i) {
+                if (new_basis[i] < 0) {
+                    can_preserve = false;
+                    break;
+                }
+            }
+        }
+
+        if (can_preserve) {
+            Index new_vars = numVars();
+            std::vector<BasisStatus> new_var_status(static_cast<std::size_t>(new_vars),
+                                                    BasisStatus::AtLower);
+            std::vector<Real> new_primal(static_cast<std::size_t>(new_vars), 0.0);
+            std::vector<Real> new_reduced(static_cast<std::size_t>(new_vars), 0.0);
+            std::vector<Index> new_basis_pos(static_cast<std::size_t>(new_vars), -1);
+            std::vector<Index> new_nonbasic;
+            new_nonbasic.reserve(static_cast<std::size_t>(new_vars - new_rows));
+
+            // Transfer mapped solution/status values.
+            for (Index old_var = 0; old_var < old_vars; ++old_var) {
+                Index new_var = var_map[old_var];
+                if (new_var < 0) continue;
+                if (old_var < static_cast<Index>(var_status_.size())) {
+                    new_var_status[new_var] = var_status_[old_var];
+                }
+                if (old_var < static_cast<Index>(primal_.size())) {
+                    new_primal[new_var] = primal_[old_var];
+                }
+                if (old_var < static_cast<Index>(reduced_cost_.size())) {
+                    new_reduced[new_var] = reduced_cost_[old_var];
+                }
+            }
+
+            // Enforce basis rows and rebuild basis_pos.
+            for (Index i = 0; i < new_rows; ++i) {
+                Index v = new_basis[i];
+                new_basis_pos[v] = i;
+                new_var_status[v] = BasisStatus::Basic;
+                new_reduced[v] = 0.0;
+            }
+
+            // Rebuild nonbasic list and sanitize statuses.
+            for (Index v = 0; v < new_vars; ++v) {
+                if (new_basis_pos[v] >= 0) continue;
+                BasisStatus st = new_var_status[v];
+                if (st == BasisStatus::Basic) {
+                    Real lb = varLower(v);
+                    Real ub = varUpper(v);
+                    if (lb != -kInf && ub != kInf && std::abs(lb - ub) < kZeroTol) {
+                        st = BasisStatus::Fixed;
+                        new_primal[v] = lb;
+                    } else if (lb != -kInf) {
+                        st = BasisStatus::AtLower;
+                        new_primal[v] = lb;
+                    } else if (ub != kInf) {
+                        st = BasisStatus::AtUpper;
+                        new_primal[v] = ub;
+                    } else {
+                        st = BasisStatus::Free;
+                        new_primal[v] = 0.0;
+                    }
+                    new_var_status[v] = st;
+                }
+                new_nonbasic.push_back(v);
+            }
+
+            basis_ = std::move(new_basis);
+            basis_pos_ = std::move(new_basis_pos);
+            var_status_ = std::move(new_var_status);
+            primal_ = std::move(new_primal);
+            reduced_cost_ = std::move(new_reduced);
+            nonbasic_ = std::move(new_nonbasic);
+            dual_.assign(static_cast<std::size_t>(num_rows_), 0.0);
+            devex_weights_.assign(static_cast<std::size_t>(num_rows_), 1.0);
+            devex_reset_count_ = 0;
+            has_basis_ = true;
+            return;
+        }
+    }
+
+    // Could not preserve basis safely.
     has_basis_ = false;
 }
 
