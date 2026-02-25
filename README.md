@@ -3,6 +3,8 @@
 Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex LP,
 cutting planes, presolve, and primal heuristics — no external solver dependencies.
 
+> **Disclaimer:** This project is developed entirely through [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+
 ## Components
 
 | Component | Description |
@@ -93,22 +95,40 @@ Tests that require missing instances are skipped automatically.
 
 ## Benchmarking
 
-Run [MIPLIB 2017](https://miplib.zib.de) benchmarks and produce CSV + Markdown reports:
+Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
 
 ```bash
-# Download instances and best-known solutions
-./tests/data/download_miplib.sh
+# Download datasets (small sets recommended for local gating)
+./tests/data/download_test_instances.sh
 
-# Run benchmark
-./tests/data/run_benchmark.sh --time-limit 300
+# LP gate input (Netlib)
+./tests/perf/run_netlib_lp_bench.sh \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --output /tmp/netlib_candidate.csv \
+  --repeats 3 \
+  --solver-arg --quiet
 
-# Results in benchmark-results/
+# MIP gate input (MIPLIB)
+./tests/perf/run_miplib_mip_bench.sh \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --output /tmp/miplib_candidate.csv \
+  --repeats 1 \
+  --threads 1 \
+  --time-limit 60 \
+  --instances air04,gt2,flugpl \
+  --solver-arg --quiet
+
+# Regression check (default metric is work_units)
+python3 tests/perf/check_regression.py \
+  --baseline /path/to/baseline.csv \
+  --candidate /tmp/netlib_candidate.csv
 ```
 
-| File | Description |
-|------|-------------|
-| `results.csv` | Machine-readable per-instance results |
-| `results.md` | GitHub-friendly Markdown table |
+Use `--metric time_seconds` if you need wall-clock gating instead of
+deterministic work-unit gating.
+Use `--max-regression-pct` to relax the gate; default is strict `0.0%`.
 
 ## Project Structure
 
