@@ -7,6 +7,8 @@ add_executable(mipx-tests
     test_lu.cpp
     test_dual_simplex.cpp
     test_incremental.cpp
+    test_node_queue.cpp
+    test_branching.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
