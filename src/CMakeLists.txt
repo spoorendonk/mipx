@@ -15,6 +15,7 @@ add_library(mipx STATIC
     mip/mip_solver.cpp
     heuristics/rounding.cpp
     heuristics/diving.cpp
+    presolve/presolve.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)

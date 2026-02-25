@@ -1,0 +1,161 @@
+#pragma once
+
+#include <string>
+#include <variant>
+#include <vector>
+
+#include "mipx/core.h"
+#include "mipx/lp_problem.h"
+
+namespace mipx {
+
+// ---- Postsolve operations ---------------------------------------------------
+
+/// A variable was fixed to a value and removed.
+struct PostsolveFixVariable {
+    Index orig_col;
+    Real value;
+};
+
+/// A singleton row was removed (variable bound was tightened instead).
+struct PostsolveSingletonRow {
+    Index orig_row;
+};
+
+/// A singleton column was substituted out.
+struct PostsolveSingletonCol {
+    Index orig_col;
+    Index orig_row;       // The single constraint it appeared in.
+    Real coeff;           // The coefficient a_{row,col}.
+    Real obj_coeff;       // Original objective coefficient.
+    Real row_lower;       // Original row bounds.
+    Real row_upper;
+    VarType var_type;     // Original variable type.
+    Real col_lower;       // Original variable bounds.
+    Real col_upper;
+};
+
+/// A forcing constraint removed variables.
+struct PostsolveForcingRow {
+    Index orig_row;
+    struct FixedVar {
+        Index orig_col;
+        Real value;
+    };
+    std::vector<FixedVar> fixed_vars;
+};
+
+/// A dominated (redundant) row was removed.
+struct PostsolveDominatedRow {
+    Index orig_row;
+};
+
+/// Coefficient was tightened for an integer variable.
+struct PostsolveCoeffTightening {
+    Index orig_row;
+    Index orig_col;
+    Real old_coeff;
+    Real new_coeff;
+    Real old_rhs;       // The row_upper that was adjusted.
+    Real new_rhs;
+};
+
+using PostsolveOp = std::variant<
+    PostsolveFixVariable,
+    PostsolveSingletonRow,
+    PostsolveSingletonCol,
+    PostsolveForcingRow,
+    PostsolveDominatedRow,
+    PostsolveCoeffTightening
+>;
+
+// ---- PostsolveStack ---------------------------------------------------------
+
+class PostsolveStack {
+public:
+    /// Push a postsolve operation.
+    void push(PostsolveOp op);
+
+    /// Given a solution to the presolved problem (indexed by presolved column),
+    /// reconstruct the full solution (indexed by original column).
+    /// `col_mapping` maps presolved col index -> original col index.
+    std::vector<Real> postsolve(const std::vector<Real>& presolved_solution,
+                                 const std::vector<Index>& col_mapping,
+                                 Index orig_num_cols) const;
+
+    [[nodiscard]] Index size() const {
+        return static_cast<Index>(ops_.size());
+    }
+
+private:
+    std::vector<PostsolveOp> ops_;
+};
+
+// ---- Presolve statistics ----------------------------------------------------
+
+struct PresolveStats {
+    Index vars_removed = 0;
+    Index rows_removed = 0;
+    Index bounds_tightened = 0;
+    Index coeffs_tightened = 0;
+    Index rounds = 0;
+};
+
+// ---- Presolver --------------------------------------------------------------
+
+class Presolver {
+public:
+    Presolver() = default;
+
+    /// Run presolve on the given problem. Returns the reduced problem.
+    /// The postsolve stack and column mapping are stored internally.
+    LpProblem presolve(const LpProblem& problem);
+
+    /// Postsolve: given solution to presolved problem, reconstruct full solution.
+    std::vector<Real> postsolve(const std::vector<Real>& presolved_solution) const;
+
+    /// Returns true if presolve detected infeasibility.
+    [[nodiscard]] bool isInfeasible() const { return infeasible_; }
+
+    /// Access statistics.
+    [[nodiscard]] const PresolveStats& stats() const { return stats_; }
+
+    /// Access the column mapping (presolved col -> original col).
+    [[nodiscard]] const std::vector<Index>& colMapping() const {
+        return col_mapping_;
+    }
+
+    /// Set maximum number of presolve rounds.
+    void setMaxRounds(Index rounds) { max_rounds_ = rounds; }
+
+private:
+    // Individual reductions. Return number of changes made.
+    Index removeFixedVariables(LpProblem& lp, std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed);
+    Index removeSingletonRows(LpProblem& lp, std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed);
+    Index removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed);
+    Index removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
+                             std::vector<bool>& row_removed);
+    Index removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed);
+    Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed);
+
+    // Build the reduced problem from the original with removed rows/cols.
+    LpProblem buildReducedProblem(const LpProblem& lp,
+                                   const std::vector<bool>& col_removed,
+                                   const std::vector<bool>& row_removed);
+
+    PostsolveStack postsolve_stack_;
+    std::vector<Index> col_mapping_;   // presolved col -> original col
+    Index orig_num_cols_ = 0;
+    PresolveStats stats_;
+    Index max_rounds_ = 20;
+    bool infeasible_ = false;
+
+    static constexpr Real kTol = 1e-8;
+};
+
+}  // namespace mipx

@@ -9,6 +9,7 @@
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/lp_problem.h"
+#include "mipx/presolve.h"
 
 namespace mipx {
 
@@ -35,6 +36,7 @@ public:
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
     void setVerbose(bool v) { verbose_ = v; }
+    void setPresolve(bool p) { presolve_ = p; }
 
 private:
     // Check if all integer variables are integral in the given solution.
@@ -56,6 +58,7 @@ private:
     double time_limit_ = 3600.0;
     Real gap_tol_ = 1e-4;
     bool verbose_ = true;
+    bool presolve_ = true;
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Int kLogFrequency = 100;
