@@ -183,7 +183,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Deferred:**
 - Hyper-sparsity exploitation in FTRAN/BTRAN
-- PAMI/SIP parallelism
+- PAMI-style multi-iteration parallelism beyond current SIP scan parallelization
 
 **MIP-first optimization wave (sequential execution plan):**
 1. GPU workstream scaffold for root policy (`RootLpPolicy`, alternate backend adapter seam) — **done**
@@ -191,8 +191,8 @@ Each step builds on the previous, produces something testable, and is scoped for
 3. Basis lifecycle hardening for reoptimization (`setBasis` fast path, row-removal remap) — **done**
 4. Pricing and scan reduction (partial pricing + periodic full refresh fallback) — **done**
 5. LU/FTRAN-BTRAN hot-path memory optimization (no per-row heap allocations in Markowitz updates, reusable solve/update scratch buffers) — **done**
-6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — planned
-7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — planned
+6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — **done** (runtime toggles, adaptive refactorization guard, AVX2-gated dense kernels for dual/slack-vector updates, O(1) nonbasic position map, and configurable SIMD build targeting with native default landed)
+7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — **done** (dual-infeasibility scan, CHUZC candidate scan + optional candidate sort, and CHUZR leaving-row scan have TBB-backed parallel paths behind runtime options, with min-size/min-thread gates plus stall-based serial fallback; default remains off)
 
 **Wave notes:**
 - Tree solve remains dual-simplex-first for MIP warm-start and basis continuity.
@@ -201,7 +201,8 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Performance regression gates (required for all optimization PRs):**
 - Correctness gate: no test regressions.
-- Performance gate: median runtime regression must stay within 2% on fixed benchmark suites.
+- Performance gate: default `work_units` regression allowance is 0% (explicit override required to relax).
+- Combined LP+MIP gate: `tests/perf/run_full_gate.sh` is the default pre-merge workflow.
 - Stability gate: no increase in numerical failures / stall rate beyond tolerance.
 - Fallback gate: new optimization stays runtime-toggleable until gates are met.
 

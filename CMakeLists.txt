@@ -15,6 +15,16 @@ find_package(ZLIB REQUIRED)
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
 
+# SIMD codegen policy:
+# - default is native for maximum local performance
+# - avx2/off remain available for standardized distribution builds
+set(MIPX_SIMD_ISA "native" CACHE STRING
+    "SIMD code generation target (off, avx2, native)")
+set_property(CACHE MIPX_SIMD_ISA PROPERTY STRINGS off avx2 native)
+option(MIPX_SIMD_REQUIRE_SUPPORTED
+       "Fail configure if requested SIMD ISA flags are not supported"
+       OFF)
+
 # --- Library ---
 
 add_subdirectory(src)

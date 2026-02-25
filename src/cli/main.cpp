@@ -12,13 +12,21 @@
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::fprintf(stdout, "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S]\n");
+        std::fprintf(stdout,
+            "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
+            "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
+            "[--no-presolve|--presolve] [--verbose|--quiet]\n");
         return 1;
     }
 
     std::string filename = argv[1];
     int num_threads = 1;
     double time_limit = -1.0;  // negative = use solver default
+    mipx::Int node_limit = 1000000;
+    double gap_tol = 1e-4;
+    bool verbose = true;
+    bool presolve = true;
+    bool cuts_enabled = true;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -27,6 +35,25 @@ int main(int argc, char* argv[]) {
             num_threads = std::atoi(argv[++i]);
         } else if (arg == "--time-limit" && i + 1 < argc) {
             time_limit = std::atof(argv[++i]);
+        } else if (arg == "--node-limit" && i + 1 < argc) {
+            node_limit = static_cast<mipx::Int>(std::atoll(argv[++i]));
+        } else if (arg == "--gap-tol" && i + 1 < argc) {
+            gap_tol = std::atof(argv[++i]);
+        } else if (arg == "--no-cuts") {
+            cuts_enabled = false;
+        } else if (arg == "--cuts") {
+            cuts_enabled = true;
+        } else if (arg == "--no-presolve") {
+            presolve = false;
+        } else if (arg == "--presolve") {
+            presolve = true;
+        } else if (arg == "--verbose") {
+            verbose = true;
+        } else if (arg == "--quiet") {
+            verbose = false;
+        } else {
+            std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
+            return 1;
         }
     }
 
@@ -39,6 +66,11 @@ int main(int argc, char* argv[]) {
             mipx::MipSolver solver;
             solver.setNumThreads(num_threads);
             if (time_limit >= 0.0) solver.setTimeLimit(time_limit);
+            solver.setNodeLimit(node_limit);
+            solver.setGapTolerance(gap_tol);
+            solver.setVerbose(verbose);
+            solver.setPresolve(presolve);
+            solver.setCutsEnabled(cuts_enabled);
             solver.load(lp);
             auto result = solver.solve();
 
@@ -53,6 +85,7 @@ int main(int argc, char* argv[]) {
             log.log("Objective: %.10e\n", result.objective);
             log.log("Nodes: %d\n", result.nodes);
             log.log("LP iterations: %d\n", result.lp_iterations);
+            log.log("Work units: %.2f\n", result.work_units);
             log.log("Time: %.2fs\n", result.time_seconds);
         } else {
             // LP solve — print banner from CLI.

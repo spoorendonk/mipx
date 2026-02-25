@@ -12,6 +12,39 @@
 
 namespace mipx {
 
+struct DualSimplexOptions {
+    // Pricing controls.
+    bool enable_partial_pricing = true;
+    Int partial_pricing_chunk_min = 512;
+    Int partial_pricing_full_scan_freq = 25;
+
+    // Refactorization controls.
+    bool enable_adaptive_refactorization = true;
+    Int adaptive_refactor_min_updates = 24;
+    Int adaptive_refactor_stall_pivots = 32;
+    Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
+
+    // Runtime SIMD controls for dense vector kernels.
+    bool enable_simd_kernels = true;
+    Int simd_min_length = 64;
+
+    // SIP-style parallel candidate scan (CHUZC), guarded and off by default.
+    bool enable_sip_parallel_candidates = false;
+    bool enable_sip_parallel_dual_scan = false;
+    Int sip_parallel_min_nonbasic = 4096;
+    Int sip_parallel_grain = 512;
+    Int sip_parallel_min_threads = 2;
+    bool sip_parallel_disable_on_stall = true;
+    Int sip_parallel_stall_pivots = 32;
+    bool enable_sip_parallel_candidate_sort = false;
+    Int sip_parallel_sort_min_candidates = 4096;
+
+    // SIP-style parallel leaving-row scan (CHUZR), guarded and off by default.
+    bool enable_sip_parallel_chuzr = false;
+    Int sip_parallel_min_rows = 2048;
+    Int sip_parallel_row_grain = 256;
+};
+
 class DualSimplexSolver : public LpSolver {
 public:
     DualSimplexSolver() = default;
@@ -41,6 +74,8 @@ public:
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
     void setVerbose(bool v) { verbose_ = v; }
+    void setOptions(const DualSimplexOptions& options) { options_ = options; }
+    [[nodiscard]] const DualSimplexOptions& getOptions() const { return options_; }
 
     /// Access work unit counter (includes LU work).
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -116,6 +151,8 @@ private:
     std::vector<Index> basis_;
     // nonbasic_ = list of nonbasic variable indices.
     std::vector<Index> nonbasic_;
+    // nonbasic_pos_[k] = position in nonbasic_ if nonbasic, -1 otherwise.
+    std::vector<Index> nonbasic_pos_;
     // basis_pos_[k] = position in basis_ if basic, -1 otherwise.
     std::vector<Index> basis_pos_;
     // var_status_[k] = status of variable k.
@@ -148,14 +185,13 @@ private:
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
-    static constexpr Int kPartialPricingChunkMin = 512;
-    static constexpr Int kPartialPricingFullScanFreq = 25;
 
     // Timing for iteration log.
     std::chrono::steady_clock::time_point solve_start_;
 
     // Deterministic work counter.
     WorkUnits work_;
+    DualSimplexOptions options_{};
 };
 
 }  // namespace mipx

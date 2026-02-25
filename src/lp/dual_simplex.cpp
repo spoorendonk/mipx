@@ -3,12 +3,91 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
+#ifdef MIPX_HAS_TBB
+#include <tbb/enumerable_thread_specific.h>
+#include <tbb/parallel_for.h>
+#include <tbb/parallel_sort.h>
+#include <tbb/blocked_range.h>
+#include <tbb/task_arena.h>
+#endif
+
 namespace mipx {
+
+namespace {
+
+inline bool canUseSimd(const DualSimplexOptions& options, Index len) {
+    return options.enable_simd_kernels &&
+           options.simd_min_length > 0 &&
+           len >= options.simd_min_length;
+}
+
+inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alpha,
+                        const DualSimplexOptions& options) {
+    assert(dst.size() == src.size());
+    (void)options;
+#if defined(__AVX2__)
+    if (canUseSimd(options, static_cast<Index>(dst.size()))) {
+        const __m256d a = _mm256_set1_pd(alpha);
+        std::size_t i = 0;
+        const std::size_t n = dst.size();
+        for (; i + 4 <= n; i += 4) {
+            __m256d d = _mm256_loadu_pd(dst.data() + i);
+            __m256d s = _mm256_loadu_pd(src.data() + i);
+#if defined(__FMA__)
+            d = _mm256_fmadd_pd(a, s, d);
+#else
+            d = _mm256_add_pd(d, _mm256_mul_pd(a, s));
+#endif
+            _mm256_storeu_pd(dst.data() + i, d);
+        }
+        for (; i < n; ++i) {
+            dst[i] += alpha * src[i];
+        }
+        return;
+    }
+#endif
+    for (std::size_t i = 0; i < dst.size(); ++i) {
+        dst[i] += alpha * src[i];
+    }
+}
+
+inline void negateCopy(std::span<Real> dst, std::span<const Real> src,
+                       const DualSimplexOptions& options) {
+    assert(dst.size() == src.size());
+    (void)options;
+#if defined(__AVX2__)
+    if (canUseSimd(options, static_cast<Index>(dst.size()))) {
+        const __m256d z = _mm256_setzero_pd();
+        std::size_t i = 0;
+        const std::size_t n = dst.size();
+        for (; i + 4 <= n; i += 4) {
+            __m256d s = _mm256_loadu_pd(src.data() + i);
+            __m256d d = _mm256_sub_pd(z, s);
+            _mm256_storeu_pd(dst.data() + i, d);
+        }
+        for (; i < n; ++i) {
+            dst[i] = -src[i];
+        }
+        return;
+    }
+#endif
+    for (std::size_t i = 0; i < dst.size(); ++i) {
+        dst[i] = -src[i];
+    }
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 //  Load
@@ -41,6 +120,8 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 
     status_ = Status::Error;
     iterations_ = 0;
+    has_basis_ = false;
+    nonbasic_pos_.clear();
     loaded_ = true;
 }
 
@@ -191,6 +272,7 @@ void DualSimplexSolver::setupInitialBasis() {
     basis_.resize(num_rows_);
     nonbasic_.clear();
     nonbasic_.reserve(num_cols_);
+    nonbasic_pos_.assign(n, -1);
     basis_pos_.assign(n, -1);
     var_status_.resize(n);
     primal_.resize(n);
@@ -248,6 +330,7 @@ void DualSimplexSolver::setupInitialBasis() {
         }
 
         nonbasic_.push_back(j);
+        nonbasic_pos_[j] = static_cast<Index>(nonbasic_.size() - 1);
     }
 }
 
@@ -534,6 +617,7 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
     Index partial_price_offset = 0;
+    Int degenerate_pivot_streak = 0;
 
     // Record solve start time for iteration log.
     solve_start_ = std::chrono::steady_clock::now();
@@ -541,6 +625,13 @@ LpResult DualSimplexSolver::solve() {
     // Log header.
     if (verbose_) std::printf("%-7s  %9s  %20s  %11s  %9s\n",
                               "Method", "Iteration", "Objective", "Primal.NInf", "Time");
+
+#ifdef MIPX_HAS_TBB
+    auto sipThreadGatePass = [&]() -> bool {
+        Int need = std::max<Int>(1, options_.sip_parallel_min_threads);
+        return static_cast<Int>(tbb::this_task_arena::max_concurrency()) >= need;
+    };
+#endif
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
@@ -567,12 +658,19 @@ LpResult DualSimplexSolver::solve() {
                                       "Dual", iterations_, obj_val, pinf_count, solve_elapsed);
         }
 
+        bool sip_numerical_gate = true;
+        if (options_.sip_parallel_disable_on_stall &&
+            options_.sip_parallel_stall_pivots > 0 &&
+            degenerate_pivot_streak >= options_.sip_parallel_stall_pivots) {
+            sip_numerical_gate = false;
+        }
+
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
         work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
         Index leaving_row = -1;
         Real max_score = 0.0;
 
-        for (Index i = 0; i < num_rows_; ++i) {
+        auto scoreRow = [&](Index i) -> Real {
             Index k = basis_[i];
             Real xk = primal_[k];
             Real lb = varLower(k);
@@ -583,7 +681,64 @@ LpResult DualSimplexSolver::solve() {
             else if (xk > ub + kPrimalTol) viol = xk - ub;
 
             if (viol > kPrimalTol) {
-                Real score = viol * viol / devex_weights_[i];
+                return viol * viol / devex_weights_[i];
+            }
+            return 0.0;
+        };
+
+#ifdef MIPX_HAS_TBB
+        if (options_.enable_sip_parallel_chuzr &&
+            num_rows_ >= options_.sip_parallel_min_rows &&
+            options_.sip_parallel_row_grain > 0 &&
+            sipThreadGatePass() &&
+            sip_numerical_gate) {
+            struct ChuzrBest {
+                Index row = -1;
+                Real score = 0.0;
+            };
+            auto better = [](const ChuzrBest& a, const ChuzrBest& b) {
+                if (a.row < 0) return false;
+                if (b.row < 0) return true;
+                if (a.score > b.score) return true;
+                if (a.score < b.score) return false;
+                return a.row < b.row;  // deterministic tie-break
+            };
+
+            tbb::enumerable_thread_specific<ChuzrBest> locals;
+            const Index grain = std::max<Index>(1, options_.sip_parallel_row_grain);
+            tbb::parallel_for(tbb::blocked_range<Index>(0, num_rows_, grain),
+                              [&](const tbb::blocked_range<Index>& range) {
+                ChuzrBest local;
+                for (Index i = range.begin(); i < range.end(); ++i) {
+                    Real score = scoreRow(i);
+                    if (score > 0.0) {
+                        ChuzrBest cand{i, score};
+                        if (better(cand, local)) {
+                            local = cand;
+                        }
+                    }
+                }
+                if (local.row >= 0) {
+                    auto& slot = locals.local();
+                    if (better(local, slot)) {
+                        slot = local;
+                    }
+                }
+            });
+
+            for (const auto& local : locals) {
+                if (local.score > max_score ||
+                    (local.score == max_score && local.row >= 0 &&
+                     (leaving_row < 0 || local.row < leaving_row))) {
+                    max_score = local.score;
+                    leaving_row = local.row;
+                }
+            }
+        } else
+#endif
+        {
+            for (Index i = 0; i < num_rows_; ++i) {
+                Real score = scoreRow(i);
                 if (score > max_score) {
                     max_score = score;
                     leaving_row = i;
@@ -629,16 +784,79 @@ LpResult DualSimplexSolver::solve() {
             // No cost shifts active. Check dual feasibility.
             Index entering_p = -1;
             Real worst_rc = 0.0;
-            for (Index k : nonbasic_) {
-                Real rc = reduced_cost_[k];
-                BasisStatus st = var_status_[k];
-                bool dual_inf =
-                    (st == BasisStatus::AtLower && rc < -kDualTol) ||
-                    (st == BasisStatus::AtUpper && rc > kDualTol) ||
-                    (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
-                    worst_rc = rc;
-                    entering_p = k;
+            Index nnb = static_cast<Index>(nonbasic_.size());
+
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_dual_scan &&
+                nnb >= options_.sip_parallel_min_nonbasic &&
+                options_.sip_parallel_grain > 0 &&
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
+                struct DualScanBest {
+                    Index var = -1;
+                    Index pos = -1;
+                    Real rc = 0.0;
+                    Real abs_rc = 0.0;
+                };
+                auto better = [](const DualScanBest& a, const DualScanBest& b) {
+                    if (a.var < 0) return false;
+                    if (b.var < 0) return true;
+                    if (a.abs_rc > b.abs_rc) return true;
+                    if (a.abs_rc < b.abs_rc) return false;
+                    return a.pos < b.pos;  // deterministic tie-break
+                };
+
+                tbb::enumerable_thread_specific<DualScanBest> locals;
+                const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
+                tbb::parallel_for(tbb::blocked_range<Index>(0, nnb, grain),
+                                  [&](const tbb::blocked_range<Index>& range) {
+                    DualScanBest local;
+                    for (Index pos = range.begin(); pos < range.end(); ++pos) {
+                        Index k = nonbasic_[pos];
+                        Real rc = reduced_cost_[k];
+                        BasisStatus st = var_status_[k];
+                        bool dual_inf =
+                            (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                            (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                            (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                        if (!dual_inf) continue;
+                        DualScanBest cand{k, pos, rc, std::abs(rc)};
+                        if (better(cand, local)) {
+                            local = cand;
+                        }
+                    }
+                    if (local.var >= 0) {
+                        auto& slot = locals.local();
+                        if (better(local, slot)) {
+                            slot = local;
+                        }
+                    }
+                });
+
+                DualScanBest best;
+                for (const auto& local : locals) {
+                    if (better(local, best)) {
+                        best = local;
+                    }
+                }
+                if (best.var >= 0) {
+                    entering_p = best.var;
+                    worst_rc = best.rc;
+                }
+            } else
+#endif
+            {
+                for (Index k : nonbasic_) {
+                    Real rc = reduced_cost_[k];
+                    BasisStatus st = var_status_[k];
+                    bool dual_inf =
+                        (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                        (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                        (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                    if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
+                        worst_rc = rc;
+                        entering_p = k;
+                    }
                 }
             }
 
@@ -757,9 +975,11 @@ LpResult DualSimplexSolver::solve() {
                     pivot_row_alpha[rv.indices[pp]] += rho_i * rv.values[pp];
                 }
             }
-            for (Index i = 0; i < num_rows_; ++i) {
-                pivot_row_alpha[num_cols_ + i] = -work[i];
-            }
+            negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
+                                       static_cast<std::size_t>(num_rows_)),
+                       std::span<const Real>(work.data(),
+                                             static_cast<std::size_t>(num_rows_)),
+                       options_);
 
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
@@ -773,9 +993,10 @@ LpResult DualSimplexSolver::solve() {
             reduced_cost_[leaving_var_p] = -theta_d_p;
 
             // Update duals.
-            for (Index i = 0; i < num_rows_; ++i) {
-                dual_[i] += theta_d_p * work[i];
-            }
+            axpyInPlace(std::span<Real>(dual_.data(), static_cast<std::size_t>(num_rows_)),
+                        std::span<const Real>(work.data(),
+                                              static_cast<std::size_t>(num_rows_)),
+                        theta_d_p, options_);
 
             // Determine leaving variable status.
             Real leaving_lb = varLower(leaving_var_p);
@@ -800,12 +1021,11 @@ LpResult DualSimplexSolver::solve() {
             var_status_[entering_p] = BasisStatus::Basic;
             var_status_[leaving_var_p] = leaving_st;
 
-            for (Index idx = 0;
-                 idx < static_cast<Index>(nonbasic_.size()); ++idx) {
-                if (nonbasic_[idx] == entering_p) {
-                    nonbasic_[idx] = leaving_var_p;
-                    break;
-                }
+            Index nb_pos = nonbasic_pos_[entering_p];
+            if (nb_pos >= 0) {
+                nonbasic_[nb_pos] = leaving_var_p;
+                nonbasic_pos_[leaving_var_p] = nb_pos;
+                nonbasic_pos_[entering_p] = -1;
             }
 
             // LU update.
@@ -858,9 +1078,11 @@ LpResult DualSimplexSolver::solve() {
             }
         }
         // Slack alpha values: alpha_{n+i} = rho^T * (-e_i) = -rho[i].
-        for (Index i = 0; i < num_rows_; ++i) {
-            pivot_row_alpha[num_cols_ + i] = -work[i];
-        }
+        negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
+                                   static_cast<std::size_t>(num_rows_)),
+                   std::span<const Real>(work.data(),
+                                         static_cast<std::size_t>(num_rows_)),
+                   options_);
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
@@ -884,6 +1106,7 @@ LpResult DualSimplexSolver::solve() {
         // Collect eligible candidates with dual ratios and bound gaps.
         struct BfrtCand {
             Index var;
+            Index nonbasic_pos;
             Real ratio;
             Real alpha;
             Real gap;  // ub - lb, kInf if no finite opposite bound
@@ -894,26 +1117,60 @@ LpResult DualSimplexSolver::solve() {
         bool has_flips = false;
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
-        auto collectCandidates = [&](Index offset, Index count) {
-            Index nnb = static_cast<Index>(nonbasic_.size());
+        Index nnb = static_cast<Index>(nonbasic_.size());
+        auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out) {
+            Index k = nonbasic_[pos];
+            Real alpha = pivot_row_alpha[k];
+            if (!isEligible(k, alpha)) return;
+            Real ratio = std::abs(reduced_cost_[k] / alpha);
+            Real lb = varLower(k);
+            Real ub = varUpper(k);
+            Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+            out.push_back({k, pos, ratio, alpha, gap});
+        };
+
+        auto collectCandidatesSerial = [&](Index offset, Index count) {
             for (Index t = 0; t < count; ++t) {
                 Index pos = (offset + t) % nnb;
-                Index k = nonbasic_[pos];
-                Real alpha = pivot_row_alpha[k];
-                if (!isEligible(k, alpha)) continue;
-                Real ratio = std::abs(reduced_cost_[k] / alpha);
-                Real lb = varLower(k);
-                Real ub = varUpper(k);
-                Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
-                bfrt_cands.push_back({k, ratio, alpha, gap});
+                appendCandidate(pos, bfrt_cands);
             }
         };
 
-        Index nnb = static_cast<Index>(nonbasic_.size());
+        auto collectCandidates = [&](Index offset, Index count) {
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_candidates &&
+                count >= options_.sip_parallel_min_nonbasic &&
+                options_.sip_parallel_grain > 0 &&
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
+                tbb::enumerable_thread_specific<std::vector<BfrtCand>> locals;
+                const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
+                tbb::parallel_for(tbb::blocked_range<Index>(0, count, grain),
+                                  [&](const tbb::blocked_range<Index>& range) {
+                    auto& local = locals.local();
+                    local.reserve(local.size() +
+                        static_cast<std::size_t>((range.end() - range.begin()) / 4 + 8));
+                    for (Index t = range.begin(); t < range.end(); ++t) {
+                        Index pos = (offset + t) % nnb;
+                        appendCandidate(pos, local);
+                    }
+                });
+
+                for (auto& local : locals) {
+                    bfrt_cands.insert(bfrt_cands.end(), local.begin(), local.end());
+                }
+                return;
+            }
+#endif
+            collectCandidatesSerial(offset, count);
+        };
+
         bool did_partial_scan = false;
-        if (nnb > kPartialPricingChunkMin &&
-            (iterations_ % kPartialPricingFullScanFreq) != 0) {
-            Index chunk = std::max<Index>(kPartialPricingChunkMin, nnb / 8);
+        if (options_.enable_partial_pricing &&
+            nnb > options_.partial_pricing_chunk_min &&
+            options_.partial_pricing_full_scan_freq > 0 &&
+            (iterations_ % options_.partial_pricing_full_scan_freq) != 0) {
+            Index chunk = std::max<Index>(options_.partial_pricing_chunk_min, nnb / 8);
             chunk = std::min(chunk, nnb);
             collectCandidates(partial_price_offset, chunk);
             partial_price_offset = (partial_price_offset + chunk) % nnb;
@@ -933,10 +1190,32 @@ LpResult DualSimplexSolver::solve() {
         }
 
         // Sort by ratio for BFRT sweep.
-        std::sort(bfrt_cands.begin(), bfrt_cands.end(),
-            [](const BfrtCand& a, const BfrtCand& b) {
-                return a.ratio < b.ratio;
-            });
+        // Keep legacy ordering when SIP scan is disabled to avoid behavior drift.
+        if (!options_.enable_sip_parallel_candidates) {
+            std::sort(bfrt_cands.begin(), bfrt_cands.end(),
+                [](const BfrtCand& a, const BfrtCand& b) {
+                    return a.ratio < b.ratio;
+                });
+        } else {
+            auto cmp = [](const BfrtCand& a, const BfrtCand& b) {
+                if (a.ratio != b.ratio) return a.ratio < b.ratio;
+                if (a.nonbasic_pos != b.nonbasic_pos) {
+                    return a.nonbasic_pos < b.nonbasic_pos;
+                }
+                return a.var < b.var;
+            };
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_candidate_sort &&
+                static_cast<Index>(bfrt_cands.size()) >= options_.sip_parallel_sort_min_candidates &&
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
+                tbb::parallel_sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
+            } else
+#endif
+            {
+                std::sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
+            }
+        }
 
         // BFRT sweep: flip bounded variables until the leaving variable's
         // infeasibility can be resolved by the next candidate entering.
@@ -1013,6 +1292,7 @@ LpResult DualSimplexSolver::solve() {
             refactorize();
             computePrimals();
             computeDuals();
+            degenerate_pivot_streak = 0;
             continue;
         }
 
@@ -1059,9 +1339,10 @@ LpResult DualSimplexSolver::solve() {
         reduced_cost_[entering_var] = 0.0;  // entering becomes basic
 
         // Update dual values.
-        for (Index i = 0; i < num_rows_; ++i) {
-            dual_[i] += theta_d * work[i];  // work still holds btran result
-        }
+        axpyInPlace(std::span<Real>(dual_.data(), static_cast<std::size_t>(num_rows_)),
+                    std::span<const Real>(work.data(),
+                                          static_cast<std::size_t>(num_rows_)),
+                    theta_d, options_);  // work still holds btran result
 
         // Reduced cost of leaving var (now nonbasic).
         // The leaving var was basic (rc=0). Its column through B^{-1} gives e_r.
@@ -1100,11 +1381,11 @@ LpResult DualSimplexSolver::solve() {
 
         // Update nonbasic list.
         // Remove entering_var, add leaving_var.
-        for (Index idx = 0; idx < static_cast<Index>(nonbasic_.size()); ++idx) {
-            if (nonbasic_[idx] == entering_var) {
-                nonbasic_[idx] = leaving_var;
-                break;
-            }
+        Index nb_pos = nonbasic_pos_[entering_var];
+        if (nb_pos >= 0) {
+            nonbasic_[nb_pos] = leaving_var;
+            nonbasic_pos_[leaving_var] = nb_pos;
+            nonbasic_pos_[entering_var] = -1;
         }
 
         // ---- Update Devex weights ----
@@ -1136,11 +1417,26 @@ LpResult DualSimplexSolver::solve() {
                        std::span<const Real>(&neg_one, 1));
         }
 
+        if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
+            ++degenerate_pivot_streak;
+        } else {
+            degenerate_pivot_streak = 0;
+        }
+
         // Check if refactorization needed.
-        if (lu_.needsRefactorization()) {
+        bool should_refactorize = lu_.needsRefactorization();
+        if (!should_refactorize &&
+            options_.enable_adaptive_refactorization &&
+            degenerate_pivot_streak >= options_.adaptive_refactor_stall_pivots &&
+            lu_.numUpdates() >= options_.adaptive_refactor_min_updates) {
+            should_refactorize = true;
+        }
+
+        if (should_refactorize) {
             refactorize();
             computePrimals();
             computeDuals();
+            degenerate_pivot_streak = 0;
 
             // Reset Devex weights after refactorization.
             std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
@@ -1271,6 +1567,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
 
     basis_.clear();
     nonbasic_.clear();
+    nonbasic_pos_.assign(n, -1);
     basis_pos_.assign(n, -1);
 
     for (Index k = 0; k < n; ++k) {
@@ -1280,6 +1577,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
             basis_.push_back(k);
         } else {
             nonbasic_.push_back(k);
+            nonbasic_pos_[k] = static_cast<Index>(nonbasic_.size() - 1);
             if (basis[k] == BasisStatus::AtLower || basis[k] == BasisStatus::Fixed) {
                 primal_[k] = varLower(k);
             } else if (basis[k] == BasisStatus::AtUpper) {
@@ -1413,6 +1711,7 @@ void DualSimplexSolver::addRows(
     // Extend basis: new slack variables enter as basic.
     Index new_total = numVars();
     basis_pos_.resize(new_total, -1);
+    nonbasic_pos_.resize(new_total, -1);
     var_status_.resize(new_total);
     primal_.resize(new_total);
     reduced_cost_.resize(new_total, 0.0);
@@ -1608,6 +1907,10 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
             primal_ = std::move(new_primal);
             reduced_cost_ = std::move(new_reduced);
             nonbasic_ = std::move(new_nonbasic);
+            nonbasic_pos_.assign(static_cast<std::size_t>(new_vars), -1);
+            for (Index pos = 0; pos < static_cast<Index>(nonbasic_.size()); ++pos) {
+                nonbasic_pos_[nonbasic_[pos]] = pos;
+            }
             dual_.assign(static_cast<std::size_t>(num_rows_), 0.0);
             devex_weights_.assign(static_cast<std::size_t>(num_rows_), 1.0);
             devex_reset_count_ = 0;
@@ -1618,6 +1921,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
 
     // Could not preserve basis safely.
     has_basis_ = false;
+    nonbasic_pos_.clear();
 }
 
 // ---------------------------------------------------------------------------

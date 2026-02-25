@@ -3,7 +3,7 @@
 
 Expected CSV columns:
   - instance
-  - <metric> (default: time_seconds)
+  - <metric> (default: work_units)
 """
 
 from __future__ import annotations
@@ -41,12 +41,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--candidate", required=True, type=Path)
-    parser.add_argument("--metric", default="time_seconds")
+    parser.add_argument("--metric", default="work_units")
     parser.add_argument(
         "--max-regression-pct",
         type=float,
-        default=2.0,
-        help="Allowed median regression in percent (default: 2.0).",
+        default=0.0,
+        help="Allowed median regression in percent (default: 0.0).",
     )
     parser.add_argument(
         "--min-common-instances",

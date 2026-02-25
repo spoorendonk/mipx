@@ -365,3 +365,57 @@ TEST_CASE("DualSimplex: work units scale with problem size", "[dual_simplex][wor
     // blend has more rows/cols/nnz — should do more work.
     CHECK(rb.work_units > ra.work_units);
 }
+
+TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths",
+          "[dual_simplex][options]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts;
+    opts.enable_partial_pricing = false;
+    opts.enable_adaptive_refactorization = false;
+    opts.partial_pricing_chunk_min = 8;
+    opts.partial_pricing_full_scan_freq = 1;
+    opts.adaptive_refactor_min_updates = 8;
+    opts.adaptive_refactor_stall_pivots = 8;
+    opts.enable_simd_kernels = false;
+    opts.simd_min_length = 16;
+    opts.enable_sip_parallel_candidates = true;
+    opts.enable_sip_parallel_dual_scan = true;
+    opts.sip_parallel_min_nonbasic = 1;
+    opts.sip_parallel_grain = 32;
+    opts.sip_parallel_min_threads = 2;
+    opts.sip_parallel_disable_on_stall = true;
+    opts.sip_parallel_stall_pivots = 4;
+    opts.enable_sip_parallel_candidate_sort = true;
+    opts.sip_parallel_sort_min_candidates = 32;
+    opts.enable_sip_parallel_chuzr = true;
+    opts.sip_parallel_min_rows = 1;
+    opts.sip_parallel_row_grain = 16;
+    solver.setOptions(opts);
+
+    const auto& applied = solver.getOptions();
+    CHECK_FALSE(applied.enable_partial_pricing);
+    CHECK_FALSE(applied.enable_adaptive_refactorization);
+    CHECK_FALSE(applied.enable_simd_kernels);
+    CHECK(applied.enable_sip_parallel_candidates);
+    CHECK(applied.enable_sip_parallel_dual_scan);
+    CHECK(applied.enable_sip_parallel_chuzr);
+    CHECK(applied.partial_pricing_chunk_min == 8);
+    CHECK(applied.partial_pricing_full_scan_freq == 1);
+    CHECK(applied.simd_min_length == 16);
+    CHECK(applied.sip_parallel_min_nonbasic == 1);
+    CHECK(applied.sip_parallel_grain == 32);
+    CHECK(applied.sip_parallel_min_threads == 2);
+    CHECK(applied.sip_parallel_disable_on_stall);
+    CHECK(applied.sip_parallel_stall_pivots == 4);
+    CHECK(applied.enable_sip_parallel_candidate_sort);
+    CHECK(applied.sip_parallel_sort_min_candidates == 32);
+    CHECK(applied.sip_parallel_min_rows == 1);
+    CHECK(applied.sip_parallel_row_grain == 16);
+
+    solver.load(lp);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
