@@ -185,6 +185,21 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Hyper-sparsity exploitation in FTRAN/BTRAN
 - PAMI/SIP parallelism
 
+**MIP-first optimization wave (planned):**
+- Node reoptimization fast path (bound-delta push/pop to avoid full bound reset at each node)
+- Pricing and scan reduction (partial pricing + candidate caches with safe fallback refresh)
+- Hyper-sparsity in FTRAN/BTRAN (adaptive sparse/dense switching with telemetry)
+- Adaptive refactorization and stability guards (growth/residual-aware rebuild triggers)
+- SIMD and memory-layout tuning on hot loops (AVX2/AVX-512 guarded, scalar fallback)
+- Intra-iteration parallel simplex (SIP-style, gated by model shape and measured win)
+- MIP-centric instrumentation (root/node LP timing split, warm/cold-start counters)
+
+**Performance regression gates (required for all optimization PRs):**
+- Correctness gate: no test regressions.
+- Performance gate: median runtime regression must stay within 2% on fixed benchmark suites.
+- Stability gate: no increase in numerical failures / stall rate beyond tolerance.
+- Fallback gate: new optimization stays runtime-toggleable until gates are met.
+
 **Test criteria:** Solve all Netlib instances to optimality. Objective matches `.solu` values within tolerance. Competitive iteration counts vs. reference.
 
 **References:** HiGHS `HDual`, Koberstein (2005) dual simplex thesis (best description of Harris + BFRT + cost shifting integration), Maros (2003) textbook, Hall & McKinnon (2005) hyper-sparsity, Huangfu & Hall (2018) parallel dual simplex.
@@ -418,6 +433,10 @@ These validate our roadmap: get dual simplex right on CPU first, add barrier/PDL
 
 ## Future Work (after end-to-end MIP is working)
 
+- **GPU MIP Workstream (deferred dependency)** — no in-repo PDLP or barrier backend exists yet, so this is design/integration scaffolding only for now.
+  - Current scope: root policy interface + alternate backend adapter API.
+  - Deferred implementation: root concurrent race (CPU dual simplex + alternate GPU LP backend) after backend integration.
+  - Tree policy remains dual-simplex-first for warm-start and basis continuity.
 - **Barrier / Interior Point Method** — Mehrotra predictor-corrector, sparse Cholesky. GPU-accelerated via cuDSS.
 - **PDLP + GPU** — First-order method (PDHG) with CUDA acceleration. Only needs SpMV — ideal for GPU. See cuPDLP-C/cuPDLP+ from COPT team.
 - **Concurrent LP** — Run dual simplex (CPU) + barrier (GPU) + PDLP (GPU) simultaneously, return first solution (cuOpt pattern).
