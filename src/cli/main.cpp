@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
             if (did_presolve) {
                 log.log("Presolve: %d vars removed, %d rows removed, "
                          "%d bounds tightened, %d rounds (%d changed), %.3fs "
-                         "[rules: implied=%d abt=%d dual=%d empty_col=%d] "
+                         "[rules: implied=%d abt=%d dual=%d empty_col=%d dup_row=%d] "
                          "[examined: %d rows, %d cols]\n\n",
                          stats.vars_removed, stats.rows_removed,
                          stats.bounds_tightened, stats.rounds,
@@ -139,6 +139,7 @@ int main(int argc, char* argv[]) {
                          stats.activity_bound_tightening_changes,
                          stats.dual_fixing_changes,
                          stats.empty_col_changes,
+                         stats.duplicate_row_changes,
                          stats.rows_examined, stats.cols_examined);
             }
 
