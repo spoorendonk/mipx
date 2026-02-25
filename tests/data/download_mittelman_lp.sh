@@ -24,16 +24,13 @@ DEST_DIR="${SCRIPT_DIR}/mittelman_lp"
 # --- Instance sources ---
 # [2] plato.asu.edu/ftp/lptestset/ — Mittelman's hosted collection
 MITTELMAN_BASE="https://plato.asu.edu/ftp/lptestset"
-# [1] MIPLIB 2010 — LP relaxations used in LPopt benchmark
-MIPLIB2010_BASE="https://miplib2010.zib.de/download"
 # [4-9] Meszaros collection hosted at CAS
 MESZAROS_BASE="https://www.sztaki.hu/~meszaros/public_ftp/lptestset"
-# [3] Netlib
-NETLIB_BASE="https://raw.githubusercontent.com/SkyLiu0/NETLIB/master/feasible"
 
 # --- Instance lists by source ---
 # Instances from Mittelman's lptestset (plato.asu.edu/ftp/lptestset/)
 # These are .mps.bz2 files hosted directly by Mittelman.
+# Note: pds-* instances live in the pds/ subdirectory (see MITTELMAN_PDS_INSTANCES).
 MITTELMAN_INSTANCES=(
     buildingenergy
     cont1
@@ -49,7 +46,6 @@ MITTELMAN_INSTANCES=(
     neos
     neos3
     nug08-3rd
-    pds-100
     qap15
     rmine15
     s100

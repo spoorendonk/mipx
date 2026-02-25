@@ -175,9 +175,12 @@ for inst in "${instances[@]}"; do
     for ((r = 0; r < REPEATS; ++r)); do
         log_file="$(mktemp)"
         start_ns="$(date +%s%N)"
-        if ! "${BIN}" "${inst}" \
+        exit_code=0
+        "${BIN}" "${inst}" \
             "${SOLVER_ARGS[@]}" \
-            "${EXTRA_ARGS[@]}" >"${log_file}" 2>&1; then
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} >"${log_file}" 2>&1 \
+            || exit_code=$?
+        if [[ ${exit_code} -ne 0 ]]; then
             status="solve_error"
             rm -f "${log_file}"
             break

@@ -153,13 +153,16 @@ for name in "${sorted_names[@]}"; do
     for ((r = 0; r < REPEATS; ++r)); do
         log_file="$(mktemp)"
         start_ns="$(date +%s%N)"
-        if ! timeout "${TIME_LIMIT}" "${BIN}" "${inst}" "${EXTRA_ARGS[@]}" >"${log_file}" 2>&1; then
-            exit_code=$?
-            if [[ ${exit_code} -eq 124 ]]; then
-                status="time_limit"
-            else
-                status="solve_error"
-            fi
+        exit_code=0
+        timeout "${TIME_LIMIT}" "${BIN}" "${inst}" \
+            ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} >"${log_file}" 2>&1 \
+            || exit_code=$?
+        if [[ ${exit_code} -eq 124 ]]; then
+            status="time_limit"
+            rm -f "${log_file}"
+            break
+        elif [[ ${exit_code} -ne 0 ]]; then
+            status="solve_error"
             rm -f "${log_file}"
             break
         fi

@@ -31,9 +31,9 @@ SMALL_SET=(
     stein9inf
 )
 
-# MIPLIB 2017 benchmark set — the 240 instances used by Mittelman and others.
+# MIPLIB 2017 benchmark set used by Mittelman and others.
 # Source: https://miplib.zib.de/tag_benchmark.html
-# This is the official MIPLIB 2017 benchmark set used in Mittelman's MILP bench.
+# ~240 benchmark-tagged instances (exact count depends on MIPLIB version).
 BENCHMARK_SET=(
     10teams 30n20b8 a1c1s1 aflow30a aflow40b
     air04 air05 app1-2 arki001 ash608gpia-3col
@@ -121,7 +121,7 @@ MITTELMAN_SMALL=(
 usage() {
     echo "Usage: $0 [--small|--mittelman|--mittelman-small]"
     echo "  --small             Download only a small subset suitable for CI (12 instances)"
-    echo "  --mittelman         Download the 240 MIPLIB 2017 benchmark set (Mittelman MILP)"
+    echo "  --mittelman         Download the MIPLIB 2017 benchmark set (Mittelman MILP)"
     echo "  --mittelman-small   Download ~50 Mittelman-set instances solvable by HiGHS in <30min"
     echo "  (default)           Download full MIPLIB 2017 collection (~1065 instances)"
     exit 1

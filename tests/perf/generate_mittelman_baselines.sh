@@ -28,8 +28,8 @@ fi
 mkdir -p "${OUT_DIR}"
 
 # --- Mittelman-matching parameters ---
-# LP: 15000s time limit (we use 600s for baselines — enough for HiGHS)
-LP_TIME_LIMIT=600
+HIGHS_LP_TIME_LIMIT=600   # HiGHS is fast; 600s is plenty
+MIPX_LP_TIME_LIMIT=15000  # mipx needs full Mittelman limit
 LP_REPEATS=3
 
 # MIP: 7200s time limit, 8 threads (we use smaller subset for baselines)
@@ -52,7 +52,7 @@ if [[ "${HIGHS}" == "true" ]]; then
         --output "${HIGHS_LP_OUT}" \
         --repeats "${LP_REPEATS}" \
         --threads 1 \
-        --time-limit "${LP_TIME_LIMIT}" \
+        --time-limit "${HIGHS_LP_TIME_LIMIT}" \
         --solver simplex \
         --simplex-strategy 1 \
         --presolve choose 2>/dev/null || echo "Warning: HiGHS LP Mittelman baseline skipped (instances may be missing)"
@@ -66,7 +66,7 @@ if [[ "${HIGHS}" == "true" ]]; then
             --output "${HIGHS_LP_NETLIB}" \
             --repeats "${LP_REPEATS}" \
             --threads 1 \
-            --time-limit "${LP_TIME_LIMIT}" \
+            --time-limit "${HIGHS_LP_TIME_LIMIT}" \
             --solver simplex \
             --simplex-strategy 1 \
             --presolve choose 2>/dev/null || echo "Warning: HiGHS LP Netlib baseline skipped"
@@ -145,7 +145,7 @@ if [[ "${MIPX}" == "true" ]]; then
         --netlib-dir "${NETLIB_DIR}" \
         --output "${MIPX_LP_OUT}" \
         --repeats "${LP_REPEATS}" \
-        --time-limit "${LP_TIME_LIMIT}" \
+        --time-limit "${MIPX_LP_TIME_LIMIT}" \
         --solver-arg --quiet
 
     echo "=== Generating mipx Mittelman MIP baseline ==="
@@ -184,7 +184,7 @@ meta = {
     "python": sys.version.split()[0],
     "platform": platform.platform(),
     "benchmark_config": {
-        "lp_time_limit": 600,
+        "lp_time_limit": 15000,
         "lp_repeats": 3,
         "mip_time_limit": 7200,
         "mip_threads": 8,
