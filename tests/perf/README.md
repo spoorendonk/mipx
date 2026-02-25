@@ -9,6 +9,12 @@ Required CSV columns:
 Example:
 
 ```bash
+./tests/perf/run_netlib_lp_bench.sh \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --output /tmp/mipx_candidate.csv \
+  --repeats 3
+
 python3 tests/perf/check_regression.py \
   --baseline benchmarks/baseline_v1.csv \
   --candidate benchmarks/pr_step2.csv \

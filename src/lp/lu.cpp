@@ -165,6 +165,14 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     std::vector<Index> work_indices;
     work_indices.reserve(dim_);
 
+    // Reusable row update scratch to avoid per-row heap allocations.
+    std::vector<Index> row_entry_for_col(dim_, -1);
+    std::vector<Index> row_touched_cols;
+    row_touched_cols.reserve(dim_);
+
+    std::vector<std::pair<Index, Real>> rows_to_update;
+    rows_to_update.reserve(dim_);
+
     for (Index step = 0; step < dim_; ++step) {
         // ---- Markowitz pivot selection ----
         // Find pivot minimizing (row_nnz - 1) * (col_nnz - 1)
@@ -297,7 +305,7 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         }
 
         // Collect rows to update (from pivot column, excluding pivot row).
-        std::vector<std::pair<Index, Real>> rows_to_update;
+        rows_to_update.clear();
         for (Index eidx = col_head[pivot_col]; eidx >= 0;
              eidx = entries[eidx].next_in_col) {
             if (!entries[eidx].alive) continue;
@@ -317,48 +325,26 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         for (auto& [ri, aval] : rows_to_update) {
             Real mult = aval / pivot_val;
 
-            // Gather existing entries of row ri into a temporary map.
-            // We need to update: for each col c in pivot row, a(ri, c) -= mult * a(pivot_row, c).
-            // First, build a quick lookup of existing entries in row ri.
-            // We use the work vector approach: scan row ri entries for cols in work_indices.
-
-            // For each column in the pivot row, update the corresponding entry in row ri.
-            // First, mark which columns row ri already has entries for.
-            std::vector<Index> ri_entries;
+            // Build a temporary col->entry index map for this row, reused across rows.
+            row_touched_cols.clear();
             for (Index eidx = row_head[ri]; eidx >= 0;
                  eidx = entries[eidx].next_in_row) {
-                if (entries[eidx].alive && entries[eidx].col != pivot_col) {
-                    ri_entries.push_back(eidx);
-                }
-            }
-
-            // Build a col->entry_idx map for row ri.
-            // Use the work vector temporarily (we'll clean up).
-            // Actually, use a separate approach: scan row ri entries
-            // and for matching cols, update directly.
-
-            // Sparse-sparse update: for each col c in pivot row...
-            // Use a vector marking which cols we found.
-            std::vector<Real> ri_vals(dim_, 0.0);
-            std::vector<bool> ri_has(dim_, false);
-            std::vector<Index> ri_entry_for_col(dim_, -1);
-
-            for (Index eidx : ri_entries) {
+                if (!entries[eidx].alive || entries[eidx].col == pivot_col) continue;
                 Index c = entries[eidx].col;
-                ri_vals[c] = entries[eidx].val;
-                ri_has[c] = true;
-                ri_entry_for_col[c] = eidx;
+                row_entry_for_col[c] = eidx;
+                row_touched_cols.push_back(c);
             }
 
             for (Index c : work_indices) {
                 Real update_val = mult * work[c];
-                if (ri_has[c]) {
-                    Real new_val = ri_vals[c] - update_val;
+                Index row_entry = row_entry_for_col[c];
+                if (row_entry >= 0) {
+                    Real new_val = entries[row_entry].val - update_val;
                     if (std::abs(new_val) < kZeroTol) {
                         // Remove entry.
-                        removeEntry(ri_entry_for_col[c]);
+                        removeEntry(row_entry);
                     } else {
-                        entries[ri_entry_for_col[c]].val = new_val;
+                        entries[row_entry].val = new_val;
                     }
                 } else {
                     Real new_val = -update_val;
@@ -366,6 +352,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                         addEntry(ri, c, new_val);
                     }
                 }
+            }
+
+            for (Index c : row_touched_cols) {
+                row_entry_for_col[c] = -1;
             }
         }
 
@@ -516,7 +506,10 @@ void SparseLU::ftran(std::span<Real> rhs) const {
     // So x = E_n^{-1} * ... * E_1^{-1} * Q * U^{-1} * L^{-1} * P * b.
 
     // Step 1: w = P * b.
-    std::vector<Real> work(dim_);
+    if (static_cast<Index>(solve_work_.size()) < dim_) {
+        solve_work_.resize(dim_);
+    }
+    std::span<Real> work(solve_work_.data(), static_cast<std::size_t>(dim_));
     for (Index step = 0; step < dim_; ++step) {
         work[step] = rhs[row_perm_[step]];
     }
@@ -562,7 +555,10 @@ void SparseLU::btran(std::span<Real> rhs) const {
     applyFTTranspose(rhs);
 
     // Step 2: w = Q^T * rhs. w[step] = rhs[col_perm[step]].
-    std::vector<Real> work(dim_);
+    if (static_cast<Index>(solve_work_.size()) < dim_) {
+        solve_work_.resize(dim_);
+    }
+    std::span<Real> work(solve_work_.data(), static_cast<std::size_t>(dim_));
     for (Index step = 0; step < dim_; ++step) {
         work[step] = rhs[col_perm_[step]];
     }
@@ -604,7 +600,11 @@ void SparseLU::update(Index pivot_pos,
     // E^{-1} * x: x[pivot_pos] = (x[pivot_pos] - sum_{i!=p} d[i]*x[i]) / d[p]
 
     // Build the new column as a dense vector.
-    std::vector<Real> d(dim_, 0.0);
+    if (static_cast<Index>(update_work_.size()) < dim_) {
+        update_work_.resize(dim_);
+    }
+    std::fill(update_work_.begin(), update_work_.begin() + dim_, 0.0);
+    std::span<Real> d(update_work_.data(), static_cast<std::size_t>(dim_));
     for (Index k = 0; k < static_cast<Index>(indices.size()); ++k) {
         if (indices[k] < dim_) {
             d[indices[k]] = values[k];

@@ -99,6 +99,10 @@ private:
 
     Index num_updates_ = 0;
 
+    // Reusable dense scratch buffers for hot-path solves/updates.
+    mutable std::vector<Real> solve_work_;
+    std::vector<Real> update_work_;
+
     static constexpr Index kMaxUpdates = 100;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
