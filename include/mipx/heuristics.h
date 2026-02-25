@@ -125,6 +125,30 @@ protected:
         std::span<const Real> obj) const override;
 };
 
+/// RINS (Relaxation Induced Neighborhood Search)-style heuristic.
+/// Fix near-integral integer variables to rounded LP values and re-solve.
+class RinsHeuristic : public Heuristic {
+public:
+    /// Maximum LP iterations for the restricted subproblem solve.
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+
+    /// Agreement tolerance for fixing near-integral integer variables.
+    /// If |x - round(x)| <= tol, the variable is fixed to round(x).
+    void setAgreementTol(Real tol) { agreement_tol_ = tol; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "rins"; }
+
+private:
+    Int subproblem_iter_limit_ = 200;
+    Real agreement_tol_ = 1e-4;
+};
+
 /// Schedules and manages heuristic execution.
 class HeuristicScheduler {
 public:

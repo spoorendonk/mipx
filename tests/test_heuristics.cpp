@@ -288,6 +288,69 @@ TEST_CASE("Diving: respects backtrack limit", "[heuristics]") {
 }
 
 // ===========================================================================
+// RINS tests
+// ===========================================================================
+
+TEST_CASE("RinsHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(200);
+    rins.setAgreementTol(1.0);
+    auto result = rins.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+    CHECK_THAT(result->objective, WithinAbs(-7.0, 1e-6));
+}
+
+TEST_CASE("RinsHeuristic: respects incumbent cutoff", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(200);
+    rins.setAgreementTol(1.0);
+    auto result = rins.run(problem, lp, primals, -100.0);
+
+    CHECK(!result.has_value());
+}
+
+TEST_CASE("RinsHeuristic: LP state restored after run", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+
+    auto primals = lp.getPrimalValues();
+
+    RinsHeuristic rins;
+    rins.setSubproblemIterLimit(200);
+    rins.setAgreementTol(1.0);
+    rins.run(problem, lp, primals, kInf);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
+// ===========================================================================
 // HeuristicScheduler tests
 // ===========================================================================
 
