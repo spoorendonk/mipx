@@ -21,11 +21,14 @@ Generate and store HiGHS/highspy wall-clock baselines:
 
 ```bash
 ./tests/perf/generate_highspy_baselines.sh
+./tests/perf/generate_mipx_baselines.sh
 ```
 
 This writes:
 - `tests/perf/baselines/highspy_lp_netlib_small.csv`
 - `tests/perf/baselines/highspy_mip_miplib_small.csv`
+- `tests/perf/baselines/mipx_lp_netlib_small.csv`
+- `tests/perf/baselines/mipx_mip_miplib_small.csv`
 
 The MIP highspy baseline uses the stable small trio:
 `p0201,gt2,flugpl`.

@@ -3,6 +3,7 @@
 #include <exception>
 #include <string>
 #include <thread>
+#include <chrono>
 
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
@@ -135,7 +136,10 @@ int main(int argc, char* argv[]) {
 
             mipx::DualSimplexSolver solver;
             solver.load(working);
+            auto t0 = std::chrono::steady_clock::now();
             auto result = solver.solve();
+            auto t1 = std::chrono::steady_clock::now();
+            double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
 
             // Postsolve if needed.
             double obj = result.objective;
@@ -150,23 +154,35 @@ int main(int argc, char* argv[]) {
 
             std::fflush(stdout);  // flush LP solver's printf output before Logger write()
             log.log("\n");
+            const char* status_text = "Error";
             switch (result.status) {
                 case mipx::Status::Optimal:
+                    status_text = "Optimal";
                     log.log("Optimal: %.10e (%d iterations)\n", obj, result.iterations);
                     break;
                 case mipx::Status::Infeasible:
+                    status_text = "Infeasible";
                     log.log("Status: Infeasible\n");
                     break;
                 case mipx::Status::Unbounded:
+                    status_text = "Unbounded";
                     log.log("Status: Unbounded\n");
                     break;
                 case mipx::Status::IterLimit:
+                    status_text = "Iteration limit";
                     log.log("Status: Iteration limit\n");
                     break;
                 default:
+                    status_text = "Error";
                     log.log("Status: Error\n");
                     break;
             }
+            // Stable summary lines consumed by benchmark scripts.
+            log.log("Status: %s\n", status_text);
+            log.log("Objective: %.10e\n", obj);
+            log.log("Iterations: %d\n", result.iterations);
+            log.log("Work units: %.2f\n", result.work_units);
+            log.log("Time: %.2fs\n", solve_seconds);
         }
 
     } catch (const std::exception& e) {

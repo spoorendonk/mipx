@@ -159,6 +159,7 @@ Generate reproducible HiGHS/highspy wall-clock baselines:
 
 ```bash
 ./tests/perf/generate_highspy_baselines.sh
+./tests/perf/generate_mipx_baselines.sh
 ```
 
 Baselines are stored in `tests/perf/baselines/`.
