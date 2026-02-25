@@ -1,17 +1,18 @@
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <print>
 #include <string>
 #include <thread>
 
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
+#include "mipx/logger.h"
 #include "mipx/mip_solver.h"
 #include "mipx/presolve.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::println("Usage: mipx-solve <mps-file> [--threads N]");
+        std::fprintf(stdout, "Usage: mipx-solve <mps-file> [--threads N]\n");
         return 1;
     }
 
@@ -28,6 +29,7 @@ int main(int argc, char* argv[]) {
 
     try {
         auto lp = mipx::readMps(filename);
+        mipx::Logger log;
 
         if (lp.hasIntegers()) {
             // MIP solve — MipSolver prints its own banner.
@@ -37,49 +39,38 @@ int main(int argc, char* argv[]) {
             auto result = solver.solve();
 
             switch (result.status) {
-                case mipx::Status::Optimal:
-                    std::println("Status: Optimal");
-                    break;
-                case mipx::Status::Infeasible:
-                    std::println("Status: Infeasible");
-                    break;
-                case mipx::Status::Unbounded:
-                    std::println("Status: Unbounded");
-                    break;
-                case mipx::Status::NodeLimit:
-                    std::println("Status: Node limit");
-                    break;
-                case mipx::Status::TimeLimit:
-                    std::println("Status: Time limit");
-                    break;
-                default:
-                    std::println("Status: Error");
-                    break;
+                case mipx::Status::Optimal:    log.log("Status: Optimal\n"); break;
+                case mipx::Status::Infeasible: log.log("Status: Infeasible\n"); break;
+                case mipx::Status::Unbounded:  log.log("Status: Unbounded\n"); break;
+                case mipx::Status::NodeLimit:  log.log("Status: Node limit\n"); break;
+                case mipx::Status::TimeLimit:  log.log("Status: Time limit\n"); break;
+                default:                       log.log("Status: Error\n"); break;
             }
-            std::println("Objective: {:.10e}", result.objective);
-            std::println("Nodes: {}", result.nodes);
-            std::println("LP iterations: {}", result.lp_iterations);
-            std::println("Time: {:.2f}s", result.time_seconds);
+            log.log("Objective: %.10e\n", result.objective);
+            log.log("Nodes: %d\n", result.nodes);
+            log.log("LP iterations: %d\n", result.lp_iterations);
+            log.log("Time: %.2fs\n", result.time_seconds);
         } else {
             // LP solve — print banner from CLI.
-            std::println("mipx v0.3");
+            log.log("mipx v0.3\n");
 
             unsigned logical = std::thread::hardware_concurrency();
-            std::string capabilities;
+            const char* tbb_str = "";
+            const char* simd_str = "";
 #ifdef MIPX_HAS_TBB
-            capabilities += ", TBB";
+            tbb_str = ", TBB";
 #endif
 #ifdef __AVX512F__
-            capabilities += ", AVX-512";
+            simd_str = ", AVX-512";
 #elif defined(__AVX2__)
-            capabilities += ", AVX2";
+            simd_str = ", AVX2";
 #elif defined(__AVX__)
-            capabilities += ", AVX";
+            simd_str = ", AVX";
 #elif defined(__SSE4_2__)
-            capabilities += ", SSE4.2";
+            simd_str = ", SSE4.2";
 #endif
-            std::println("Thread count: {} logical processors, using up to 1 thread{}",
-                         logical, capabilities);
+            log.log("Thread count: %u logical processors, using up to 1 thread%s%s\n",
+                     logical, tbb_str, simd_str);
 
             // Presolve.
             mipx::Presolver presolver;
@@ -92,18 +83,17 @@ int main(int argc, char* argv[]) {
                 working = lp;
             }
 
-            std::println("Solving LP with:");
-            std::println("  {} rows, {} cols, {} nonzeros",
-                         working.num_rows, working.num_cols,
-                         working.matrix.numNonzeros());
-            std::println("");
+            log.log("Solving LP with:\n");
+            log.log("  %d rows, %d cols, %d nonzeros\n",
+                     working.num_rows, working.num_cols,
+                     working.matrix.numNonzeros());
+            log.log("\n");
 
             if (did_presolve) {
-                std::println("Presolve: {} vars removed, {} rows removed, "
-                             "{} bounds tightened, {} rounds",
-                             stats.vars_removed, stats.rows_removed,
-                             stats.bounds_tightened, stats.rounds);
-                std::println("");
+                log.log("Presolve: %d vars removed, %d rows removed, "
+                         "%d bounds tightened, %d rounds\n\n",
+                         stats.vars_removed, stats.rows_removed,
+                         stats.bounds_tightened, stats.rounds);
             }
 
             mipx::DualSimplexSolver solver;
@@ -115,38 +105,34 @@ int main(int argc, char* argv[]) {
             if (did_presolve && result.status == mipx::Status::Optimal) {
                 auto primals = solver.getPrimalValues();
                 auto postsolved = presolver.postsolve(primals);
-                // Recompute objective from original problem.
                 obj = lp.obj_offset;
                 for (mipx::Index j = 0; j < lp.num_cols; ++j) {
                     obj += lp.obj[j] * postsolved[j];
                 }
-                if (lp.sense == mipx::Sense::Maximize) {
-                    // obj is already in original sense from postsolve
-                }
             }
 
-            std::println("");
+            log.log("\n");
             switch (result.status) {
                 case mipx::Status::Optimal:
-                    std::println("Optimal: {:.10e} ({} iterations)", obj, result.iterations);
+                    log.log("Optimal: %.10e (%d iterations)\n", obj, result.iterations);
                     break;
                 case mipx::Status::Infeasible:
-                    std::println("Status: Infeasible");
+                    log.log("Status: Infeasible\n");
                     break;
                 case mipx::Status::Unbounded:
-                    std::println("Status: Unbounded");
+                    log.log("Status: Unbounded\n");
                     break;
                 case mipx::Status::IterLimit:
-                    std::println("Status: Iteration limit");
+                    log.log("Status: Iteration limit\n");
                     break;
                 default:
-                    std::println("Status: Error");
+                    log.log("Status: Error\n");
                     break;
             }
         }
 
     } catch (const std::exception& e) {
-        std::println(stderr, "Error: {}", e.what());
+        std::fprintf(stderr, "Error: %s\n", e.what());
         return 1;
     }
 

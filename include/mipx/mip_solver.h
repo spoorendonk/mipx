@@ -13,6 +13,7 @@
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
+#include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
 
@@ -138,6 +139,7 @@ private:
     bool cuts_enabled_ = true;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     MipLpStats lp_stats_{};
+    mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
