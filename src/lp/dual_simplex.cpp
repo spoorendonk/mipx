@@ -464,17 +464,32 @@ LpResult DualSimplexSolver::solve() {
         augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
     }
 
-    // Set up initial basis.
-    setupInitialBasis();
+    // Reset iteration counter for this solve call.
+    iterations_ = 0;
 
-    // Factorize initial basis (all slacks => B = -I).
+    if (!has_basis_) {
+        // Cold start: set up initial all-slack basis.
+        setupInitialBasis();
+    } else if (scaled_) {
+        // Warm-start: re-scale nonbasic primal values that were unscaled
+        // by unscaleResults() at the end of the previous solve.
+        for (Index k : nonbasic_) {
+            if (k < num_cols_) {
+                primal_[k] /= col_scale_[k];
+            } else {
+                primal_[k] *= row_scale_[k - num_cols_];
+            }
+        }
+    }
+
+    // Factorize basis.
     refactorize();
 
-    // Compute initial primal and dual values.
+    // Compute primal and dual values from the basis.
     computePrimals();
     computeDuals();
 
-    // Ensure initial dual feasibility by cost shifting.
+    // Cost shifting for dual feasibility (Phase 1).
     // With all-slack basis: y = 0, so rc_j = c_j for structural vars, rc_{n+i} = 0 for slacks.
     // For nonbasic structural at lower: need rc >= -dualTol => c_j >= -dualTol
     // For nonbasic structural at upper: need rc <= dualTol  => c_j <= dualTol
@@ -1120,6 +1135,9 @@ LpResult DualSimplexSolver::solve() {
         status_ = Status::IterLimit;
     }
 
+    // Mark basis as available for warm-start.
+    has_basis_ = true;
+
     // Final log.
     {
         Real obj_val = 0.0;
@@ -1190,18 +1208,26 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     // External basis: first num_cols are structural, next num_rows are slacks.
     if (static_cast<Index>(basis.size()) != numVars()) return;
 
+    // Ensure solution vectors are allocated.
+    Index n = numVars();
+    var_status_.resize(n);
+    primal_.resize(n, 0.0);
+    dual_.resize(num_rows_, 0.0);
+    reduced_cost_.resize(n, 0.0);
+    devex_weights_.assign(num_rows_, 1.0);
+    devex_reset_count_ = 0;
+
     basis_.clear();
     nonbasic_.clear();
-    basis_pos_.assign(numVars(), -1);
+    basis_pos_.assign(n, -1);
 
-    for (Index k = 0; k < numVars(); ++k) {
+    for (Index k = 0; k < n; ++k) {
         var_status_[k] = basis[k];
         if (basis[k] == BasisStatus::Basic) {
             basis_pos_[k] = static_cast<Index>(basis_.size());
             basis_.push_back(k);
         } else {
             nonbasic_.push_back(k);
-            // Set primal value based on status.
             if (basis[k] == BasisStatus::AtLower || basis[k] == BasisStatus::Fixed) {
                 primal_[k] = varLower(k);
             } else if (basis[k] == BasisStatus::AtUpper) {
@@ -1211,36 +1237,206 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
             }
         }
     }
+    has_basis_ = true;
 }
 
 // ---------------------------------------------------------------------------
-//  Stub implementations for Step 8
+//  Incremental modifications (Step 8)
 // ---------------------------------------------------------------------------
+
+void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
+    if (!loaded_ || col < 0 || col >= num_cols_) return;
+
+    // Apply scaling: internal bounds = external / col_scale.
+    Real scale = scaled_ ? col_scale_[col] : 1.0;
+    Real int_lower = (lower == -kInf) ? -kInf : lower / scale;
+    Real int_upper = (upper == kInf) ? kInf : upper / scale;
+
+    col_lower_[col] = int_lower;
+    col_upper_[col] = int_upper;
+
+    // If we have a basis, update the nonbasic variable's status/value.
+    if (has_basis_) {
+        BasisStatus st = var_status_[col];
+        if (st != BasisStatus::Basic) {
+            if (int_lower != -kInf && int_upper != kInf &&
+                std::abs(int_lower - int_upper) < kZeroTol) {
+                var_status_[col] = BasisStatus::Fixed;
+                primal_[col] = int_lower;
+            } else if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
+                if (int_lower != -kInf) {
+                    primal_[col] = int_lower;
+                    var_status_[col] = BasisStatus::AtLower;
+                } else if (int_upper != kInf) {
+                    primal_[col] = int_upper;
+                    var_status_[col] = BasisStatus::AtUpper;
+                } else {
+                    primal_[col] = 0.0;
+                    var_status_[col] = BasisStatus::Free;
+                }
+            } else if (st == BasisStatus::AtUpper) {
+                if (int_upper != kInf) {
+                    primal_[col] = int_upper;
+                } else if (int_lower != -kInf) {
+                    primal_[col] = int_lower;
+                    var_status_[col] = BasisStatus::AtLower;
+                } else {
+                    primal_[col] = 0.0;
+                    var_status_[col] = BasisStatus::Free;
+                }
+            }
+        }
+        // If basic, the value may now violate bounds — dual simplex handles this.
+    }
+}
+
+void DualSimplexSolver::setObjective(std::span<const Real> obj) {
+    if (!loaded_ || static_cast<Index>(obj.size()) != num_cols_) return;
+
+    for (Index j = 0; j < num_cols_; ++j) {
+        Real c = obj[j];
+        if (sense_ == Sense::Maximize) c = -c;
+        if (scaled_) c *= col_scale_[j];
+        obj_[j] = c;
+    }
+}
 
 void DualSimplexSolver::addRows(
-    [[maybe_unused]] std::span<const Index> starts,
-    [[maybe_unused]] std::span<const Index> indices,
-    [[maybe_unused]] std::span<const Real> values,
-    [[maybe_unused]] std::span<const Real> lower,
-    [[maybe_unused]] std::span<const Real> upper) {
-    // Stub: will be implemented in Step 8 (warm-start modifications).
+    std::span<const Index> starts,
+    std::span<const Index> indices,
+    std::span<const Real> values,
+    std::span<const Real> lower,
+    std::span<const Real> upper) {
+    if (!loaded_) return;
+
+    Index num_new = static_cast<Index>(lower.size());
+    if (num_new == 0) return;
+
+    Index old_rows = num_rows_;
+    Index old_vars = numVars();
+    num_rows_ += num_new;
+
+    // Extend row bounds.
+    for (Index i = 0; i < num_new; ++i) {
+        row_lower_.push_back(lower[i]);
+        row_upper_.push_back(upper[i]);
+    }
+
+    // Extend scaling factors (new rows get scale = 1.0).
+    if (scaled_) {
+        row_scale_.resize(num_rows_, 1.0);
+    }
+
+    // Build new constraint matrix with added rows.
+    std::vector<Triplet> triplets;
+    triplets.reserve(matrix_.numNonzeros() + static_cast<Index>(values.size()));
+
+    for (Index i = 0; i < old_rows; ++i) {
+        auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            triplets.push_back({i, rv.indices[k], rv.values[k]});
+        }
+    }
+
+    for (Index i = 0; i < num_new; ++i) {
+        Index row = old_rows + i;
+        Index start = starts[i];
+        Index end = (i + 1 < num_new) ? starts[i + 1]
+                                      : static_cast<Index>(values.size());
+        for (Index p = start; p < end; ++p) {
+            if (std::abs(values[p]) > kZeroTol) {
+                triplets.push_back({row, indices[p], values[p]});
+            }
+        }
+    }
+    matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+
+    // Extend basis: new slack variables enter as basic.
+    Index new_total = numVars();
+    basis_pos_.resize(new_total, -1);
+    var_status_.resize(new_total);
+    primal_.resize(new_total);
+    reduced_cost_.resize(new_total, 0.0);
+    dual_.resize(num_rows_, 0.0);
+    devex_weights_.resize(num_rows_, 1.0);
+
+    for (Index i = 0; i < num_new; ++i) {
+        Index slack = old_vars + i;
+        basis_.push_back(slack);
+        basis_pos_[slack] = old_rows + i;
+        var_status_[slack] = BasisStatus::Basic;
+
+        // Slack value = activity of new row.
+        Real activity = 0.0;
+        Index start = starts[i];
+        Index end = (i + 1 < num_new) ? starts[i + 1]
+                                      : static_cast<Index>(values.size());
+        for (Index p = start; p < end; ++p) {
+            activity += values[p] * primal_[indices[p]];
+        }
+        primal_[slack] = activity;
+    }
+
+    has_basis_ = true;
 }
 
-void DualSimplexSolver::removeRows(
-    [[maybe_unused]] std::span<const Index> rows) {
-    // Stub: will be implemented in Step 8.
-}
+void DualSimplexSolver::removeRows(std::span<const Index> rows) {
+    if (!loaded_ || rows.empty()) return;
 
-void DualSimplexSolver::setColBounds(
-    [[maybe_unused]] Index col,
-    [[maybe_unused]] Real lower,
-    [[maybe_unused]] Real upper) {
-    // Stub: will be implemented in Step 8.
-}
+    std::vector<Index> sorted_rows(rows.begin(), rows.end());
+    std::sort(sorted_rows.begin(), sorted_rows.end());
 
-void DualSimplexSolver::setObjective(
-    [[maybe_unused]] std::span<const Real> obj) {
-    // Stub: will be implemented in Step 8.
+    // Build row mapping: old row -> new row (-1 if removed).
+    std::vector<Index> row_map(num_rows_, 0);
+    Index removed = 0;
+    Index ri = 0;
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (ri < static_cast<Index>(sorted_rows.size()) &&
+            sorted_rows[ri] == i) {
+            row_map[i] = -1;
+            ++removed;
+            ++ri;
+        } else {
+            row_map[i] = i - removed;
+        }
+    }
+
+    Index new_rows = num_rows_ - removed;
+
+    // Rebuild matrix without removed rows.
+    std::vector<Triplet> triplets;
+    triplets.reserve(matrix_.numNonzeros());
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (row_map[i] < 0) continue;
+        auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            triplets.push_back({row_map[i], rv.indices[k], rv.values[k]});
+        }
+    }
+
+    // Compact row bounds and scaling.
+    std::vector<Real> new_row_lower, new_row_upper;
+    std::vector<Real> new_row_scale;
+    new_row_lower.reserve(new_rows);
+    new_row_upper.reserve(new_rows);
+    if (scaled_) new_row_scale.reserve(new_rows);
+
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (row_map[i] < 0) continue;
+        new_row_lower.push_back(row_lower_[i]);
+        new_row_upper.push_back(row_upper_[i]);
+        if (scaled_) new_row_scale.push_back(row_scale_[i]);
+    }
+
+    num_rows_ = new_rows;
+    row_lower_ = std::move(new_row_lower);
+    row_upper_ = std::move(new_row_upper);
+    if (scaled_) row_scale_ = std::move(new_row_scale);
+    matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+
+    // After removing rows, the basis is invalidated (slack renumbering).
+    // Trigger cold start on next solve.
+    has_basis_ = false;
 }
 
 }  // namespace mipx

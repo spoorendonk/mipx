@@ -6,6 +6,7 @@ add_executable(mipx-tests
     test_lp_solver.cpp
     test_lu.cpp
     test_dual_simplex.cpp
+    test_incremental.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
