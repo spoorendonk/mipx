@@ -29,6 +29,7 @@ struct DualSimplexOptions {
 
     // SIP-style parallel candidate scan (CHUZC), guarded and off by default.
     bool enable_sip_parallel_candidates = false;
+    bool enable_sip_parallel_dual_scan = false;
     Int sip_parallel_min_nonbasic = 4096;
     Int sip_parallel_grain = 512;
 

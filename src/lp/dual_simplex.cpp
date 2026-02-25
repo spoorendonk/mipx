@@ -760,16 +760,77 @@ LpResult DualSimplexSolver::solve() {
             // No cost shifts active. Check dual feasibility.
             Index entering_p = -1;
             Real worst_rc = 0.0;
-            for (Index k : nonbasic_) {
-                Real rc = reduced_cost_[k];
-                BasisStatus st = var_status_[k];
-                bool dual_inf =
-                    (st == BasisStatus::AtLower && rc < -kDualTol) ||
-                    (st == BasisStatus::AtUpper && rc > kDualTol) ||
-                    (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
-                    worst_rc = rc;
-                    entering_p = k;
+            Index nnb = static_cast<Index>(nonbasic_.size());
+
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_dual_scan &&
+                nnb >= options_.sip_parallel_min_nonbasic &&
+                options_.sip_parallel_grain > 0) {
+                struct DualScanBest {
+                    Index var = -1;
+                    Index pos = -1;
+                    Real rc = 0.0;
+                    Real abs_rc = 0.0;
+                };
+                auto better = [](const DualScanBest& a, const DualScanBest& b) {
+                    if (a.var < 0) return false;
+                    if (b.var < 0) return true;
+                    if (a.abs_rc > b.abs_rc) return true;
+                    if (a.abs_rc < b.abs_rc) return false;
+                    return a.pos < b.pos;  // deterministic tie-break
+                };
+
+                tbb::enumerable_thread_specific<DualScanBest> locals;
+                const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
+                tbb::parallel_for(tbb::blocked_range<Index>(0, nnb, grain),
+                                  [&](const tbb::blocked_range<Index>& range) {
+                    DualScanBest local;
+                    for (Index pos = range.begin(); pos < range.end(); ++pos) {
+                        Index k = nonbasic_[pos];
+                        Real rc = reduced_cost_[k];
+                        BasisStatus st = var_status_[k];
+                        bool dual_inf =
+                            (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                            (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                            (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                        if (!dual_inf) continue;
+                        DualScanBest cand{k, pos, rc, std::abs(rc)};
+                        if (better(cand, local)) {
+                            local = cand;
+                        }
+                    }
+                    if (local.var >= 0) {
+                        auto& slot = locals.local();
+                        if (better(local, slot)) {
+                            slot = local;
+                        }
+                    }
+                });
+
+                DualScanBest best;
+                for (const auto& local : locals) {
+                    if (better(local, best)) {
+                        best = local;
+                    }
+                }
+                if (best.var >= 0) {
+                    entering_p = best.var;
+                    worst_rc = best.rc;
+                }
+            } else
+#endif
+            {
+                for (Index k : nonbasic_) {
+                    Real rc = reduced_cost_[k];
+                    BasisStatus st = var_status_[k];
+                    bool dual_inf =
+                        (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                        (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                        (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                    if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
+                        worst_rc = rc;
+                        entering_p = k;
+                    }
                 }
             }
 
