@@ -6,6 +6,7 @@
 #include <chrono>
 
 #include "mipx/dual_simplex.h"
+#include "mipx/barrier.h"
 #include "mipx/io.h"
 #include "mipx/logger.h"
 #include "mipx/mip_solver.h"
@@ -16,7 +17,8 @@ int main(int argc, char* argv[]) {
         std::fprintf(stdout,
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-            "[--no-presolve|--presolve] [--verbose|--quiet]\n");
+            "[--no-presolve|--presolve] [--barrier|--dual] "
+            "[--gpu|--no-gpu] [--verbose|--quiet]\n");
         return 1;
     }
 
@@ -28,6 +30,8 @@ int main(int argc, char* argv[]) {
     bool verbose = true;
     bool presolve = true;
     bool cuts_enabled = true;
+    bool use_barrier = false;
+    bool barrier_gpu = true;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -52,6 +56,14 @@ int main(int argc, char* argv[]) {
             verbose = true;
         } else if (arg == "--quiet") {
             verbose = false;
+        } else if (arg == "--barrier") {
+            use_barrier = true;
+        } else if (arg == "--dual") {
+            use_barrier = false;
+        } else if (arg == "--gpu") {
+            barrier_gpu = true;
+        } else if (arg == "--no-gpu") {
+            barrier_gpu = false;
         } else {
             std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
             return 1;
@@ -72,6 +84,10 @@ int main(int argc, char* argv[]) {
             solver.setVerbose(verbose);
             solver.setPresolve(presolve);
             solver.setCutsEnabled(cuts_enabled);
+            solver.setRootLpPolicy(use_barrier
+                ? mipx::RootLpPolicy::BarrierRoot
+                : mipx::RootLpPolicy::DualDefault);
+            solver.setBarrierUseGpu(barrier_gpu);
             solver.load(lp);
             auto result = solver.solve();
 
@@ -143,17 +159,36 @@ int main(int argc, char* argv[]) {
                          stats.rows_examined, stats.cols_examined);
             }
 
-            mipx::DualSimplexSolver solver;
-            solver.load(working);
             auto t0 = std::chrono::steady_clock::now();
-            auto result = solver.solve();
+            mipx::LpResult result;
+            std::vector<mipx::Real> primals;
+            bool used_gpu_backend = false;
+            if (use_barrier) {
+                mipx::BarrierSolver solver;
+                mipx::BarrierOptions bopts;
+                bopts.verbose = verbose;
+                bopts.use_gpu = barrier_gpu;
+                solver.setOptions(bopts);
+                solver.load(working);
+                result = solver.solve();
+                primals = solver.getPrimalValues();
+                used_gpu_backend = solver.usedGpu();
+            } else {
+                mipx::DualSimplexSolver solver;
+                solver.load(working);
+                result = solver.solve();
+                primals = solver.getPrimalValues();
+            }
             auto t1 = std::chrono::steady_clock::now();
             double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
+
+            if (use_barrier && verbose) {
+                log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
+            }
 
             // Postsolve if needed.
             double obj = result.objective;
             if (did_presolve && result.status == mipx::Status::Optimal) {
-                auto primals = solver.getPrimalValues();
                 auto postsolved = presolver.postsolve(primals);
                 obj = lp.obj_offset;
                 for (mipx::Index j = 0; j < lp.num_cols; ++j) {

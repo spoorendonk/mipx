@@ -5,6 +5,7 @@ add_library(mipx STATIC
     lp/lp_solver.cpp
     lp/lu.cpp
     lp/dual_simplex.cpp
+    lp/barrier.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
     io/lp_reader.cpp
@@ -30,6 +31,11 @@ target_link_libraries(mipx PUBLIC ZLIB::ZLIB)
 if(MIPX_USE_TBB)
     target_link_libraries(mipx PUBLIC TBB::tbb)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_TBB)
+endif()
+
+if(MIPX_USE_CUDA)
+    target_link_libraries(mipx PUBLIC CUDA::cudart CUDA::cusparse)
+    target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDA)
 endif()
 
 mipx_set_compiler_flags(mipx)
