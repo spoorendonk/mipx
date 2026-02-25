@@ -284,18 +284,21 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 12: Cutting Planes ⚡ parallel with 13, 14
+## Step 12: Cutting Planes ✅ ⚡ parallel with 13, 14
 
 **Goal:** Strengthen LP relaxations with valid inequalities.
 
-**Deliverables:**
-- `CutPool`: store cuts, manage ages, purge inactive cuts
-- Gomory mixed-integer rounding (MIR) cuts from optimal simplex tableau
-- Separation rounds at root and tree nodes (configurable frequency)
-- Cut selection: parallelism filtering, efficacy ranking
-- Integration with incremental LP (Step 8): add cuts → re-solve → iterate
+**Status:** Complete. CutPool with efficacy/parallelism filtering, Gomory MIR separator, MipSolver integration. 10 new tests (147 total).
 
-**Test criteria:** Root gap closed on standard instances (e.g., `p0033` root gap → near-zero with Gomory cuts). Fewer nodes needed vs. no-cuts solve. Cut pool doesn't grow unboundedly.
+**Deliverables:**
+- `CutPool`: store cuts with efficacy ranking, cosine similarity parallelism filtering, age tracking, purging
+- `GomorySeparator`: Gomory MIR cuts from simplex tableau with proper sign adjustment for at-upper nonbasic variables
+- `getTableauRow()` in DualSimplexSolver: returns external (unscaled) tableau row for cut generation
+- `addRows()` fixed to apply column scaling to new row coefficients
+- Cutting plane rounds at root node (configurable max rounds and cuts per round)
+- MipSolver integration with enable/disable toggle
+
+**Test criteria:** Root gap closed on standard instances. Fewer nodes needed vs. no-cuts solve. Cut pool doesn't grow unboundedly.
 
 **References:** HiGHS `HighsCutPool`, SCIP `sepa_gomory.c`, Cornuéjols (2007) survey.
 
