@@ -6,6 +6,17 @@ Required CSV columns:
 - `instance`
 - metric column (default `work_units`)
 
+Full LP+MIP gate example (single command):
+
+```bash
+./tests/perf/run_full_gate.sh \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --solver-arg --quiet
+```
+
 LP example (Netlib, gate on `work_units`):
 
 ```bash
@@ -31,8 +42,8 @@ MIP example (MIPLIB, gate on `work_units`):
   --output /tmp/mipx_mip_candidate.csv \
   --repeats 1 \
   --threads 1 \
-  --time-limit 60 \
-  --instances air04,gt2,flugpl \
+  --time-limit 30 \
+  --instances p0201,pk1,gt2 \
   --solver-arg --quiet
 
 python3 tests/perf/check_regression.py \

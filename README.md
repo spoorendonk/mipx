@@ -120,6 +120,16 @@ Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
 # Download datasets (small sets recommended for local gating)
 ./tests/data/download_test_instances.sh
 
+# Full LP+MIP gate (strict: 0% median regression by default)
+./tests/perf/run_full_gate.sh \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --solver-arg --quiet
+
+# Optional: run LP/MIP gates separately
+
 # LP gate input (Netlib)
 ./tests/perf/run_netlib_lp_bench.sh \
   --binary ./build/mipx-solve \
@@ -135,8 +145,8 @@ Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
   --output /tmp/miplib_candidate.csv \
   --repeats 1 \
   --threads 1 \
-  --time-limit 60 \
-  --instances air04,gt2,flugpl \
+  --time-limit 30 \
+  --instances p0201,pk1,gt2 \
   --solver-arg --quiet
 
 # Regression check (default metric is work_units)
