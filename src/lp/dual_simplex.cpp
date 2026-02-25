@@ -648,7 +648,7 @@ LpResult DualSimplexSolver::solve() {
         Index leaving_row = -1;
         Real max_score = 0.0;
 
-        for (Index i = 0; i < num_rows_; ++i) {
+        auto scoreRow = [&](Index i) -> Real {
             Index k = basis_[i];
             Real xk = primal_[k];
             Real lb = varLower(k);
@@ -659,7 +659,62 @@ LpResult DualSimplexSolver::solve() {
             else if (xk > ub + kPrimalTol) viol = xk - ub;
 
             if (viol > kPrimalTol) {
-                Real score = viol * viol / devex_weights_[i];
+                return viol * viol / devex_weights_[i];
+            }
+            return 0.0;
+        };
+
+#ifdef MIPX_HAS_TBB
+        if (options_.enable_sip_parallel_chuzr &&
+            num_rows_ >= options_.sip_parallel_min_rows &&
+            options_.sip_parallel_row_grain > 0) {
+            struct ChuzrBest {
+                Index row = -1;
+                Real score = 0.0;
+            };
+            auto better = [](const ChuzrBest& a, const ChuzrBest& b) {
+                if (a.row < 0) return false;
+                if (b.row < 0) return true;
+                if (a.score > b.score) return true;
+                if (a.score < b.score) return false;
+                return a.row < b.row;  // deterministic tie-break
+            };
+
+            tbb::enumerable_thread_specific<ChuzrBest> locals;
+            const Index grain = std::max<Index>(1, options_.sip_parallel_row_grain);
+            tbb::parallel_for(tbb::blocked_range<Index>(0, num_rows_, grain),
+                              [&](const tbb::blocked_range<Index>& range) {
+                ChuzrBest local;
+                for (Index i = range.begin(); i < range.end(); ++i) {
+                    Real score = scoreRow(i);
+                    if (score > 0.0) {
+                        ChuzrBest cand{i, score};
+                        if (better(cand, local)) {
+                            local = cand;
+                        }
+                    }
+                }
+                if (local.row >= 0) {
+                    auto& slot = locals.local();
+                    if (better(local, slot)) {
+                        slot = local;
+                    }
+                }
+            });
+
+            for (const auto& local : locals) {
+                if (local.score > max_score ||
+                    (local.score == max_score && local.row >= 0 &&
+                     (leaving_row < 0 || local.row < leaving_row))) {
+                    max_score = local.score;
+                    leaving_row = local.row;
+                }
+            }
+        } else
+#endif
+        {
+            for (Index i = 0; i < num_rows_; ++i) {
+                Real score = scoreRow(i);
                 if (score > max_score) {
                     max_score = score;
                     leaving_row = i;

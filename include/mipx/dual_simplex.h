@@ -31,6 +31,11 @@ struct DualSimplexOptions {
     bool enable_sip_parallel_candidates = false;
     Int sip_parallel_min_nonbasic = 4096;
     Int sip_parallel_grain = 512;
+
+    // SIP-style parallel leaving-row scan (CHUZR), guarded and off by default.
+    bool enable_sip_parallel_chuzr = false;
+    Int sip_parallel_min_rows = 2048;
+    Int sip_parallel_row_grain = 256;
 };
 
 class DualSimplexSolver : public LpSolver {
