@@ -145,6 +145,8 @@ private:
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
+    static constexpr Int kPartialPricingChunkMin = 512;
+    static constexpr Int kPartialPricingFullScanFreq = 25;
 
     // Deterministic work counter.
     WorkUnits work_;
