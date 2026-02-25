@@ -16,6 +16,8 @@ add_library(mipx STATIC
     heuristics/rounding.cpp
     heuristics/diving.cpp
     heuristics/rins.cpp
+    heuristics/rens.cpp
+    heuristics/feaspump.cpp
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp

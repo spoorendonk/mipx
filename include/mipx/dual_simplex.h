@@ -73,6 +73,8 @@ public:
     void setObjective(std::span<const Real> obj) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+    [[nodiscard]] Int getIterationLimit() const { return iter_limit_; }
+    void getColBounds(Index col, Real& lower, Real& upper) const;
     void setVerbose(bool v) { verbose_ = v; }
     void setOptions(const DualSimplexOptions& options) { options_ = options; }
     [[nodiscard]] const DualSimplexOptions& getOptions() const { return options_; }

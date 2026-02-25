@@ -347,15 +347,27 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 14: Primal Heuristics ⚡ parallel with 12, 13
+## Step 14: Primal Heuristics ✅ ⚡ parallel with 12, 13
 
 **Goal:** Find feasible solutions faster.
+
+**Status:** Complete. Root/tree heuristic portfolio integrated with conservative activation and strict work-units gate compatibility.
 
 **Deliverables:**
 - Rounding heuristic: round LP solution, check feasibility
 - Diving heuristics: fractional diving, coefficient diving, guided diving
-- RINS (Relaxation Induced Neighborhood Search): fix variables agreed upon by LP and incumbent, solve sub-MIP
+- RINS (Relaxation Induced Neighborhood Search): incumbent-guided agreement fixing, periodic in-tree scheduling, fixed-count diagnostics
+- RENS (Relaxation Enforced Neighborhood Search): LP-neighborhood fixing without incumbent
+- Feasibility Pump (lightweight): round + guided LP repair loop with cycle perturbation
 - Heuristic scheduler: run at root, periodically in tree, after incumbent improvement
+- MIP solver integration:
+  - Root portfolio: rounding -> feasibility pump -> RENS -> RINS (gated by root integer infeasibility/size thresholds)
+  - Tree portfolio: periodic RINS on promising fractional nodes with incumbent and relative-gap gating
+  - LP state hygiene: bounds/objective/iteration-limit/basis restoration around heuristic subsolves
+  - Instrumentation: per-heuristic LP iterations/work units and skip reasons for tuning
+- Regression hardening:
+  - Tight default RINS/RENS/FeasPump budgets and activation thresholds to protect branch-and-bound throughput
+  - `tests/perf/run_full_gate.sh` (metric `work_units`, default 0% regression allowance) used as required gate for heuristic tuning
 
 **Test criteria:** Heuristics find incumbent earlier (fewer nodes to first feasible). Solution quality comparable to optimal. Time overhead acceptable.
 

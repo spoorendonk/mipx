@@ -1640,6 +1640,17 @@ void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
     }
 }
 
+void DualSimplexSolver::getColBounds(Index col, Real& lower, Real& upper) const {
+    if (!loaded_ || col < 0 || col >= num_cols_) {
+        lower = -kInf;
+        upper = kInf;
+        return;
+    }
+    Real scale = scaled_ ? col_scale_[col] : 1.0;
+    lower = (col_lower_[col] == -kInf) ? -kInf : col_lower_[col] * scale;
+    upper = (col_upper_[col] == kInf) ? kInf : col_upper_[col] * scale;
+}
+
 void DualSimplexSolver::setObjective(std::span<const Real> obj) {
     if (!loaded_ || static_cast<Index>(obj.size()) != num_cols_) return;
 
