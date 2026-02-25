@@ -4,6 +4,8 @@
 #include <cmath>
 #include <functional>
 #include <print>
+#include <thread>
+#include <unordered_map>
 
 #include "mipx/cut_pool.h"
 #include "mipx/gomory.h"
@@ -56,47 +58,90 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              Real& node_obj_out,
                              std::vector<Real>& node_primals_out,
                              Int& node_iters_out,
-                             double& node_work_out) {
+                             double& node_work_out,
+                             std::vector<Real>& current_lower,
+                             std::vector<Real>& current_upper,
+                             std::vector<Index>& touched_vars,
+                             NodeWorkStats& node_stats) {
     children_out.clear();
     node_iters_out = 0;
     node_work_out = 0.0;
+    ++node_stats.nodes_solved;
 
     // Skip if pruned by bound (might have changed since pop).
     if (incumbent_snapshot < kInf && node.lp_bound >= incumbent_snapshot - 1e-6) {
         return false;
     }
 
-    // Apply bound changes from root.
-    for (Index j = 0; j < problem_.num_cols; ++j) {
-        lp.setColBounds(j, problem_.col_lower[j], problem_.col_upper[j]);
+    // Restore variables touched by the previous node to root bounds.
+    auto t0 = std::chrono::steady_clock::now();
+    for (Index j : touched_vars) {
+        if (current_lower[j] != problem_.col_lower[j] ||
+            current_upper[j] != problem_.col_upper[j]) {
+            lp.setColBounds(j, problem_.col_lower[j], problem_.col_upper[j]);
+            current_lower[j] = problem_.col_lower[j];
+            current_upper[j] = problem_.col_upper[j];
+        }
     }
+    touched_vars.clear();
+
+    // Apply this node's bound changes using per-variable aggregation.
+    std::unordered_map<Index, Index> var_pos;
+    std::vector<Index> vars;
+    std::vector<Real> node_lb;
+    std::vector<Real> node_ub;
+    vars.reserve(node.bound_changes.size());
+    node_lb.reserve(node.bound_changes.size());
+    node_ub.reserve(node.bound_changes.size());
+
     for (const auto& bc : node.bound_changes) {
+        auto [it, inserted] = var_pos.emplace(bc.variable, static_cast<Index>(vars.size()));
+        Index pos = it->second;
+        if (inserted) {
+            vars.push_back(bc.variable);
+            node_lb.push_back(problem_.col_lower[bc.variable]);
+            node_ub.push_back(problem_.col_upper[bc.variable]);
+        }
         if (bc.is_upper) {
-            Real lb = problem_.col_lower[bc.variable];
-            for (const auto& prev : node.bound_changes) {
-                if (prev.variable == bc.variable && !prev.is_upper) {
-                    lb = prev.bound;
-                }
-            }
-            lp.setColBounds(bc.variable, lb, bc.bound);
+            node_ub[pos] = std::min(node_ub[pos], bc.bound);
         } else {
-            Real ub = problem_.col_upper[bc.variable];
-            for (const auto& prev : node.bound_changes) {
-                if (prev.variable == bc.variable && prev.is_upper) {
-                    ub = prev.bound;
-                }
-            }
-            lp.setColBounds(bc.variable, bc.bound, ub);
+            node_lb[pos] = std::max(node_lb[pos], bc.bound);
         }
     }
 
-    // Set basis for warm-start.
-    if (!node.basis.empty()) {
-        lp.setBasis(node.basis);
+    for (Index p = 0; p < static_cast<Index>(vars.size()); ++p) {
+        Index j = vars[p];
+        if (node_lb[p] > node_ub[p] + 1e-12) {
+            node_stats.bound_apply_seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            return false;
+        }
+        if (current_lower[j] != node_lb[p] || current_upper[j] != node_ub[p]) {
+            lp.setColBounds(j, node_lb[p], node_ub[p]);
+            current_lower[j] = node_lb[p];
+            current_upper[j] = node_ub[p];
+        }
+        touched_vars.push_back(j);
     }
+    node_stats.bound_apply_seconds += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    // Set basis for warm-start.
+    t0 = std::chrono::steady_clock::now();
+    if (!node.basis.empty()) {
+        ++node_stats.warm_starts;
+        lp.setBasis(node.basis);
+    } else {
+        ++node_stats.cold_starts;
+    }
+    node_stats.basis_set_seconds += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
 
     // Solve node LP.
+    t0 = std::chrono::steady_clock::now();
     auto node_result = lp.solve();
+    node_stats.lp_solve_seconds += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
     node_iters_out = node_result.iterations;
     node_work_out = node_result.work_units;
 
@@ -148,6 +193,12 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                              Real& incumbent, std::vector<Real>& best_solution,
                              Real root_bound,
                              const std::function<double()>& elapsed) {
+    std::vector<Real> current_lower = problem_.col_lower;
+    std::vector<Real> current_upper = problem_.col_upper;
+    std::vector<Index> touched_vars;
+    touched_vars.reserve(problem_.num_cols);
+    NodeWorkStats node_stats;
+
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
             if (verbose_) std::println("Node limit reached.");
@@ -179,7 +230,10 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         double node_work = 0.0;
 
         bool branched = processNode(lp, node, incumbent,
-                                    children, node_obj, node_primals, node_iters, node_work);
+                                    children, node_obj, node_primals, node_iters,
+                                    node_work,
+                                    current_lower, current_upper, touched_vars,
+                                    node_stats);
         total_lp_iters += node_iters;
         total_work += node_work;
 
@@ -207,6 +261,13 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
             queue.push(std::move(child));
         }
     }
+
+    lp_stats_.node_bound_apply_seconds += node_stats.bound_apply_seconds;
+    lp_stats_.node_basis_set_seconds += node_stats.basis_set_seconds;
+    lp_stats_.node_lp_solve_seconds += node_stats.lp_solve_seconds;
+    lp_stats_.nodes_solved += node_stats.nodes_solved;
+    lp_stats_.warm_starts += node_stats.warm_starts;
+    lp_stats_.cold_starts += node_stats.cold_starts;
 }
 
 #ifdef MIPX_HAS_TBB
@@ -223,6 +284,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::atomic<Int> atomic_lp_iters{total_lp_iters};
     std::atomic<double> atomic_work{total_work};
     std::atomic<bool> should_stop{false};
+    std::mutex stats_mutex;
 
     // Each thread needs its own LP solver instance.
     Int actual_threads = std::min(num_threads_, static_cast<Int>(std::thread::hardware_concurrency()));
@@ -239,10 +301,11 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         local_lp.load(problem_);
         // Warm-start from root basis.
         local_lp.setBasis(root_lp.getBasis());
-        // Need an initial solve to set up internal state.
-        local_lp.solve();
-
-        MostFractionalBranching branching;
+        std::vector<Real> current_lower = problem_.col_lower;
+        std::vector<Real> current_upper = problem_.col_upper;
+        std::vector<Index> touched_vars;
+        touched_vars.reserve(problem_.num_cols);
+        NodeWorkStats local_node_stats;
 
         while (!should_stop.load(std::memory_order_relaxed)) {
             // Check limits.
@@ -293,7 +356,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             double node_work = 0.0;
 
             bool branched = processNode(local_lp, node, inc_snapshot,
-                                        children, node_obj, node_primals, node_iters, node_work);
+                                        children, node_obj, node_primals, node_iters,
+                                        node_work,
+                                        current_lower, current_upper, touched_vars,
+                                        local_node_stats);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
             // Atomically add work (relaxed is fine for accumulation).
             auto old_w = atomic_work.load(std::memory_order_relaxed);
@@ -327,6 +393,14 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                            elapsed());
             }
         }
+
+        std::lock_guard<std::mutex> lock(stats_mutex);
+        lp_stats_.node_bound_apply_seconds += local_node_stats.bound_apply_seconds;
+        lp_stats_.node_basis_set_seconds += local_node_stats.basis_set_seconds;
+        lp_stats_.node_lp_solve_seconds += local_node_stats.lp_solve_seconds;
+        lp_stats_.nodes_solved += local_node_stats.nodes_solved;
+        lp_stats_.warm_starts += local_node_stats.warm_starts;
+        lp_stats_.cold_starts += local_node_stats.cold_starts;
     };
 
     // Launch worker threads.
@@ -370,6 +444,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
 
 MipResult MipSolver::solve() {
     if (!loaded_) return {};
+    lp_stats_ = {};
+    lp_stats_.root_policy = root_lp_policy_;
 
     auto start_time = std::chrono::steady_clock::now();
     auto elapsed = [&]() -> double {
@@ -484,7 +560,10 @@ MipResult MipSolver::solve() {
         std::println("Root concurrent mode requested, but alternate LP backend "
                      "is not integrated. Falling back to dual simplex.");
     }
+    auto t0 = std::chrono::steady_clock::now();
     auto root_result = lp.solve();
+    lp_stats_.root_lp_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
 
     Int total_lp_iters = root_result.iterations;
     double total_work = root_result.work_units;
@@ -531,7 +610,10 @@ MipResult MipSolver::solve() {
 
     // Run cutting planes at root.
     if (cuts_enabled_ && problem_.hasIntegers()) {
+        t0 = std::chrono::steady_clock::now();
         Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
+        lp_stats_.root_cut_lp_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
         if (cuts_added > 0) {
             root_bound = lp.getObjective();
             root_primals = lp.getPrimalValues();
