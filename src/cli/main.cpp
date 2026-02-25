@@ -129,9 +129,10 @@ int main(int argc, char* argv[]) {
 
             if (did_presolve) {
                 log.log("Presolve: %d vars removed, %d rows removed, "
-                         "%d bounds tightened, %d rounds\n\n",
+                         "%d bounds tightened, %d rounds (%d changed), %.3fs\n\n",
                          stats.vars_removed, stats.rows_removed,
-                         stats.bounds_tightened, stats.rounds);
+                         stats.bounds_tightened, stats.rounds,
+                         stats.rounds_with_changes, stats.time_seconds);
             }
 
             mipx::DualSimplexSolver solver;

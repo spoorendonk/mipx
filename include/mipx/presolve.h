@@ -76,6 +76,9 @@ public:
     /// Push a postsolve operation.
     void push(PostsolveOp op);
 
+    /// Clear all recorded operations.
+    void clear();
+
     /// Given a solution to the presolved problem (indexed by presolved column),
     /// reconstruct the full solution (indexed by original column).
     /// `col_mapping` maps presolved col index -> original col index.
@@ -98,7 +101,15 @@ struct PresolveStats {
     Index rows_removed = 0;
     Index bounds_tightened = 0;
     Index coeffs_tightened = 0;
+    Index fixed_var_changes = 0;
+    Index singleton_row_changes = 0;
+    Index singleton_col_changes = 0;
+    Index forcing_row_changes = 0;
+    Index dominated_row_changes = 0;
+    Index coeff_tightening_changes = 0;
     Index rounds = 0;
+    Index rounds_with_changes = 0;
+    Real time_seconds = 0.0;
 };
 
 // ---- Presolver --------------------------------------------------------------

@@ -1,6 +1,7 @@
 #include "mipx/presolve.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace mipx {
@@ -11,6 +12,10 @@ namespace mipx {
 
 void PostsolveStack::push(PostsolveOp op) {
     ops_.push_back(std::move(op));
+}
+
+void PostsolveStack::clear() {
+    ops_.clear();
 }
 
 std::vector<Real> PostsolveStack::postsolve(
@@ -154,7 +159,8 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
         if (count == 0) {
             // Empty row. Check feasibility, then remove.
             if (lp.row_lower[i] > kTol || lp.row_upper[i] < -kTol) {
-                // Infeasible, but we still remove it (solver will detect).
+                infeasible_ = true;
+                return changes;
             }
             row_removed[i] = true;
             ++changes;
@@ -601,6 +607,15 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 // =============================================================================
 
 LpProblem Presolver::presolve(const LpProblem& problem) {
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Reset state so one Presolver instance can be reused safely.
+    postsolve_stack_.clear();
+    col_mapping_.clear();
+    orig_num_cols_ = 0;
+    stats_ = PresolveStats{};
+    infeasible_ = false;
+
     // Work on a copy.
     LpProblem lp = problem;
     orig_num_cols_ = lp.num_cols;
@@ -612,14 +627,35 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     for (Index round = 0; round < max_rounds_; ++round) {
         Index total_changes = 0;
 
-        total_changes += removeFixedVariables(lp, col_removed, row_removed);
-        total_changes += removeSingletonRows(lp, col_removed, row_removed);
-        total_changes += removeSingletonCols(lp, col_removed, row_removed);
-        total_changes += removeForcingRows(lp, col_removed, row_removed);
-        total_changes += removeDominatedRows(lp, col_removed, row_removed);
-        total_changes += tightenCoefficients(lp, col_removed, row_removed);
+        Index ch = removeFixedVariables(lp, col_removed, row_removed);
+        stats_.fixed_var_changes += ch;
+        total_changes += ch;
+
+        ch = removeSingletonRows(lp, col_removed, row_removed);
+        stats_.singleton_row_changes += ch;
+        total_changes += ch;
+
+        ch = removeSingletonCols(lp, col_removed, row_removed);
+        stats_.singleton_col_changes += ch;
+        total_changes += ch;
+
+        ch = removeForcingRows(lp, col_removed, row_removed);
+        stats_.forcing_row_changes += ch;
+        total_changes += ch;
+
+        ch = removeDominatedRows(lp, col_removed, row_removed);
+        stats_.dominated_row_changes += ch;
+        total_changes += ch;
+
+        // Coefficient tightening is currently disabled: the previous
+        // implementation updated RHS without mutating matrix coefficients,
+        // which can change the model semantics.
+        // ch = tightenCoefficients(lp, col_removed, row_removed);
+        // stats_.coeff_tightening_changes += ch;
+        // total_changes += ch;
 
         ++stats_.rounds;
+        if (total_changes > 0) ++stats_.rounds_with_changes;
 
         // Check for infeasibility: any non-removed variable with lb > ub.
         for (Index j = 0; j < lp.num_cols; ++j) {
@@ -651,6 +687,9 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
         if (total_changes == 0) break;
     }
+
+    stats_.time_seconds =
+        std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count();
 
     return buildReducedProblem(lp, col_removed, row_removed);
 }
