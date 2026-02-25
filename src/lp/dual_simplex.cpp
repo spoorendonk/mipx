@@ -17,6 +17,7 @@
 #ifdef MIPX_HAS_TBB
 #include <tbb/enumerable_thread_specific.h>
 #include <tbb/parallel_for.h>
+#include <tbb/parallel_sort.h>
 #include <tbb/blocked_range.h>
 #include <tbb/task_arena.h>
 #endif
@@ -1190,14 +1191,24 @@ LpResult DualSimplexSolver::solve() {
                     return a.ratio < b.ratio;
                 });
         } else {
-            std::sort(bfrt_cands.begin(), bfrt_cands.end(),
-                [](const BfrtCand& a, const BfrtCand& b) {
-                    if (a.ratio != b.ratio) return a.ratio < b.ratio;
-                    if (a.nonbasic_pos != b.nonbasic_pos) {
-                        return a.nonbasic_pos < b.nonbasic_pos;
-                    }
-                    return a.var < b.var;
-                });
+            auto cmp = [](const BfrtCand& a, const BfrtCand& b) {
+                if (a.ratio != b.ratio) return a.ratio < b.ratio;
+                if (a.nonbasic_pos != b.nonbasic_pos) {
+                    return a.nonbasic_pos < b.nonbasic_pos;
+                }
+                return a.var < b.var;
+            };
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_candidate_sort &&
+                static_cast<Index>(bfrt_cands.size()) >= options_.sip_parallel_sort_min_candidates &&
+                sipThreadGatePass() &&
+                sip_numerical_gate) {
+                tbb::parallel_sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
+            } else
+#endif
+            {
+                std::sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
+            }
         }
 
         // BFRT sweep: flip bounded variables until the leaving variable's
