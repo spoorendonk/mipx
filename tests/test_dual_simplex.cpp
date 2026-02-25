@@ -380,15 +380,21 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.adaptive_refactor_stall_pivots = 8;
     opts.enable_simd_kernels = false;
     opts.simd_min_length = 16;
+    opts.enable_sip_parallel_candidates = true;
+    opts.sip_parallel_min_nonbasic = 1;
+    opts.sip_parallel_grain = 32;
     solver.setOptions(opts);
 
     const auto& applied = solver.getOptions();
     CHECK_FALSE(applied.enable_partial_pricing);
     CHECK_FALSE(applied.enable_adaptive_refactorization);
     CHECK_FALSE(applied.enable_simd_kernels);
+    CHECK(applied.enable_sip_parallel_candidates);
     CHECK(applied.partial_pricing_chunk_min == 8);
     CHECK(applied.partial_pricing_full_scan_freq == 1);
     CHECK(applied.simd_min_length == 16);
+    CHECK(applied.sip_parallel_min_nonbasic == 1);
+    CHECK(applied.sip_parallel_grain == 32);
 
     solver.load(lp);
     auto result = solver.solve();

@@ -14,6 +14,12 @@
 #include <immintrin.h>
 #endif
 
+#ifdef MIPX_HAS_TBB
+#include <tbb/enumerable_thread_specific.h>
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
+#endif
+
 namespace mipx {
 
 namespace {
@@ -958,6 +964,7 @@ LpResult DualSimplexSolver::solve() {
         // Collect eligible candidates with dual ratios and bound gaps.
         struct BfrtCand {
             Index var;
+            Index nonbasic_pos;
             Real ratio;
             Real alpha;
             Real gap;  // ub - lb, kInf if no finite opposite bound
@@ -968,22 +975,52 @@ LpResult DualSimplexSolver::solve() {
         bool has_flips = false;
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
-        auto collectCandidates = [&](Index offset, Index count) {
-            Index nnb = static_cast<Index>(nonbasic_.size());
+        Index nnb = static_cast<Index>(nonbasic_.size());
+        auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out) {
+            Index k = nonbasic_[pos];
+            Real alpha = pivot_row_alpha[k];
+            if (!isEligible(k, alpha)) return;
+            Real ratio = std::abs(reduced_cost_[k] / alpha);
+            Real lb = varLower(k);
+            Real ub = varUpper(k);
+            Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+            out.push_back({k, pos, ratio, alpha, gap});
+        };
+
+        auto collectCandidatesSerial = [&](Index offset, Index count) {
             for (Index t = 0; t < count; ++t) {
                 Index pos = (offset + t) % nnb;
-                Index k = nonbasic_[pos];
-                Real alpha = pivot_row_alpha[k];
-                if (!isEligible(k, alpha)) continue;
-                Real ratio = std::abs(reduced_cost_[k] / alpha);
-                Real lb = varLower(k);
-                Real ub = varUpper(k);
-                Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
-                bfrt_cands.push_back({k, ratio, alpha, gap});
+                appendCandidate(pos, bfrt_cands);
             }
         };
 
-        Index nnb = static_cast<Index>(nonbasic_.size());
+        auto collectCandidates = [&](Index offset, Index count) {
+#ifdef MIPX_HAS_TBB
+            if (options_.enable_sip_parallel_candidates &&
+                count >= options_.sip_parallel_min_nonbasic &&
+                options_.sip_parallel_grain > 0) {
+                tbb::enumerable_thread_specific<std::vector<BfrtCand>> locals;
+                const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
+                tbb::parallel_for(tbb::blocked_range<Index>(0, count, grain),
+                                  [&](const tbb::blocked_range<Index>& range) {
+                    auto& local = locals.local();
+                    local.reserve(local.size() +
+                        static_cast<std::size_t>((range.end() - range.begin()) / 4 + 8));
+                    for (Index t = range.begin(); t < range.end(); ++t) {
+                        Index pos = (offset + t) % nnb;
+                        appendCandidate(pos, local);
+                    }
+                });
+
+                for (auto& local : locals) {
+                    bfrt_cands.insert(bfrt_cands.end(), local.begin(), local.end());
+                }
+                return;
+            }
+#endif
+            collectCandidatesSerial(offset, count);
+        };
+
         bool did_partial_scan = false;
         if (options_.enable_partial_pricing &&
             nnb > options_.partial_pricing_chunk_min &&
@@ -1009,10 +1046,22 @@ LpResult DualSimplexSolver::solve() {
         }
 
         // Sort by ratio for BFRT sweep.
-        std::sort(bfrt_cands.begin(), bfrt_cands.end(),
-            [](const BfrtCand& a, const BfrtCand& b) {
-                return a.ratio < b.ratio;
-            });
+        // Keep legacy ordering when SIP scan is disabled to avoid behavior drift.
+        if (!options_.enable_sip_parallel_candidates) {
+            std::sort(bfrt_cands.begin(), bfrt_cands.end(),
+                [](const BfrtCand& a, const BfrtCand& b) {
+                    return a.ratio < b.ratio;
+                });
+        } else {
+            std::sort(bfrt_cands.begin(), bfrt_cands.end(),
+                [](const BfrtCand& a, const BfrtCand& b) {
+                    if (a.ratio != b.ratio) return a.ratio < b.ratio;
+                    if (a.nonbasic_pos != b.nonbasic_pos) {
+                        return a.nonbasic_pos < b.nonbasic_pos;
+                    }
+                    return a.var < b.var;
+                });
+        }
 
         // BFRT sweep: flip bounded variables until the leaving variable's
         // infeasibility can be resolved by the next candidate entering.
