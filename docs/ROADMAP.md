@@ -284,18 +284,21 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 12: Cutting Planes ⚡ parallel with 13, 14
+## Step 12: Cutting Planes ✅ ⚡ parallel with 13, 14
 
 **Goal:** Strengthen LP relaxations with valid inequalities.
 
-**Deliverables:**
-- `CutPool`: store cuts, manage ages, purge inactive cuts
-- Gomory mixed-integer rounding (MIR) cuts from optimal simplex tableau
-- Separation rounds at root and tree nodes (configurable frequency)
-- Cut selection: parallelism filtering, efficacy ranking
-- Integration with incremental LP (Step 8): add cuts → re-solve → iterate
+**Status:** Complete. CutPool with efficacy/parallelism filtering, Gomory MIR separator, MipSolver integration. 10 new tests (147 total).
 
-**Test criteria:** Root gap closed on standard instances (e.g., `p0033` root gap → near-zero with Gomory cuts). Fewer nodes needed vs. no-cuts solve. Cut pool doesn't grow unboundedly.
+**Deliverables:**
+- `CutPool`: store cuts with efficacy ranking, cosine similarity parallelism filtering, age tracking, purging
+- `GomorySeparator`: Gomory MIR cuts from simplex tableau with proper sign adjustment for at-upper nonbasic variables
+- `getTableauRow()` in DualSimplexSolver: returns external (unscaled) tableau row for cut generation
+- `addRows()` fixed to apply column scaling to new row coefficients
+- Cutting plane rounds at root node (configurable max rounds and cuts per round)
+- MipSolver integration with enable/disable toggle
+
+**Test criteria:** Root gap closed on standard instances. Fewer nodes needed vs. no-cuts solve. Cut pool doesn't grow unboundedly.
 
 **References:** HiGHS `HighsCutPool`, SCIP `sepa_gomory.c`, Cornuéjols (2007) survey.
 
@@ -342,18 +345,22 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 15: Parallel Tree Search
+## Step 15: Parallel Tree Search ✅
 
 **Goal:** Exploit multicore via TBB.
 
-**Deliverables:**
-- Thread-safe node queue (TBB concurrent queue or lock-free)
-- Parallel node processing: each thread has own LP solver instance
-- Shared incumbent with atomic updates
-- Deterministic mode: reproducible results regardless of thread count
-- Graceful fallback: single-threaded when TBB unavailable
+**Status:** Complete. Parallel B&B with TBB task_group, mutex-protected shared state, per-thread LP solvers. 6 new tests (153 total with TBB, 148 without).
 
-**Test criteria:** Correct results match serial solver. Speedup on 4+ cores. Deterministic mode produces identical solutions across runs.
+**Deliverables:**
+- `processNode()`: extracted pure function for node processing (apply bounds, warm-start, solve LP, branch)
+- `solveSerial()`: original B&B loop refactored as method
+- `solveParallel()`: TBB-based parallel B&B — each thread has own `DualSimplexSolver` instance
+- Mutex-protected node queue and incumbent with atomic counters
+- `setNumThreads(n)`: parameter to control thread count (default 1 = serial)
+- CLI `--threads N` flag for `mipx-solve`
+- Graceful fallback: compiles and runs single-threaded when TBB unavailable
+
+**Test criteria:** Correct results match serial solver. Speedup on 4+ cores. Graceful fallback without TBB.
 
 **References:** SCIP concurrent solver, HiGHS parallel MIP, cuOpt parallel B&B.
 

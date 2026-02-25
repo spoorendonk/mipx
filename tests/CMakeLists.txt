@@ -14,6 +14,7 @@ add_executable(mipx-tests
     test_heuristics.cpp
     test_presolve.cpp
     test_cuts.cpp
+    test_parallel.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
