@@ -18,6 +18,11 @@
 
 namespace mipx {
 
+enum class RootLpPolicy {
+    DualDefault,
+    ConcurrentRootExperimental,
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -46,6 +51,7 @@ public:
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
     void setNumThreads(Int n) { num_threads_ = n; }
+    void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
 
 private:
     /// Run cutting plane rounds at the root node.
@@ -99,6 +105,7 @@ private:
     Int max_cut_rounds_ = 20;
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
+    RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
