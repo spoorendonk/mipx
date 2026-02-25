@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <unordered_map>
 
 namespace mipx {
 
@@ -26,6 +28,65 @@ inline void markColsInRow(const LpProblem& lp, Index row,
         Index col = rv.indices[k];
         if (!col_removed[col]) dirty_cols[col] = 1;
     }
+}
+
+inline uint64_t coeffBits(Real v) {
+    static_assert(sizeof(uint64_t) == sizeof(Real));
+    uint64_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
+inline uint64_t mixHash(uint64_t h, uint64_t x) {
+    // SplitMix64-style mix for sparse-pattern hashing.
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    x ^= (x >> 31);
+    return h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+}
+
+inline uint64_t rowPatternHash(const LpProblem& lp, Index row,
+                               const std::vector<bool>& col_removed) {
+    auto rv = lp.matrix.row(row);
+    uint64_t h = 1469598103934665603ULL;
+    Index active = 0;
+    for (Index k = 0; k < rv.size(); ++k) {
+        Index col = rv.indices[k];
+        if (col_removed[col]) continue;
+        h = mixHash(h, static_cast<uint64_t>(col));
+        h = mixHash(h, coeffBits(rv.values[k]));
+        ++active;
+    }
+    return mixHash(h, static_cast<uint64_t>(active));
+}
+
+inline bool rowsHaveSamePattern(const LpProblem& lp, Index r1, Index r2,
+                                const std::vector<bool>& col_removed,
+                                Real tol) {
+    auto a = lp.matrix.row(r1);
+    auto b = lp.matrix.row(r2);
+    Index i = 0;
+    Index j = 0;
+    while (true) {
+        while (i < a.size() && col_removed[a.indices[i]]) ++i;
+        while (j < b.size() && col_removed[b.indices[j]]) ++j;
+        bool done_i = (i >= a.size());
+        bool done_j = (j >= b.size());
+        if (done_i || done_j) return done_i && done_j;
+        if (a.indices[i] != b.indices[j]) return false;
+        if (std::abs(a.values[i] - b.values[j]) > tol) return false;
+        ++i;
+        ++j;
+    }
+}
+
+inline bool rowIntervalSubsumes(Real keep_lb, Real keep_ub,
+                                Real rem_lb, Real rem_ub, Real tol) {
+    // [keep_lb, keep_ub] subset [rem_lb, rem_ub] => row(rem) redundant.
+    bool lb_ok = std::isinf(rem_lb) || keep_lb >= rem_lb - tol;
+    bool ub_ok = std::isinf(rem_ub) || keep_ub <= rem_ub + tol;
+    return lb_ok && ub_ok;
 }
 
 }  // namespace
@@ -909,6 +970,71 @@ Index Presolver::removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_remove
     return changes;
 }
 
+Index Presolver::removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_removed,
+                                      std::vector<bool>& row_removed,
+                                      const std::vector<uint8_t>& dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+    std::unordered_map<uint64_t, std::vector<Index>> buckets;
+    buckets.reserve(static_cast<size_t>(lp.num_rows));
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
+        if (row_removed[i]) continue;
+        ++stats_.rows_examined;
+        uint64_t h = rowPatternHash(lp, i, col_removed);
+        buckets[h].push_back(i);
+    }
+
+    for (const auto& [h, rows] : buckets) {
+        (void)h;
+        if (rows.size() < 2) continue;
+
+        for (size_t a = 0; a < rows.size(); ++a) {
+            Index i = rows[a];
+            if (row_removed[i]) continue;
+            for (size_t b = a + 1; b < rows.size(); ++b) {
+                Index j = rows[b];
+                if (row_removed[j]) continue;
+                if (!rowsHaveSamePattern(lp, i, j, col_removed, kTol)) continue;
+
+                bool i_subsumes_j = rowIntervalSubsumes(lp.row_lower[i], lp.row_upper[i],
+                                                        lp.row_lower[j], lp.row_upper[j], kTol);
+                bool j_subsumes_i = rowIntervalSubsumes(lp.row_lower[j], lp.row_upper[j],
+                                                        lp.row_lower[i], lp.row_upper[i], kTol);
+
+                if (i_subsumes_j && !j_subsumes_i) {
+                    row_removed[j] = true;
+                    ++changes;
+                    ++stats_.rows_removed;
+                    next_dirty_rows[j] = 1;
+                    markColsInRow(lp, j, col_removed, next_dirty_cols);
+                    postsolve_stack_.push(PostsolveDominatedRow{j});
+                } else if (j_subsumes_i && !i_subsumes_j) {
+                    row_removed[i] = true;
+                    ++changes;
+                    ++stats_.rows_removed;
+                    next_dirty_rows[i] = 1;
+                    markColsInRow(lp, i, col_removed, next_dirty_cols);
+                    postsolve_stack_.push(PostsolveDominatedRow{i});
+                    break;
+                } else if (i_subsumes_j && j_subsumes_i) {
+                    // Exact duplicate row intervals: drop the later one.
+                    row_removed[j] = true;
+                    ++changes;
+                    ++stats_.rows_removed;
+                    next_dirty_rows[j] = 1;
+                    markColsInRow(lp, j, col_removed, next_dirty_cols);
+                    postsolve_stack_.push(PostsolveDominatedRow{j});
+                }
+            }
+        }
+    }
+
+    return changes;
+}
+
 Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                       std::vector<bool>& row_removed) {
     Index changes = 0;
@@ -1045,6 +1171,11 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         ch = removeDominatedRows(lp, col_removed, row_removed,
                                  dirty_rows, next_dirty_rows, next_dirty_cols);
         stats_.dominated_row_changes += ch;
+        total_changes += ch;
+
+        ch = removeDuplicateRows(lp, col_removed, row_removed,
+                                 dirty_rows, next_dirty_rows, next_dirty_cols);
+        stats_.duplicate_row_changes += ch;
         total_changes += ch;
 
         ch = detectImpliedEquations(lp, col_removed, row_removed,

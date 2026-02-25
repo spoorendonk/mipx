@@ -300,6 +300,35 @@ static LpProblem buildEmptyColumnProblem() {
     return lp;
 }
 
+/// Build a problem with duplicate row patterns but different bounds.
+/// min -x-y
+/// s.t. x + y <= 5, x + y <= 10, x,y >= 0
+/// The weaker duplicate row (<=10) should be removed even with infinite upper
+/// variable bounds where generic activity domination cannot conclude.
+static LpProblem buildDuplicateRowProblem() {
+    LpProblem lp;
+    lp.name = "duplicate_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {5.0, 10.0};
+    lp.row_names = {"tight", "weak"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
 // =============================================================================
 // Tests: Fixed variable removal
 // =============================================================================
@@ -667,4 +696,14 @@ TEST_CASE("Presolve: empty column removal", "[presolve]") {
     auto full_sol = presolver.postsolve(presolved_sol);
     REQUIRE(full_sol.size() == 2);
     CHECK_THAT(full_sol[0], WithinAbs(0.0, 1e-8));  // empty x fixed at lower bound
+}
+
+TEST_CASE("Presolve: duplicate row removal", "[presolve]") {
+    auto lp = buildDuplicateRowProblem();
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    CHECK(presolver.stats().duplicate_row_changes >= 1);
+    CHECK(reduced.num_rows == 1);
 }
