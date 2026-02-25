@@ -151,26 +151,36 @@ private:
     // Individual reductions. Return number of changes made.
     Index removeFixedVariables(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
+                               std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
                                const std::vector<uint8_t>& dirty_cols,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
     Index removeSingletonRows(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
+                               std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
                                const std::vector<uint8_t>& dirty_rows,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
     Index removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
+                               std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
                                const std::vector<uint8_t>& dirty_cols,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
     Index removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
                              std::vector<bool>& row_removed,
+                             std::vector<Index>& row_active_nnz,
+                             std::vector<Index>& col_active_nnz,
                              const std::vector<uint8_t>& dirty_rows,
                              std::vector<uint8_t>& next_dirty_rows,
                              std::vector<uint8_t>& next_dirty_cols);
     Index removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
+                               std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
                                const std::vector<uint8_t>& dirty_rows,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
@@ -186,16 +196,22 @@ private:
                                    std::vector<uint8_t>& next_dirty_cols);
     Index dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
                       std::vector<bool>& row_removed,
+                      std::vector<Index>& row_active_nnz,
+                      std::vector<Index>& col_active_nnz,
                       const std::vector<uint8_t>& dirty_cols,
                       std::vector<uint8_t>& next_dirty_rows,
                       std::vector<uint8_t>& next_dirty_cols);
     Index removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
                               std::vector<bool>& row_removed,
+                              std::vector<Index>& row_active_nnz,
+                              std::vector<Index>& col_active_nnz,
                               const std::vector<uint8_t>& dirty_cols,
                               std::vector<uint8_t>& next_dirty_rows,
                               std::vector<uint8_t>& next_dirty_cols);
     Index removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
+                               std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
                                const std::vector<uint8_t>& dirty_rows,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
