@@ -185,14 +185,19 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Hyper-sparsity exploitation in FTRAN/BTRAN
 - PAMI/SIP parallelism
 
-**MIP-first optimization wave (planned):**
-- Node reoptimization fast path (bound-delta push/pop to avoid full bound reset at each node)
-- Pricing and scan reduction (partial pricing + candidate caches with safe fallback refresh)
-- Hyper-sparsity in FTRAN/BTRAN (adaptive sparse/dense switching with telemetry)
-- Adaptive refactorization and stability guards (growth/residual-aware rebuild triggers)
-- SIMD and memory-layout tuning on hot loops (AVX2/AVX-512 guarded, scalar fallback)
-- Intra-iteration parallel simplex (SIP-style, gated by model shape and measured win)
-- MIP-centric instrumentation (root/node LP timing split, warm/cold-start counters)
+**MIP-first optimization wave (sequential execution plan):**
+1. GPU workstream scaffold for root policy (`RootLpPolicy`, alternate backend adapter seam) — **done**
+2. Node reoptimization fast path (bound-delta apply/restore, avoid full bound reset) — **done**
+3. Basis lifecycle hardening for reoptimization (`setBasis` fast path, row-removal remap) — **done**
+4. Pricing and scan reduction (partial pricing + periodic full refresh fallback) — **done**
+5. LU/FTRAN-BTRAN hot-path memory optimization (no per-row heap allocations in Markowitz updates, reusable solve/update scratch buffers) — **done**
+6. Remaining dual-simplex optimizations bundle (adaptive refactorization/stability triggers, SIMD/memory-layout tuning where safe, additional runtime toggles) — planned
+7. Intra-iteration parallel simplex (SIP-style), gated by model-shape wins and numerical stability — planned
+
+**Wave notes:**
+- Tree solve remains dual-simplex-first for MIP warm-start and basis continuity.
+- GPU concurrent root racing remains deferred until an in-repo PDLP/barrier backend exists.
+- MIP-centric instrumentation is active (root/node LP timing split, warm/cold counters) and should be extended as Step 6 lands.
 
 **Performance regression gates (required for all optimization PRs):**
 - Correctness gate: no test regressions.
