@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -79,6 +80,12 @@ private:
     std::vector<Index> eta_start_;
     std::vector<Index> eta_index_;
     std::vector<Real> eta_value_;
+    // Elimination-order target index for each eta entry (same size as eta_index_).
+    std::vector<Index> eta_target_;
+    // Reverse adjacency: for elimination index t, eta_rev_src_[eta_rev_start_[t]..eta_rev_start_[t+1])
+    // are steps s such that eta has an edge s -> t.
+    std::vector<Index> eta_rev_start_;
+    std::vector<Index> eta_rev_src_;
 
     // U stored row-wise (in elimination order).
     // u_start_[k] .. u_start_[k+1] gives the range for row k.
@@ -102,11 +109,15 @@ private:
     // Reusable dense scratch buffers for hot-path solves/updates.
     mutable std::vector<Real> solve_work_;
     std::vector<Real> update_work_;
+    mutable std::vector<Index> sparse_steps_;
+    mutable std::vector<uint8_t> sparse_mark_;
 
     static constexpr Index kMaxUpdates = 100;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Real kGrowthLimit = 1e12;
+    static constexpr Index kHyperSparseMinDim = 256;
+    static constexpr Real kHyperSparseMaxDensity = 0.10;
 
     Real max_u_entry_ = 0.0;  // track growth
 

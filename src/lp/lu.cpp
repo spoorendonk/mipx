@@ -397,6 +397,30 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         c = col_perm_inv_[c];
     }
 
+    // Build elimination-order eta adjacency for hyper-sparse solves.
+    eta_target_.resize(eta_index_.size());
+    eta_rev_start_.assign(static_cast<std::size_t>(dim_ + 1), 0);
+    for (Index step = 0; step < dim_; ++step) {
+        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+            Index target = row_perm_inv_[eta_index_[k]];
+            eta_target_[k] = target;
+            ++eta_rev_start_[static_cast<std::size_t>(target + 1)];
+        }
+    }
+    for (Index i = 0; i < dim_; ++i) {
+        eta_rev_start_[static_cast<std::size_t>(i + 1)] +=
+            eta_rev_start_[static_cast<std::size_t>(i)];
+    }
+    eta_rev_src_.assign(eta_index_.size(), 0);
+    std::vector<Index> rev_cursor = eta_rev_start_;
+    for (Index step = 0; step < dim_; ++step) {
+        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+            Index target = eta_target_[k];
+            Index pos = rev_cursor[static_cast<std::size_t>(target)]++;
+            eta_rev_src_[static_cast<std::size_t>(pos)] = step;
+        }
+    }
+
     // Count work: total nonzeros stored in L and U.
     work_.count(static_cast<uint64_t>(eta_index_.size()) +
                 static_cast<uint64_t>(u_col_.size()));
@@ -510,18 +534,62 @@ void SparseLU::ftran(std::span<Real> rhs) const {
         solve_work_.resize(dim_);
     }
     std::span<Real> work(solve_work_.data(), static_cast<std::size_t>(dim_));
+    Index work_nnz = 0;
     for (Index step = 0; step < dim_; ++step) {
         work[step] = rhs[row_perm_[step]];
+        if (std::abs(work[step]) > kZeroTol) {
+            ++work_nnz;
+        }
     }
 
-    // Step 2: Apply L^{-1} (in elimination order, eta indices in original row space).
-    for (Index step = 0; step < dim_; ++step) {
-        Index start = eta_start_[step];
-        Index end = eta_start_[step + 1];
-        Real wk = work[step];
-        if (wk == 0.0) continue;
-        for (Index k = start; k < end; ++k) {
-            work[row_perm_inv_[eta_index_[k]]] -= eta_value_[k] * wk;
+    // Step 2: Apply L^{-1}. Use a hyper-sparse reach solve when rhs is sparse.
+    bool use_hypersparse_l =
+        dim_ >= kHyperSparseMinDim &&
+        !eta_index_.empty() &&
+        work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
+
+    if (use_hypersparse_l) {
+        if (static_cast<Index>(sparse_mark_.size()) < dim_) {
+            sparse_mark_.resize(dim_);
+        }
+        std::fill(sparse_mark_.begin(), sparse_mark_.begin() + dim_, uint8_t{0});
+        sparse_steps_.clear();
+        sparse_steps_.reserve(static_cast<std::size_t>(std::max<Index>(work_nnz, 8)));
+
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                sparse_mark_[step] = 1;
+                sparse_steps_.push_back(step);
+            }
+        }
+
+        // Reachability over eta graph: if step is active, all eta targets can be affected.
+        for (std::size_t idx = 0; idx < sparse_steps_.size(); ++idx) {
+            Index step = sparse_steps_[idx];
+            for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                Index target = eta_target_[k];
+                if (!sparse_mark_[target]) {
+                    sparse_mark_[target] = 1;
+                    sparse_steps_.push_back(target);
+                }
+            }
+        }
+
+        std::sort(sparse_steps_.begin(), sparse_steps_.end());
+        for (Index step : sparse_steps_) {
+            Real wk = work[step];
+            if (std::abs(wk) <= kZeroTol) continue;
+            for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                work[eta_target_[k]] -= eta_value_[k] * wk;
+            }
+        }
+    } else {
+        for (Index step = 0; step < dim_; ++step) {
+            Real wk = work[step];
+            if (wk == 0.0) continue;
+            for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                work[eta_target_[k]] -= eta_value_[k] * wk;
+            }
         }
     }
 
@@ -566,15 +634,64 @@ void SparseLU::btran(std::span<Real> rhs) const {
     // Step 3: Solve U^T * z = w (forward substitution).
     solveUTranspose(work);
 
-    // Step 4: Apply L^{-T} (in elimination order, reverse).
-    for (Index step = dim_ - 1; step >= 0; --step) {
-        Index start = eta_start_[step];
-        Index end = eta_start_[step + 1];
-        Real sum = 0.0;
-        for (Index k = start; k < end; ++k) {
-            sum += eta_value_[k] * work[row_perm_inv_[eta_index_[k]]];
+    // Step 4: Apply L^{-T}. Use reverse-reach hyper-sparse solve when possible.
+    Index work_nnz = 0;
+    for (Index step = 0; step < dim_; ++step) {
+        if (std::abs(work[step]) > kZeroTol) {
+            ++work_nnz;
         }
-        work[step] -= sum;
+    }
+    bool use_hypersparse_lt =
+        dim_ >= kHyperSparseMinDim &&
+        !eta_index_.empty() &&
+        work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
+
+    if (use_hypersparse_lt) {
+        if (static_cast<Index>(sparse_mark_.size()) < dim_) {
+            sparse_mark_.resize(dim_);
+        }
+        std::fill(sparse_mark_.begin(), sparse_mark_.begin() + dim_, uint8_t{0});
+        sparse_steps_.clear();
+        sparse_steps_.reserve(static_cast<std::size_t>(std::max<Index>(work_nnz, 8)));
+
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                sparse_mark_[step] = 1;
+                sparse_steps_.push_back(step);
+            }
+        }
+
+        // Reverse reachability: any source feeding an active target may become active.
+        for (std::size_t idx = 0; idx < sparse_steps_.size(); ++idx) {
+            Index target = sparse_steps_[idx];
+            Index rs = eta_rev_start_[target];
+            Index re = eta_rev_start_[target + 1];
+            for (Index p = rs; p < re; ++p) {
+                Index src = eta_rev_src_[p];
+                if (!sparse_mark_[src]) {
+                    sparse_mark_[src] = 1;
+                    sparse_steps_.push_back(src);
+                }
+            }
+        }
+
+        std::sort(sparse_steps_.begin(), sparse_steps_.end());
+        for (auto it = sparse_steps_.rbegin(); it != sparse_steps_.rend(); ++it) {
+            Index step = *it;
+            Real sum = 0.0;
+            for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                sum += eta_value_[k] * work[eta_target_[k]];
+            }
+            work[step] -= sum;
+        }
+    } else {
+        for (Index step = dim_ - 1; step >= 0; --step) {
+            Real sum = 0.0;
+            for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                sum += eta_value_[k] * work[eta_target_[k]];
+            }
+            work[step] -= sum;
+        }
     }
 
     // Step 5: y = P^T * work. y[row_perm[step]] = work[step].
