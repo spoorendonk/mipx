@@ -463,6 +463,10 @@ MipResult MipSolver::solve() {
     // Solve root LP.
     DualSimplexSolver lp;
     lp.load(problem_);
+    if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
+        std::println("Root concurrent mode requested, but alternate LP backend "
+                     "is not integrated. Falling back to dual simplex.");
+    }
     auto root_result = lp.solve();
 
     Int total_lp_iters = root_result.iterations;
