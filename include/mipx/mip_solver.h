@@ -143,7 +143,7 @@ private:
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
-    static constexpr Int kLogFrequency = 100;
+    static constexpr double kLogInterval = 5.0;  // seconds between heartbeat lines
 };
 
 }  // namespace mipx

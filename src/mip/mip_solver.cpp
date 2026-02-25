@@ -239,6 +239,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
     std::vector<Index> touched_vars;
+    double last_log_time = -kLogInterval;  // ensure first node is logged
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
 
@@ -280,12 +281,14 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         total_lp_iters += node_iters;
         total_work += node_work;
 
-        // Log progress periodically.
-        if (verbose_ && (nodes_explored % kLogFrequency == 0 || nodes_explored <= 10)) {
+        // Log progress periodically (time-based).
+        double now = elapsed();
+        if (verbose_ && (now - last_log_time >= kLogInterval || nodes_explored <= 1)) {
             logProgress(nodes_explored, queue.size(), total_lp_iters,
                        incumbent,
                        queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                       elapsed());
+                       now);
+            last_log_time = now;
         }
 
         if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
@@ -328,6 +331,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::atomic<double> atomic_work{total_work};
     std::atomic<bool> should_stop{false};
     std::mutex stats_mutex;
+    double last_log_time = -kLogInterval;  // ensure first log fires
 
     // Each thread needs its own LP solver instance.
     Int actual_threads = std::min(num_threads_, static_cast<Int>(std::thread::hardware_concurrency()));
@@ -383,7 +387,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 node = queue.pop();
             }
 
-            Int node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
+            atomic_nodes.fetch_add(1, std::memory_order_relaxed);
 
             // Get current incumbent for pruning.
             Real inc_snapshot;
@@ -429,8 +433,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
             }
 
-            // Log progress: new incumbent or periodic heartbeat.
-            if (verbose_ && (found_incumbent || (node_num % kLogFrequency == 0))) {
+            // Log progress: new incumbent or periodic heartbeat (time-based).
+            double now = elapsed();
+            if (verbose_ && (found_incumbent || (now - last_log_time >= kLogInterval))) {
+                last_log_time = now;
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 logProgress(atomic_nodes.load(), queue.size(),
                            atomic_lp_iters.load(),

@@ -12,18 +12,21 @@
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::fprintf(stdout, "Usage: mipx-solve <mps-file> [--threads N]\n");
+        std::fprintf(stdout, "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S]\n");
         return 1;
     }
 
     std::string filename = argv[1];
     int num_threads = 1;
+    double time_limit = -1.0;  // negative = use solver default
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--threads" && i + 1 < argc) {
             num_threads = std::atoi(argv[++i]);
+        } else if (arg == "--time-limit" && i + 1 < argc) {
+            time_limit = std::atof(argv[++i]);
         }
     }
 
@@ -35,6 +38,7 @@ int main(int argc, char* argv[]) {
             // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
             solver.setNumThreads(num_threads);
+            if (time_limit >= 0.0) solver.setTimeLimit(time_limit);
             solver.load(lp);
             auto result = solver.solve();
 
