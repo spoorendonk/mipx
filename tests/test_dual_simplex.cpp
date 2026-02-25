@@ -365,3 +365,29 @@ TEST_CASE("DualSimplex: work units scale with problem size", "[dual_simplex][wor
     // blend has more rows/cols/nnz — should do more work.
     CHECK(rb.work_units > ra.work_units);
 }
+
+TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths",
+          "[dual_simplex][options]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts;
+    opts.enable_partial_pricing = false;
+    opts.enable_adaptive_refactorization = false;
+    opts.partial_pricing_chunk_min = 8;
+    opts.partial_pricing_full_scan_freq = 1;
+    opts.adaptive_refactor_min_updates = 8;
+    opts.adaptive_refactor_stall_pivots = 8;
+    solver.setOptions(opts);
+
+    const auto& applied = solver.getOptions();
+    CHECK_FALSE(applied.enable_partial_pricing);
+    CHECK_FALSE(applied.enable_adaptive_refactorization);
+    CHECK(applied.partial_pricing_chunk_min == 8);
+    CHECK(applied.partial_pricing_full_scan_freq == 1);
+
+    solver.load(lp);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}

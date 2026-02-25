@@ -11,6 +11,19 @@
 
 namespace mipx {
 
+struct DualSimplexOptions {
+    // Pricing controls.
+    bool enable_partial_pricing = true;
+    Int partial_pricing_chunk_min = 512;
+    Int partial_pricing_full_scan_freq = 25;
+
+    // Refactorization controls.
+    bool enable_adaptive_refactorization = true;
+    Int adaptive_refactor_min_updates = 24;
+    Int adaptive_refactor_stall_pivots = 32;
+    Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
+};
+
 class DualSimplexSolver : public LpSolver {
 public:
     DualSimplexSolver() = default;
@@ -39,6 +52,8 @@ public:
     void setObjective(std::span<const Real> obj) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+    void setOptions(const DualSimplexOptions& options) { options_ = options; }
+    [[nodiscard]] const DualSimplexOptions& getOptions() const { return options_; }
 
     /// Access work unit counter (includes LU work).
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -145,11 +160,10 @@ private:
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
-    static constexpr Int kPartialPricingChunkMin = 512;
-    static constexpr Int kPartialPricingFullScanFreq = 25;
 
     // Deterministic work counter.
     WorkUnits work_;
+    DualSimplexOptions options_{};
 };
 
 }  // namespace mipx

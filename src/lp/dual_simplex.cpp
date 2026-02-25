@@ -534,6 +534,7 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
     Index partial_price_offset = 0;
+    Int degenerate_pivot_streak = 0;
 
     // Log header.
     std::printf("  Iter      Objective   PrimalInf\n");
@@ -905,9 +906,11 @@ LpResult DualSimplexSolver::solve() {
 
         Index nnb = static_cast<Index>(nonbasic_.size());
         bool did_partial_scan = false;
-        if (nnb > kPartialPricingChunkMin &&
-            (iterations_ % kPartialPricingFullScanFreq) != 0) {
-            Index chunk = std::max<Index>(kPartialPricingChunkMin, nnb / 8);
+        if (options_.enable_partial_pricing &&
+            nnb > options_.partial_pricing_chunk_min &&
+            options_.partial_pricing_full_scan_freq > 0 &&
+            (iterations_ % options_.partial_pricing_full_scan_freq) != 0) {
+            Index chunk = std::max<Index>(options_.partial_pricing_chunk_min, nnb / 8);
             chunk = std::min(chunk, nnb);
             collectCandidates(partial_price_offset, chunk);
             partial_price_offset = (partial_price_offset + chunk) % nnb;
@@ -1007,6 +1010,7 @@ LpResult DualSimplexSolver::solve() {
             refactorize();
             computePrimals();
             computeDuals();
+            degenerate_pivot_streak = 0;
             continue;
         }
 
@@ -1130,11 +1134,28 @@ LpResult DualSimplexSolver::solve() {
                        std::span<const Real>(&neg_one, 1));
         }
 
+        if (options_.enable_adaptive_refactorization) {
+            if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
+                ++degenerate_pivot_streak;
+            } else {
+                degenerate_pivot_streak = 0;
+            }
+        }
+
         // Check if refactorization needed.
-        if (lu_.needsRefactorization()) {
+        bool should_refactorize = lu_.needsRefactorization();
+        if (!should_refactorize &&
+            options_.enable_adaptive_refactorization &&
+            degenerate_pivot_streak >= options_.adaptive_refactor_stall_pivots &&
+            lu_.numUpdates() >= options_.adaptive_refactor_min_updates) {
+            should_refactorize = true;
+        }
+
+        if (should_refactorize) {
             refactorize();
             computePrimals();
             computeDuals();
+            degenerate_pivot_streak = 0;
 
             // Reset Devex weights after refactorization.
             std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
