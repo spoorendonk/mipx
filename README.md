@@ -45,6 +45,25 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+SIMD build defaults:
+- `MIPX_SIMD_ISA=avx2` by default (builds AVX2/FMA paths when supported)
+- `MIPX_SIMD_ISA=native` for max local tuning (`-march=native`; not portable across machines)
+- `MIPX_SIMD_ISA=off` for scalar fallback
+
+```bash
+# Explicit AVX2 target (default)
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_SIMD_ISA=avx2
+
+# Local-machine-only tuning
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_SIMD_ISA=native
+```
+
+You can inspect host SIMD support with:
+
+```bash
+lscpu | grep -E "Flags|avx2|avx512"
+```
+
 Optional TBB support:
 
 ```bash
