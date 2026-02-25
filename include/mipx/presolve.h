@@ -3,6 +3,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include <cstdint>
 
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
@@ -109,6 +110,8 @@ struct PresolveStats {
     Index coeff_tightening_changes = 0;
     Index rounds = 0;
     Index rounds_with_changes = 0;
+    Index rows_examined = 0;
+    Index cols_examined = 0;
     Real time_seconds = 0.0;
 };
 
@@ -142,15 +145,30 @@ public:
 private:
     // Individual reductions. Return number of changes made.
     Index removeFixedVariables(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed);
+                               std::vector<bool>& row_removed,
+                               const std::vector<uint8_t>& dirty_cols,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
     Index removeSingletonRows(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed);
+                               std::vector<bool>& row_removed,
+                               const std::vector<uint8_t>& dirty_rows,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
     Index removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed);
+                               std::vector<bool>& row_removed,
+                               const std::vector<uint8_t>& dirty_cols,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
     Index removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
-                             std::vector<bool>& row_removed);
+                             std::vector<bool>& row_removed,
+                             const std::vector<uint8_t>& dirty_rows,
+                             std::vector<uint8_t>& next_dirty_rows,
+                             std::vector<uint8_t>& next_dirty_cols);
     Index removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed);
+                               std::vector<bool>& row_removed,
+                               const std::vector<uint8_t>& dirty_rows,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed);
 
