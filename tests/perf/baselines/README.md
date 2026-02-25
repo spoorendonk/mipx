@@ -19,6 +19,26 @@ Regenerate with:
 ./tests/perf/generate_mipx_baselines.sh
 ```
 
+## Mittelman Baselines
+
+Baselines matching Hans Mittelman's benchmark configuration
+(https://plato.asu.edu/bench.html):
+
+- `highspy_lp_mittelman.csv`: HiGHS LP baseline on Mittelman LPopt instances.
+- `highspy_mip_mittelman.csv`: HiGHS MIP baseline on MIPLIB 2017 benchmark set.
+- `highspy_mittelman_meta.json`: generation metadata.
+- `mipx_lp_mittelman.csv`: mipx LP baseline on Mittelman LPopt instances.
+- `mipx_mip_mittelman.csv`: mipx MIP baseline on MIPLIB 2017 benchmark set.
+- `mipx_mittelman_meta.json`: generation metadata.
+
+Regenerate with:
+
+```bash
+./tests/perf/generate_mittelman_baselines.sh
+```
+
 Notes:
 - These are machine-specific wall-clock references.
 - Use `work_units`-based gates for strict no-regression checks.
+- Mittelman LP params: 15000s time limit, 1 thread (simplex).
+- Mittelman MIP params: 7200s time limit, 8 threads, 1e-4 gap tolerance.
