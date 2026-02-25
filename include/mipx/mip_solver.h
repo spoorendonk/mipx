@@ -23,6 +23,18 @@ enum class RootLpPolicy {
     ConcurrentRootExperimental,
 };
 
+struct MipLpStats {
+    RootLpPolicy root_policy = RootLpPolicy::DualDefault;
+    double root_lp_seconds = 0.0;
+    double root_cut_lp_seconds = 0.0;
+    double node_bound_apply_seconds = 0.0;
+    double node_basis_set_seconds = 0.0;
+    double node_lp_solve_seconds = 0.0;
+    Int nodes_solved = 0;
+    Int warm_starts = 0;
+    Int cold_starts = 0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -53,8 +65,18 @@ public:
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
+    const MipLpStats& getLpStats() const { return lp_stats_; }
 
 private:
+    struct NodeWorkStats {
+        double bound_apply_seconds = 0.0;
+        double basis_set_seconds = 0.0;
+        double lp_solve_seconds = 0.0;
+        Int nodes_solved = 0;
+        Int warm_starts = 0;
+        Int cold_starts = 0;
+    };
+
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work);
 
@@ -91,7 +113,11 @@ private:
                      Real& node_obj_out,
                      std::vector<Real>& node_primals_out,
                      Int& node_iters_out,
-                     double& node_work_out);
+                     double& node_work_out,
+                     std::vector<Real>& current_lower,
+                     std::vector<Real>& current_upper,
+                     std::vector<Index>& touched_vars,
+                     NodeWorkStats& node_stats);
 
     // Problem data.
     LpProblem problem_;
@@ -110,6 +136,7 @@ private:
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
+    MipLpStats lp_stats_{};
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
