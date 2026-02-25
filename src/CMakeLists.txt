@@ -15,6 +15,7 @@ add_library(mipx STATIC
     mip/mip_solver.cpp
     heuristics/rounding.cpp
     heuristics/diving.cpp
+    heuristics/rins.cpp
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp
