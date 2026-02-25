@@ -13,6 +13,7 @@
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
+#include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
 
@@ -58,7 +59,7 @@ public:
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
-    void setVerbose(bool v) { verbose_ = v; }
+    void setVerbose(bool v) { verbose_ = v; log_.setEnabled(v); }
     void setPresolve(bool p) { presolve_ = p; }
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
@@ -104,7 +105,8 @@ private:
 
     // Log a progress line.
     void logProgress(Int nodes, Int open, Int lp_iters,
-                     Real incumbent, Real best_bound, double elapsed) const;
+                     Real incumbent, Real best_bound, double elapsed,
+                     bool new_incumbent = false, Int int_inf = -1) const;
 
     /// Process a single node. Returns true if children were created.
     bool processNode(DualSimplexSolver& lp, BnbNode& node,
@@ -117,7 +119,8 @@ private:
                      std::vector<Real>& current_lower,
                      std::vector<Real>& current_upper,
                      std::vector<Index>& touched_vars,
-                     NodeWorkStats& node_stats);
+                     NodeWorkStats& node_stats,
+                     Int& int_inf_out);
 
     // Problem data.
     LpProblem problem_;
@@ -137,10 +140,11 @@ private:
     bool cuts_enabled_ = true;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     MipLpStats lp_stats_{};
+    mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCutImprovementTol = 1e-6;
-    static constexpr Int kLogFrequency = 100;
+    static constexpr double kLogInterval = 5.0;  // seconds between heartbeat lines
 };
 
 }  // namespace mipx

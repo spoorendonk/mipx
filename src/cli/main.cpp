@@ -1,25 +1,27 @@
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <print>
 #include <string>
+#include <thread>
 
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
+#include "mipx/logger.h"
 #include "mipx/mip_solver.h"
+#include "mipx/presolve.h"
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::println(
+        std::fprintf(stdout,
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-            "[--no-presolve|--presolve] [--verbose|--quiet]"
-        );
+            "[--no-presolve|--presolve] [--verbose|--quiet]\n");
         return 1;
     }
 
     std::string filename = argv[1];
     int num_threads = 1;
-    double time_limit = 3600.0;
+    double time_limit = -1.0;  // negative = use solver default
     mipx::Int node_limit = 1000000;
     double gap_tol = 1e-4;
     bool verbose = true;
@@ -50,25 +52,20 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--quiet") {
             verbose = false;
         } else {
-            std::println(stderr, "Unknown argument: {}", arg);
+            std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
             return 1;
         }
     }
 
     try {
-        std::println("mipx-solve v0.3");
-        std::println("Reading: {}", filename);
-
         auto lp = mipx::readMps(filename);
-        std::println("Problem: {} ({} rows, {} cols, {} nonzeros)",
-                     lp.name, lp.num_rows, lp.num_cols,
-                     lp.matrix.numNonzeros());
+        mipx::Logger log;
 
         if (lp.hasIntegers()) {
-            // MIP solve.
+            // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
             solver.setNumThreads(num_threads);
-            solver.setTimeLimit(time_limit);
+            if (time_limit >= 0.0) solver.setTimeLimit(time_limit);
             solver.setNodeLimit(node_limit);
             solver.setGapTolerance(gap_tol);
             solver.setVerbose(verbose);
@@ -78,60 +75,102 @@ int main(int argc, char* argv[]) {
             auto result = solver.solve();
 
             switch (result.status) {
-                case mipx::Status::Optimal:
-                    std::println("Status: Optimal");
-                    break;
-                case mipx::Status::Infeasible:
-                    std::println("Status: Infeasible");
-                    break;
-                case mipx::Status::Unbounded:
-                    std::println("Status: Unbounded");
-                    break;
-                case mipx::Status::NodeLimit:
-                    std::println("Status: Node limit");
-                    break;
-                case mipx::Status::TimeLimit:
-                    std::println("Status: Time limit");
-                    break;
-                default:
-                    std::println("Status: Error");
-                    break;
+                case mipx::Status::Optimal:    log.log("Status: Optimal\n"); break;
+                case mipx::Status::Infeasible: log.log("Status: Infeasible\n"); break;
+                case mipx::Status::Unbounded:  log.log("Status: Unbounded\n"); break;
+                case mipx::Status::NodeLimit:  log.log("Status: Node limit\n"); break;
+                case mipx::Status::TimeLimit:  log.log("Status: Time limit\n"); break;
+                default:                       log.log("Status: Error\n"); break;
             }
-            std::println("Objective: {:.10e}", result.objective);
-            std::println("Nodes: {}", result.nodes);
-            std::println("LP iterations: {}", result.lp_iterations);
-            std::println("Work units: {:.2f}", result.work_units);
-            std::println("Time: {:.2f}s", result.time_seconds);
+            log.log("Objective: %.10e\n", result.objective);
+            log.log("Nodes: %d\n", result.nodes);
+            log.log("LP iterations: %d\n", result.lp_iterations);
+            log.log("Work units: %.2f\n", result.work_units);
+            log.log("Time: %.2fs\n", result.time_seconds);
         } else {
-            // LP solve.
+            // LP solve — print banner from CLI.
+            log.log("mipx v0.3\n");
+
+            unsigned logical = std::thread::hardware_concurrency();
+            const char* tbb_str = "";
+            const char* simd_str = "";
+#ifdef MIPX_HAS_TBB
+            tbb_str = ", TBB";
+#endif
+#ifdef __AVX512F__
+            simd_str = ", AVX-512";
+#elif defined(__AVX2__)
+            simd_str = ", AVX2";
+#elif defined(__AVX__)
+            simd_str = ", AVX";
+#elif defined(__SSE4_2__)
+            simd_str = ", SSE4.2";
+#endif
+            log.log("Thread count: %u logical processors, using up to 1 thread%s%s\n",
+                     logical, tbb_str, simd_str);
+
+            // Presolve.
+            mipx::Presolver presolver;
+            auto working = presolver.presolve(lp);
+            bool did_presolve = false;
+            const auto& stats = presolver.stats();
+            if (stats.vars_removed > 0 || stats.rows_removed > 0) {
+                did_presolve = true;
+            } else {
+                working = lp;
+            }
+
+            log.log("Solving LP with:\n");
+            log.log("  %d rows, %d cols, %d nonzeros\n",
+                     working.num_rows, working.num_cols,
+                     working.matrix.numNonzeros());
+            log.log("\n");
+
+            if (did_presolve) {
+                log.log("Presolve: %d vars removed, %d rows removed, "
+                         "%d bounds tightened, %d rounds\n\n",
+                         stats.vars_removed, stats.rows_removed,
+                         stats.bounds_tightened, stats.rounds);
+            }
+
             mipx::DualSimplexSolver solver;
-            solver.load(lp);
+            solver.load(working);
             auto result = solver.solve();
 
+            // Postsolve if needed.
+            double obj = result.objective;
+            if (did_presolve && result.status == mipx::Status::Optimal) {
+                auto primals = solver.getPrimalValues();
+                auto postsolved = presolver.postsolve(primals);
+                obj = lp.obj_offset;
+                for (mipx::Index j = 0; j < lp.num_cols; ++j) {
+                    obj += lp.obj[j] * postsolved[j];
+                }
+            }
+
+            std::fflush(stdout);  // flush LP solver's printf output before Logger write()
+            log.log("\n");
             switch (result.status) {
                 case mipx::Status::Optimal:
-                    std::println("Status: Optimal");
+                    log.log("Optimal: %.10e (%d iterations)\n", obj, result.iterations);
                     break;
                 case mipx::Status::Infeasible:
-                    std::println("Status: Infeasible");
+                    log.log("Status: Infeasible\n");
                     break;
                 case mipx::Status::Unbounded:
-                    std::println("Status: Unbounded");
+                    log.log("Status: Unbounded\n");
                     break;
                 case mipx::Status::IterLimit:
-                    std::println("Status: Iteration limit");
+                    log.log("Status: Iteration limit\n");
                     break;
                 default:
-                    std::println("Status: Error");
+                    log.log("Status: Error\n");
                     break;
             }
-            std::println("Objective: {:.10e}", result.objective);
-            std::println("Iterations: {}", result.iterations);
-            std::println("Work units: {:.2f}", result.work_units);
         }
 
     } catch (const std::exception& e) {
-        std::println(stderr, "Error: {}", e.what());
+        std::fprintf(stderr, "Error: %s\n", e.what());
         return 1;
     }
 

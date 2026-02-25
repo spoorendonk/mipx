@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <vector>
 
 #include "mipx/core.h"
@@ -72,6 +73,7 @@ public:
     void setObjective(std::span<const Real> obj) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+    void setVerbose(bool v) { verbose_ = v; }
     void setOptions(const DualSimplexOptions& options) { options_ = options; }
     [[nodiscard]] const DualSimplexOptions& getOptions() const { return options_; }
 
@@ -170,6 +172,7 @@ private:
     Int iter_limit_ = 1000000;
     bool loaded_ = false;
     bool has_basis_ = false;  // true after first solve or setBasis()
+    bool verbose_ = true;
 
     // Devex pricing weights.
     std::vector<Real> devex_weights_;  // size num_rows, one per basis position
@@ -182,6 +185,9 @@ private:
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
+
+    // Timing for iteration log.
+    std::chrono::steady_clock::time_point solve_start_;
 
     // Deterministic work counter.
     WorkUnits work_;

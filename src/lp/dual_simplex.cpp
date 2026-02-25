@@ -619,8 +619,12 @@ LpResult DualSimplexSolver::solve() {
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
 
+    // Record solve start time for iteration log.
+    solve_start_ = std::chrono::steady_clock::now();
+
     // Log header.
-    std::printf("  Iter      Objective   PrimalInf\n");
+    if (verbose_) std::printf("%-7s  %9s  %20s  %11s  %9s\n",
+                              "Method", "Iteration", "Objective", "Primal.NInf", "Time");
 
 #ifdef MIPX_HAS_TBB
     auto sipThreadGatePass = [&]() -> bool {
@@ -639,17 +643,19 @@ LpResult DualSimplexSolver::solve() {
                 obj_val += varCost(k) * primal_[k];
             }
 
-            // Compute primal infeasibility.
-            Real pinf = 0.0;
+            // Count primal infeasibilities (number of infeasible rows).
+            Int pinf_count = 0;
             for (Index i = 0; i < num_rows_; ++i) {
                 Index k = basis_[i];
                 Real xk = primal_[k];
                 Real lb = varLower(k);
                 Real ub = varUpper(k);
-                if (xk < lb - kPrimalTol) pinf += lb - xk;
-                else if (xk > ub + kPrimalTol) pinf += xk - ub;
+                if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) ++pinf_count;
             }
-            std::printf("%6d  %13.6e  %10.3e\n", iterations_, obj_val, pinf);
+            double solve_elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - solve_start_).count();
+            if (verbose_) std::printf("%-7s  %9d  %20.10e  %11d  %7.2fs\n",
+                                      "Dual", iterations_, obj_val, pinf_count, solve_elapsed);
         }
 
         bool sip_numerical_gate = true;
@@ -1456,13 +1462,24 @@ LpResult DualSimplexSolver::solve() {
     // Mark basis as available for warm-start.
     has_basis_ = true;
 
-    // Final log.
-    {
+    // Final iteration log (only if it wouldn't duplicate a periodic line).
+    if (verbose_ && (iterations_ % kLogFrequency) != 0) {
         Real obj_val = 0.0;
         for (Index k = 0; k < numVars(); ++k) {
             obj_val += varCost(k) * primal_[k];
         }
-        std::printf("%6d  %13.6e  (final)\n", iterations_, obj_val);
+        Int pinf_count = 0;
+        for (Index i = 0; i < num_rows_; ++i) {
+            Index k = basis_[i];
+            Real xk = primal_[k];
+            Real lb = varLower(k);
+            Real ub = varUpper(k);
+            if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) ++pinf_count;
+        }
+        double solve_elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - solve_start_).count();
+        std::printf("%-7s  %9d  %20.10e  %11d  %7.2fs\n",
+                    "Dual", iterations_, obj_val, pinf_count, solve_elapsed);
     }
 
     // Note: primals are kept in internal (scaled) coordinates.

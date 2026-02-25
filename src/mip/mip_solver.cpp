@@ -2,10 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
-#include <print>
 #include <thread>
 #include <unordered_map>
+
+#ifdef __linux__
+#include <unistd.h>
+#endif
 
 #include "mipx/cut_pool.h"
 #include "mipx/gomory.h"
@@ -16,6 +20,41 @@
 #endif
 
 namespace mipx {
+
+namespace {
+
+/// Get physical core count (linux only, falls back to hardware_concurrency).
+unsigned getPhysicalCores() {
+#ifdef __linux__
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n > 0) return static_cast<unsigned>(n);
+#endif
+    return std::thread::hardware_concurrency();
+}
+
+/// Count binary, general-integer, and continuous variables.
+/// An integer variable with bounds [0,1] is reported as binary.
+void countVarTypes(const LpProblem& problem,
+                   Int& n_binary, Int& n_integer, Int& n_continuous) {
+    n_binary = n_integer = n_continuous = 0;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        if (problem.col_type[j] == VarType::Continuous) {
+            ++n_continuous;
+        } else {
+            bool is_binary = (problem.col_type[j] == VarType::Binary) ||
+                             (problem.col_lower[j] >= -1e-12 &&
+                              problem.col_lower[j] <= 1e-12 &&
+                              problem.col_upper[j] >= 1.0 - 1e-12 &&
+                              problem.col_upper[j] <= 1.0 + 1e-12);
+            if (is_binary)
+                ++n_binary;
+            else
+                ++n_integer;
+        }
+    }
+}
+
+}  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
     problem_ = problem;
@@ -39,16 +78,28 @@ Real MipSolver::computeGap(Real incumbent, Real best_bound) const {
 
 void MipSolver::logProgress(Int nodes, Int open, Int lp_iters,
                              Real incumbent, Real best_bound,
-                             double elapsed) const {
+                             double elapsed, bool new_incumbent,
+                             Int int_inf) const {
     if (!verbose_) return;
+
+    const char* prefix = new_incumbent ? " *" : "  ";
+    Int lpit_per_node = (nodes > 0) ? lp_iters / nodes : 0;
+
+    char int_inf_buf[16];
+    if (int_inf >= 0)
+        std::snprintf(int_inf_buf, sizeof(int_inf_buf), "%6d", int_inf);
+    else
+        std::snprintf(int_inf_buf, sizeof(int_inf_buf), "%6s", "-");
 
     if (incumbent < kInf) {
         Real gap = computeGap(incumbent, best_bound) * 100.0;
-        std::println("  {:>8d}  {:>8d}  {:>10d}  {:>14.6e}  {:>14.6e}  {:>7.2f}%  {:>7.1f}s",
-                     nodes, open, lp_iters, incumbent, best_bound, gap, elapsed);
+        log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14.6e  %7.2f%%  %5.1fs\n",
+                 prefix, nodes, open, lpit_per_node, int_inf_buf,
+                 best_bound, incumbent, gap, elapsed);
     } else {
-        std::println("  {:>8d}  {:>8d}  {:>10d}  {:>14s}  {:>14.6e}  {:>7s}  {:>7.1f}s",
-                     nodes, open, lp_iters, "-", best_bound, "-", elapsed);
+        log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14s  %7s  %5.1fs\n",
+                 prefix, nodes, open, lpit_per_node, int_inf_buf,
+                 best_bound, "-", "-", elapsed);
     }
 }
 
@@ -62,10 +113,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              std::vector<Real>& current_lower,
                              std::vector<Real>& current_upper,
                              std::vector<Index>& touched_vars,
-                             NodeWorkStats& node_stats) {
+                             NodeWorkStats& node_stats,
+                             Int& int_inf_out) {
     children_out.clear();
     node_iters_out = 0;
     node_work_out = 0.0;
+    int_inf_out = -1;
     ++node_stats.nodes_solved;
 
     // Skip if pruned by bound (might have changed since pop).
@@ -160,8 +213,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_obj_out = node_result.objective;
     node_primals_out = lp.getPrimalValues();
 
+    // Count integer infeasibilities (fractional integer variables).
+    Int frac_count = 0;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Continuous) continue;
+        if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+    }
+    int_inf_out = frac_count;
+
     // Check integer feasibility.
-    if (isFeasibleMip(node_primals_out)) {
+    if (frac_count == 0) {
         return false;  // Caller handles incumbent update.
     }
 
@@ -196,16 +257,17 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
     std::vector<Index> touched_vars;
+    double last_log_time = -kLogInterval;  // ensure first node is logged
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
 
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
-            if (verbose_) std::println("Node limit reached.");
+            if (verbose_) log_.log("Node limit reached.\n");
             break;
         }
         if (elapsed() >= time_limit_) {
-            if (verbose_) std::println("Time limit reached.");
+            if (verbose_) log_.log("Time limit reached.\n");
             break;
         }
 
@@ -216,7 +278,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
 
         Real best_bound = queue.bestBound();
         if (incumbent < kInf && computeGap(incumbent, best_bound) < gap_tol_) {
-            if (verbose_) std::println("Gap tolerance reached.");
+            if (verbose_) log_.log("Gap tolerance reached.\n");
             break;
         }
 
@@ -228,31 +290,34 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         std::vector<Real> node_primals;
         Int node_iters = 0;
         double node_work = 0.0;
+        Int node_int_inf = -1;
 
         bool branched = processNode(lp, node, incumbent,
                                     children, node_obj, node_primals, node_iters,
                                     node_work,
                                     current_lower, current_upper, touched_vars,
-                                    node_stats);
+                                    node_stats, node_int_inf);
         total_lp_iters += node_iters;
         total_work += node_work;
 
-        // Log progress periodically.
-        if (verbose_ && (nodes_explored % kLogFrequency == 0 || nodes_explored <= 10)) {
+        // Log progress periodically (time-based).
+        double now = elapsed();
+        if (verbose_ && (now - last_log_time >= kLogInterval || nodes_explored <= 1)) {
             logProgress(nodes_explored, queue.size(), total_lp_iters,
                        incumbent,
                        queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                       elapsed());
+                       now, false, node_int_inf);
+            last_log_time = now;
         }
 
-        if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
+        if (!branched && !node_primals.empty() && node_int_inf == 0) {
             if (node_obj < incumbent) {
                 incumbent = node_obj;
                 best_solution = node_primals;
-                if (verbose_) {
-                    std::println("  * New incumbent: {:.10e} (node {}, depth {})",
-                                 incumbent, nodes_explored, node.depth);
-                }
+                logProgress(nodes_explored, queue.size(), total_lp_iters,
+                           incumbent,
+                           queue.empty() ? incumbent : queue.bestBound(),
+                           elapsed(), true, 0);
                 queue.prune(incumbent - 1e-6);
             }
         }
@@ -285,13 +350,14 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::atomic<double> atomic_work{total_work};
     std::atomic<bool> should_stop{false};
     std::mutex stats_mutex;
+    double last_log_time = -kLogInterval;  // ensure first log fires
 
     // Each thread needs its own LP solver instance.
     Int actual_threads = std::min(num_threads_, static_cast<Int>(std::thread::hardware_concurrency()));
     if (actual_threads < 1) actual_threads = 1;
 
     if (verbose_) {
-        std::println("Parallel tree search with {} threads", actual_threads);
+        log_.log("Parallel tree search with %d threads\n", actual_threads);
     }
 
     // Worker function.
@@ -299,6 +365,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         // Create thread-local LP solver by loading problem fresh.
         DualSimplexSolver local_lp;
         local_lp.load(problem_);
+        local_lp.setVerbose(false);
         // Warm-start from root basis.
         local_lp.setBasis(root_lp.getBasis());
         std::vector<Real> current_lower = problem_.col_lower;
@@ -339,7 +406,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 node = queue.pop();
             }
 
-            Int node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
+            atomic_nodes.fetch_add(1, std::memory_order_relaxed);
 
             // Get current incumbent for pruning.
             Real inc_snapshot;
@@ -354,12 +421,13 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             std::vector<Real> node_primals;
             Int node_iters = 0;
             double node_work = 0.0;
+            Int node_int_inf = -1;
 
             bool branched = processNode(local_lp, node, inc_snapshot,
                                         children, node_obj, node_primals, node_iters,
                                         node_work,
                                         current_lower, current_upper, touched_vars,
-                                        local_node_stats);
+                                        local_node_stats, node_int_inf);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
             // Atomically add work (relaxed is fine for accumulation).
             auto old_w = atomic_work.load(std::memory_order_relaxed);
@@ -367,11 +435,13 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                                        std::memory_order_relaxed)) {}
 
             // Check for new incumbent.
-            if (!branched && !node_primals.empty() && isFeasibleMip(node_primals)) {
+            bool found_incumbent = false;
+            if (!branched && !node_primals.empty() && node_int_inf == 0) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
                 if (node_obj < incumbent) {
                     incumbent = node_obj;
                     best_solution = node_primals;
+                    found_incumbent = true;
                 }
             }
 
@@ -383,14 +453,16 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
             }
 
-            // Log progress periodically (only from one thread to avoid garbled output).
-            if (verbose_ && (node_num % kLogFrequency == 0)) {
+            // Log progress: new incumbent or periodic heartbeat (time-based).
+            double now = elapsed();
+            if (verbose_ && (found_incumbent || (now - last_log_time >= kLogInterval))) {
+                last_log_time = now;
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 logProgress(atomic_nodes.load(), queue.size(),
                            atomic_lp_iters.load(),
                            incumbent,
                            queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                           elapsed());
+                           elapsed(), found_incumbent, node_int_inf);
             }
         }
 
@@ -416,8 +488,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     total_work = atomic_work.load();
 
     if (verbose_) {
-        if (nodes_explored >= node_limit_) std::println("Node limit reached.");
-        else if (elapsed() >= time_limit_) std::println("Time limit reached.");
+        if (nodes_explored >= node_limit_) log_.log("Node limit reached.\n");
+        else if (elapsed() >= time_limit_) log_.log("Time limit reached.\n");
     }
 }
 #else
@@ -429,7 +501,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
                                const std::function<double()>& elapsed) {
     // Fallback to serial when TBB is not available.
     if (verbose_) {
-        std::println("TBB not available, falling back to serial.");
+        log_.log("TBB not available, falling back to serial.\n");
     }
     // Need a mutable LP solver for serial path.
     DualSimplexSolver lp;
@@ -453,6 +525,66 @@ MipResult MipSolver::solve() {
         return std::chrono::duration<double>(now - start_time).count();
     };
 
+    // Print banner before presolve (uses original problem dimensions).
+    if (verbose_ && problem_.hasIntegers()) {
+        log_.log("mipx v0.3\n");
+
+        // Thread count and platform capabilities.
+        unsigned logical = std::thread::hardware_concurrency();
+        unsigned physical = getPhysicalCores();
+        const char* tbb_str = "";
+        const char* simd_str = "";
+#ifdef MIPX_HAS_TBB
+        tbb_str = ", TBB";
+#endif
+#ifdef __AVX512F__
+        simd_str = ", AVX-512";
+#elif defined(__AVX2__)
+        simd_str = ", AVX2";
+#elif defined(__AVX__)
+        simd_str = ", AVX";
+#elif defined(__SSE4_2__)
+        simd_str = ", SSE4.2";
+#endif
+        log_.log("Thread count: %u physical cores, %u logical processors, using up to %d threads%s%s\n",
+                 physical, logical, num_threads_, tbb_str, simd_str);
+
+        // Variable type breakdown.
+        Int n_binary = 0, n_integer = 0, n_continuous = 0;
+        countVarTypes(problem_, n_binary, n_integer, n_continuous);
+
+        // Build type string.
+        char type_buf[128] = "";
+        if (n_binary > 0 || n_integer > 0) {
+            char* p = type_buf;
+            p += std::snprintf(p, sizeof(type_buf), " (");
+            bool first = true;
+            if (n_binary > 0) { p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d binary", n_binary); first = false; }
+            if (n_integer > 0) { if (!first) p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), ", "); p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d integer", n_integer); first = false; }
+            if (n_continuous > 0) { if (!first) p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), ", "); p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d continuous", n_continuous); }
+            std::snprintf(p, sizeof(type_buf) - (p - type_buf), ")");
+        }
+        log_.log("Solving MIP with:\n  %d rows, %d cols%s, %d nonzeros\n",
+                 problem_.num_rows, problem_.num_cols, type_buf,
+                 problem_.matrix.numNonzeros());
+
+        // Settings line: only non-default values.
+        char settings[256] = "";
+        char* sp = settings;
+        if (time_limit_ != 3600.0) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "time=%.0fs ", time_limit_);
+        if (gap_tol_ != 1e-4) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "gap=%.2f%% ", gap_tol_ * 100.0);
+        if (node_limit_ != 1000000) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "nodes=%d ", node_limit_);
+        if (!presolve_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "presolve=off ");
+        if (!cuts_enabled_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cuts=off ");
+        if (max_cut_rounds_ != 20) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cut_rounds=%d ", max_cut_rounds_);
+        if (sp > settings) {
+            // Trim trailing space.
+            if (sp > settings && *(sp - 1) == ' ') *(sp - 1) = '\0';
+            log_.log("  Settings  : %s\n", settings);
+        }
+        log_.log("\n");
+    }
+
     // Presolve.
     Presolver presolver;
     LpProblem working_problem;
@@ -464,10 +596,10 @@ MipResult MipSolver::solve() {
         if (stats.vars_removed > 0 || stats.rows_removed > 0) {
             did_presolve = true;
             if (verbose_) {
-                std::println("Presolve: {} vars removed, {} rows removed, "
-                             "{} bounds tightened, {} rounds",
-                             stats.vars_removed, stats.rows_removed,
-                             stats.bounds_tightened, stats.rounds);
+                log_.log("Presolve: %d vars removed, %d rows removed, "
+                         "%d bounds tightened, %d rounds\n\n",
+                         stats.vars_removed, stats.rows_removed,
+                         stats.bounds_tightened, stats.rounds);
             }
         } else {
             working_problem = problem_;
@@ -482,7 +614,7 @@ MipResult MipSolver::solve() {
         result.nodes = 0;
         result.lp_iterations = 0;
         result.time_seconds = elapsed();
-        if (verbose_) std::println("Presolve detected infeasibility.");
+        if (verbose_) log_.log("Presolve detected infeasibility.\n");
         return result;
     }
 
@@ -525,8 +657,23 @@ MipResult MipSolver::solve() {
 
     // If no integers, solve as LP directly.
     if (!problem_.hasIntegers()) {
+        if (verbose_) {
+            log_.log("mipx v0.3\n");
+            unsigned logical = std::thread::hardware_concurrency();
+            const char* tbb_str = "";
+#ifdef MIPX_HAS_TBB
+            tbb_str = ", TBB";
+#endif
+            log_.log("Thread count: %u logical processors, using up to 1 thread%s\n",
+                     logical, tbb_str);
+            log_.log("Solving LP with:\n  %d rows, %d cols, %d nonzeros\n\n",
+                     problem_.num_rows, problem_.num_cols,
+                     problem_.matrix.numNonzeros());
+        }
+
         DualSimplexSolver lp;
         lp.load(problem_);
+        lp.setVerbose(verbose_);
         auto lr = lp.solve();
 
         MipResult result;
@@ -540,25 +687,23 @@ MipResult MipSolver::solve() {
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
+            if (verbose_) {
+                std::fflush(stdout);
+                log_.log("\nOptimal: %.10e (%d iterations)\n",
+                         result.objective, lr.iterations);
+            }
         }
         applyPostsolve(result);
         return result;
     }
 
-    if (verbose_) {
-        std::println("mipx MIP solver");
-        std::println("Problem: {} ({} rows, {} cols, {} nonzeros)",
-                     problem_.name, problem_.num_rows, problem_.num_cols,
-                     problem_.matrix.numNonzeros());
-        std::println("");
-    }
-
     // Solve root LP.
     DualSimplexSolver lp;
     lp.load(problem_);
+    lp.setVerbose(verbose_);
     if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
-        std::println("Root concurrent mode requested, but alternate LP backend "
-                     "is not integrated. Falling back to dual simplex.");
+        log_.log("Root concurrent mode requested, but alternate LP backend "
+                 "is not integrated. Falling back to dual simplex.\n");
     }
     auto t0 = std::chrono::steady_clock::now();
     auto root_result = lp.solve();
@@ -569,7 +714,7 @@ MipResult MipSolver::solve() {
     double total_work = root_result.work_units;
 
     if (root_result.status == Status::Infeasible) {
-        if (verbose_) std::println("Root LP infeasible.");
+        if (verbose_) log_.log("Root LP infeasible.\n");
         MipResult result;
         result.status = Status::Infeasible;
         result.nodes = 1;
@@ -580,7 +725,7 @@ MipResult MipSolver::solve() {
     }
 
     if (root_result.status == Status::Unbounded) {
-        if (verbose_) std::println("Root LP unbounded.");
+        if (verbose_) log_.log("Root LP unbounded.\n");
         MipResult result;
         result.status = Status::Unbounded;
         result.nodes = 1;
@@ -591,7 +736,7 @@ MipResult MipSolver::solve() {
     }
 
     if (root_result.status != Status::Optimal) {
-        if (verbose_) std::println("Root LP failed: status {}", static_cast<int>(root_result.status));
+        if (verbose_) log_.log("Root LP failed: status %d\n", static_cast<int>(root_result.status));
         MipResult result;
         result.status = Status::Error;
         result.nodes = 1;
@@ -605,10 +750,12 @@ MipResult MipSolver::solve() {
     auto root_primals = lp.getPrimalValues();
 
     if (verbose_) {
-        std::println("Root LP: obj = {:.10e}, iters = {}", root_bound, root_result.iterations);
+        std::fflush(stdout);  // flush LP solver's printf output before Logger write()
+        log_.log("Root LP: obj = %.10e, %d iters\n", root_bound, root_result.iterations);
     }
 
-    // Run cutting planes at root.
+    // Run cutting planes at root (suppress LP iteration logs — we log per round).
+    lp.setVerbose(false);
     if (cuts_enabled_ && problem_.hasIntegers()) {
         t0 = std::chrono::steady_clock::now();
         Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
@@ -617,10 +764,6 @@ MipResult MipSolver::solve() {
         if (cuts_added > 0) {
             root_bound = lp.getObjective();
             root_primals = lp.getPrimalValues();
-            if (verbose_) {
-                std::println("After cuts: obj = {:.10e}, {} cuts added",
-                             root_bound, cuts_added);
-            }
         }
     }
 
@@ -631,7 +774,7 @@ MipResult MipSolver::solve() {
     if (isFeasibleMip(root_primals)) {
         incumbent = root_bound;
         best_solution = root_primals;
-        if (verbose_) std::println("Root solution is integer feasible!");
+        if (verbose_) log_.log("Root solution is integer feasible!\n");
         MipResult result;
         result.status = Status::Optimal;
         result.objective = incumbent;
@@ -645,11 +788,14 @@ MipResult MipSolver::solve() {
         return result;
     }
 
+    // Suppress LP iteration logs during tree search.
+    lp.setVerbose(false);
+
     // Branch-and-bound.
     if (verbose_) {
-        std::println("");
-        std::println("  {:>8s}  {:>8s}  {:>10s}  {:>14s}  {:>14s}  {:>7s}  {:>7s}",
-                     "Nodes", "Open", "LP iters", "Incumbent", "Best bound", "Gap", "Time");
+        log_.log("\n%10s  %8s  %6s  %6s  %14s  %14s  %7s  %5s\n",
+                 "Nodes", "Active", "LPit/n", "IntInf",
+                 "BestBound", "BestSolution", "Gap", "Time");
     }
 
     NodeQueue queue(NodePolicy::BestFirst);
@@ -725,14 +871,16 @@ MipResult MipSolver::solve() {
     applyPostsolve(result);
 
     if (verbose_) {
-        std::println("");
-        std::println("Explored {} nodes, {} LP iterations, {:.2f} work, {:.1f}s",
-                     result.nodes, result.lp_iterations, result.work_units, result.time_seconds);
+        char node_buf[16], iter_buf[16];
+        Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
+        Logger::formatCount(result.lp_iterations, iter_buf, sizeof(iter_buf));
+        log_.log("\nExplored %s nodes, %s LP iterations, %.1fs\n",
+                 node_buf, iter_buf, result.time_seconds);
         if (result.status == Status::Optimal) {
-            std::println("Optimal: {:.10e}", result.objective);
+            log_.log("Optimal: %.10e\n", result.objective);
         } else if (incumbent < kInf) {
-            std::println("Best solution: {:.10e} (gap {:.2f}%)",
-                         result.objective, result.gap * 100.0);
+            log_.log("Best solution: %.10e (gap %.2f%%)\n",
+                     result.objective, result.gap * 100.0);
         }
     }
 
@@ -745,6 +893,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     gomory.setMaxCuts(max_cuts_per_round_);
 
     Int total_cuts = 0;
+    Int rounds_done = 0;
+    Real start_obj = lp.getObjective();
 
     for (Int round = 0; round < max_cut_rounds_; ++round) {
         auto primals = lp.getPrimalValues();
@@ -755,12 +905,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
         Int new_cuts = gomory.separate(lp, problem_, primals, pool);
 
-        if (new_cuts == 0) {
-            if (verbose_) {
-                std::println("  Cut round {}: no cuts generated, stopping.", round + 1);
-            }
-            break;
-        }
+        if (new_cuts == 0) break;
 
         auto top_indices = pool.topByEfficacy(max_cuts_per_round_);
 
@@ -793,32 +938,24 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         total_lp_iters += result.iterations;
         total_work += result.work_units;
 
-        if (result.status != Status::Optimal) {
-            if (verbose_) {
-                std::println("  Cut round {}: LP solve failed after adding cuts.", round + 1);
-            }
-            break;
-        }
+        if (result.status != Status::Optimal) break;
 
         total_cuts += cuts_this_round;
+        rounds_done = round + 1;
         Real new_obj = result.objective;
         Real improvement = std::abs(new_obj - prev_obj);
-
-        if (verbose_) {
-            std::println("  Cut round {}: {} cuts, obj {:.10e} -> {:.10e} (improve {:.2e})",
-                         round + 1, cuts_this_round, prev_obj, new_obj, improvement);
-        }
 
         auto new_primals = lp.getPrimalValues();
         pool.ageAll(new_primals);
         pool.purge(10);
 
-        if (improvement < kCutImprovementTol) {
-            if (verbose_) {
-                std::println("  Improvement below tolerance, stopping cut rounds.");
-            }
-            break;
-        }
+        if (improvement < kCutImprovementTol) break;
+    }
+
+    if (verbose_ && total_cuts > 0) {
+        Real end_obj = lp.getObjective();
+        log_.log("Cutting planes: %d rounds, %d cuts, obj %.10e -> %.10e\n",
+                 rounds_done, total_cuts, start_obj, end_obj);
     }
 
     return total_cuts;
