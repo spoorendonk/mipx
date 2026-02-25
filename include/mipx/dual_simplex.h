@@ -22,6 +22,10 @@ struct DualSimplexOptions {
     Int adaptive_refactor_min_updates = 24;
     Int adaptive_refactor_stall_pivots = 32;
     Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
+
+    // Runtime SIMD controls for dense vector kernels.
+    bool enable_simd_kernels = true;
+    Int simd_min_length = 64;
 };
 
 class DualSimplexSolver : public LpSolver {
@@ -129,6 +133,8 @@ private:
     std::vector<Index> basis_;
     // nonbasic_ = list of nonbasic variable indices.
     std::vector<Index> nonbasic_;
+    // nonbasic_pos_[k] = position in nonbasic_ if nonbasic, -1 otherwise.
+    std::vector<Index> nonbasic_pos_;
     // basis_pos_[k] = position in basis_ if basic, -1 otherwise.
     std::vector<Index> basis_pos_;
     // var_status_[k] = status of variable k.
