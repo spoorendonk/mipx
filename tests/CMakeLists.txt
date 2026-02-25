@@ -13,6 +13,7 @@ add_executable(mipx-tests
     test_mip_solver.cpp
     test_heuristics.cpp
     test_presolve.cpp
+    test_cuts.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE

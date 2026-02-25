@@ -6,8 +6,10 @@
 #include "mipx/bnb_node.h"
 #include "mipx/branching.h"
 #include "mipx/core.h"
+#include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
+#include "mipx/gomory.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
 
@@ -37,8 +39,15 @@ public:
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
     void setVerbose(bool v) { verbose_ = v; }
     void setPresolve(bool p) { presolve_ = p; }
+    void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
+    void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
+    void setCutsEnabled(bool e) { cuts_enabled_ = e; }
 
 private:
+    /// Run cutting plane rounds at the root node.
+    /// Returns the number of cuts added.
+    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters);
+
     // Check if all integer variables are integral in the given solution.
     bool isFeasibleMip(const std::vector<Real>& primals) const;
 
@@ -60,7 +69,13 @@ private:
     bool verbose_ = true;
     bool presolve_ = true;
 
+    // Cutting plane parameters.
+    Int max_cut_rounds_ = 20;
+    Int max_cuts_per_round_ = 50;
+    bool cuts_enabled_ = true;
+
     static constexpr Real kIntTol = 1e-6;
+    static constexpr Real kCutImprovementTol = 1e-6;
     static constexpr Int kLogFrequency = 100;
 };
 

@@ -4,6 +4,9 @@
 #include <cmath>
 #include <print>
 
+#include "mipx/cut_pool.h"
+#include "mipx/gomory.h"
+
 namespace mipx {
 
 void MipSolver::load(const LpProblem& problem) {
@@ -203,12 +206,25 @@ MipResult MipSolver::solve() {
         std::println("Root LP: obj = {:.10e}, iters = {}", root_bound, root_result.iterations);
     }
 
+    // Run cutting planes at root.
+    if (cuts_enabled_ && problem_.hasIntegers()) {
+        Int cuts_added = runCuttingPlanes(lp, total_lp_iters);
+        if (cuts_added > 0) {
+            root_bound = lp.getObjective();
+            root_primals = lp.getPrimalValues();
+            if (verbose_) {
+                std::println("After cuts: obj = {:.10e}, {} cuts added",
+                             root_bound, cuts_added);
+            }
+        }
+    }
+
     // Check if root solution is integer feasible.
     Real incumbent = kInf;
     std::vector<Real> best_solution;
 
     if (isFeasibleMip(root_primals)) {
-        incumbent = root_result.objective;
+        incumbent = root_bound;
         best_solution = root_primals;
         if (verbose_) std::println("Root solution is integer feasible!");
         MipResult result;
@@ -429,6 +445,98 @@ MipResult MipSolver::solve() {
     }
 
     return result;
+}
+
+Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters) {
+    CutPool pool;
+    GomorySeparator gomory;
+    gomory.setMaxCuts(max_cuts_per_round_);
+
+    Int total_cuts = 0;
+
+    for (Int round = 0; round < max_cut_rounds_; ++round) {
+        auto primals = lp.getPrimalValues();
+
+        // Check if already integer feasible.
+        if (isFeasibleMip(primals)) break;
+
+        Real prev_obj = lp.getObjective();
+
+        // Generate Gomory MIR cuts.
+        Int new_cuts = gomory.separate(lp, problem_, primals, pool);
+
+        if (new_cuts == 0) {
+            if (verbose_) {
+                std::println("  Cut round {}: no cuts generated, stopping.", round + 1);
+            }
+            break;
+        }
+
+        // Get the top cuts by efficacy and add to LP.
+        auto top_indices = pool.topByEfficacy(max_cuts_per_round_);
+
+        // Build CSR data for addRows.
+        std::vector<Index> starts;
+        std::vector<Index> col_indices;
+        std::vector<Real> values;
+        std::vector<Real> lower;
+        std::vector<Real> upper;
+
+        for (Index idx : top_indices) {
+            const auto& cut = pool[idx];
+            if (cut.age > 0) continue;  // Only add fresh cuts.
+
+            starts.push_back(static_cast<Index>(col_indices.size()));
+            for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+                col_indices.push_back(cut.indices[k]);
+                values.push_back(cut.values[k]);
+            }
+            lower.push_back(cut.lower);
+            upper.push_back(cut.upper);
+        }
+
+        if (lower.empty()) break;
+
+        Index cuts_this_round = static_cast<Index>(lower.size());
+
+        // Add cuts to LP.
+        lp.addRows(starts, col_indices, values, lower, upper);
+
+        // Re-solve.
+        auto result = lp.solve();
+        total_lp_iters += result.iterations;
+
+        if (result.status != Status::Optimal) {
+            if (verbose_) {
+                std::println("  Cut round {}: LP solve failed after adding cuts.", round + 1);
+            }
+            break;
+        }
+
+        total_cuts += cuts_this_round;
+        Real new_obj = result.objective;
+        Real improvement = std::abs(new_obj - prev_obj);
+
+        if (verbose_) {
+            std::println("  Cut round {}: {} cuts, obj {:.10e} -> {:.10e} (improve {:.2e})",
+                         round + 1, cuts_this_round, prev_obj, new_obj, improvement);
+        }
+
+        // Age and purge the pool.
+        auto new_primals = lp.getPrimalValues();
+        pool.ageAll(new_primals);
+        pool.purge(10);
+
+        // Stop if improvement is negligible.
+        if (improvement < kCutImprovementTol) {
+            if (verbose_) {
+                std::println("  Improvement below tolerance, stopping cut rounds.");
+            }
+            break;
+        }
+    }
+
+    return total_cuts;
 }
 
 }  // namespace mipx
