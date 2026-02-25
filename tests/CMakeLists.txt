@@ -11,6 +11,7 @@ add_executable(mipx-tests
     test_branching.cpp
     test_domain.cpp
     test_mip_solver.cpp
+    test_heuristics.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
