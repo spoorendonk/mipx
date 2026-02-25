@@ -533,6 +533,7 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
+    Index partial_price_offset = 0;
 
     // Log header.
     std::printf("  Iter      Objective   PrimalInf\n");
@@ -887,14 +888,37 @@ LpResult DualSimplexSolver::solve() {
         bool has_flips = false;
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
-        for (Index k : nonbasic_) {
-            Real alpha = pivot_row_alpha[k];
-            if (!isEligible(k, alpha)) continue;
-            Real ratio = std::abs(reduced_cost_[k] / alpha);
-            Real lb = varLower(k);
-            Real ub = varUpper(k);
-            Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
-            bfrt_cands.push_back({k, ratio, alpha, gap});
+        auto collectCandidates = [&](Index offset, Index count) {
+            Index nnb = static_cast<Index>(nonbasic_.size());
+            for (Index t = 0; t < count; ++t) {
+                Index pos = (offset + t) % nnb;
+                Index k = nonbasic_[pos];
+                Real alpha = pivot_row_alpha[k];
+                if (!isEligible(k, alpha)) continue;
+                Real ratio = std::abs(reduced_cost_[k] / alpha);
+                Real lb = varLower(k);
+                Real ub = varUpper(k);
+                Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+                bfrt_cands.push_back({k, ratio, alpha, gap});
+            }
+        };
+
+        Index nnb = static_cast<Index>(nonbasic_.size());
+        bool did_partial_scan = false;
+        if (nnb > kPartialPricingChunkMin &&
+            (iterations_ % kPartialPricingFullScanFreq) != 0) {
+            Index chunk = std::max<Index>(kPartialPricingChunkMin, nnb / 8);
+            chunk = std::min(chunk, nnb);
+            collectCandidates(partial_price_offset, chunk);
+            partial_price_offset = (partial_price_offset + chunk) % nnb;
+            did_partial_scan = true;
+        } else {
+            collectCandidates(0, nnb);
+        }
+
+        // Fallback to full scan if partial scan found no eligible entering candidates.
+        if (did_partial_scan && bfrt_cands.empty()) {
+            collectCandidates(0, nnb);
         }
 
         if (bfrt_cands.empty()) {
