@@ -6,6 +6,30 @@
 
 namespace mipx {
 
+namespace {
+
+inline void markRowsTouchingCol(const LpProblem& lp, Index col,
+                                const std::vector<bool>& row_removed,
+                                std::vector<uint8_t>& dirty_rows) {
+    auto cv = lp.matrix.col(col);
+    for (Index k = 0; k < cv.size(); ++k) {
+        Index row = cv.indices[k];
+        if (!row_removed[row]) dirty_rows[row] = 1;
+    }
+}
+
+inline void markColsInRow(const LpProblem& lp, Index row,
+                          const std::vector<bool>& col_removed,
+                          std::vector<uint8_t>& dirty_cols) {
+    auto rv = lp.matrix.row(row);
+    for (Index k = 0; k < rv.size(); ++k) {
+        Index col = rv.indices[k];
+        if (!col_removed[col]) dirty_cols[col] = 1;
+    }
+}
+
+}  // namespace
+
 // =============================================================================
 // PostsolveStack
 // =============================================================================
@@ -101,11 +125,16 @@ std::vector<Real> PostsolveStack::postsolve(
 // =============================================================================
 
 Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_removed,
-                                       std::vector<bool>& row_removed) {
+                                       std::vector<bool>& row_removed,
+                                       const std::vector<uint8_t>& dirty_cols,
+                                       std::vector<uint8_t>& next_dirty_rows,
+                                       std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index j = 0; j < lp.num_cols; ++j) {
+        if (!dirty_cols[j]) continue;
         if (col_removed[j]) continue;
+        ++stats_.cols_examined;
         if (std::abs(lp.col_lower[j] - lp.col_upper[j]) > kTol) continue;
 
         // Variable is fixed.
@@ -124,10 +153,12 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
             Real shift = a * value;
             if (!std::isinf(lp.row_lower[row])) lp.row_lower[row] -= shift;
             if (!std::isinf(lp.row_upper[row])) lp.row_upper[row] -= shift;
+            next_dirty_rows[row] = 1;
         }
 
         // Adjust objective offset.
         lp.obj_offset += lp.obj[j] * value;
+        next_dirty_cols[j] = 1;
 
         postsolve_stack_.push(PostsolveFixVariable{j, value});
     }
@@ -136,11 +167,16 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
 }
 
 Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_removed,
-                                      std::vector<bool>& row_removed) {
+                                      std::vector<bool>& row_removed,
+                                      const std::vector<uint8_t>& dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
         if (row_removed[i]) continue;
+        ++stats_.rows_examined;
 
         // Count non-removed entries in this row.
         auto rv = lp.matrix.row(i);
@@ -166,6 +202,7 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
             ++changes;
             ++stats_.rows_removed;
             postsolve_stack_.push(PostsolveDominatedRow{i});
+            markColsInRow(lp, i, col_removed, next_dirty_cols);
             continue;
         }
 
@@ -194,11 +231,15 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
             lp.col_lower[singleton_col] = new_lb;
             tightened = true;
             ++stats_.bounds_tightened;
+            markRowsTouchingCol(lp, singleton_col, row_removed, next_dirty_rows);
+            next_dirty_cols[singleton_col] = 1;
         }
         if (new_ub < lp.col_upper[singleton_col] - kTol) {
             lp.col_upper[singleton_col] = new_ub;
             tightened = true;
             ++stats_.bounds_tightened;
+            markRowsTouchingCol(lp, singleton_col, row_removed, next_dirty_rows);
+            next_dirty_cols[singleton_col] = 1;
         }
 
         // Integer rounding.
@@ -208,10 +249,14 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
             if (rounded_lb > lp.col_lower[singleton_col] + kTol) {
                 lp.col_lower[singleton_col] = rounded_lb;
                 tightened = true;
+                markRowsTouchingCol(lp, singleton_col, row_removed, next_dirty_rows);
+                next_dirty_cols[singleton_col] = 1;
             }
             if (rounded_ub < lp.col_upper[singleton_col] - kTol) {
                 lp.col_upper[singleton_col] = rounded_ub;
                 tightened = true;
+                markRowsTouchingCol(lp, singleton_col, row_removed, next_dirty_rows);
+                next_dirty_cols[singleton_col] = 1;
             }
         }
 
@@ -221,17 +266,23 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
         if (tightened) ++changes;
 
         postsolve_stack_.push(PostsolveSingletonRow{i});
+        markColsInRow(lp, i, col_removed, next_dirty_cols);
     }
 
     return changes;
 }
 
 Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
-                                      std::vector<bool>& row_removed) {
+                                      std::vector<bool>& row_removed,
+                                      const std::vector<uint8_t>& dirty_cols,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index j = 0; j < lp.num_cols; ++j) {
+        if (!dirty_cols[j]) continue;
         if (col_removed[j]) continue;
+        ++stats_.cols_examined;
 
         // Count non-removed rows containing this column.
         auto cv = lp.matrix.col(j);
@@ -345,6 +396,8 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             lp.row_lower[singleton_row] -= shift;
         if (!std::isinf(lp.row_upper[singleton_row]))
             lp.row_upper[singleton_row] -= shift;
+        next_dirty_rows[singleton_row] = 1;
+        next_dirty_cols[j] = 1;
 
         // Adjust objective.
         lp.obj_offset += obj * fix_value;
@@ -355,17 +408,25 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             lp.col_type[j], lp.col_lower[j], lp.col_upper[j]
         });
         postsolve_stack_.push(PostsolveFixVariable{j, fix_value});
+
+        // Row cardinalities may change in rows touched by this column.
+        markRowsTouchingCol(lp, j, row_removed, next_dirty_rows);
     }
 
     return changes;
 }
 
 Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
-                                    std::vector<bool>& row_removed) {
+                                    std::vector<bool>& row_removed,
+                                    const std::vector<uint8_t>& dirty_rows,
+                                    std::vector<uint8_t>& next_dirty_rows,
+                                    std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
         if (row_removed[i]) continue;
+        ++stats_.rows_examined;
 
         auto rv = lp.matrix.row(i);
 
@@ -437,6 +498,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
 
             col_removed[j] = true;
             ++stats_.vars_removed;
+            next_dirty_cols[j] = 1;
             lp.obj_offset += lp.obj[j] * fix_value;
 
             // Adjust other rows containing this variable.
@@ -449,6 +511,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
                     lp.row_lower[other_row] -= shift;
                 if (!std::isinf(lp.row_upper[other_row]))
                     lp.row_upper[other_row] -= shift;
+                next_dirty_rows[other_row] = 1;
             }
 
             postsolve_op.fixed_vars.push_back({j, fix_value});
@@ -460,17 +523,23 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
         ++changes;
 
         postsolve_stack_.push(std::move(postsolve_op));
+        markColsInRow(lp, i, col_removed, next_dirty_cols);
     }
 
     return changes;
 }
 
 Index Presolver::removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
-                                      std::vector<bool>& row_removed) {
+                                      std::vector<bool>& row_removed,
+                                      const std::vector<uint8_t>& dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!dirty_rows[i]) continue;
         if (row_removed[i]) continue;
+        ++stats_.rows_examined;
 
         auto rv = lp.matrix.row(i);
 
@@ -512,6 +581,8 @@ Index Presolver::removeDominatedRows(LpProblem& lp, std::vector<bool>& col_remov
             ++changes;
             ++stats_.rows_removed;
             postsolve_stack_.push(PostsolveDominatedRow{i});
+            markColsInRow(lp, i, col_removed, next_dirty_cols);
+            next_dirty_rows[i] = 1;
         }
     }
 
@@ -622,28 +693,37 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
     std::vector<bool> col_removed(lp.num_cols, false);
     std::vector<bool> row_removed(lp.num_rows, false);
+    std::vector<uint8_t> dirty_rows(lp.num_rows, 1);
+    std::vector<uint8_t> dirty_cols(lp.num_cols, 1);
 
     // Iterative reduction loop.
     for (Index round = 0; round < max_rounds_; ++round) {
         Index total_changes = 0;
+        std::vector<uint8_t> next_dirty_rows(lp.num_rows, 0);
+        std::vector<uint8_t> next_dirty_cols(lp.num_cols, 0);
 
-        Index ch = removeFixedVariables(lp, col_removed, row_removed);
+        Index ch = removeFixedVariables(lp, col_removed, row_removed,
+                                        dirty_cols, next_dirty_rows, next_dirty_cols);
         stats_.fixed_var_changes += ch;
         total_changes += ch;
 
-        ch = removeSingletonRows(lp, col_removed, row_removed);
+        ch = removeSingletonRows(lp, col_removed, row_removed,
+                                 dirty_rows, next_dirty_rows, next_dirty_cols);
         stats_.singleton_row_changes += ch;
         total_changes += ch;
 
-        ch = removeSingletonCols(lp, col_removed, row_removed);
+        ch = removeSingletonCols(lp, col_removed, row_removed,
+                                 dirty_cols, next_dirty_rows, next_dirty_cols);
         stats_.singleton_col_changes += ch;
         total_changes += ch;
 
-        ch = removeForcingRows(lp, col_removed, row_removed);
+        ch = removeForcingRows(lp, col_removed, row_removed,
+                               dirty_rows, next_dirty_rows, next_dirty_cols);
         stats_.forcing_row_changes += ch;
         total_changes += ch;
 
-        ch = removeDominatedRows(lp, col_removed, row_removed);
+        ch = removeDominatedRows(lp, col_removed, row_removed,
+                                 dirty_rows, next_dirty_rows, next_dirty_cols);
         stats_.dominated_row_changes += ch;
         total_changes += ch;
 
@@ -686,6 +766,27 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         if (infeasible_) break;
 
         if (total_changes == 0) break;
+
+        dirty_rows.swap(next_dirty_rows);
+        dirty_cols.swap(next_dirty_cols);
+
+        // Keep progress even when only removals happened.
+        bool has_dirty = false;
+        for (uint8_t f : dirty_rows) {
+            if (f) {
+                has_dirty = true;
+                break;
+            }
+        }
+        if (!has_dirty) {
+            for (uint8_t f : dirty_cols) {
+                if (f) {
+                    has_dirty = true;
+                    break;
+                }
+            }
+        }
+        if (!has_dirty) break;
     }
 
     stats_.time_seconds =

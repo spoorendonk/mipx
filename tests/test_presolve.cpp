@@ -446,6 +446,8 @@ TEST_CASE("Presolve: statistics are tracked", "[presolve]") {
     CHECK(stats.rounds >= 1);
     // The singleton rows should be detected.
     CHECK(stats.rows_removed >= 0);  // At least some reductions.
+    CHECK(stats.rows_examined > 0);
+    CHECK(stats.cols_examined > 0);
 }
 
 // =============================================================================
