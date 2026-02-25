@@ -111,6 +111,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            std::fflush(stdout);  // flush LP solver's printf output before Logger write()
             log.log("\n");
             switch (result.status) {
                 case mipx::Status::Optimal:

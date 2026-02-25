@@ -704,10 +704,12 @@ MipResult MipSolver::solve() {
     auto root_primals = lp.getPrimalValues();
 
     if (verbose_) {
+        std::fflush(stdout);  // flush LP solver's printf output before Logger write()
         log_.log("Root LP: obj = %.10e, %d iters\n", root_bound, root_result.iterations);
     }
 
-    // Run cutting planes at root.
+    // Run cutting planes at root (suppress LP iteration logs — we log per round).
+    lp.setVerbose(false);
     if (cuts_enabled_ && problem_.hasIntegers()) {
         t0 = std::chrono::steady_clock::now();
         Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);

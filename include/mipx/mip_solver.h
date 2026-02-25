@@ -59,7 +59,7 @@ public:
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
-    void setVerbose(bool v) { verbose_ = v; }
+    void setVerbose(bool v) { verbose_ = v; log_.setEnabled(v); }
     void setPresolve(bool p) { presolve_ = p; }
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
