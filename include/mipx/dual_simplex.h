@@ -26,6 +26,11 @@ struct DualSimplexOptions {
     // Runtime SIMD controls for dense vector kernels.
     bool enable_simd_kernels = true;
     Int simd_min_length = 64;
+
+    // SIP-style parallel candidate scan (CHUZC), guarded and off by default.
+    bool enable_sip_parallel_candidates = false;
+    Int sip_parallel_min_nonbasic = 4096;
+    Int sip_parallel_grain = 512;
 };
 
 class DualSimplexSolver : public LpSolver {
