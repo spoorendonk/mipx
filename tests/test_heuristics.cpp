@@ -628,6 +628,39 @@ TEST_CASE("LocalBranchingHeuristic: larger neighborhoods can unlock improvements
     }
 }
 
+TEST_CASE("HeuristicBudgetManager: frequency grows on misses", "[heuristics]") {
+    HeuristicBudgetManager budget;
+    budget.setBaseTreeFrequency(10);
+    budget.setMaxFrequencyScale(8);
+
+    CHECK(budget.currentTreeFrequency() == 10);
+
+    budget.recordHeuristicCall(0, 1.0, false);
+    CHECK(budget.currentTreeFrequency() == 20);
+
+    budget.recordHeuristicCall(20, 1.0, false);
+    CHECK(budget.currentTreeFrequency() >= 20);
+
+    budget.recordHeuristicCall(40, 1.0, true);
+    CHECK(budget.currentTreeFrequency() == 20);
+}
+
+TEST_CASE("HeuristicBudgetManager: work-share gate and node gate", "[heuristics]") {
+    HeuristicBudgetManager budget;
+    budget.setBaseTreeFrequency(5);
+    budget.setMaxWorkShare(0.10);
+
+    CHECK(budget.allowRootHeuristic(0.0));
+    CHECK(budget.allowTreeHeuristic(0, 100.0));
+
+    budget.recordHeuristicCall(0, 6.0, false);
+    CHECK_FALSE(budget.allowRootHeuristic(50.0));
+    CHECK(budget.allowRootHeuristic(100.0));
+
+    CHECK_FALSE(budget.allowTreeHeuristic(9, 100.0));
+    CHECK(budget.allowTreeHeuristic(10, 100.0));
+}
+
 // ===========================================================================
 // HeuristicScheduler tests
 // ===========================================================================

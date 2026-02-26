@@ -20,6 +20,8 @@
 
 namespace mipx {
 
+class HeuristicBudgetManager;
+
 enum class RootLpPolicy {
     DualDefault,
     BarrierRoot,
@@ -92,6 +94,7 @@ private:
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                      Int& nodes_explored, Int& total_lp_iters,
                      double& total_work,
+                     HeuristicBudgetManager& heuristic_budget,
                      Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound,
                      const std::function<double()>& elapsed);
@@ -178,6 +181,8 @@ private:
     static constexpr Int kRootLocalBranchingNeighborhoodMedium = 16;
     static constexpr Int kRootLocalBranchingNeighborhoodLarge = 24;
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
+    static constexpr Real kHeurBudgetMaxWorkShare = 0.20;
+    static constexpr Int kHeurBudgetMaxFrequencyScale = 8;
 };
 
 }  // namespace mipx
