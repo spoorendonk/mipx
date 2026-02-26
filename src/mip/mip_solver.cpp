@@ -878,6 +878,8 @@ MipResult MipSolver::solve() {
         BarrierOptions bopts;
         bopts.verbose = verbose_;
         bopts.use_gpu = barrier_use_gpu_;
+        bopts.gpu_min_rows = barrier_gpu_min_rows_;
+        bopts.gpu_min_nnz = barrier_gpu_min_nnz_;
         barrier.setOptions(bopts);
         barrier.load(problem_);
         root_result = barrier.solve();

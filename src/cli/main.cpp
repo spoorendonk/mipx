@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -18,7 +19,9 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--dual] "
-            "[--gpu|--no-gpu] [--verbose|--quiet]\n");
+            "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
+            "[--relax-integrality] "
+            "[--verbose|--quiet]\n");
         return 1;
     }
 
@@ -32,6 +35,9 @@ int main(int argc, char* argv[]) {
     bool cuts_enabled = true;
     bool use_barrier = false;
     bool barrier_gpu = true;
+    bool relax_integrality = false;
+    mipx::Int barrier_gpu_min_rows = 512;
+    mipx::Int barrier_gpu_min_nnz = 10000;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -64,6 +70,14 @@ int main(int argc, char* argv[]) {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
             barrier_gpu = false;
+        } else if (arg == "--gpu-min-rows" && i + 1 < argc) {
+            barrier_gpu_min_rows =
+                std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--gpu-min-nnz" && i + 1 < argc) {
+            barrier_gpu_min_nnz =
+                std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--relax-integrality") {
+            relax_integrality = true;
         } else {
             std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
             return 1;
@@ -72,6 +86,9 @@ int main(int argc, char* argv[]) {
 
     try {
         auto lp = mipx::readMps(filename);
+        if (relax_integrality && lp.hasIntegers()) {
+            for (auto& t : lp.col_type) t = mipx::VarType::Continuous;
+        }
         mipx::Logger log;
 
         if (lp.hasIntegers()) {
@@ -88,6 +105,7 @@ int main(int argc, char* argv[]) {
                 ? mipx::RootLpPolicy::BarrierRoot
                 : mipx::RootLpPolicy::DualDefault);
             solver.setBarrierUseGpu(barrier_gpu);
+            solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.load(lp);
             auto result = solver.solve();
 
@@ -128,13 +146,16 @@ int main(int argc, char* argv[]) {
 
             // Presolve.
             mipx::Presolver presolver;
-            auto working = presolver.presolve(lp);
+            auto working = lp;
             bool did_presolve = false;
-            const auto& stats = presolver.stats();
-            if (stats.vars_removed > 0 || stats.rows_removed > 0) {
-                did_presolve = true;
-            } else {
-                working = lp;
+            if (presolve) {
+                working = presolver.presolve(lp);
+                const auto& stats = presolver.stats();
+                if (stats.vars_removed > 0 || stats.rows_removed > 0) {
+                    did_presolve = true;
+                } else {
+                    working = lp;
+                }
             }
 
             log.log("Solving LP with:\n");
@@ -144,6 +165,7 @@ int main(int argc, char* argv[]) {
             log.log("\n");
 
             if (did_presolve) {
+                const auto& stats = presolver.stats();
                 log.log("Presolve: %d vars removed, %d rows removed, "
                          "%d bounds tightened, %d rounds (%d changed), %.3fs "
                          "[rules: implied=%d abt=%d dual=%d empty_col=%d dup_row=%d] "
@@ -168,6 +190,8 @@ int main(int argc, char* argv[]) {
                 mipx::BarrierOptions bopts;
                 bopts.verbose = verbose;
                 bopts.use_gpu = barrier_gpu;
+                bopts.gpu_min_rows = barrier_gpu_min_rows;
+                bopts.gpu_min_nnz = barrier_gpu_min_nnz;
                 solver.setOptions(bopts);
                 solver.load(working);
                 result = solver.solve();
