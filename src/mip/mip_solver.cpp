@@ -107,6 +107,31 @@ const char* lpLightBackendName() {
     return kLpLightCompiled ? "dual" : "none";
 }
 
+enum class PreRootArm : int {
+    FeasJump = 0,
+    Fpr = 1,
+    LocalMip = 2,
+    LpLightFpr = 3,
+    LpLightDiving = 4,
+};
+
+constexpr int kPreRootArmCount = 5;
+
+constexpr std::size_t preRootArmIndex(PreRootArm arm) {
+    return static_cast<std::size_t>(arm);
+}
+
+double sampleBeta(double alpha, double beta, std::mt19937_64& rng) {
+    const double a = std::max(1e-6, alpha);
+    const double b = std::max(1e-6, beta);
+    std::gamma_distribution<double> ga(a, 1.0);
+    std::gamma_distribution<double> gb(b, 1.0);
+    const double x = ga(rng);
+    const double y = gb(rng);
+    if (x <= 0.0 && y <= 0.0) return 0.5;
+    return x / (x + y);
+}
+
 Real sparseCosineSimilarity(std::span<const Index> ind_a, std::span<const Real> val_a,
                             std::span<const Index> ind_b, std::span<const Real> val_b) {
     Real dot = 0.0;
@@ -2076,6 +2101,10 @@ MipResult MipSolver::solve() {
                                 "pre_root_lplight=on lplight_backend=%s ",
                                 lpLightBackendName());
         }
+        if (!pre_root_portfolio_enabled_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "pre_root_sched=fixed ");
+        }
         if (sp > settings) {
             // Trim trailing space.
             if (sp > settings && *(sp - 1) == ' ') *(sp - 1) = '\0';
@@ -2238,6 +2267,18 @@ MipResult MipSolver::solve() {
         }
         const bool run_lp_free_arms = pre_root_lp_free_enabled_;
         const bool run_lp_light_arms = lp_light_guide.has_value();
+        std::vector<PreRootArm> available_arms;
+        if (run_lp_free_arms) {
+            available_arms.push_back(PreRootArm::FeasJump);
+            available_arms.push_back(PreRootArm::Fpr);
+            available_arms.push_back(PreRootArm::LocalMip);
+        }
+        if (run_lp_light_arms) {
+            available_arms.push_back(PreRootArm::LpLightFpr);
+            available_arms.push_back(PreRootArm::LpLightDiving);
+        }
+        pre_root_stats_.portfolio_enabled =
+            pre_root_portfolio_enabled_ && available_arms.size() > 1;
         const auto lp_light_primals = run_lp_light_arms
             ? std::span<const Real>(lp_light_guide->primals.data(), lp_light_guide->primals.size())
             : std::span<const Real>{};
@@ -2258,12 +2299,130 @@ MipResult MipSolver::solve() {
                 log_.log("Pre-root stage enabled but no usable arms are available.\n");
             }
         } else {
+        class AdaptivePortfolioState {
+        public:
+            AdaptivePortfolioState(bool enabled,
+                                   HeuristicRuntimeMode mode,
+                                   std::span<const PreRootArm> arms)
+                : enabled_(enabled), mode_(mode), arms_(arms.begin(), arms.end()) {
+                alpha_.fill(1.0);
+                beta_.fill(1.0);
+                reward_sum_.fill(0.0);
+                pulls_.fill(0);
+                improvements_.fill(0);
+            }
+
+            PreRootArm select(Int round, std::mt19937_64& rng) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++epochs_;
+                if (arms_.empty()) return PreRootArm::FeasJump;
+                if (!enabled_) {
+                    if (mode_ == HeuristicRuntimeMode::Deterministic) {
+                        const std::size_t idx =
+                            static_cast<std::size_t>(std::max<Int>(0, round)) % arms_.size();
+                        ++pulls_[preRootArmIndex(arms_[idx])];
+                        return arms_[idx];
+                    }
+                    const std::size_t idx = std::uniform_int_distribution<std::size_t>(
+                        0, arms_.size() - 1)(rng);
+                    ++pulls_[preRootArmIndex(arms_[idx])];
+                    return arms_[idx];
+                }
+
+                // Warm-up: make one pull from each available arm before sampling.
+                for (PreRootArm arm : arms_) {
+                    if (pulls_[preRootArmIndex(arm)] == 0) {
+                        ++pulls_[preRootArmIndex(arm)];
+                        return arm;
+                    }
+                }
+
+                PreRootArm best_arm = arms_.front();
+                double best_score = -1.0;
+                for (PreRootArm arm : arms_) {
+                    const std::size_t idx = preRootArmIndex(arm);
+                    const double score = sampleBeta(alpha_[idx], beta_[idx], rng);
+                    if (score > best_score) {
+                        best_score = score;
+                        best_arm = arm;
+                    }
+                }
+                ++pulls_[preRootArmIndex(best_arm)];
+                return best_arm;
+            }
+
+            void update(PreRootArm arm, double reward, bool improved) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const std::size_t idx = preRootArmIndex(arm);
+                const double clipped = std::clamp(reward, 0.0, 1.0);
+                reward_sum_[idx] += clipped;
+                alpha_[idx] += clipped;
+                beta_[idx] += (1.0 - clipped);
+
+                if (improved) {
+                    ++improvements_[idx];
+                    ++wins_total_;
+                    effort_scale_ = std::min(1.75, effort_scale_ * 1.08);
+                } else if (clipped <= 1e-9) {
+                    ++stagnant_total_;
+                    effort_scale_ = std::max(0.35, effort_scale_ * 0.94);
+                }
+            }
+
+            [[nodiscard]] double currentBudget(double base_budget) const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return std::max(1.0, base_budget * effort_scale_);
+            }
+            [[nodiscard]] Int epochs() const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return epochs_;
+            }
+            [[nodiscard]] Int winsTotal() const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return wins_total_;
+            }
+            [[nodiscard]] Int stagnantTotal() const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return stagnant_total_;
+            }
+            [[nodiscard]] double effortScale() const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return effort_scale_;
+            }
+            [[nodiscard]] Int improvements(PreRootArm arm) const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return improvements_[preRootArmIndex(arm)];
+            }
+            [[nodiscard]] double rewardSum(PreRootArm arm) const {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return reward_sum_[preRootArmIndex(arm)];
+            }
+
+        private:
+            bool enabled_ = false;
+            HeuristicRuntimeMode mode_ = HeuristicRuntimeMode::Deterministic;
+            std::vector<PreRootArm> arms_;
+            mutable std::mutex mutex_;
+            std::array<double, kPreRootArmCount> alpha_{};
+            std::array<double, kPreRootArmCount> beta_{};
+            std::array<double, kPreRootArmCount> reward_sum_{};
+            std::array<Int, kPreRootArmCount> pulls_{};
+            std::array<Int, kPreRootArmCount> improvements_{};
+            Int epochs_ = 0;
+            Int wins_total_ = 0;
+            Int stagnant_total_ = 0;
+            double effort_scale_ = 1.0;
+        };
+
+        AdaptivePortfolioState portfolio(
+            pre_root_stats_.portfolio_enabled,
+            heuristic_mode_,
+            available_arms);
         const Int hw_threads = static_cast<Int>(
             std::max<unsigned>(1, std::thread::hardware_concurrency()));
         const Int stage_threads = (heuristic_mode_ == HeuristicRuntimeMode::Deterministic)
             ? 1
             : std::max<Int>(1, std::min(num_threads_, hw_threads));
-        const int arm_count = (run_lp_free_arms ? 3 : 0) + (run_lp_light_arms ? 2 : 0);
         std::atomic<Int> next_round{0};
         std::atomic<bool> should_stop{false};
         std::atomic<Int> calls{0};
@@ -2295,35 +2454,34 @@ MipResult MipSolver::solve() {
                 heuristic_seed_ ^
                 (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(thread_id + 1)));
             while (!should_stop.load(std::memory_order_relaxed)) {
-                if (stage_work.load(std::memory_order_relaxed) >= pre_root_lp_free_work_budget_) {
+                if (stage_work.load(std::memory_order_relaxed) >=
+                    portfolio.currentBudget(pre_root_lp_free_work_budget_)) {
                     break;
                 }
                 const Int round = next_round.fetch_add(1, std::memory_order_relaxed);
                 if (round >= pre_root_lp_free_max_rounds_) break;
                 ++calls;
 
-                int arm = 0;
-                if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
-                    arm = static_cast<int>(round % arm_count);
-                } else {
-                    arm = std::uniform_int_distribution<int>(0, arm_count - 1)(rng);
-                }
+                const PreRootArm arm = portfolio.select(round, rng);
 
                 double local_work = 0.0;
                 std::optional<HeuristicSolution> candidate;
-                int arm_base = 0;
-                if (run_lp_free_arms) {
-                    if (arm == arm_base) {
+                switch (arm) {
+                    case PreRootArm::FeasJump: {
                         ++fj_calls;
                         candidate = runLpFreeFeasJump(problem_, discrete_vars, rng,
                                                       pre_root_pool.bestObjective(),
                                                       local_work);
-                    } else if (arm == arm_base + 1) {
+                        break;
+                    }
+                    case PreRootArm::Fpr: {
                         ++fpr_calls;
                         candidate = runLpFreeFpr(problem_, discrete_vars, rng,
                                                  pre_root_pool.bestObjective(),
                                                  local_work);
-                    } else if (arm == arm_base + 2) {
+                        break;
+                    }
+                    case PreRootArm::LocalMip: {
                         ++local_mip_calls;
                         auto incumbent_sol = pre_root_pool.bestSolution();
                         std::span<const Real> incumbent_span{};
@@ -2334,29 +2492,38 @@ MipResult MipSolver::solve() {
                         candidate = runLpFreeLocalMip(problem_, discrete_vars, rng,
                                                       pre_root_pool.bestObjective(),
                                                       incumbent_span, local_work);
+                        break;
                     }
-                    arm_base += 3;
-                }
-                if (run_lp_light_arms && arm >= arm_base && arm < arm_base + 2) {
-                    ++lp_light_calls;
-                    if (arm == arm_base) {
+                    case PreRootArm::LpLightFpr: {
+                        if (!run_lp_light_arms) break;
+                        ++lp_light_calls;
                         ++lp_light_fpr_calls;
                         candidate = runLpLightFpr(problem_, discrete_vars,
                                                   lp_light_primals, lp_light_reduced_costs,
                                                   pre_root_pool.bestObjective(),
                                                   local_work);
-                    } else {
+                        break;
+                    }
+                    case PreRootArm::LpLightDiving: {
+                        if (!run_lp_light_arms) break;
+                        ++lp_light_calls;
                         ++lp_light_diving_calls;
                         candidate = runLpLightDiving(problem_, discrete_vars,
                                                      lp_light_primals, lp_light_reduced_costs,
                                                      pre_root_pool.bestObjective(),
                                                      local_work);
+                        break;
                     }
                 }
                 addStageWork(local_work);
 
+                const Real incumbent_before = pre_root_pool.bestObjective();
+                const bool had_incumbent_before =
+                    std::isfinite(incumbent_before) && incumbent_before < kInf;
+                bool accepted = false;
                 if (candidate.has_value() &&
                     pre_root_pool.submit(*candidate, "pre_root_stage", thread_id)) {
+                    accepted = true;
                     ++improvements;
                     ++feasible_found;
                     const double seen = stageElapsed();
@@ -2369,6 +2536,12 @@ MipResult MipSolver::solve() {
                         ++early_stops;
                     }
                 }
+
+                double reward = 0.0;
+                if (accepted && !had_incumbent_before) reward = 1.0;
+                else if (accepted) reward = 0.8;
+                else if (candidate.has_value()) reward = 0.2;
+                portfolio.update(arm, reward, accepted);
             }
         };
 
@@ -2397,6 +2570,23 @@ MipResult MipSolver::solve() {
         pre_root_stats_.lp_light_fpr_calls = lp_light_fpr_calls.load(std::memory_order_relaxed);
         pre_root_stats_.lp_light_diving_calls =
             lp_light_diving_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.portfolio_epochs = portfolio.epochs();
+        pre_root_stats_.portfolio_wins = portfolio.winsTotal();
+        pre_root_stats_.portfolio_stagnant = portfolio.stagnantTotal();
+        pre_root_stats_.effort_scale_final = portfolio.effortScale();
+        pre_root_stats_.fj_improvements = portfolio.improvements(PreRootArm::FeasJump);
+        pre_root_stats_.fpr_improvements = portfolio.improvements(PreRootArm::Fpr);
+        pre_root_stats_.local_mip_improvements = portfolio.improvements(PreRootArm::LocalMip);
+        pre_root_stats_.lp_light_fpr_improvements =
+            portfolio.improvements(PreRootArm::LpLightFpr);
+        pre_root_stats_.lp_light_diving_improvements =
+            portfolio.improvements(PreRootArm::LpLightDiving);
+        pre_root_stats_.fj_reward = portfolio.rewardSum(PreRootArm::FeasJump);
+        pre_root_stats_.fpr_reward = portfolio.rewardSum(PreRootArm::Fpr);
+        pre_root_stats_.local_mip_reward = portfolio.rewardSum(PreRootArm::LocalMip);
+        pre_root_stats_.lp_light_fpr_reward = portfolio.rewardSum(PreRootArm::LpLightFpr);
+        pre_root_stats_.lp_light_diving_reward =
+            portfolio.rewardSum(PreRootArm::LpLightDiving);
         pre_root_stats_.work_units = stage_work.load(std::memory_order_relaxed);
         pre_root_stats_.time_seconds = stageElapsed();
         pre_root_stats_.time_to_first_feasible =
@@ -2451,6 +2641,25 @@ MipResult MipSolver::solve() {
                     pre_root_stats_.lp_light_lp_iterations,
                     pre_root_stats_.lp_light_lp_work);
             }
+            log_.log(
+                "Pre-root portfolio: mode=%s epochs=%d wins=%d stagnant=%d effort=%.2f "
+                "reward[fj=%.2f fpr=%.2f local=%.2f lpfpr=%.2f lpdiv=%.2f] "
+                "impr[fj=%d fpr=%d local=%d lpfpr=%d lpdiv=%d]\n",
+                pre_root_stats_.portfolio_enabled ? "adaptive" : "fixed",
+                pre_root_stats_.portfolio_epochs,
+                pre_root_stats_.portfolio_wins,
+                pre_root_stats_.portfolio_stagnant,
+                pre_root_stats_.effort_scale_final,
+                pre_root_stats_.fj_reward,
+                pre_root_stats_.fpr_reward,
+                pre_root_stats_.local_mip_reward,
+                pre_root_stats_.lp_light_fpr_reward,
+                pre_root_stats_.lp_light_diving_reward,
+                pre_root_stats_.fj_improvements,
+                pre_root_stats_.fpr_improvements,
+                pre_root_stats_.local_mip_improvements,
+                pre_root_stats_.lp_light_fpr_improvements,
+                pre_root_stats_.lp_light_diving_improvements);
         }
     }
     }

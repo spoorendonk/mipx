@@ -26,7 +26,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 16: Heuristic Runtime Subsystem](#step-16)
 - [🟢 Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
 - [🟢 Step 18: LP-Light Heuristics Integration](#step-18)
-- [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
+- [🟢 Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
@@ -649,11 +649,17 @@ gating, and telemetry/test coverage with default behavior unchanged when off.
 
 <a id="step-19"></a>
 
-## Step 19: Adaptive Portfolio Orchestrator
+## Step 19: Adaptive Portfolio Orchestrator ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Replace fixed heuristic schedules with data-driven arm selection.
+
+**Status:** Complete. Added an adaptive pre-root portfolio orchestrator with
+warm-up arm rotation, Thompson-sampling arm selection, deterministic-mode
+reproducibility, adaptive effort scaling (shrink on stagnation / grow on wins),
+and arm-level observability (selection counts, reward sums, improvement
+contribution) across LP-free and LP-light arms.
 
 **Deliverables:**
 - Thompson Sampling scheduler over available heuristic arms (LP-free + LP-light + existing LP-based arms)
