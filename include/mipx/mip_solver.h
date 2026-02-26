@@ -7,6 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include "mipx/bnb_node.h"
@@ -29,6 +30,12 @@ enum class RootLpPolicy {
     BarrierRoot,
     PdlpRoot,
     ConcurrentRootExperimental,
+};
+
+enum class SearchProfile {
+    Stable,
+    Default,
+    Aggressive,
 };
 
 struct MipLpStats {
@@ -65,6 +72,15 @@ struct MipConflictStats {
     Int lp_infeasible_conflicts = 0;
     Int bound_infeasible_conflicts = 0;
     Int branch_score_overrides = 0;
+};
+
+struct MipSearchStats {
+    Int policy_switches = 0;
+    Int restarts = 0;
+    Int restart_nodes_dropped = 0;
+    Int sibling_cache_hits = 0;
+    Int sibling_cache_misses = 0;
+    Int strong_budget_updates = 0;
 };
 
 struct MipResult {
@@ -133,9 +149,16 @@ public:
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
+    void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
+    void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
+        restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
+        restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
+    }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
+    const MipSearchStats& getSearchStats() const { return search_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -253,11 +276,17 @@ private:
     bool conflicts_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
+    SearchProfile search_profile_ = SearchProfile::Default;
+    bool restarts_enabled_ = false;
+    Int restart_stagnation_nodes_ = 96;
+    Int restart_keep_nodes_ = 32;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     MipConflictStats conflict_stats_{};
+    MipSearchStats search_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
+    std::unordered_map<Int, Index> sibling_branch_cache_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
