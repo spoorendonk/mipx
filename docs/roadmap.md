@@ -37,7 +37,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 26: Search + Restart Controller](#step-26)
 - [🟢 Step 27: In-Processing Presolve](#step-27)
 - [🟢 Step 28: MIP Feature Coverage Expansion](#step-28)
-- [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
+- [🟢 Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
 - [Janitor Block (post-Step-29)](#janitor-post29)
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
@@ -982,11 +982,18 @@ gating, and telemetry/test coverage with default behavior unchanged when off.
 
 <a id="step-29"></a>
 
-## Step 29: Reproducibility + Tuning + Benchmark Hardening
+## Step 29: Reproducibility + Tuning + Benchmark Hardening ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Make performance claims auditable and tuning repeatable.
+
+**Status:** Complete. Added dedicated reproducibility/tuning tooling in
+`tests/perf`: deterministic single/multi-thread suite (`run_determinism_suite.py`),
+full matrix runner with CSV/Markdown artifacts
+(`run_benchmark_matrix.py`), and parameter sweep runner with ranked
+CSV/Markdown outputs (`run_param_sweep.py`), while preserving strict default
+`work_units` regression gates and versioned mipx/HiGHS baseline workflows.
 
 **Deliverables:**
 - Determinism test suite (single-thread and configured multi-thread deterministic mode)

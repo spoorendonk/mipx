@@ -80,6 +80,87 @@ The regression gate fails if the median candidate metric regresses by more
 than the configured percentage. Default gate is strict: `0.0%` allowed median
 regression.
 
+## Determinism Suite
+
+Validate deterministic reproducibility at fixed seed in both single-thread
+and configured multi-thread mode:
+
+```bash
+python3 tests/perf/run_determinism_suite.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --instances p0201,gt2,flugpl \
+  --runs 5 \
+  --single-threads 1 \
+  --multi-threads 4 \
+  --solver-arg --quiet
+```
+
+Artifacts:
+- `determinism_detail.csv`
+- `determinism_summary.csv`
+- `determinism_summary.md`
+
+The command exits non-zero if any `(instance, profile)` is unstable.
+Use `--strict-metrics` to additionally require node/iteration/work-unit
+equality across runs.
+
+## Benchmark Matrix Runner
+
+Run the full `solver x time x threads x mode` matrix and generate artifacts:
+
+```bash
+python3 tests/perf/run_benchmark_matrix.py \
+  --mipx-binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --solvers mipx \
+  --modes deterministic,opportunistic \
+  --threads 1,4 \
+  --time-limits 30,120 \
+  --instances p0201,gt2,flugpl \
+  --solver-arg --quiet
+```
+
+Optional HiGHS rows:
+
+```bash
+python3 tests/perf/run_benchmark_matrix.py \
+  --mipx-binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --solvers mipx,highs \
+  --highs-binary highs \
+  --instances p0201,gt2,flugpl \
+  --solver-arg --quiet
+```
+
+Artifacts:
+- `matrix_detail.csv`
+- `matrix_summary.csv`
+- `matrix_summary.md`
+
+## Parameter Sweep Runner
+
+Sweep common MIP controls and rank configurations with structured outputs:
+
+```bash
+python3 tests/perf/run_param_sweep.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --instances p0201,gt2,flugpl \
+  --search-profiles stable,default,aggressive \
+  --heur-modes deterministic,opportunistic \
+  --cuts on,off \
+  --presolve on,off \
+  --threads 1 \
+  --time-limit 30 \
+  --solver-arg --quiet
+```
+
+Artifacts:
+- `sweep_detail.csv`
+- `sweep_summary.csv`
+- `sweep_summary.md`
+
 ## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
 
 For LP barrier-focused comparisons (CPU/GPU and cross-solver):
