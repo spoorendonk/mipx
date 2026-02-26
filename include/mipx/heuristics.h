@@ -253,6 +253,53 @@ private:
     double last_work_units_ = 0.0;
 };
 
+/// Local Branching heuristic for binary MIPs:
+/// solve a neighborhood around an incumbent with
+///   sum_j |x_j - x^*_j| <= k  (for binary variables).
+class LocalBranchingHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setNeighborhoodSize(Int size) { neighborhood_size_ = size; }
+    void setMinBinaryVars(Int count) { min_binary_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    /// Incumbent-guided local branching.
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent,
+        std::span<const Real> incumbent_values);
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] bool lastSkippedNoIncumbent() const { return last_skipped_no_incumbent_; }
+    [[nodiscard]] bool lastSkippedTooSmall() const { return last_skipped_too_small_; }
+    [[nodiscard]] Int lastBinaryCount() const { return last_binary_count_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "localbranching"; }
+
+private:
+    Int subproblem_iter_limit_ = 80;
+    Int neighborhood_size_ = 12;
+    Int min_binary_vars_ = 8;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    bool last_skipped_no_incumbent_ = false;
+    bool last_skipped_too_small_ = false;
+    Int last_binary_count_ = 0;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
 /// Schedules and manages heuristic execution.
 class HeuristicScheduler {
 public:
