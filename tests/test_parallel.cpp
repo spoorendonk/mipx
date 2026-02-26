@@ -37,6 +37,29 @@ static LpProblem buildBranchingMip() {
     return lp;
 }
 
+static LpProblem buildSymmetryBranchingMip() {
+    LpProblem lp;
+    lp.name = "symmetry_branching_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x0", "x1"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.5};
+    lp.row_names = {"sum"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
 #ifdef MIPX_HAS_TBB
 // ---------------------------------------------------------------------------
 // Helper: Knapsack MIP
@@ -192,6 +215,42 @@ TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
     REQUIRE(b.status == Status::Optimal);
     CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
     CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
+}
+
+TEST_CASE("Parallel: deterministic mode with symmetry is reproducible",
+          "[parallel][tbb][heuristics][symmetry]") {
+    auto lp = buildSymmetryBranchingMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setNumThreads(4);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setSymmetryEnabled(true);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(101);
+    solver_a.setSearchProfile(SearchProfile::Stable);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setNumThreads(4);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setSymmetryEnabled(true);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(101);
+    solver_b.setSearchProfile(SearchProfile::Stable);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    REQUIRE(a.status == Status::Optimal);
+    REQUIRE(b.status == Status::Optimal);
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+    CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
+    CHECK(solver_a.getSymmetryStats().cuts_applied);
+    CHECK(solver_b.getSymmetryStats().cuts_applied);
 }
 
 TEST_CASE("Parallel: opportunistic heuristic mode remains valid",

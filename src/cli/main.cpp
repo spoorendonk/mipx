@@ -25,7 +25,7 @@ int main(int argc, char* argv[]) {
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
             "[--pre-root-lplight|--no-pre-root-lplight] "
-            "[--pre-root-portfolio|--pre-root-fixed] "
+            "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -57,6 +57,7 @@ int main(int argc, char* argv[]) {
     bool pre_root_lplight = false;
     bool pre_root_portfolio = true;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
+    bool symmetry_enabled = true;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -115,6 +116,8 @@ int main(int argc, char* argv[]) {
             pre_root_portfolio = true;
         } else if (arg == "--pre-root-fixed") {
             pre_root_portfolio = false;
+        } else if (arg == "--no-symmetry") {
+            symmetry_enabled = false;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
         } else if (arg == "--search-default") {
@@ -177,6 +180,7 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
+            solver.setSymmetryEnabled(symmetry_enabled);
             solver.setSearchProfile(search_profile);
             solver.load(lp);
             auto result = solver.solve();

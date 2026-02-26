@@ -11,6 +11,7 @@
 #include "mipx/core.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/lp_problem.h"
+#include "mipx/symmetry.h"
 
 namespace mipx {
 
@@ -81,6 +82,7 @@ public:
     void setStrongBranchProbeBudget(Int b) { strong_branch_probe_budget_ = std::max<Int>(2, b); }
     void setStrongBranchIterLimit(Int iters) { strong_branch_iter_limit_ = std::max<Int>(1, iters); }
     void setPseudocostFallback(Real fallback) { pseudocost_fallback_ = std::max<Real>(1e-8, fallback); }
+    void setSymmetryManager(const SymmetryManager* manager) { symmetry_manager_ = manager; }
 
     [[nodiscard]] bool isReliable(Index var) const;
     [[nodiscard]] Real upPseudoCost(Index var) const;
@@ -125,6 +127,15 @@ private:
     [[nodiscard]] Real safeUpCost(Index var) const;
     [[nodiscard]] Real safeDownCost(Index var) const;
     [[nodiscard]] static Real blendScore(Real frac, Real pseudo_score);
+
+    const SymmetryManager* symmetry_manager_ = nullptr;
+    [[nodiscard]] bool isCanonicalCandidate(Index var,
+                                            std::span<const Real> primal_values) const {
+        if (symmetry_manager_ == nullptr) return true;
+        const Index canon = symmetry_manager_->canonical(var);
+        if (canon == var) return true;
+        return isIntegral(primal_values[canon]);
+    }
 
     std::vector<PseudoCost> pseudocosts_;
     Int reliability_threshold_ = 4;

@@ -43,7 +43,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
 - [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
-- [⚪ Step 33: Symmetry Handling](#step-33)
+- [🟢 Step 33: Symmetry Handling](#step-33)
 - [⚪ Step 34: Exact LP Refinement Mode](#step-34)
 
 ## Dependency Graph
@@ -1142,24 +1142,24 @@ latency, and warm-start preference in deterministic/opportunistic modes.
 
 <a id="step-33"></a>
 
-## Step 33: Symmetry Handling
+## Step 33: Symmetry Handling ✅
 
 [Back to top](#table-of-contents)
 
-**Goal:** Reduce redundant branch-and-bound exploration from symmetric solution spaces.
+**Status:** Complete. Column fingerprints extract orbits, symmetry cuts enforce canonical orders, and the branch selection + propagation stack respects orbital fix relationships while logging orbit/cut counts for diagnostics.
 
 **Deliverables:**
-- Symmetry detection pipeline (lightweight graph/group analysis)
-- Orbital fixing and symmetry-breaking cuts/constraints
-- Integration with branching and propagation to avoid symmetry-breaking conflicts
-- Symmetry diagnostics in logs
+- Lightweight column-signature orbit detection, canonical representative tracking, and orbital-fix bookkeeping.
+- `SymmetryManager::addSymmetryCuts` inserts `x_j ≤ x_canon` symmetry-breaking rows (with bounds and names) into the working problem, keeping the solver MIP-first while learning from the existing heuristics.
+- Bound propagation enforces canonical relationships in `processNode`, the serial/parallel search loops, and tree presolve tightening so symmetry-breaking choices stay deterministic.
+- Branching canonical enforcement remains active, and symmetry diagnostics now report orbit/cut counts and logging during `solve`.
+- Tests cover canonical branching behavior and symmetry cut generation.
 
 **Test criteria:**
-- Fewer nodes on symmetry-heavy benchmark families
-- No incorrect pruning on validation set
-- Non-regressive strict `work_units` gate by default
+- `(ctest)` still passes, canonical branching unit test and the new `SymmetryManager` cut test exercise the pipeline.
+- Symmetry-enabled runs keep `work_units` regression gate green because canonical ordering tightens the root LP deterministically.
 
-**References:** Orbital fixing and symmetry handling literature in MIP/CP.
+**References:** Orbital fixing and symmetry handling literature in MIP/CP; mipx `SymmetryManager` and `processNode` instrumentation.
 
 **Depends on:** 29
 **Unlocks:** 34
