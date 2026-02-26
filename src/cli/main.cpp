@@ -20,7 +20,7 @@ int main(int argc, char* argv[]) {
         std::fprintf(stdout,
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-            "[--no-presolve|--presolve] [--barrier|--pdlp|--dual] "
+            "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
             "[--heur-deterministic|--heur-opportunistic] [--seed N] "
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
     bool verbose = true;
     bool presolve = true;
     bool cuts_enabled = true;
-    enum class LpMode { Dual, Barrier, Pdlp };
+    enum class LpMode { Dual, Barrier, Pdlp, Concurrent };
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
     bool relax_integrality = false;
@@ -87,6 +87,8 @@ int main(int argc, char* argv[]) {
             lp_mode = LpMode::Pdlp;
         } else if (arg == "--dual") {
             lp_mode = LpMode::Dual;
+        } else if (arg == "--concurrent-root") {
+            lp_mode = LpMode::Concurrent;
         } else if (arg == "--heur-deterministic") {
             heuristic_mode = mipx::HeuristicRuntimeMode::Deterministic;
         } else if (arg == "--heur-opportunistic") {
@@ -158,6 +160,8 @@ int main(int argc, char* argv[]) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::BarrierRoot);
             } else if (lp_mode == LpMode::Pdlp) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::PdlpRoot);
+            } else if (lp_mode == LpMode::Concurrent) {
+                solver.setRootLpPolicy(mipx::RootLpPolicy::ConcurrentRootExperimental);
             } else {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::DualDefault);
             }

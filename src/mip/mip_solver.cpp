@@ -2673,57 +2673,260 @@ MipResult MipSolver::solve() {
     lp.load(problem_);
     lp.setVerbose(false);
 
+    enum class RootBackend : int {
+        Dual = 0,
+        Barrier = 1,
+        Pdlp = 2,
+    };
+
+    struct RootCandidateResult {
+        RootBackend backend = RootBackend::Dual;
+        LpResult lp_result{};
+        std::vector<Real> primals;
+        std::vector<BasisStatus> basis;
+        bool used_gpu = false;
+        double seconds = 0.0;
+    };
+
+    auto backendName = [](RootBackend backend) {
+        switch (backend) {
+            case RootBackend::Dual: return "dual";
+            case RootBackend::Barrier: return "barrier";
+            case RootBackend::Pdlp: return "pdlp";
+            default: return "dual";
+        }
+    };
+
+    auto backendWarmStartRank = [](RootBackend backend) {
+        switch (backend) {
+            case RootBackend::Dual: return 0;
+            case RootBackend::Barrier: return 1;
+            case RootBackend::Pdlp: return 2;
+            default: return 3;
+        }
+    };
+
+    auto betterBound = [&](Real candidate, Real incumbent) {
+        if (!std::isfinite(incumbent)) return true;
+        if (problem_.sense == Sense::Minimize) return candidate < incumbent - 1e-7;
+        return candidate > incumbent + 1e-7;
+    };
+
+    auto comparableBound = [](Real a, Real b) {
+        const Real scale = std::max<Real>({1.0, std::abs(a), std::abs(b)});
+        return std::abs(a - b) <= 1e-7 * scale;
+    };
+
+    auto runRootBackend = [&](RootBackend backend,
+                              const std::atomic<bool>* stop_flag) -> RootCandidateResult {
+        RootCandidateResult out;
+        out.backend = backend;
+
+        if (stop_flag != nullptr && stop_flag->load(std::memory_order_relaxed)) {
+            out.lp_result.status = Status::IterLimit;
+            return out;
+        }
+
+        const auto started = std::chrono::steady_clock::now();
+        if (backend == RootBackend::Dual) {
+            DualSimplexSolver solver;
+            solver.load(problem_);
+            solver.setVerbose(false);
+            auto opts = solver.getOptions();
+            opts.stop_flag = stop_flag;
+            solver.setOptions(opts);
+            out.lp_result = solver.solve();
+            out.primals = solver.getPrimalValues();
+            out.basis = solver.getBasis();
+        } else if (backend == RootBackend::Barrier) {
+            BarrierSolver solver;
+            BarrierOptions opts;
+            opts.verbose = false;
+            opts.use_gpu = barrier_use_gpu_;
+            opts.gpu_min_rows = barrier_gpu_min_rows_;
+            opts.gpu_min_nnz = barrier_gpu_min_nnz_;
+            opts.stop_flag = stop_flag;
+            solver.setOptions(opts);
+            solver.load(problem_);
+            out.lp_result = solver.solve();
+            out.primals = solver.getPrimalValues();
+            out.used_gpu = solver.usedGpu();
+        } else {
+            PdlpSolver solver;
+            PdlpOptions opts;
+            opts.verbose = false;
+            opts.use_gpu = pdlp_use_gpu_;
+            opts.gpu_min_rows = pdlp_gpu_min_rows_;
+            opts.gpu_min_nnz = pdlp_gpu_min_nnz_;
+            opts.stop_flag = stop_flag;
+            solver.setOptions(opts);
+            solver.load(problem_);
+            out.lp_result = solver.solve();
+            out.primals = solver.getPrimalValues();
+            out.used_gpu = solver.usedGpu();
+        }
+        out.seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        return out;
+    };
+
     bool root_used_dual = true;
     std::vector<Real> root_primals;
     std::vector<BasisStatus> root_basis;
+    const char* root_backend_used = rootPolicyName(root_lp_policy_);
 
     auto t0 = std::chrono::steady_clock::now();
     LpResult root_result;
+    Int root_lp_iters_total = 0;
+    double root_lp_work_total = 0.0;
     if (root_lp_policy_ == RootLpPolicy::BarrierRoot) {
         root_used_dual = false;
-        BarrierSolver barrier;
-        BarrierOptions bopts;
-        bopts.verbose = verbose_;
-        bopts.use_gpu = barrier_use_gpu_;
-        bopts.gpu_min_rows = barrier_gpu_min_rows_;
-        bopts.gpu_min_nnz = barrier_gpu_min_nnz_;
-        barrier.setOptions(bopts);
-        barrier.load(problem_);
-        root_result = barrier.solve();
-        root_primals = barrier.getPrimalValues();
+        const auto result = runRootBackend(RootBackend::Barrier, nullptr);
+        root_result = result.lp_result;
+        root_primals = result.primals;
+        root_lp_iters_total = root_result.iterations;
+        root_lp_work_total = root_result.work_units;
+        root_backend_used = "barrier";
         if (verbose_) {
-            log_.log("Root barrier mode%s.\n", barrier.usedGpu() ? " (GPU backend)" : "");
+            log_.log("Root barrier mode%s.\n", result.used_gpu ? " (GPU backend)" : "");
         }
     } else if (root_lp_policy_ == RootLpPolicy::PdlpRoot) {
         root_used_dual = false;
-        PdlpSolver pdlp;
-        PdlpOptions popts;
-        popts.verbose = verbose_;
-        popts.use_gpu = pdlp_use_gpu_;
-        popts.gpu_min_rows = pdlp_gpu_min_rows_;
-        popts.gpu_min_nnz = pdlp_gpu_min_nnz_;
-        pdlp.setOptions(popts);
-        pdlp.load(problem_);
-        root_result = pdlp.solve();
-        root_primals = pdlp.getPrimalValues();
+        const auto result = runRootBackend(RootBackend::Pdlp, nullptr);
+        root_result = result.lp_result;
+        root_primals = result.primals;
+        root_lp_iters_total = root_result.iterations;
+        root_lp_work_total = root_result.work_units;
+        root_backend_used = "pdlp";
         if (verbose_) {
-            log_.log("Root PDLP mode%s.\n", pdlp.usedGpu() ? " (GPU backend)" : "");
+            log_.log("Root PDLP mode%s.\n", result.used_gpu ? " (GPU backend)" : "");
+        }
+    } else if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental) {
+        root_used_dual = false;
+        lp_stats_.root_race_runs = 1;
+        std::vector<RootCandidateResult> race_results;
+        race_results.reserve(3);
+
+        if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
+            race_results.push_back(runRootBackend(RootBackend::Dual, nullptr));
+            race_results.push_back(runRootBackend(RootBackend::Barrier, nullptr));
+            race_results.push_back(runRootBackend(RootBackend::Pdlp, nullptr));
+        } else {
+            std::atomic<bool> race_stop{false};
+            std::mutex race_mutex;
+            auto run_and_store = [&](RootBackend backend) {
+                auto result = runRootBackend(backend, &race_stop);
+                bool mark_stop = false;
+                {
+                    std::lock_guard<std::mutex> lock(race_mutex);
+                    race_results.push_back(result);
+                    if (result.lp_result.status == Status::Optimal &&
+                        !race_stop.load(std::memory_order_relaxed)) {
+                        mark_stop = true;
+                    }
+                }
+                if (mark_stop) {
+                    race_stop.store(true, std::memory_order_relaxed);
+                }
+            };
+
+            std::thread dual_thread(run_and_store, RootBackend::Dual);
+            std::thread barrier_thread(run_and_store, RootBackend::Barrier);
+            std::thread pdlp_thread(run_and_store, RootBackend::Pdlp);
+            dual_thread.join();
+            barrier_thread.join();
+            pdlp_thread.join();
+        }
+
+        lp_stats_.root_race_candidates = static_cast<Int>(race_results.size());
+        for (const auto& candidate : race_results) {
+            root_lp_iters_total += candidate.lp_result.iterations;
+            root_lp_work_total += candidate.lp_result.work_units;
+            if (candidate.lp_result.status == Status::IterLimit) {
+                ++lp_stats_.root_race_cancelled;
+            }
+        }
+
+        std::optional<std::size_t> winner;
+        Real best_obj = (problem_.sense == Sense::Minimize) ? kInf : -kInf;
+        for (std::size_t i = 0; i < race_results.size(); ++i) {
+            const auto& c = race_results[i];
+            if (c.lp_result.status != Status::Optimal) continue;
+            if (!winner.has_value() || betterBound(c.lp_result.objective, best_obj)) {
+                winner = i;
+                best_obj = c.lp_result.objective;
+                continue;
+            }
+            if (!comparableBound(c.lp_result.objective, best_obj)) continue;
+            const auto& w = race_results[*winner];
+            if (c.seconds + 1e-12 < w.seconds) {
+                winner = i;
+            } else if (std::abs(c.seconds - w.seconds) <= 1e-12 &&
+                       backendWarmStartRank(c.backend) < backendWarmStartRank(w.backend)) {
+                winner = i;
+            }
+        }
+
+        if (!winner.has_value()) {
+            for (std::size_t i = 0; i < race_results.size(); ++i) {
+                if (race_results[i].lp_result.status == Status::Infeasible ||
+                    race_results[i].lp_result.status == Status::Unbounded) {
+                    winner = i;
+                    break;
+                }
+            }
+        }
+
+        if (!winner.has_value()) {
+            // Safety fallback if all race arms terminate without a usable root result.
+            auto dual_fallback = runRootBackend(RootBackend::Dual, nullptr);
+            race_results.push_back(dual_fallback);
+            winner = race_results.size() - 1;
+            root_lp_iters_total += dual_fallback.lp_result.iterations;
+            root_lp_work_total += dual_fallback.lp_result.work_units;
+        }
+
+        const auto& selected = race_results[*winner];
+        root_result = selected.lp_result;
+        root_primals = selected.primals;
+        root_basis = selected.basis;
+        lp_stats_.root_race_winner_seconds = selected.seconds;
+        root_backend_used = backendName(selected.backend);
+        switch (selected.backend) {
+            case RootBackend::Dual: ++lp_stats_.root_race_dual_wins; break;
+            case RootBackend::Barrier: ++lp_stats_.root_race_barrier_wins; break;
+            case RootBackend::Pdlp: ++lp_stats_.root_race_pdlp_wins; break;
+            default: break;
+        }
+
+        if (verbose_) {
+            for (const auto& candidate : race_results) {
+                log_.log("Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s\n",
+                         backendName(candidate.backend),
+                         static_cast<int>(candidate.lp_result.status),
+                         candidate.lp_result.objective,
+                         candidate.lp_result.iterations,
+                         candidate.seconds,
+                         candidate.used_gpu ? " gpu" : "");
+            }
+            log_.log("Root race winner=%s time=%.4fs\n",
+                     root_backend_used,
+                     lp_stats_.root_race_winner_seconds);
         }
     } else {
-        if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
-            log_.log("Root concurrent mode requested; PDLP/barrier/dual racing is "
-                     "not yet enabled. Falling back to dual simplex.\n");
-        }
         lp.setVerbose(verbose_);
         root_result = lp.solve();
         root_primals = lp.getPrimalValues();
         root_basis = lp.getBasis();
+        root_lp_iters_total = root_result.iterations;
+        root_lp_work_total = root_result.work_units;
+        root_backend_used = "dual";
     }
     lp_stats_.root_lp_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
 
-    total_lp_iters += root_result.iterations;
-    total_work += root_result.work_units;
+    total_lp_iters += root_lp_iters_total;
+    total_work += root_lp_work_total;
 
     if (root_result.status == Status::Infeasible) {
         if (verbose_) log_.log("Root LP infeasible.\n");
@@ -2762,8 +2965,8 @@ MipResult MipSolver::solve() {
 
     if (verbose_) {
         std::fflush(stdout);  // flush LP solver's printf output before Logger write()
-        log_.log("Root LP (%s): obj = %.10e, %d iters\n",
-                 rootPolicyName(root_lp_policy_), root_bound, root_result.iterations);
+        log_.log("Root LP (%s -> %s): obj = %.10e, %d iters\n",
+                 rootPolicyName(root_lp_policy_), root_backend_used, root_bound, root_result.iterations);
     }
 
     // Dual simplex supports reliable warm-starts for node LPs only after at least one solve.

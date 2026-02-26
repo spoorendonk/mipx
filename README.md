@@ -20,6 +20,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
 | **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
 | **Python API** | Nanobind bindings for model I/O and MIP solve flow (`LpProblem`, `MipSolver`) |
+| **Concurrent root racing** | Optional dual/barrier/PDLP root race with cooperative stop and winner telemetry |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -106,6 +107,7 @@ is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 | `--dual` | on | Use dual simplex for LP/root LP solve |
 | `--barrier` | off | Use barrier for LP/root LP solve |
 | `--pdlp` | off | Use PDLP for LP/root LP solve |
+| `--concurrent-root` | off | Race dual/barrier/PDLP at root (deterministic or opportunistic policy mode) |
 | `--heur-deterministic` | on | Deterministic heuristic runtime mode |
 | `--heur-opportunistic` | off | Opportunistic heuristic runtime mode (throughput-first) |
 | `--seed <n>` | 1 | Seed for heuristic runtime restart scheduling |
@@ -286,8 +288,7 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** post-Step-20 quality/performance janitor work and
-core MIP quality/performance track.
+**Current focus:** symmetry handling (Step 33) and exact-LP refinement planning (Step 34).
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 

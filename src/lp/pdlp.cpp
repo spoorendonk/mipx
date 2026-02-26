@@ -739,6 +739,11 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
     Real restart_merit = std::numeric_limits<Real>::infinity();
 
     for (Index iter = 0; iter < options_.max_iter; ++iter) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            iters = iter;
+            return false;
+        }
         if (!backend->multiply(z_bar, az_bar)) return false;
         for (Index i = 0; i < m; ++i) {
             y[i] += step * primal_weight * sigma_base_[i] * (az_bar[i] - bscaled_[i]);
@@ -861,6 +866,14 @@ LpResult PdlpSolver::solve() {
     bool ok = solveStandardForm(z_unscaled, y_unscaled, iters);
 
     if (!ok) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            status_ = Status::IterLimit;
+            objective_ = 0.0;
+            iterations_ = iters;
+            return {status_, objective_, iterations_, 0.0};
+        }
+
         // Robust fallback: preserve correctness if PDLP stalls.
         DualSimplexSolver fallback;
         fallback.load(original_);
