@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <functional>
 #include <numeric>
+#include <random>
 #include <thread>
 #include <unordered_map>
 
@@ -75,6 +76,14 @@ const char* cutEffortName(CutEffortMode mode) {
         case CutEffortMode::Aggressive: return "aggressive";
         case CutEffortMode::Auto: return "auto";
         default: return "auto";
+    }
+}
+
+const char* heuristicModeName(HeuristicRuntimeMode mode) {
+    switch (mode) {
+        case HeuristicRuntimeMode::Deterministic: return "deterministic";
+        case HeuristicRuntimeMode::Opportunistic: return "opportunistic";
+        default: return "deterministic";
     }
 }
 
@@ -166,6 +175,377 @@ private:
     DualSimplexSolver& lp_;
     std::vector<Index>& rows_;
 };
+
+constexpr Real kLpFreeFeasTol = 1e-6;
+
+bool isDiscreteType(VarType t) {
+    return t == VarType::Binary || t == VarType::Integer;
+}
+
+Real fallbackLowerBound(Real lb) {
+    if (std::isfinite(lb)) return lb;
+    return -16.0;
+}
+
+Real fallbackUpperBound(Real ub) {
+    if (std::isfinite(ub)) return ub;
+    return 16.0;
+}
+
+Real clampValue(Real v, Real lb, Real ub) {
+    const Real lo = fallbackLowerBound(lb);
+    const Real hi = std::max(lo, fallbackUpperBound(ub));
+    return std::clamp(v, lo, hi);
+}
+
+bool betterObjective(Sense sense, Real candidate, Real incumbent) {
+    if (!std::isfinite(incumbent) || incumbent >= kInf) return true;
+    if (sense == Sense::Minimize) return candidate < incumbent - 1e-9;
+    return candidate > incumbent + 1e-9;
+}
+
+Real objectiveValue(const LpProblem& problem, std::span<const Real> x) {
+    Real obj = problem.obj_offset;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        obj += problem.obj[j] * x[j];
+    }
+    return obj;
+}
+
+void canonicalizePoint(const LpProblem& problem, std::vector<Real>& x) {
+    if (x.size() != static_cast<std::size_t>(problem.num_cols)) {
+        x.assign(problem.num_cols, 0.0);
+    }
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        Real value = clampValue(x[j], problem.col_lower[j], problem.col_upper[j]);
+        if (problem.col_type[j] == VarType::Binary) {
+            value = (value >= 0.5) ? 1.0 : 0.0;
+        } else if (problem.col_type[j] == VarType::Integer) {
+            value = std::round(value);
+        }
+        x[j] = clampValue(value, problem.col_lower[j], problem.col_upper[j]);
+    }
+}
+
+void randomInitializePoint(const LpProblem& problem,
+                           std::span<const Index> discrete_vars,
+                           std::mt19937_64& rng,
+                           std::vector<Real>& x) {
+    x.assign(problem.num_cols, 0.0);
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        const Real lb = fallbackLowerBound(problem.col_lower[j]);
+        const Real ub = std::max(lb, fallbackUpperBound(problem.col_upper[j]));
+        if (problem.col_type[j] == VarType::Continuous) {
+            x[j] = clampValue(0.5 * (lb + ub), problem.col_lower[j], problem.col_upper[j]);
+        } else if (problem.col_type[j] == VarType::Binary) {
+            x[j] = std::uniform_int_distribution<int>(0, 1)(rng) ? 1.0 : 0.0;
+        } else {
+            const int lo = static_cast<int>(std::ceil(lb - 1e-9));
+            const int hi = static_cast<int>(std::floor(ub + 1e-9));
+            if (lo <= hi) {
+                x[j] = static_cast<Real>(std::uniform_int_distribution<int>(lo, hi)(rng));
+            } else {
+                x[j] = std::round(clampValue(0.0, lb, ub));
+            }
+        }
+    }
+    // Add a small deterministic perturbation to diversify restarts.
+    for (Index j : discrete_vars) {
+        if (problem.col_type[j] == VarType::Binary && std::uniform_int_distribution<int>(0, 7)(rng) == 0) {
+            x[j] = 1.0 - x[j];
+        }
+    }
+    canonicalizePoint(problem, x);
+}
+
+Real violationScore(const LpProblem& problem, std::span<const Real> x, double* work_units = nullptr) {
+    Real violation = 0.0;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        if (x[j] < problem.col_lower[j] - kLpFreeFeasTol) {
+            violation += problem.col_lower[j] - x[j];
+        }
+        if (x[j] > problem.col_upper[j] + kLpFreeFeasTol) {
+            violation += x[j] - problem.col_upper[j];
+        }
+        if (problem.col_type[j] != VarType::Continuous) {
+            violation += std::abs(x[j] - std::round(x[j]));
+        }
+    }
+
+    for (Index i = 0; i < problem.num_rows; ++i) {
+        const auto row = problem.matrix.row(i);
+        Real lhs = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            lhs += row.values[k] * x[row.indices[k]];
+        }
+        if (work_units != nullptr) {
+            *work_units += static_cast<double>(row.size()) * 1e-6;
+        }
+        if (lhs < problem.row_lower[i] - kLpFreeFeasTol) {
+            violation += problem.row_lower[i] - lhs;
+        }
+        if (lhs > problem.row_upper[i] + kLpFreeFeasTol) {
+            violation += lhs - problem.row_upper[i];
+        }
+    }
+    return violation;
+}
+
+bool isFeasiblePoint(const LpProblem& problem, std::span<const Real> x, double* work_units = nullptr) {
+    return violationScore(problem, x, work_units) <= 1e-7;
+}
+
+void greedyRepair(const LpProblem& problem,
+                  std::vector<Real>& x,
+                  Int max_passes,
+                  double& work_units) {
+    for (Int pass = 0; pass < max_passes; ++pass) {
+        bool changed = false;
+        for (Index i = 0; i < problem.num_rows; ++i) {
+            const auto row = problem.matrix.row(i);
+            Real lhs = 0.0;
+            for (Index k = 0; k < row.size(); ++k) {
+                lhs += row.values[k] * x[row.indices[k]];
+            }
+            work_units += static_cast<double>(row.size()) * 1e-6;
+
+            auto applyAdjustment = [&](bool decrease_lhs, Real magnitude) {
+                Index best_var = -1;
+                Real best_coeff = 0.0;
+                Real best_new_value = 0.0;
+                for (Index k = 0; k < row.size(); ++k) {
+                    const Index j = row.indices[k];
+                    const Real coeff = row.values[k];
+                    const bool discrete = isDiscreteType(problem.col_type[j]);
+                    const Real lb = fallbackLowerBound(problem.col_lower[j]);
+                    const Real ub = std::max(lb, fallbackUpperBound(problem.col_upper[j]));
+
+                    Real candidate = x[j];
+                    bool valid = false;
+                    if (decrease_lhs) {
+                        if (coeff > 1e-12 && x[j] > lb + kLpFreeFeasTol) {
+                            const Real step = discrete
+                                ? static_cast<Real>(std::max<Int>(1, static_cast<Int>(std::ceil(magnitude / coeff))))
+                                : magnitude / coeff;
+                            candidate = std::max(lb, x[j] - step);
+                            valid = true;
+                        } else if (coeff < -1e-12 && x[j] < ub - kLpFreeFeasTol) {
+                            const Real step = discrete
+                                ? static_cast<Real>(std::max<Int>(1, static_cast<Int>(std::ceil(magnitude / std::abs(coeff)))))
+                                : magnitude / std::abs(coeff);
+                            candidate = std::min(ub, x[j] + step);
+                            valid = true;
+                        }
+                    } else {
+                        if (coeff > 1e-12 && x[j] < ub - kLpFreeFeasTol) {
+                            const Real step = discrete
+                                ? static_cast<Real>(std::max<Int>(1, static_cast<Int>(std::ceil(magnitude / coeff))))
+                                : magnitude / coeff;
+                            candidate = std::min(ub, x[j] + step);
+                            valid = true;
+                        } else if (coeff < -1e-12 && x[j] > lb + kLpFreeFeasTol) {
+                            const Real step = discrete
+                                ? static_cast<Real>(std::max<Int>(1, static_cast<Int>(std::ceil(magnitude / std::abs(coeff)))))
+                                : magnitude / std::abs(coeff);
+                            candidate = std::max(lb, x[j] - step);
+                            valid = true;
+                        }
+                    }
+                    if (!valid) continue;
+
+                    if (problem.col_type[j] == VarType::Binary) {
+                        candidate = (candidate >= 0.5) ? 1.0 : 0.0;
+                    } else if (problem.col_type[j] == VarType::Integer) {
+                        candidate = std::round(candidate);
+                    }
+                    candidate = clampValue(candidate, problem.col_lower[j], problem.col_upper[j]);
+                    if (std::abs(candidate - x[j]) <= 1e-12) continue;
+
+                    if (std::abs(coeff) > std::abs(best_coeff)) {
+                        best_coeff = coeff;
+                        best_var = j;
+                        best_new_value = candidate;
+                    }
+                }
+
+                if (best_var >= 0) {
+                    x[best_var] = best_new_value;
+                    changed = true;
+                }
+            };
+
+            if (lhs > problem.row_upper[i] + kLpFreeFeasTol && problem.row_upper[i] < kInf) {
+                applyAdjustment(true, lhs - problem.row_upper[i]);
+            }
+            if (lhs < problem.row_lower[i] - kLpFreeFeasTol && problem.row_lower[i] > -kInf) {
+                applyAdjustment(false, problem.row_lower[i] - lhs);
+            }
+        }
+        canonicalizePoint(problem, x);
+        if (!changed) break;
+    }
+}
+
+std::optional<HeuristicSolution> runLpFreeFeasJump(
+    const LpProblem& problem,
+    std::span<const Index> discrete_vars,
+    std::mt19937_64& rng,
+    Real incumbent,
+    double& work_units) {
+    if (discrete_vars.empty()) return std::nullopt;
+
+    std::vector<Real> x(problem.num_cols, 0.0);
+    for (Int restart = 0; restart < 4; ++restart) {
+        randomInitializePoint(problem, discrete_vars, rng, x);
+        greedyRepair(problem, x, 6, work_units);
+        if (isFeasiblePoint(problem, x, &work_units)) {
+            const Real obj = objectiveValue(problem, x);
+            if (betterObjective(problem.sense, obj, incumbent)) {
+                return HeuristicSolution{.values = x, .objective = obj};
+            }
+        }
+
+        // Single-variable jump pass.
+        for (Index j : discrete_vars) {
+            const Real current = x[j];
+            Real best_value = current;
+            Real best_violation = violationScore(problem, x, &work_units);
+            const std::array<Real, 2> candidates = {
+                clampValue(current - 1.0, problem.col_lower[j], problem.col_upper[j]),
+                clampValue(current + 1.0, problem.col_lower[j], problem.col_upper[j]),
+            };
+            for (Real c : candidates) {
+                if (problem.col_type[j] == VarType::Binary) c = (c >= 0.5) ? 1.0 : 0.0;
+                if (problem.col_type[j] == VarType::Integer) c = std::round(c);
+                if (std::abs(c - current) <= 1e-12) continue;
+                x[j] = c;
+                canonicalizePoint(problem, x);
+                const Real v = violationScore(problem, x, &work_units);
+                if (v + 1e-12 < best_violation) {
+                    best_violation = v;
+                    best_value = c;
+                }
+            }
+            x[j] = best_value;
+            canonicalizePoint(problem, x);
+        }
+        greedyRepair(problem, x, 4, work_units);
+        if (isFeasiblePoint(problem, x, &work_units)) {
+            const Real obj = objectiveValue(problem, x);
+            if (betterObjective(problem.sense, obj, incumbent)) {
+                return HeuristicSolution{.values = x, .objective = obj};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<HeuristicSolution> runLpFreeFpr(
+    const LpProblem& problem,
+    std::span<const Index> discrete_vars,
+    std::mt19937_64& rng,
+    Real incumbent,
+    double& work_units) {
+    if (discrete_vars.empty()) return std::nullopt;
+
+    std::vector<Real> x(problem.num_cols, 0.0);
+    randomInitializePoint(problem, discrete_vars, rng, x);
+
+    std::vector<std::pair<Real, Index>> ranked;
+    ranked.reserve(discrete_vars.size());
+    for (Index j : discrete_vars) {
+        const Real degree = static_cast<Real>(problem.matrix.col(j).size());
+        const Real score = std::abs(problem.obj[j]) * (1.0 + degree);
+        ranked.push_back({score, j});
+        work_units += degree * 1e-6;
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    for (const auto& [score, j] : ranked) {
+        (void)score;
+        const Real lb = clampValue(problem.col_lower[j], problem.col_lower[j], problem.col_upper[j]);
+        const Real ub = clampValue(problem.col_upper[j], problem.col_lower[j], problem.col_upper[j]);
+        const bool prefer_upper = (problem.sense == Sense::Minimize)
+            ? (problem.obj[j] < 0.0)
+            : (problem.obj[j] > 0.0);
+        const std::array<Real, 2> candidates = prefer_upper
+            ? std::array<Real, 2>{ub, lb}
+            : std::array<Real, 2>{lb, ub};
+        Real best_choice = x[j];
+        Real best_violation = kInf;
+        for (Real c : candidates) {
+            x[j] = c;
+            canonicalizePoint(problem, x);
+            greedyRepair(problem, x, 2, work_units);
+            const Real v = violationScore(problem, x, &work_units);
+            if (v < best_violation) {
+                best_violation = v;
+                best_choice = x[j];
+            }
+        }
+        x[j] = best_choice;
+        canonicalizePoint(problem, x);
+    }
+
+    greedyRepair(problem, x, 8, work_units);
+    if (!isFeasiblePoint(problem, x, &work_units)) return std::nullopt;
+    const Real obj = objectiveValue(problem, x);
+    if (!betterObjective(problem.sense, obj, incumbent)) return std::nullopt;
+    return HeuristicSolution{.values = std::move(x), .objective = obj};
+}
+
+std::optional<HeuristicSolution> runLpFreeLocalMip(
+    const LpProblem& problem,
+    std::span<const Index> discrete_vars,
+    std::mt19937_64& rng,
+    Real incumbent,
+    std::span<const Real> incumbent_values,
+    double& work_units) {
+    if (discrete_vars.empty() || incumbent_values.empty()) return std::nullopt;
+    std::vector<Real> x(incumbent_values.begin(), incumbent_values.end());
+    canonicalizePoint(problem, x);
+    if (!isFeasiblePoint(problem, x, &work_units)) {
+        greedyRepair(problem, x, 6, work_units);
+    }
+    if (!isFeasiblePoint(problem, x, &work_units)) return std::nullopt;
+
+    Real best_obj = objectiveValue(problem, x);
+    bool improved = false;
+    const Int iters = std::max<Int>(24, static_cast<Int>(discrete_vars.size()) * 4);
+    for (Int iter = 0; iter < iters; ++iter) {
+        const Index pos = std::uniform_int_distribution<Index>(
+            0, static_cast<Index>(discrete_vars.size()) - 1)(rng);
+        const Index j = discrete_vars[pos];
+        const Real current = x[j];
+        std::array<Real, 2> candidates = {
+            clampValue(current - 1.0, problem.col_lower[j], problem.col_upper[j]),
+            clampValue(current + 1.0, problem.col_lower[j], problem.col_upper[j]),
+        };
+        if (problem.col_type[j] == VarType::Binary) {
+            candidates = {1.0 - current, current};
+        }
+
+        for (Real c : candidates) {
+            std::vector<Real> trial = x;
+            trial[j] = c;
+            canonicalizePoint(problem, trial);
+            greedyRepair(problem, trial, 2, work_units);
+            if (!isFeasiblePoint(problem, trial, &work_units)) continue;
+            const Real obj = objectiveValue(problem, trial);
+            if (betterObjective(problem.sense, obj, best_obj)) {
+                x = std::move(trial);
+                best_obj = obj;
+                improved = true;
+            }
+        }
+    }
+
+    if (!improved || !betterObjective(problem.sense, best_obj, incumbent)) {
+        return std::nullopt;
+    }
+    return HeuristicSolution{.values = std::move(x), .objective = best_obj};
+}
 
 }  // namespace
 
@@ -1439,6 +1819,7 @@ MipResult MipSolver::solve() {
     lp_stats_ = {};
     cut_stats_ = {};
     conflict_stats_ = {};
+    pre_root_stats_ = {};
     search_stats_ = {};
     tree_presolve_stats_ = {};
     conflict_pool_.clear();
@@ -1527,6 +1908,12 @@ MipResult MipSolver::solve() {
         if (search_profile_ != SearchProfile::Default) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
                                 "search=%s ", searchProfileName(search_profile_));
+        }
+        if (pre_root_lp_free_enabled_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "pre_root_lpfree=on pre_root_work=%.0f pre_root_rounds=%d ",
+                                pre_root_lp_free_work_budget_,
+                                pre_root_lp_free_max_rounds_);
         }
         if (sp > settings) {
             // Trim trailing space.
@@ -1659,6 +2046,172 @@ MipResult MipSolver::solve() {
 
     branching_rule_.reset(problem_.num_cols);
     branching_stats_ = {};
+    Real incumbent = kInf;
+    std::vector<Real> best_solution;
+    Int total_lp_iters = 0;
+    double total_work = 0.0;
+
+    std::vector<Index> discrete_vars;
+    discrete_vars.reserve(problem_.num_cols);
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (isDiscreteType(problem_.col_type[j])) discrete_vars.push_back(j);
+    }
+
+    if (pre_root_lp_free_enabled_ && !discrete_vars.empty()) {
+        pre_root_stats_.enabled = true;
+        const Int hw_threads = static_cast<Int>(
+            std::max<unsigned>(1, std::thread::hardware_concurrency()));
+        const Int stage_threads = (heuristic_mode_ == HeuristicRuntimeMode::Deterministic)
+            ? 1
+            : std::max<Int>(1, std::min(num_threads_, hw_threads));
+        std::atomic<Int> next_round{0};
+        std::atomic<bool> should_stop{false};
+        std::atomic<Int> calls{0};
+        std::atomic<Int> improvements{0};
+        std::atomic<Int> feasible_found{0};
+        std::atomic<Int> early_stops{0};
+        std::atomic<Int> fj_calls{0};
+        std::atomic<Int> fpr_calls{0};
+        std::atomic<Int> local_mip_calls{0};
+        std::atomic<double> stage_work{0.0};
+        std::atomic<double> first_feasible_seconds{kInf};
+        SolutionPool pre_root_pool(problem_.sense);
+        const auto stage_start = std::chrono::steady_clock::now();
+        auto stageElapsed = [&]() -> double {
+            return std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - stage_start).count();
+        };
+        auto addStageWork = [&](double add) {
+            auto old_w = stage_work.load(std::memory_order_relaxed);
+            while (!stage_work.compare_exchange_weak(old_w, old_w + add,
+                                                     std::memory_order_relaxed)) {}
+        };
+
+        auto worker = [&](Int thread_id) {
+            std::mt19937_64 rng(
+                heuristic_seed_ ^
+                (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(thread_id + 1)));
+            while (!should_stop.load(std::memory_order_relaxed)) {
+                if (stage_work.load(std::memory_order_relaxed) >= pre_root_lp_free_work_budget_) {
+                    break;
+                }
+                const Int round = next_round.fetch_add(1, std::memory_order_relaxed);
+                if (round >= pre_root_lp_free_max_rounds_) break;
+                ++calls;
+
+                int arm = 0;
+                if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
+                    arm = round % 3;
+                } else {
+                    arm = std::uniform_int_distribution<int>(0, 2)(rng);
+                }
+
+                double local_work = 0.0;
+                std::optional<HeuristicSolution> candidate;
+                if (arm == 0) {
+                    ++fj_calls;
+                    candidate = runLpFreeFeasJump(problem_, discrete_vars, rng,
+                                                  pre_root_pool.bestObjective(),
+                                                  local_work);
+                } else if (arm == 1) {
+                    ++fpr_calls;
+                    candidate = runLpFreeFpr(problem_, discrete_vars, rng,
+                                             pre_root_pool.bestObjective(),
+                                             local_work);
+                } else {
+                    ++local_mip_calls;
+                    auto incumbent_sol = pre_root_pool.bestSolution();
+                    std::span<const Real> incumbent_span{};
+                    if (incumbent_sol.has_value()) {
+                        incumbent_span = std::span<const Real>(incumbent_sol->values.data(),
+                                                               incumbent_sol->values.size());
+                    }
+                    candidate = runLpFreeLocalMip(problem_, discrete_vars, rng,
+                                                  pre_root_pool.bestObjective(),
+                                                  incumbent_span, local_work);
+                }
+                addStageWork(local_work);
+
+                if (candidate.has_value() &&
+                    pre_root_pool.submit(*candidate, "pre_root_lp_free", thread_id)) {
+                    ++improvements;
+                    ++feasible_found;
+                    const double seen = stageElapsed();
+                    auto old_first = first_feasible_seconds.load(std::memory_order_relaxed);
+                    while (seen < old_first &&
+                           !first_feasible_seconds.compare_exchange_weak(
+                               old_first, seen, std::memory_order_relaxed)) {}
+                    if (pre_root_lp_free_early_stop_) {
+                        should_stop.store(true, std::memory_order_relaxed);
+                        ++early_stops;
+                    }
+                }
+            }
+        };
+
+        std::vector<std::thread> workers;
+        workers.reserve(stage_threads);
+        for (Int t = 0; t < stage_threads; ++t) {
+            workers.emplace_back(worker, t);
+        }
+        for (auto& w : workers) w.join();
+
+        if (auto best = pre_root_pool.bestSolution(); best.has_value()) {
+            incumbent = best->objective;
+            best_solution = std::move(best->values);
+        }
+        pre_root_stats_.rounds = std::min<Int>(
+            pre_root_lp_free_max_rounds_,
+            next_round.load(std::memory_order_relaxed));
+        pre_root_stats_.calls = calls.load(std::memory_order_relaxed);
+        pre_root_stats_.improvements = improvements.load(std::memory_order_relaxed);
+        pre_root_stats_.feasible_found = feasible_found.load(std::memory_order_relaxed);
+        pre_root_stats_.early_stops = early_stops.load(std::memory_order_relaxed);
+        pre_root_stats_.fj_calls = fj_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.fpr_calls = fpr_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.local_mip_calls = local_mip_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.work_units = stage_work.load(std::memory_order_relaxed);
+        pre_root_stats_.time_seconds = stageElapsed();
+        pre_root_stats_.time_to_first_feasible =
+            first_feasible_seconds.load(std::memory_order_relaxed);
+        pre_root_stats_.incumbent_at_root = incumbent;
+        total_work += pre_root_stats_.work_units;
+
+        if (verbose_) {
+            if (std::isfinite(pre_root_stats_.time_to_first_feasible)) {
+                log_.log(
+                    "Pre-root LP-free (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "found=%d best=%.10e work=%.3f time=%.3fs first=%.3fs\n",
+                    heuristicModeName(heuristic_mode_),
+                    stage_threads,
+                    stage_threads == 1 ? "" : "s",
+                    pre_root_stats_.calls,
+                    pre_root_stats_.fj_calls,
+                    pre_root_stats_.fpr_calls,
+                    pre_root_stats_.local_mip_calls,
+                    pre_root_stats_.feasible_found,
+                    pre_root_stats_.incumbent_at_root,
+                    pre_root_stats_.work_units,
+                    pre_root_stats_.time_seconds,
+                    pre_root_stats_.time_to_first_feasible);
+            } else {
+                log_.log(
+                    "Pre-root LP-free (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "found=%d best=%.10e work=%.3f time=%.3fs first=n/a\n",
+                    heuristicModeName(heuristic_mode_),
+                    stage_threads,
+                    stage_threads == 1 ? "" : "s",
+                    pre_root_stats_.calls,
+                    pre_root_stats_.fj_calls,
+                    pre_root_stats_.fpr_calls,
+                    pre_root_stats_.local_mip_calls,
+                    pre_root_stats_.feasible_found,
+                    pre_root_stats_.incumbent_at_root,
+                    pre_root_stats_.work_units,
+                    pre_root_stats_.time_seconds);
+            }
+        }
+    }
 
     // Solve root LP.
     DualSimplexSolver lp;
@@ -1714,8 +2267,8 @@ MipResult MipSolver::solve() {
     lp_stats_.root_lp_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
 
-    Int total_lp_iters = root_result.iterations;
-    double total_work = root_result.work_units;
+    total_lp_iters += root_result.iterations;
+    total_work += root_result.work_units;
 
     if (root_result.status == Status::Infeasible) {
         if (verbose_) log_.log("Root LP infeasible.\n");
@@ -1823,11 +2376,12 @@ MipResult MipSolver::solve() {
 
     // Check if root solution is integer feasible.
     root_basis = lp.getBasis();
-    Real incumbent = kInf;
-    std::vector<Real> best_solution;
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
     HeuristicRuntime root_runtime(runtime_config);
+    if (incumbent < kInf && !best_solution.empty()) {
+        solution_pool.submit({best_solution, incumbent}, "pre_root_lp_free", 0);
+    }
 
     if (isFeasibleLp(root_primals) && isFeasibleMip(root_primals)) {
         incumbent = root_bound;

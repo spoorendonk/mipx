@@ -529,6 +529,93 @@ TEST_CASE("MipSolver: opportunistic heuristic mode solves", "[mip][heuristics]")
     CHECK(result.solution[0] <= 4.6 + 1e-6);
 }
 
+TEST_CASE("MipSolver: pre-root LP-free stage is disabled by default",
+          "[mip][heuristics][preroot]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    CHECK((result.status == Status::Optimal ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& stats = solver.getPreRootStats();
+    CHECK_FALSE(stats.enabled);
+    CHECK(stats.calls == 0);
+    CHECK(stats.work_units == 0.0);
+}
+
+TEST_CASE("MipSolver: pre-root LP-free stage can hand off incumbent",
+          "[mip][heuristics][preroot]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(11);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpFreeWorkBudget(2.0e5);
+    solver.setPreRootLpFreeMaxRounds(16);
+    solver.setPreRootLpFreeEarlyStop(true);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK(stats.calls > 0);
+    CHECK(stats.work_units > 0.0);
+    CHECK(stats.feasible_found >= 1);
+    CHECK(std::isfinite(stats.incumbent_at_root));
+    REQUIRE(!result.solution.empty());
+}
+
+TEST_CASE("MipSolver: pre-root LP-free deterministic mode reproduces with seed",
+          "[mip][heuristics][preroot]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setNodeLimit(1);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(77);
+    solver_a.setPreRootLpFreeEnabled(true);
+    solver_a.setPreRootLpFreeWorkBudget(1.0e5);
+    solver_a.setPreRootLpFreeMaxRounds(12);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setNodeLimit(1);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(77);
+    solver_b.setPreRootLpFreeEnabled(true);
+    solver_b.setPreRootLpFreeWorkBudget(1.0e5);
+    solver_b.setPreRootLpFreeMaxRounds(12);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    const auto& sa = solver_a.getPreRootStats();
+    const auto& sb = solver_b.getPreRootStats();
+    CHECK(sa.enabled);
+    CHECK(sb.enabled);
+    CHECK(sa.calls == sb.calls);
+    CHECK_THAT(sa.work_units, WithinAbs(sb.work_units, 1e-9));
+    CHECK_THAT(sa.incumbent_at_root, WithinAbs(sb.incumbent_at_root, 1e-9));
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+}
+
 TEST_CASE("MipSolver: conflict learning learns and reuses no-goods", "[mip][conflicts]") {
     auto lp = buildConflictLearningMip();
 
