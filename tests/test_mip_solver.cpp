@@ -223,6 +223,35 @@ static LpProblem buildTreeCutMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: infeasible binary model with fractional root to exercise conflict
+// learning and no-good reuse in the tree.
+// x + y = 1.5, x,y binary
+// ---------------------------------------------------------------------------
+
+static LpProblem buildConflictLearningMip() {
+    LpProblem lp;
+    lp.name = "conflict_learning_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {1.5};
+    lp.row_upper = {1.5};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -466,4 +495,44 @@ TEST_CASE("MipSolver: opportunistic heuristic mode solves", "[mip][heuristics]")
     REQUIRE(!result.solution.empty());
     CHECK(result.solution[0] >= 0.0);
     CHECK(result.solution[0] <= 4.6 + 1e-6);
+}
+
+TEST_CASE("MipSolver: conflict learning learns and reuses no-goods", "[mip][conflicts]") {
+    auto lp = buildConflictLearningMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(128);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK(result.status == Status::Infeasible);
+    const auto& cstats = solver.getConflictStats();
+    CHECK(cstats.learned >= 1);
+    CHECK(cstats.lp_infeasible_conflicts >= 1);
+    CHECK(cstats.minimized_literals >= 0);
+}
+
+TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conflicts]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver with_conflicts;
+    with_conflicts.setVerbose(false);
+    with_conflicts.setCutsEnabled(false);
+    with_conflicts.setConflictsEnabled(true);
+    with_conflicts.load(lp);
+    const auto with_result = with_conflicts.solve();
+
+    MipSolver without_conflicts;
+    without_conflicts.setVerbose(false);
+    without_conflicts.setCutsEnabled(false);
+    without_conflicts.setConflictsEnabled(false);
+    without_conflicts.load(lp);
+    const auto without_result = without_conflicts.solve();
+
+    REQUIRE(with_result.status == Status::Optimal);
+    REQUIRE(without_result.status == Status::Optimal);
+    CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
 }

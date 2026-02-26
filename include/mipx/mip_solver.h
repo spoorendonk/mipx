@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <span>
 #include <vector>
 
 #include "mipx/bnb_node.h"
@@ -53,6 +54,17 @@ struct MipCutStats {
     Int tree_cuts_purged = 0;
     Int tree_cuts_revived = 0;
     Real tree_lp_delta = 0.0;
+};
+
+struct MipConflictStats {
+    Int learned = 0;
+    Int reused = 0;
+    Int pruned = 0;
+    Int purged = 0;
+    Int minimized_literals = 0;
+    Int lp_infeasible_conflicts = 0;
+    Int bound_infeasible_conflicts = 0;
+    Int branch_score_overrides = 0;
 };
 
 struct MipResult {
@@ -120,8 +132,10 @@ public:
     }
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
+    void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
+    const MipConflictStats& getConflictStats() const { return conflict_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -182,7 +196,29 @@ private:
                      std::vector<Index>& touched_vars,
                      NodeWorkStats& node_stats,
                      Int& int_inf_out);
+    void ageConflictPool();
+    void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
+                               bool lp_infeasible);
+    bool isConflictTriggered(std::span<const Index> vars,
+                             std::span<const Real> node_lb,
+                             std::span<const Real> node_ub);
+    Index selectConflictAwareBranchVariable(std::span<const Real> primals,
+                                            std::span<const Real> current_lower,
+                                            std::span<const Real> current_upper,
+                                            Index default_var);
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
+
+    struct ConflictLiteral {
+        Index variable = -1;
+        Real bound = 0.0;
+        bool is_upper = false;
+    };
+
+    struct ConflictClause {
+        std::vector<ConflictLiteral> literals;
+        Int age = 0;
+        Int hits = 0;
+    };
 
     // Problem data.
     LpProblem problem_;
@@ -214,8 +250,14 @@ private:
     Int pdlp_gpu_min_nnz_ = 10000;
     HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
+    bool conflicts_enabled_ = true;
+    Int conflict_max_pool_size_ = 512;
+    Int conflict_max_age_ = 64;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
+    MipConflictStats conflict_stats_{};
+    std::vector<ConflictClause> conflict_pool_{};
+    std::vector<Real> conflict_scores_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
