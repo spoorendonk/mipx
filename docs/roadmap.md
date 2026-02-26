@@ -25,7 +25,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 15: Parallel Tree Search](#step-15)
 - [🟢 Step 16: Heuristic Runtime Subsystem](#step-16)
 - [🟢 Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
-- [⚪ Step 18: LP-Light Heuristics Integration](#step-18)
+- [🟢 Step 18: LP-Light Heuristics Integration](#step-18)
 - [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
@@ -618,11 +618,16 @@ work/round budgets with early-stop, and telemetry for calls/work/time-to-first-f
 
 <a id="step-18"></a>
 
-## Step 18: LP-Light Heuristics Integration
+## Step 18: LP-Light Heuristics Integration ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add LP-assisted heuristic arms without forcing core solver dependency changes.
+
+**Status:** Complete. Added optional LP-light pre-root arms (LP-fractionality
+FPR + LP-guided diving) with deterministic/opportunistic scheduling integration,
+an LP-light adapter path for heuristic-only LP solves, build/runtime capability
+gating, and telemetry/test coverage with default behavior unchanged when off.
 
 **Deliverables:**
 - Optional LP-backend adapter for heuristic-only LP calls (HiGHS first target)

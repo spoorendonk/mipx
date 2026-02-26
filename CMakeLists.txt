@@ -16,6 +16,9 @@ find_package(CUDAToolkit QUIET)
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
 option(MIPX_USE_CUDA "Enable CUDA acceleration in barrier solver" ${CUDAToolkit_FOUND})
+option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
+       "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
+       ON)
 
 if(MIPX_USE_CUDA AND NOT CUDAToolkit_FOUND)
     message(FATAL_ERROR "MIPX_USE_CUDA=ON but CUDAToolkit was not found")

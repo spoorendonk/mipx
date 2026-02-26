@@ -96,6 +96,17 @@ const char* searchProfileName(SearchProfile profile) {
     }
 }
 
+constexpr bool kLpLightCompiled =
+#ifdef MIPX_HAS_LP_LIGHT
+    true;
+#else
+    false;
+#endif
+
+const char* lpLightBackendName() {
+    return kLpLightCompiled ? "dual" : "none";
+}
+
 Real sparseCosineSimilarity(std::span<const Index> ind_a, std::span<const Real> val_a,
                             std::span<const Index> ind_b, std::span<const Real> val_b) {
     Real dot = 0.0;
@@ -224,6 +235,15 @@ void canonicalizePoint(const LpProblem& problem, std::vector<Real>& x) {
             value = std::round(value);
         }
         x[j] = clampValue(value, problem.col_lower[j], problem.col_upper[j]);
+    }
+}
+
+void projectToBounds(const LpProblem& problem, std::vector<Real>& x) {
+    if (x.size() != static_cast<std::size_t>(problem.num_cols)) {
+        x.assign(problem.num_cols, 0.0);
+    }
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        x[j] = clampValue(x[j], problem.col_lower[j], problem.col_upper[j]);
     }
 }
 
@@ -547,11 +567,147 @@ std::optional<HeuristicSolution> runLpFreeLocalMip(
     return HeuristicSolution{.values = std::move(x), .objective = best_obj};
 }
 
+struct LpLightGuide {
+    std::vector<Real> primals;
+    std::vector<Real> reduced_costs;
+    Int iterations = 0;
+    double work_units = 0.0;
+};
+
+std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem) {
+#ifdef MIPX_HAS_LP_LIGHT
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.setVerbose(false);
+    const auto result = lp.solve();
+    if (result.status != Status::Optimal) return std::nullopt;
+    LpLightGuide guide;
+    guide.primals = lp.getPrimalValues();
+    guide.reduced_costs = lp.getReducedCosts();
+    guide.iterations = result.iterations;
+    guide.work_units = result.work_units;
+    return guide;
+#else
+    (void)problem;
+    return std::nullopt;
+#endif
+}
+
+std::optional<HeuristicSolution> runLpLightFpr(
+    const LpProblem& problem,
+    std::span<const Index> discrete_vars,
+    std::span<const Real> lp_primals,
+    std::span<const Real> reduced_costs,
+    Real incumbent,
+    double& work_units) {
+    if (discrete_vars.empty() || lp_primals.empty()) return std::nullopt;
+
+    std::vector<Real> x(lp_primals.begin(), lp_primals.end());
+    projectToBounds(problem, x);
+
+    struct RankedVar {
+        Real score = 0.0;
+        Index var = -1;
+    };
+
+    std::vector<RankedVar> ranked;
+    ranked.reserve(discrete_vars.size());
+    for (Index j : discrete_vars) {
+        const Real frac = std::abs(lp_primals[j] - std::round(lp_primals[j]));
+        const Real rc = (j >= 0 && j < static_cast<Index>(reduced_costs.size()))
+            ? std::abs(reduced_costs[j])
+            : 0.0;
+        const Real degree = static_cast<Real>(problem.matrix.col(j).size());
+        ranked.push_back({frac * (1.0 + rc + 0.1 * degree), j});
+        work_units += (1.0 + degree) * 1e-6;
+    }
+    std::sort(ranked.begin(), ranked.end(),
+              [](const RankedVar& a, const RankedVar& b) { return a.score > b.score; });
+
+    const Int fix_count = std::max<Int>(1, static_cast<Int>(ranked.size() / 2));
+    for (Int k = 0; k < fix_count; ++k) {
+        const Index j = ranked[static_cast<std::size_t>(k)].var;
+        const Real lpv = lp_primals[j];
+        const Real down = std::floor(lpv);
+        const Real up = std::ceil(lpv);
+        const bool prefer_up = (problem.sense == Sense::Minimize)
+            ? (problem.obj[j] < 0.0)
+            : (problem.obj[j] > 0.0);
+        x[j] = prefer_up ? up : down;
+        x[j] = clampValue(x[j], problem.col_lower[j], problem.col_upper[j]);
+    }
+
+    canonicalizePoint(problem, x);
+    greedyRepair(problem, x, 6, work_units);
+    if (!isFeasiblePoint(problem, x, &work_units)) return std::nullopt;
+    const Real obj = objectiveValue(problem, x);
+    if (!betterObjective(problem.sense, obj, incumbent)) return std::nullopt;
+    return HeuristicSolution{.values = std::move(x), .objective = obj};
+}
+
+std::optional<HeuristicSolution> runLpLightDiving(
+    const LpProblem& problem,
+    std::span<const Index> discrete_vars,
+    std::span<const Real> lp_primals,
+    std::span<const Real> reduced_costs,
+    Real incumbent,
+    double& work_units) {
+    if (discrete_vars.empty() || lp_primals.empty()) return std::nullopt;
+
+    std::vector<Real> x(lp_primals.begin(), lp_primals.end());
+    projectToBounds(problem, x);
+
+    const Int max_steps = std::max<Int>(12, std::min<Int>(64, static_cast<Int>(discrete_vars.size())));
+    for (Int step = 0; step < max_steps; ++step) {
+        Index best_var = -1;
+        Real best_frac = 0.0;
+        for (Index j : discrete_vars) {
+            const Real frac = std::abs(x[j] - std::round(x[j]));
+            if (frac > best_frac + 1e-12) {
+                best_frac = frac;
+                best_var = j;
+            }
+        }
+        if (best_var < 0 || best_frac <= 1e-9) break;
+
+        const Real v = x[best_var];
+        Real down = std::floor(v);
+        Real up = std::ceil(v);
+        down = clampValue(down, problem.col_lower[best_var], problem.col_upper[best_var]);
+        up = clampValue(up, problem.col_lower[best_var], problem.col_upper[best_var]);
+        if (problem.col_type[best_var] == VarType::Binary) {
+            down = (down >= 0.5) ? 1.0 : 0.0;
+            up = (up >= 0.5) ? 1.0 : 0.0;
+        }
+
+        const Real rc = (best_var >= 0 && best_var < static_cast<Index>(reduced_costs.size()))
+            ? reduced_costs[best_var]
+            : 0.0;
+        const bool prefer_up = (problem.sense == Sense::Minimize)
+            ? ((problem.obj[best_var] - rc) < 0.0)
+            : ((problem.obj[best_var] - rc) > 0.0);
+        x[best_var] = prefer_up ? up : down;
+        projectToBounds(problem, x);
+        work_units += 1e-6;
+    }
+
+    canonicalizePoint(problem, x);
+    greedyRepair(problem, x, 6, work_units);
+    if (!isFeasiblePoint(problem, x, &work_units)) return std::nullopt;
+    const Real obj = objectiveValue(problem, x);
+    if (!betterObjective(problem.sense, obj, incumbent)) return std::nullopt;
+    return HeuristicSolution{.values = std::move(x), .objective = obj};
+}
+
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
     problem_ = linearizeModelFeatures(problem);
     loaded_ = true;
+}
+
+bool MipSolver::hasLpLightCapability() const {
+    return kLpLightCompiled;
 }
 
 HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
@@ -1915,6 +2071,11 @@ MipResult MipSolver::solve() {
                                 pre_root_lp_free_work_budget_,
                                 pre_root_lp_free_max_rounds_);
         }
+        if (pre_root_lp_light_enabled_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "pre_root_lplight=on lplight_backend=%s ",
+                                lpLightBackendName());
+        }
         if (sp > settings) {
             // Trim trailing space.
             if (sp > settings && *(sp - 1) == ' ') *(sp - 1) = '\0';
@@ -2057,13 +2218,52 @@ MipResult MipSolver::solve() {
         if (isDiscreteType(problem_.col_type[j])) discrete_vars.push_back(j);
     }
 
-    if (pre_root_lp_free_enabled_ && !discrete_vars.empty()) {
+    const bool pre_root_stage_enabled =
+        (pre_root_lp_free_enabled_ || pre_root_lp_light_enabled_) && !discrete_vars.empty();
+    if (pre_root_stage_enabled) {
         pre_root_stats_.enabled = true;
+        pre_root_stats_.lp_light_enabled = pre_root_lp_light_enabled_;
+        pre_root_stats_.lp_light_available = pre_root_lp_light_enabled_ && hasLpLightCapability();
+
+        std::optional<LpLightGuide> lp_light_guide;
+        if (pre_root_stats_.lp_light_available) {
+            lp_light_guide = solveLpLightGuide(problem_);
+            if (lp_light_guide.has_value()) {
+                pre_root_stats_.lp_light_lp_solves = 1;
+                pre_root_stats_.lp_light_lp_iterations = lp_light_guide->iterations;
+                pre_root_stats_.lp_light_lp_work = lp_light_guide->work_units;
+                total_lp_iters += lp_light_guide->iterations;
+                total_work += lp_light_guide->work_units;
+            }
+        }
+        const bool run_lp_free_arms = pre_root_lp_free_enabled_;
+        const bool run_lp_light_arms = lp_light_guide.has_value();
+        const auto lp_light_primals = run_lp_light_arms
+            ? std::span<const Real>(lp_light_guide->primals.data(), lp_light_guide->primals.size())
+            : std::span<const Real>{};
+        const auto lp_light_reduced_costs = run_lp_light_arms
+            ? std::span<const Real>(lp_light_guide->reduced_costs.data(), lp_light_guide->reduced_costs.size())
+            : std::span<const Real>{};
+
+        if (verbose_ && pre_root_lp_light_enabled_ && !pre_root_stats_.lp_light_available) {
+            log_.log("Pre-root LP-light requested but unavailable (backend=%s).\n",
+                     lpLightBackendName());
+        }
+        if (verbose_ && pre_root_stats_.lp_light_available && !run_lp_light_arms) {
+            log_.log("Pre-root LP-light guide solve unavailable for this model; "
+                     "continuing with LP-free arms only.\n");
+        }
+        if (!run_lp_free_arms && !run_lp_light_arms) {
+            if (verbose_) {
+                log_.log("Pre-root stage enabled but no usable arms are available.\n");
+            }
+        } else {
         const Int hw_threads = static_cast<Int>(
             std::max<unsigned>(1, std::thread::hardware_concurrency()));
         const Int stage_threads = (heuristic_mode_ == HeuristicRuntimeMode::Deterministic)
             ? 1
             : std::max<Int>(1, std::min(num_threads_, hw_threads));
+        const int arm_count = (run_lp_free_arms ? 3 : 0) + (run_lp_light_arms ? 2 : 0);
         std::atomic<Int> next_round{0};
         std::atomic<bool> should_stop{false};
         std::atomic<Int> calls{0};
@@ -2073,6 +2273,9 @@ MipResult MipSolver::solve() {
         std::atomic<Int> fj_calls{0};
         std::atomic<Int> fpr_calls{0};
         std::atomic<Int> local_mip_calls{0};
+        std::atomic<Int> lp_light_calls{0};
+        std::atomic<Int> lp_light_fpr_calls{0};
+        std::atomic<Int> lp_light_diving_calls{0};
         std::atomic<double> stage_work{0.0};
         std::atomic<double> first_feasible_seconds{kInf};
         SolutionPool pre_root_pool(problem_.sense);
@@ -2101,39 +2304,59 @@ MipResult MipSolver::solve() {
 
                 int arm = 0;
                 if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
-                    arm = round % 3;
+                    arm = static_cast<int>(round % arm_count);
                 } else {
-                    arm = std::uniform_int_distribution<int>(0, 2)(rng);
+                    arm = std::uniform_int_distribution<int>(0, arm_count - 1)(rng);
                 }
 
                 double local_work = 0.0;
                 std::optional<HeuristicSolution> candidate;
-                if (arm == 0) {
-                    ++fj_calls;
-                    candidate = runLpFreeFeasJump(problem_, discrete_vars, rng,
+                int arm_base = 0;
+                if (run_lp_free_arms) {
+                    if (arm == arm_base) {
+                        ++fj_calls;
+                        candidate = runLpFreeFeasJump(problem_, discrete_vars, rng,
+                                                      pre_root_pool.bestObjective(),
+                                                      local_work);
+                    } else if (arm == arm_base + 1) {
+                        ++fpr_calls;
+                        candidate = runLpFreeFpr(problem_, discrete_vars, rng,
+                                                 pre_root_pool.bestObjective(),
+                                                 local_work);
+                    } else if (arm == arm_base + 2) {
+                        ++local_mip_calls;
+                        auto incumbent_sol = pre_root_pool.bestSolution();
+                        std::span<const Real> incumbent_span{};
+                        if (incumbent_sol.has_value()) {
+                            incumbent_span = std::span<const Real>(incumbent_sol->values.data(),
+                                                                   incumbent_sol->values.size());
+                        }
+                        candidate = runLpFreeLocalMip(problem_, discrete_vars, rng,
+                                                      pre_root_pool.bestObjective(),
+                                                      incumbent_span, local_work);
+                    }
+                    arm_base += 3;
+                }
+                if (run_lp_light_arms && arm >= arm_base && arm < arm_base + 2) {
+                    ++lp_light_calls;
+                    if (arm == arm_base) {
+                        ++lp_light_fpr_calls;
+                        candidate = runLpLightFpr(problem_, discrete_vars,
+                                                  lp_light_primals, lp_light_reduced_costs,
                                                   pre_root_pool.bestObjective(),
                                                   local_work);
-                } else if (arm == 1) {
-                    ++fpr_calls;
-                    candidate = runLpFreeFpr(problem_, discrete_vars, rng,
-                                             pre_root_pool.bestObjective(),
-                                             local_work);
-                } else {
-                    ++local_mip_calls;
-                    auto incumbent_sol = pre_root_pool.bestSolution();
-                    std::span<const Real> incumbent_span{};
-                    if (incumbent_sol.has_value()) {
-                        incumbent_span = std::span<const Real>(incumbent_sol->values.data(),
-                                                               incumbent_sol->values.size());
+                    } else {
+                        ++lp_light_diving_calls;
+                        candidate = runLpLightDiving(problem_, discrete_vars,
+                                                     lp_light_primals, lp_light_reduced_costs,
+                                                     pre_root_pool.bestObjective(),
+                                                     local_work);
                     }
-                    candidate = runLpFreeLocalMip(problem_, discrete_vars, rng,
-                                                  pre_root_pool.bestObjective(),
-                                                  incumbent_span, local_work);
                 }
                 addStageWork(local_work);
 
                 if (candidate.has_value() &&
-                    pre_root_pool.submit(*candidate, "pre_root_lp_free", thread_id)) {
+                    pre_root_pool.submit(*candidate, "pre_root_stage", thread_id)) {
                     ++improvements;
                     ++feasible_found;
                     const double seen = stageElapsed();
@@ -2170,6 +2393,10 @@ MipResult MipSolver::solve() {
         pre_root_stats_.fj_calls = fj_calls.load(std::memory_order_relaxed);
         pre_root_stats_.fpr_calls = fpr_calls.load(std::memory_order_relaxed);
         pre_root_stats_.local_mip_calls = local_mip_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.lp_light_calls = lp_light_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.lp_light_fpr_calls = lp_light_fpr_calls.load(std::memory_order_relaxed);
+        pre_root_stats_.lp_light_diving_calls =
+            lp_light_diving_calls.load(std::memory_order_relaxed);
         pre_root_stats_.work_units = stage_work.load(std::memory_order_relaxed);
         pre_root_stats_.time_seconds = stageElapsed();
         pre_root_stats_.time_to_first_feasible =
@@ -2180,7 +2407,8 @@ MipResult MipSolver::solve() {
         if (verbose_) {
             if (std::isfinite(pre_root_stats_.time_to_first_feasible)) {
                 log_.log(
-                    "Pre-root LP-free (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "Pre-root stage (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "lpfpr=%d lpdiv=%d "
                     "found=%d best=%.10e work=%.3f time=%.3fs first=%.3fs\n",
                     heuristicModeName(heuristic_mode_),
                     stage_threads,
@@ -2189,6 +2417,8 @@ MipResult MipSolver::solve() {
                     pre_root_stats_.fj_calls,
                     pre_root_stats_.fpr_calls,
                     pre_root_stats_.local_mip_calls,
+                    pre_root_stats_.lp_light_fpr_calls,
+                    pre_root_stats_.lp_light_diving_calls,
                     pre_root_stats_.feasible_found,
                     pre_root_stats_.incumbent_at_root,
                     pre_root_stats_.work_units,
@@ -2196,7 +2426,8 @@ MipResult MipSolver::solve() {
                     pre_root_stats_.time_to_first_feasible);
             } else {
                 log_.log(
-                    "Pre-root LP-free (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "Pre-root stage (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
+                    "lpfpr=%d lpdiv=%d "
                     "found=%d best=%.10e work=%.3f time=%.3fs first=n/a\n",
                     heuristicModeName(heuristic_mode_),
                     stage_threads,
@@ -2205,12 +2436,23 @@ MipResult MipSolver::solve() {
                     pre_root_stats_.fj_calls,
                     pre_root_stats_.fpr_calls,
                     pre_root_stats_.local_mip_calls,
+                    pre_root_stats_.lp_light_fpr_calls,
+                    pre_root_stats_.lp_light_diving_calls,
                     pre_root_stats_.feasible_found,
                     pre_root_stats_.incumbent_at_root,
                     pre_root_stats_.work_units,
                     pre_root_stats_.time_seconds);
             }
+            if (pre_root_stats_.lp_light_lp_solves > 0) {
+                log_.log(
+                    "Pre-root LP-light guide (%s): solves=%d iters=%d work=%.3f\n",
+                    lpLightBackendName(),
+                    pre_root_stats_.lp_light_lp_solves,
+                    pre_root_stats_.lp_light_lp_iterations,
+                    pre_root_stats_.lp_light_lp_work);
+            }
         }
+    }
     }
 
     // Solve root LP.
@@ -2380,7 +2622,7 @@ MipResult MipSolver::solve() {
     SolutionPool solution_pool(problem_.sense);
     HeuristicRuntime root_runtime(runtime_config);
     if (incumbent < kInf && !best_solution.empty()) {
-        solution_pool.submit({best_solution, incumbent}, "pre_root_lp_free", 0);
+        solution_pool.submit({best_solution, incumbent}, "pre_root_stage", 0);
     }
 
     if (isFeasibleLp(root_primals) && isFeasibleMip(root_primals)) {
