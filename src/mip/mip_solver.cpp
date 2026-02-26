@@ -16,6 +16,7 @@
 #include "mipx/barrier.h"
 #include "mipx/gomory.h"
 #include "mipx/heuristics.h"
+#include "mipx/pdlp.h"
 
 #ifdef MIPX_HAS_TBB
 #include <tbb/parallel_for.h>
@@ -61,6 +62,7 @@ const char* rootPolicyName(RootLpPolicy p) {
     switch (p) {
         case RootLpPolicy::DualDefault: return "dual";
         case RootLpPolicy::BarrierRoot: return "barrier";
+        case RootLpPolicy::PdlpRoot: return "pdlp";
         case RootLpPolicy::ConcurrentRootExperimental: return "concurrent";
         default: return "dual";
     }
@@ -899,10 +901,25 @@ MipResult MipSolver::solve() {
         if (verbose_) {
             log_.log("Root barrier mode%s.\n", barrier.usedGpu() ? " (GPU backend)" : "");
         }
+    } else if (root_lp_policy_ == RootLpPolicy::PdlpRoot) {
+        root_used_dual = false;
+        PdlpSolver pdlp;
+        PdlpOptions popts;
+        popts.verbose = verbose_;
+        popts.use_gpu = pdlp_use_gpu_;
+        popts.gpu_min_rows = pdlp_gpu_min_rows_;
+        popts.gpu_min_nnz = pdlp_gpu_min_nnz_;
+        pdlp.setOptions(popts);
+        pdlp.load(problem_);
+        root_result = pdlp.solve();
+        root_primals = pdlp.getPrimalValues();
+        if (verbose_) {
+            log_.log("Root PDLP mode%s.\n", pdlp.usedGpu() ? " (GPU backend)" : "");
+        }
     } else {
         if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental && verbose_) {
-            log_.log("Root concurrent mode requested; barrier backend and dual simplex "
-                     "racing is not yet enabled. Falling back to dual simplex.\n");
+            log_.log("Root concurrent mode requested; PDLP/barrier/dual racing is "
+                     "not yet enabled. Falling back to dual simplex.\n");
         }
         lp.setVerbose(verbose_);
         root_result = lp.solve();
@@ -957,14 +974,14 @@ MipResult MipSolver::solve() {
     }
 
     // Dual simplex supports reliable warm-starts for node LPs only after at least one solve.
-    // In barrier-root mode, run one simplex solve to initialize basis state for the tree.
+    // In non-dual root mode, run one simplex solve to initialize basis state for the tree.
     if (!root_used_dual) {
         auto sync = lp.solve();
         total_lp_iters += sync.iterations;
         total_work += sync.work_units;
         if (sync.status == Status::Infeasible) {
             if (verbose_) {
-                log_.log("Root sync LP infeasible after barrier solve.\n");
+                log_.log("Root sync LP infeasible after non-dual root solve.\n");
             }
             MipResult result;
             result.status = Status::Infeasible;
@@ -976,7 +993,7 @@ MipResult MipSolver::solve() {
         }
         if (sync.status == Status::Unbounded) {
             if (verbose_) {
-                log_.log("Root sync LP unbounded after barrier solve.\n");
+                log_.log("Root sync LP unbounded after non-dual root solve.\n");
             }
             MipResult result;
             result.status = Status::Unbounded;

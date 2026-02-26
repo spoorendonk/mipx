@@ -6,6 +6,7 @@ add_library(mipx STATIC
     lp/lu.cpp
     lp/dual_simplex.cpp
     lp/barrier.cpp
+    lp/pdlp.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
     io/lp_reader.cpp

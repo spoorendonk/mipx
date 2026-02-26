@@ -8,6 +8,7 @@
 
 #include "mipx/dual_simplex.h"
 #include "mipx/barrier.h"
+#include "mipx/pdlp.h"
 #include "mipx/io.h"
 #include "mipx/logger.h"
 #include "mipx/mip_solver.h"
@@ -18,7 +19,7 @@ int main(int argc, char* argv[]) {
         std::fprintf(stdout,
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-            "[--no-presolve|--presolve] [--barrier|--dual] "
+            "[--no-presolve|--presolve] [--barrier|--pdlp|--dual] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -33,7 +34,8 @@ int main(int argc, char* argv[]) {
     bool verbose = true;
     bool presolve = true;
     bool cuts_enabled = true;
-    bool use_barrier = false;
+    enum class LpMode { Dual, Barrier, Pdlp };
+    LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
@@ -63,9 +65,11 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--quiet") {
             verbose = false;
         } else if (arg == "--barrier") {
-            use_barrier = true;
+            lp_mode = LpMode::Barrier;
+        } else if (arg == "--pdlp") {
+            lp_mode = LpMode::Pdlp;
         } else if (arg == "--dual") {
-            use_barrier = false;
+            lp_mode = LpMode::Dual;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -101,11 +105,17 @@ int main(int argc, char* argv[]) {
             solver.setVerbose(verbose);
             solver.setPresolve(presolve);
             solver.setCutsEnabled(cuts_enabled);
-            solver.setRootLpPolicy(use_barrier
-                ? mipx::RootLpPolicy::BarrierRoot
-                : mipx::RootLpPolicy::DualDefault);
+            if (lp_mode == LpMode::Barrier) {
+                solver.setRootLpPolicy(mipx::RootLpPolicy::BarrierRoot);
+            } else if (lp_mode == LpMode::Pdlp) {
+                solver.setRootLpPolicy(mipx::RootLpPolicy::PdlpRoot);
+            } else {
+                solver.setRootLpPolicy(mipx::RootLpPolicy::DualDefault);
+            }
             solver.setBarrierUseGpu(barrier_gpu);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
+            solver.setPdlpUseGpu(barrier_gpu);
+            solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.load(lp);
             auto result = solver.solve();
 
@@ -185,7 +195,7 @@ int main(int argc, char* argv[]) {
             mipx::LpResult result;
             std::vector<mipx::Real> primals;
             bool used_gpu_backend = false;
-            if (use_barrier) {
+            if (lp_mode == LpMode::Barrier) {
                 mipx::BarrierSolver solver;
                 mipx::BarrierOptions bopts;
                 bopts.verbose = verbose;
@@ -193,6 +203,18 @@ int main(int argc, char* argv[]) {
                 bopts.gpu_min_rows = barrier_gpu_min_rows;
                 bopts.gpu_min_nnz = barrier_gpu_min_nnz;
                 solver.setOptions(bopts);
+                solver.load(working);
+                result = solver.solve();
+                primals = solver.getPrimalValues();
+                used_gpu_backend = solver.usedGpu();
+            } else if (lp_mode == LpMode::Pdlp) {
+                mipx::PdlpSolver solver;
+                mipx::PdlpOptions popts;
+                popts.verbose = verbose;
+                popts.use_gpu = barrier_gpu;
+                popts.gpu_min_rows = barrier_gpu_min_rows;
+                popts.gpu_min_nnz = barrier_gpu_min_nnz;
+                solver.setOptions(popts);
                 solver.load(working);
                 result = solver.solve();
                 primals = solver.getPrimalValues();
@@ -206,8 +228,11 @@ int main(int argc, char* argv[]) {
             auto t1 = std::chrono::steady_clock::now();
             double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
 
-            if (use_barrier && verbose) {
+            if (lp_mode == LpMode::Barrier && verbose) {
                 log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
+            }
+            if (lp_mode == LpMode::Pdlp && verbose) {
+                log.log("PDLP backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
 
             // Postsolve if needed.

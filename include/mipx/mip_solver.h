@@ -25,6 +25,7 @@ class HeuristicBudgetManager;
 enum class RootLpPolicy {
     DualDefault,
     BarrierRoot,
+    PdlpRoot,
     ConcurrentRootExperimental,
 };
 
@@ -74,6 +75,11 @@ public:
     void setBarrierGpuThresholds(Int min_rows, Int min_nnz) {
         barrier_gpu_min_rows_ = std::max<Int>(0, min_rows);
         barrier_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
+    }
+    void setPdlpUseGpu(bool use_gpu) { pdlp_use_gpu_ = use_gpu; }
+    void setPdlpGpuThresholds(Int min_rows, Int min_nnz) {
+        pdlp_gpu_min_rows_ = std::max<Int>(0, min_rows);
+        pdlp_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
     }
     const MipLpStats& getLpStats() const { return lp_stats_; }
 
@@ -153,6 +159,9 @@ private:
     bool barrier_use_gpu_ = true;
     Int barrier_gpu_min_rows_ = 512;
     Int barrier_gpu_min_nnz_ = 10000;
+    bool pdlp_use_gpu_ = true;
+    Int pdlp_gpu_min_rows_ = 512;
+    Int pdlp_gpu_min_nnz_ = 10000;
     MipLpStats lp_stats_{};
     mutable Logger log_;
 
