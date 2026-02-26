@@ -557,6 +557,9 @@ Each step builds on the previous, produces something testable, and is scoped for
 **Status:** In progress. A mipx-native runtime foundation now exists with
 `HeuristicRuntime`, thread-safe `SolutionPool`, restart strategy selection,
 callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/API.
+Latest hardening integrated shared runtime budgeting across parallel workers,
+canonicalized work-unit accounting for deterministic gating, explicit finish callback
+delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 **Deliverables:**
 - Two-level heuristic API:

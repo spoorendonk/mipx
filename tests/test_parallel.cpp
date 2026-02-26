@@ -164,6 +164,52 @@ TEST_CASE("Parallel: matches serial on knapsack", "[parallel][tbb]") {
     }
 }
 
+TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
+          "[parallel][tbb][heuristics]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setNumThreads(4);
+    solver_a.setCutsEnabled(false);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(77);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setNumThreads(4);
+    solver_b.setCutsEnabled(false);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(77);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    REQUIRE(a.status == Status::Optimal);
+    REQUIRE(b.status == Status::Optimal);
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+    CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
+}
+
+TEST_CASE("Parallel: opportunistic heuristic mode remains valid",
+          "[parallel][tbb][heuristics]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(4);
+    solver.setCutsEnabled(false);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Opportunistic);
+    solver.setHeuristicSeed(99);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::Optimal ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+}
+
 TEST_CASE("Parallel: MIPLIB gt2", "[parallel][tbb][miplib]") {
     std::string path = std::string(TEST_DATA_DIR) + "/miplib/gt2.mps.gz";
     if (!std::filesystem::exists(path)) {
