@@ -46,4 +46,8 @@ if(MIPX_USE_CUDA)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDA)
 endif()
 
+if(MIPX_ENABLE_LP_LIGHT_HEURISTICS)
+    target_compile_definitions(mipx PUBLIC MIPX_HAS_LP_LIGHT)
+endif()
+
 mipx_set_compiler_flags(mipx)

@@ -546,6 +546,19 @@ TEST_CASE("MipSolver: pre-root LP-free stage is disabled by default",
     CHECK_FALSE(stats.enabled);
     CHECK(stats.calls == 0);
     CHECK(stats.work_units == 0.0);
+    CHECK_FALSE(stats.lp_light_enabled);
+    CHECK_FALSE(stats.lp_light_available);
+    CHECK(stats.lp_light_calls == 0);
+}
+
+TEST_CASE("MipSolver: LP-light capability reflects build configuration",
+          "[mip][heuristics][preroot][lplight]") {
+    MipSolver solver;
+#ifdef MIPX_HAS_LP_LIGHT
+    CHECK(solver.hasLpLightCapability());
+#else
+    CHECK_FALSE(solver.hasLpLightCapability());
+#endif
 }
 
 TEST_CASE("MipSolver: pre-root LP-free stage can hand off incumbent",
@@ -572,6 +585,7 @@ TEST_CASE("MipSolver: pre-root LP-free stage can hand off incumbent",
     CHECK(stats.calls > 0);
     CHECK(stats.work_units > 0.0);
     CHECK(stats.feasible_found >= 1);
+    CHECK(stats.lp_light_calls == 0);
     CHECK(std::isfinite(stats.incumbent_at_root));
     REQUIRE(!result.solution.empty());
 }
@@ -613,6 +627,82 @@ TEST_CASE("MipSolver: pre-root LP-free deterministic mode reproduces with seed",
     CHECK(sa.calls == sb.calls);
     CHECK_THAT(sa.work_units, WithinAbs(sb.work_units, 1e-9));
     CHECK_THAT(sa.incumbent_at_root, WithinAbs(sb.incumbent_at_root, 1e-9));
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+}
+
+TEST_CASE("MipSolver: pre-root LP-light arms can run when enabled",
+          "[mip][heuristics][preroot][lplight]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(19);
+    solver.setPreRootLpFreeEnabled(false);
+    solver.setPreRootLpLightEnabled(true);
+    solver.setPreRootLpFreeWorkBudget(1.0e5);
+    solver.setPreRootLpFreeMaxRounds(10);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK(stats.lp_light_enabled);
+#ifdef MIPX_HAS_LP_LIGHT
+    CHECK(stats.lp_light_available);
+    CHECK(stats.lp_light_lp_solves >= 1);
+    CHECK(stats.lp_light_calls > 0);
+    CHECK(stats.lp_light_fpr_calls + stats.lp_light_diving_calls == stats.lp_light_calls);
+#else
+    CHECK_FALSE(stats.lp_light_available);
+    CHECK(stats.lp_light_calls == 0);
+#endif
+}
+
+TEST_CASE("MipSolver: pre-root LP-light deterministic mode reproduces with seed",
+          "[mip][heuristics][preroot][lplight]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setNodeLimit(1);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(99);
+    solver_a.setPreRootLpFreeEnabled(false);
+    solver_a.setPreRootLpLightEnabled(true);
+    solver_a.setPreRootLpFreeWorkBudget(1.0e5);
+    solver_a.setPreRootLpFreeMaxRounds(10);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setNodeLimit(1);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(99);
+    solver_b.setPreRootLpFreeEnabled(false);
+    solver_b.setPreRootLpLightEnabled(true);
+    solver_b.setPreRootLpFreeWorkBudget(1.0e5);
+    solver_b.setPreRootLpFreeMaxRounds(10);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    const auto& sa = solver_a.getPreRootStats();
+    const auto& sb = solver_b.getPreRootStats();
+    CHECK(sa.enabled == sb.enabled);
+    CHECK(sa.lp_light_enabled == sb.lp_light_enabled);
+    CHECK(sa.lp_light_available == sb.lp_light_available);
+    CHECK(sa.calls == sb.calls);
+    CHECK(sa.lp_light_calls == sb.lp_light_calls);
+    CHECK_THAT(sa.work_units, WithinAbs(sb.work_units, 1e-9));
     CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
 }
 

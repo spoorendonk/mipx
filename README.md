@@ -17,6 +17,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Primal heuristics** | Rounding, diving, RINS, RENS, Feasibility Pump, local branching |
 | **Heuristic runtime** | Deterministic/opportunistic heuristic execution, restart engine, incumbent sharing pool |
 | **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
+| **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -53,6 +54,12 @@ Optional TBB support:
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 ```
 
+Disable optional LP-light heuristic arms at build time:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_ENABLE_LP_LIGHT_HEURISTICS=OFF
+```
+
 ## Usage
 
 ```bash
@@ -86,6 +93,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 | `--pre-root-work <w>` | 50000 | Work-unit budget for pre-root LP-free stage |
 | `--pre-root-rounds <n>` | 24 | Max pre-root LP-free rounds across workers |
 | `--pre-root-no-early-stop` | off | Do not stop pre-root stage after first feasible |
+| `--pre-root-lplight` | off | Enable LP-light pre-root arms (requires LP-light capability) |
+| `--no-pre-root-lplight` | — | Disable LP-light pre-root arms |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
@@ -209,8 +218,8 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** LP-free pre-root heuristic stage (Step 17), LP-light
-integration planning (Step 18), and adaptive portfolio orchestration (Step 19).
+**Current focus:** adaptive portfolio orchestration (Step 19) and
+Python/release pipeline integration (Step 20).
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 

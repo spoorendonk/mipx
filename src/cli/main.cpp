@@ -24,6 +24,7 @@ int main(int argc, char* argv[]) {
             "[--heur-deterministic|--heur-opportunistic] [--seed N] "
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
+            "[--pre-root-lplight|--no-pre-root-lplight] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -52,6 +53,7 @@ int main(int argc, char* argv[]) {
     double pre_root_work = 5.0e4;
     mipx::Int pre_root_rounds = 24;
     bool pre_root_early_stop = true;
+    bool pre_root_lplight = false;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
 
     // Parse optional arguments.
@@ -101,6 +103,10 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--pre-root-no-early-stop") {
             pre_root_early_stop = false;
+        } else if (arg == "--pre-root-lplight") {
+            pre_root_lplight = true;
+        } else if (arg == "--no-pre-root-lplight") {
+            pre_root_lplight = false;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
         } else if (arg == "--search-default") {
@@ -159,11 +165,8 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
             solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
+            solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setSearchProfile(search_profile);
-            solver.setPreRootLpFreeEnabled(pre_root_lpfree);
-            solver.setPreRootLpFreeWorkBudget(pre_root_work);
-            solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
-            solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
             solver.load(lp);
             auto result = solver.solve();
 

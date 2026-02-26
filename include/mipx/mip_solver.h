@@ -76,6 +76,8 @@ struct MipConflictStats {
 
 struct MipPreRootStats {
     bool enabled = false;
+    bool lp_light_enabled = false;
+    bool lp_light_available = false;
     Int rounds = 0;
     Int calls = 0;
     Int improvements = 0;
@@ -84,7 +86,13 @@ struct MipPreRootStats {
     Int fj_calls = 0;
     Int fpr_calls = 0;
     Int local_mip_calls = 0;
+    Int lp_light_calls = 0;
+    Int lp_light_fpr_calls = 0;
+    Int lp_light_diving_calls = 0;
+    Int lp_light_lp_solves = 0;
+    Int lp_light_lp_iterations = 0;
     double work_units = 0.0;
+    double lp_light_lp_work = 0.0;
     double time_seconds = 0.0;
     double time_to_first_feasible = kInf;
     Real incumbent_at_root = kInf;
@@ -183,6 +191,7 @@ public:
         pre_root_lp_free_max_rounds_ = std::max<Int>(1, rounds);
     }
     void setPreRootLpFreeEarlyStop(bool enabled) { pre_root_lp_free_early_stop_ = enabled; }
+    void setPreRootLpLightEnabled(bool enabled) { pre_root_lp_light_enabled_ = enabled; }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
@@ -200,6 +209,7 @@ public:
     const MipCutStats& getCutStats() const { return cut_stats_; }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
     const MipPreRootStats& getPreRootStats() const { return pre_root_stats_; }
+    [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
@@ -320,6 +330,7 @@ private:
     bool pre_root_lp_free_early_stop_ = true;
     Int pre_root_lp_free_max_rounds_ = 24;
     double pre_root_lp_free_work_budget_ = 5.0e4;
+    bool pre_root_lp_light_enabled_ = false;
     bool conflicts_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
