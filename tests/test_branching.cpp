@@ -119,6 +119,22 @@ TEST_CASE("createChildren accumulates bound changes", "[branching]") {
     REQUIRE(right.bound_changes.size() == 2);
 }
 
+TEST_CASE("createChildren propagates local subtree cuts", "[branching]") {
+    BnbNode parent;
+    Cut local_cut;
+    local_cut.indices = {0};
+    local_cut.values = {1.0};
+    local_cut.upper = 2.0;
+    local_cut.local = true;
+    parent.local_cuts.push_back(local_cut);
+
+    auto [left, right] = createChildren(parent, 0, 1.4);
+    REQUIRE(left.local_cuts.size() == 1);
+    REQUIRE(right.local_cuts.size() == 1);
+    CHECK(left.local_cuts[0].local);
+    CHECK(right.local_cuts[0].local);
+}
+
 TEST_CASE("isIntegral helper", "[branching]") {
     REQUIRE(isIntegral(3.0));
     REQUIRE(isIntegral(3.0 + 1e-8));

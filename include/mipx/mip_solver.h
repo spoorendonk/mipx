@@ -42,6 +42,19 @@ struct MipLpStats {
     Int cold_starts = 0;
 };
 
+struct MipCutStats {
+    Int root_rounds = 0;
+    Int root_cuts_added = 0;
+    Int tree_nodes_with_cuts = 0;
+    Int tree_nodes_skipped = 0;
+    Int tree_rounds = 0;
+    Int tree_cuts_local = 0;
+    Int tree_cuts_global = 0;
+    Int tree_cuts_purged = 0;
+    Int tree_cuts_revived = 0;
+    Real tree_lp_delta = 0.0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -108,6 +121,7 @@ public:
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
+    const MipCutStats& getCutStats() const { return cut_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -201,6 +215,7 @@ private:
     HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     MipLpStats lp_stats_{};
+    MipCutStats cut_stats_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;

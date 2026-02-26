@@ -32,7 +32,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
 - [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
-- [⚪ Step 24: In-Tree Cut Management](#step-24)
+- [🟢 Step 24: In-Tree Cut Management](#step-24)
 - [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
 - [⚪ Step 26: Search + Restart Controller](#step-26)
 - [⚪ Step 27: In-Processing Presolve](#step-27)
@@ -829,11 +829,13 @@ callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/
 
 <a id="step-24"></a>
 
-## Step 24: In-Tree Cut Management
+## Step 24: In-Tree Cut Management ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Move from root-only cutting to tree-effective separation without exploding LP time.
+
+**Status:** Complete. Added depth-gated in-tree cut rounds, local-vs-global cut handling, cut lifecycle (aging/activity/purge/revive), cut-overhead skip logic, and root-vs-tree cut telemetry in solver progress output.
 
 **Deliverables:**
 - In-tree cut rounds with depth/node-type gating (aggressive near root, conservative deep in tree)

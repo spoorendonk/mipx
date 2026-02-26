@@ -305,17 +305,21 @@ std::pair<BnbNode, BnbNode> createChildren(const BnbNode& parent,
     left.parent_id = parent.id;
     left.depth = parent.depth + 1;
     left.basis = parent.basis;
+    left.basis_rows = parent.basis_rows;
     left.branch = {branch_var, floor_val, true};  // x_j <= floor(v)
     left.bound_changes = parent.bound_changes;
     left.bound_changes.push_back(left.branch);
+    left.local_cuts = parent.local_cuts;
 
     BnbNode right;
     right.parent_id = parent.id;
     right.depth = parent.depth + 1;
     right.basis = parent.basis;
+    right.basis_rows = parent.basis_rows;
     right.branch = {branch_var, ceil_val, false};  // x_j >= ceil(v)
     right.bound_changes = parent.bound_changes;
     right.bound_changes.push_back(right.branch);
+    right.local_cuts = parent.local_cuts;
 
     return {std::move(left), std::move(right)};
 }

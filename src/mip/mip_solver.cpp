@@ -123,6 +123,41 @@ Real averageOrthogonality(const std::vector<const Cut*>& cuts) {
     return std::clamp<Real>(1.0 - avg_sim, 0.0, 1.0);
 }
 
+Real cutLhs(const Cut& cut, std::span<const Real> primals) {
+    Real lhs = 0.0;
+    for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+        const Index j = cut.indices[k];
+        if (j >= 0 && j < static_cast<Index>(primals.size())) {
+            lhs += cut.values[k] * primals[j];
+        }
+    }
+    return lhs;
+}
+
+Real cutDistanceToBinding(const Cut& cut, std::span<const Real> primals) {
+    const Real lhs = cutLhs(cut, primals);
+    Real dist = kInf;
+    if (cut.lower > -kInf) dist = std::min(dist, std::abs(lhs - cut.lower));
+    if (cut.upper < kInf) dist = std::min(dist, std::abs(lhs - cut.upper));
+    return dist;
+}
+
+class ScopedRowRemoval {
+public:
+    ScopedRowRemoval(DualSimplexSolver& lp, std::vector<Index>& rows)
+        : lp_(lp), rows_(rows) {}
+    ~ScopedRowRemoval() {
+        if (rows_.empty()) return;
+        std::sort(rows_.begin(), rows_.end(), std::greater<Index>());
+        lp_.removeRows(rows_);
+        rows_.clear();
+    }
+
+private:
+    DualSimplexSolver& lp_;
+    std::vector<Index>& rows_;
+};
+
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
@@ -250,6 +285,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_work_out = 0.0;
     int_inf_out = -1;
     ++node_stats.nodes_solved;
+    std::vector<Index> temp_local_rows;
+    ScopedRowRemoval local_row_guard(lp, temp_local_rows);
 
     // Skip if pruned by bound (might have changed since pop).
     if (incumbent_snapshot < kInf && node.lp_bound >= incumbent_snapshot - 1e-6) {
@@ -311,7 +348,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
 
     // Set basis for warm-start.
     t0 = std::chrono::steady_clock::now();
-    if (!node.basis.empty()) {
+    if (!node.basis.empty() && node.basis_rows == lp.numRows()) {
         ++node_stats.warm_starts;
         lp.setBasis(node.basis);
     } else {
@@ -319,6 +356,31 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     node_stats.basis_set_seconds += std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
+
+    if (!node.local_cuts.empty()) {
+        std::vector<Index> starts;
+        std::vector<Index> col_indices;
+        std::vector<Real> values;
+        std::vector<Real> lower;
+        std::vector<Real> upper;
+        starts.reserve(node.local_cuts.size());
+        lower.reserve(node.local_cuts.size());
+        upper.reserve(node.local_cuts.size());
+        for (const auto& cut : node.local_cuts) {
+            starts.push_back(static_cast<Index>(col_indices.size()));
+            for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+                col_indices.push_back(cut.indices[k]);
+                values.push_back(cut.values[k]);
+            }
+            lower.push_back(cut.lower);
+            upper.push_back(cut.upper);
+        }
+        const Index base_row = lp.numRows();
+        lp.addRows(starts, col_indices, values, lower, upper);
+        for (Index i = 0; i < static_cast<Index>(lower.size()); ++i) {
+            temp_local_rows.push_back(base_row + i);
+        }
+    }
 
     // Solve node LP.
     t0 = std::chrono::steady_clock::now();
@@ -351,10 +413,132 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     int_inf_out = frac_count;
 
-    // Check integer feasibility.
-    if (frac_count == 0) {
+    std::vector<Cut> node_local_cuts = node.local_cuts;
+    if (!node_local_cuts.empty()) {
+        std::vector<Cut> kept;
+        kept.reserve(node_local_cuts.size());
+        for (auto cut : node_local_cuts) {
+            const Real dist = cutDistanceToBinding(cut, node_primals_out);
+            if (dist <= 1e-4) {
+                cut.age = 0;
+                ++cut.activity;
+            } else {
+                ++cut.age;
+            }
+
+            if (cut.age > 6) {
+                if (dist <= 1e-2) {
+                    cut.age = 0;
+                    ++cut_stats_.tree_cuts_revived;
+                    kept.push_back(std::move(cut));
+                } else {
+                    ++cut_stats_.tree_cuts_purged;
+                }
+            } else {
+                kept.push_back(std::move(cut));
+            }
+        }
+        node_local_cuts = std::move(kept);
+    }
+
+    // In-tree cut management (serial path only): depth-gated rounds and
+    // local-vs-global cut handling.
+    bool tree_cut_ran = false;
+    if (cuts_enabled_ && cut_effort_mode_ != CutEffortMode::Off &&
+        num_threads_ <= 1 && node.depth > 0 && frac_count > 0 &&
+        problem_.num_cols <= 64) {
+        const bool aggressive = (node.depth <= 2);
+        const bool conservative = (node.depth <= 8);
+        const bool run_tree_rounds = aggressive || (conservative && (node.depth % 2 == 0));
+        if (run_tree_rounds) {
+            SeparatorManager tree_separators;
+            tree_separators.setConfig(cut_family_config_);
+            const Int max_tree_cuts = aggressive ? 8 : 4;
+            tree_separators.setMaxCutsPerFamily(max_tree_cuts);
+            const Int max_rounds = aggressive ? 2 : 1;
+
+            for (Int round = 0; round < max_rounds; ++round) {
+                CutPool tree_pool;
+                CutSeparationStats tree_stats;
+                const Int generated = tree_separators.separate(
+                    lp, problem_, node_primals_out, tree_pool, tree_stats);
+                if (generated == 0) break;
+
+                auto top_indices = tree_pool.topByEfficacy(max_tree_cuts);
+                std::vector<Index> starts;
+                std::vector<Index> col_indices;
+                std::vector<Real> values;
+                std::vector<Real> lower;
+                std::vector<Real> upper;
+                Int global_rows = 0;
+
+                for (Index idx : top_indices) {
+                    const auto& cut = tree_pool[idx];
+                    const bool promote_global =
+                        (node.depth <= 2 && cut.efficacy >= 0.15);
+
+                    starts.push_back(static_cast<Index>(col_indices.size()));
+                    for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+                        col_indices.push_back(cut.indices[k]);
+                        values.push_back(cut.values[k]);
+                    }
+                    lower.push_back(cut.lower);
+                    upper.push_back(cut.upper);
+
+                    if (promote_global) {
+                        ++global_rows;
+                        ++cut_stats_.tree_cuts_global;
+                    } else {
+                        Cut local_cut = cut;
+                        local_cut.local = true;
+                        local_cut.age = 0;
+                        local_cut.activity = 0;
+                        node_local_cuts.push_back(std::move(local_cut));
+                        ++cut_stats_.tree_cuts_local;
+                    }
+                }
+
+                if (lower.empty()) break;
+
+                const Index base_row = lp.numRows();
+                lp.addRows(starts, col_indices, values, lower, upper);
+                for (Index i = global_rows; i < static_cast<Index>(lower.size()); ++i) {
+                    temp_local_rows.push_back(base_row + i);
+                }
+
+                const Real prev_obj = node_obj_out;
+                auto tree_result = lp.solve();
+                node_iters_out += tree_result.iterations;
+                node_work_out += tree_result.work_units;
+                if (tree_result.status != Status::Optimal) break;
+
+                node_obj_out = tree_result.objective;
+                node_primals_out = lp.getPrimalValues();
+                const Real improvement = std::abs(node_obj_out - prev_obj);
+                cut_stats_.tree_lp_delta += improvement;
+                ++cut_stats_.tree_rounds;
+                tree_cut_ran = true;
+                if (improvement < kCutImprovementTol) break;
+            }
+        } else {
+            ++cut_stats_.tree_nodes_skipped;
+        }
+    } else if (node.depth > 0 && frac_count > 0) {
+        ++cut_stats_.tree_nodes_skipped;
+    }
+    if (tree_cut_ran) ++cut_stats_.tree_nodes_with_cuts;
+
+    // Check integer feasibility after any in-tree separation.
+    if (isFeasibleMip(node_primals_out)) {
+        int_inf_out = 0;
         return false;  // Caller handles incumbent update.
     }
+    frac_count = 0;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Continuous) continue;
+        if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+    }
+    int_inf_out = frac_count;
 
     // Branch with reliability branching (strong-branch bootstrap + pseudocosts).
     Index branch_var = -1;
@@ -374,13 +558,19 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
 
     BnbNode solved_node = std::move(node);
-    solved_node.lp_bound = node_result.objective;
-    solved_node.basis = lp.getBasis();
+    solved_node.lp_bound = node_obj_out;
+    solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
+    if (temp_local_rows.empty()) {
+        solved_node.basis = lp.getBasis();
+    } else {
+        solved_node.basis.clear();
+    }
+    solved_node.local_cuts = std::move(node_local_cuts);
 
     auto [left, right] = createChildren(solved_node, branch_var,
                                         node_primals_out[branch_var]);
-    left.lp_bound = node_result.objective;
-    right.lp_bound = node_result.objective;
+    left.lp_bound = node_obj_out;
+    right.lp_bound = node_obj_out;
 
     children_out.push_back(std::move(left));
     children_out.push_back(std::move(right));
@@ -809,6 +999,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
 MipResult MipSolver::solve() {
     if (!loaded_) return {};
     lp_stats_ = {};
+    cut_stats_ = {};
     lp_stats_.root_policy = root_lp_policy_;
 
     auto start_time = std::chrono::steady_clock::now();
@@ -1252,6 +1443,7 @@ MipResult MipSolver::solve() {
     root_node.depth = 0;
     root_node.lp_bound = root_bound;
     root_node.basis = root_basis;
+    root_node.basis_rows = lp.numRows();
 
     Index branch_var = -1;
     {
@@ -1360,6 +1552,21 @@ MipResult MipSolver::solve() {
                      avg_probe_work,
                      branching_stats_.pseudocost_uses,
                      pseudocost_hit_rate);
+        }
+        if (cut_stats_.root_rounds > 0 || cut_stats_.tree_rounds > 0) {
+            log_.log("Cuts: root_rounds=%d root_added=%d tree_nodes=%d "
+                     "tree_skipped=%d tree_rounds=%d tree_local=%d tree_global=%d "
+                     "tree_purged=%d tree_revived=%d tree_lp_delta=%.3e\n",
+                     cut_stats_.root_rounds,
+                     cut_stats_.root_cuts_added,
+                     cut_stats_.tree_nodes_with_cuts,
+                     cut_stats_.tree_nodes_skipped,
+                     cut_stats_.tree_rounds,
+                     cut_stats_.tree_cuts_local,
+                     cut_stats_.tree_cuts_global,
+                     cut_stats_.tree_cuts_purged,
+                     cut_stats_.tree_cuts_revived,
+                     cut_stats_.tree_lp_delta);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
@@ -1590,6 +1797,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                      kpi.promotions);
         }
     }
+
+    cut_stats_.root_rounds += rounds_done;
+    cut_stats_.root_cuts_added += total_cuts;
 
     return total_cuts;
 }

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "mipx/core.h"
+#include "mipx/cut_pool.h"
 #include "mipx/lp_solver.h"
 
 namespace mipx {
@@ -28,9 +29,13 @@ struct BnbNode {
 
     /// Basis snapshot for warm-starting LP.
     std::vector<BasisStatus> basis;
+    Index basis_rows = 0;
 
     /// Bound changes accumulated from root to this node.
     std::vector<BranchDecision> bound_changes;
+
+    /// Local cuts inherited along this subtree branch.
+    std::vector<Cut> local_cuts;
 };
 
 /// Node selection policies.
