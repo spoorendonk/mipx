@@ -30,7 +30,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
-- [⚪ Step 22: Core Cut Family Expansion](#step-22)
+- [🟢 Step 22: Core Cut Family Expansion](#step-22)
 - [⚪ Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [⚪ Step 24: In-Tree Cut Management](#step-24)
 - [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
@@ -757,11 +757,13 @@ callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/
 
 <a id="step-22"></a>
 
-## Step 22: Core Cut Family Expansion
+## Step 22: Core Cut Family Expansion ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Implement the high-impact cut families that are default-relevant in commercial solvers.
+
+**Status:** Complete. Added multi-family root separation (Gomory + MIR + cover + implied-bound + clique + zero-half + mixing), family toggles, numerical safety guards, and per-family root telemetry.
 
 **Deliverables:**
 - Separator framework expansion beyond Gomory:
