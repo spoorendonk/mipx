@@ -41,6 +41,7 @@ enum class SearchProfile {
 struct MipLpStats {
     RootLpPolicy root_policy = RootLpPolicy::DualDefault;
     double root_lp_seconds = 0.0;
+    double root_race_winner_seconds = 0.0;
     double root_cut_lp_seconds = 0.0;
     double node_bound_apply_seconds = 0.0;
     double node_basis_set_seconds = 0.0;
@@ -48,6 +49,12 @@ struct MipLpStats {
     Int nodes_solved = 0;
     Int warm_starts = 0;
     Int cold_starts = 0;
+    Int root_race_runs = 0;
+    Int root_race_candidates = 0;
+    Int root_race_cancelled = 0;
+    Int root_race_dual_wins = 0;
+    Int root_race_barrier_wins = 0;
+    Int root_race_pdlp_wins = 0;
 };
 
 struct MipCutStats {

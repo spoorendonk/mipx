@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -43,6 +44,9 @@ struct DualSimplexOptions {
     bool enable_sip_parallel_chuzr = false;
     Int sip_parallel_min_rows = 2048;
     Int sip_parallel_row_grain = 256;
+
+    // Optional cooperative stop flag for externally orchestrated solves.
+    const std::atomic<bool>* stop_flag = nullptr;
 };
 
 class DualSimplexSolver : public LpSolver {

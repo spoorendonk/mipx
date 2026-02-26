@@ -635,6 +635,12 @@ LpResult DualSimplexSolver::solve() {
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            status_ = Status::IterLimit;
+            break;
+        }
+
         // Log every kLogFrequency iterations.
         if (iterations_ % kLogFrequency == 0) {
             // Compute current objective.

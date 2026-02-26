@@ -42,7 +42,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
-- [⚪ Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
+- [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
 - [⚪ Step 33: Symmetry Handling](#step-33)
 - [⚪ Step 34: Exact LP Refinement Mode](#step-34)
 
@@ -1111,11 +1111,16 @@ Run this after Step 29 and then periodically after major feature batches (includ
 
 <a id="step-32"></a>
 
-## Step 32: Concurrent Root LP Racing (CPU + GPU)
+## Step 32: Concurrent Root LP Racing (CPU + GPU) ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Run complementary LP backends concurrently at root and use the first high-quality result.
+
+**Status:** Complete. `ConcurrentRootExperimental` now launches dual/barrier/PDLP
+root candidates, applies cooperative stop signaling, records race telemetry
+(winner/cancel/candidate counts), and selects a winner by bound quality,
+latency, and warm-start preference in deterministic/opportunistic modes.
 
 **Deliverables:**
 - Root race orchestration across dual simplex (CPU), barrier, and PDLP backends
