@@ -195,6 +195,34 @@ static LpProblem buildKnapsackMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: fractional nodes beyond root to exercise in-tree cut management.
+// min -5x1 -4x2 -3x3  s.t. x1 + x2 + x3 <= 2.5, x integer >= 0
+// ---------------------------------------------------------------------------
+
+static LpProblem buildTreeCutMip() {
+    LpProblem lp;
+    lp.name = "tree_cut_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-5.0, -4.0, -3.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, kInf};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Integer};
+    lp.col_names = {"x1", "x2", "x3"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {2.5};
+    lp.row_names = {"cap"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -334,6 +362,24 @@ TEST_CASE("MipSolver: LP-based root portfolio can bootstrap incumbent", "[mip]")
     REQUIRE(!result.solution.empty());
     CHECK(result.solution[0] >= 0.0);
     CHECK(result.solution[0] <= 4.6 + 1e-6);
+}
+
+TEST_CASE("MipSolver: in-tree cut telemetry is populated", "[mip][cuts]") {
+    auto lp = buildTreeCutMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(true);
+    solver.setMaxCutRounds(0);  // emphasize in-tree cuts over root rounds
+    solver.load(lp);
+    auto result = solver.solve();
+
+    CHECK((result.status == Status::Optimal ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& cut_stats = solver.getCutStats();
+    CHECK(cut_stats.tree_nodes_with_cuts + cut_stats.tree_nodes_skipped >= 1);
+    CHECK(cut_stats.tree_rounds >= 0);
 }
 
 TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {

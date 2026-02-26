@@ -30,8 +30,10 @@ struct Cut {
     Real lower = -std::numeric_limits<Real>::infinity();
     Real upper = std::numeric_limits<Real>::infinity();
     CutFamily family = CutFamily::Unknown;
+    bool local = false;
     Real efficacy = 0.0;   // violation / ||a||
     Int age = 0;           // rounds since last active (binding)
+    Int activity = 0;      // number of rounds where cut was active
 };
 
 /// Pool of cutting planes with efficacy ranking and parallelism filtering.
