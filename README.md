@@ -16,6 +16,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Presolve** | Singleton, dominated, probing reductions + postsolve stack |
 | **Primal heuristics** | Rounding, diving, RINS, RENS, Feasibility Pump, local branching |
 | **Heuristic runtime** | Deterministic/opportunistic heuristic execution, restart engine, incumbent sharing pool |
+| **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -80,6 +81,11 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 | `--heur-deterministic` | on | Deterministic heuristic runtime mode |
 | `--heur-opportunistic` | off | Opportunistic heuristic runtime mode (throughput-first) |
 | `--seed <n>` | 1 | Seed for heuristic runtime restart scheduling |
+| `--pre-root-lpfree` | off | Enable LP-free pre-root incumbent stage |
+| `--no-pre-root-lpfree` | — | Disable LP-free pre-root stage |
+| `--pre-root-work <w>` | 50000 | Work-unit budget for pre-root LP-free stage |
+| `--pre-root-rounds <n>` | 24 | Max pre-root LP-free rounds across workers |
+| `--pre-root-no-early-stop` | off | Do not stop pre-root stage after first feasible |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
@@ -203,8 +209,8 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** heuristic runtime (Step 16), root-LP quality/performance
-(dual/barrier/PDLP), presolve, and MIP heuristics.
+**Current focus:** LP-free pre-root heuristic stage (Step 17), LP-light
+integration planning (Step 18), and adaptive portfolio orchestration (Step 19).
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 

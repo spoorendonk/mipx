@@ -67,6 +67,22 @@ struct MipConflictStats {
     Int branch_score_overrides = 0;
 };
 
+struct MipPreRootStats {
+    bool enabled = false;
+    Int rounds = 0;
+    Int calls = 0;
+    Int improvements = 0;
+    Int feasible_found = 0;
+    Int early_stops = 0;
+    Int fj_calls = 0;
+    Int fpr_calls = 0;
+    Int local_mip_calls = 0;
+    double work_units = 0.0;
+    double time_seconds = 0.0;
+    double time_to_first_feasible = kInf;
+    Real incumbent_at_root = kInf;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -132,10 +148,19 @@ public:
     }
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
+    void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
+    void setPreRootLpFreeWorkBudget(double max_work_units) {
+        pre_root_lp_free_work_budget_ = std::max(1.0, max_work_units);
+    }
+    void setPreRootLpFreeMaxRounds(Int rounds) {
+        pre_root_lp_free_max_rounds_ = std::max<Int>(1, rounds);
+    }
+    void setPreRootLpFreeEarlyStop(bool enabled) { pre_root_lp_free_early_stop_ = enabled; }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
+    const MipPreRootStats& getPreRootStats() const { return pre_root_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -250,12 +275,17 @@ private:
     Int pdlp_gpu_min_nnz_ = 10000;
     HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
+    bool pre_root_lp_free_enabled_ = false;
+    bool pre_root_lp_free_early_stop_ = true;
+    Int pre_root_lp_free_max_rounds_ = 24;
+    double pre_root_lp_free_work_budget_ = 5.0e4;
     bool conflicts_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     MipConflictStats conflict_stats_{};
+    MipPreRootStats pre_root_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
     ReliabilityBranching branching_rule_;

@@ -22,6 +22,8 @@ int main(int argc, char* argv[]) {
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual] "
             "[--heur-deterministic|--heur-opportunistic] [--seed N] "
+            "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
+            "[--pre-root-rounds N] [--pre-root-no-early-stop] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -45,6 +47,10 @@ int main(int argc, char* argv[]) {
     mipx::HeuristicRuntimeMode heuristic_mode =
         mipx::HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed = 1;
+    bool pre_root_lpfree = false;
+    double pre_root_work = 5.0e4;
+    mipx::Int pre_root_rounds = 24;
+    bool pre_root_early_stop = true;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -82,6 +88,17 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(
                 std::strtoull(argv[++i], nullptr, 10));
+        } else if (arg == "--pre-root-lpfree") {
+            pre_root_lpfree = true;
+        } else if (arg == "--no-pre-root-lpfree") {
+            pre_root_lpfree = false;
+        } else if (arg == "--pre-root-work" && i + 1 < argc) {
+            pre_root_work = std::max(1.0, std::atof(argv[++i]));
+        } else if (arg == "--pre-root-rounds" && i + 1 < argc) {
+            pre_root_rounds =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--pre-root-no-early-stop") {
+            pre_root_early_stop = false;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -130,6 +147,10 @@ int main(int argc, char* argv[]) {
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setHeuristicMode(heuristic_mode);
             solver.setHeuristicSeed(heuristic_seed);
+            solver.setPreRootLpFreeEnabled(pre_root_lpfree);
+            solver.setPreRootLpFreeWorkBudget(pre_root_work);
+            solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
+            solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
             solver.load(lp);
             auto result = solver.solve();
 

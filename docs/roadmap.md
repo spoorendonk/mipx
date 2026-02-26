@@ -24,7 +24,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 14: Primal Heuristics](#step-14)
 - [🟢 Step 15: Parallel Tree Search](#step-15)
 - [🟢 Step 16: Heuristic Runtime Subsystem](#step-16)
-- [⚪ Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
+- [🟢 Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
 - [⚪ Step 18: LP-Light Heuristics Integration](#step-18)
 - [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
@@ -584,11 +584,16 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-17"></a>
 
-## Step 17: LP-Free Parallel Pre-Root Heuristic Stage
+## Step 17: LP-Free Parallel Pre-Root Heuristic Stage ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add a parallel pre-root primal stage (before/alongside root LP) using LP-free heuristics.
+
+**Status:** Complete. `mipx` now has an opt-in LP-free pre-root stage with
+parallel worker execution in opportunistic mode, deterministic single-thread
+reproducibility mode, shared incumbent handoff via `SolutionPool`, configurable
+work/round budgets with early-stop, and telemetry for calls/work/time-to-first-feasible.
 
 **Deliverables:**
 - Integrate LP-free heuristic arms from `../mip-heuristics`:
