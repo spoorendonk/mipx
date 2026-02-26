@@ -4,6 +4,49 @@ Stepwise implementation plan for an end-to-end MIP solver (branch-and-cut) in C+
 
 Each step builds on the previous, produces something testable, and is scoped for 1–2 sessions.
 
+## Table of Contents
+
+- Status: `🟢 done`, `⚪ planned`
+- [Dependency Graph](#dependency-graph)
+- [🟢 Step 1: Project Skeleton](#step-1)
+- [🟢 Step 2: Sparse Matrix](#step-2)
+- [🟢 Step 3: LP Problem + File I/O](#step-3)
+- [🟢 Step 4: MIPLIB Test Framework](#step-4)
+- [🟢 Step 5: LP Solver Interface](#step-5)
+- [🟢 Step 6: LU Factorization](#step-6)
+- [🟢 Step 7: Dual Simplex](#step-7)
+- [🟢 Step 8: Incremental LP Updates](#step-8)
+- [🟢 Step 9: Domain Propagation](#step-9)
+- [🟢 Step 10: Node Queue + Branching](#step-10)
+- [🟢 Step 11: MIP Solver Shell](#step-11)
+- [🟢 Step 12: Cutting Planes](#step-12)
+- [🟢 Step 13: Presolve](#step-13)
+- [🟢 Step 14: Primal Heuristics](#step-14)
+- [🟢 Step 15: Parallel Tree Search](#step-15)
+- [⚪ Step 16: Heuristic Runtime Subsystem](#step-16)
+- [⚪ Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
+- [⚪ Step 18: LP-Light Heuristics Integration](#step-18)
+- [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
+- [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
+- [Janitor Block (pre-Step-21)](#janitor-pre21)
+- [⚪ Step 21: Branching Quality Upgrade](#step-21)
+- [⚪ Step 22: Core Cut Family Expansion](#step-22)
+- [⚪ Step 23: AUTO Cut Policy + Cut Manager](#step-23)
+- [⚪ Step 24: In-Tree Cut Management](#step-24)
+- [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
+- [⚪ Step 26: Search + Restart Controller](#step-26)
+- [⚪ Step 27: In-Processing Presolve](#step-27)
+- [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
+- [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
+- [Janitor Block (post-Step-29)](#janitor-post29)
+- [Cross-cutting: Solver Output](#solver-output)
+- [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
+- [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
+- [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
+- [⚪ Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
+- [⚪ Step 33: Symmetry Handling](#step-33)
+- [⚪ Step 34: Exact LP Refinement Mode](#step-34)
+
 ## Dependency Graph
 
 ```
@@ -22,6 +65,25 @@ Each step builds on the previous, produces something testable, and is scoped for
 │       │                       ├── 13 (Presolve)     ├── parallel
 │       │                       └── 14 (Heuristics)   ┘
 │       │                           └── 15 (Parallel Tree)
+│       │                               ├── 16 (Heuristic Runtime / mip-heuristics port base)
+│       │                               │   ├── 17 (LP-free pre-root heuristics)
+│       │                               │   ├── 18 (LP-light heuristics)
+│       │                               │   ├── 19 (Adaptive portfolio)  ← needs 17 + 18
+│       │                               │   └── 20 (Python API + release pipeline)
+│       │                               │       └── Janitor Block (quality/perf catch-up gate)  ← depends on 17 + 18 + 19 + 20
+│       │                               └── 21 (Branching quality, core MIP track)
+│       │                                   └── 22 (Core cut family expansion)
+│       │                                       └── 23 (AUTO cut policy)
+│       │                                           └── 24 (In-tree cut management)
+│       │                                               └── 25 (Conflict learning)
+│       │                                                   └── 26 (Search + restart control)
+│       │                                                       └── 27 (In-processing presolve)  ← also needs 13
+│       │                                                           └── 28 (MIP feature coverage)  ← also needs 11
+│       │                                                               └── 29 (Repro/tuning hardening)  ← also needs 19 + 20
+│       │                                                                   ├── 30 (Barrier / IPM backend ✅) ┐
+│       │                                                                   ├── 31 (PDLP + GPU backend ✅)      ├── 32 (Concurrent root LP racing)
+│       │                                                                   └── 33 (Symmetry handling)
+│       │                                                                       └── 34 (Exact LP refinement mode)
 ```
 
 **Parallel opportunities:**
@@ -29,11 +91,25 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Steps 9 + 10: domain propagation and node queue are independent after Step 8
 - Steps 12 + 13 + 14: cuts, presolve, and heuristics are independent after Step 11
 
+**Post-15 expansion sequence (MIP-first):**
+- `15 -> 16 -> 17 -> 18 -> 19 -> 20` (port `mip-heuristics` first; shutdown path)
+- `17 + 18 + 19 + 20 -> Janitor Block`
+- `Janitor Block -> 21 -> 22 -> 23 -> 24 -> 25 -> 26 -> 27 -> 28`
+- `19 + 20 + 28 -> 29`
+- `29 -> 30` and `29 -> 31`; then `30 + 31 -> 32` (advanced LP backend and root-concurrent execution track)
+- `29 -> 33 -> 34` (symmetry + exactness track)
+
 ---
 
-## Step 1: Project Skeleton
+<a id="step-1"></a>
+
+## Step 1: Project Skeleton ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Buildable project with CI-ready test infrastructure.
+
+**Status:** Complete. CMake/Catch2 project skeleton, core types, and optional TBB build path are in place.
 
 **Deliverables:**
 - CMake build system (C++23, `-Wall -Wextra -Werror`, sanitizers in debug)
@@ -51,9 +127,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 2: Sparse Matrix
+<a id="step-2"></a>
+
+## Step 2: Sparse Matrix ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** CSR-primary sparse matrix with lazy CSC view.
+
+**Status:** Complete. `SparseMatrix` CSR/CSC operations, SpMV, and row mutation APIs are implemented and covered by tests.
 
 **Deliverables:**
 - `SparseMatrix` class: CSR storage (values, col_indices, row_starts)
@@ -71,9 +153,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 3: LP Problem + File I/O
+<a id="step-3"></a>
+
+## Step 3: LP Problem + File I/O ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Represent LP/MIP problems and read/write standard formats.
+
+**Status:** Complete. LP/MIP model structures and MPS/LP/.solu I/O paths are implemented and validated in tests.
 
 **Deliverables:**
 - `LpProblem` struct: objective (min/max), variable bounds, constraint matrix (SparseMatrix), row senses/rhs, integrality markers, names
@@ -91,9 +179,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 4: MIPLIB Test Framework ⚡ parallel with 5→6
+<a id="step-4"></a>
+
+## Step 4: MIPLIB Test Framework ✅ ⚡ parallel with 5→6
+
+[Back to top](#table-of-contents)
 
 **Goal:** Automated benchmark infrastructure against standard LP/MIP test sets.
+
+**Status:** Complete. Netlib/MIPLIB download scripts, benchmark runners, and dataset-backed tests/perf gates are integrated.
 
 **Deliverables:**
 - Download script for Netlib LP set and MIPLIB 2017 benchmark/easy subsets
@@ -110,9 +204,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 5: LP Solver Interface ⚡ parallel with 4
+<a id="step-5"></a>
+
+## Step 5: LP Solver Interface ✅ ⚡ parallel with 4
+
+[Back to top](#table-of-contents)
 
 **Goal:** Abstract interface that dual simplex (and later barrier/PDLP) will implement.
+
+**Status:** Complete. `LpSolver`/`LpResult` abstraction and interface-backed tests are in place and used by solver components.
 
 **Deliverables:**
 - `LpSolver` abstract class:
@@ -133,9 +233,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 6: LU Factorization
+<a id="step-6"></a>
+
+## Step 6: LU Factorization ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Sparse LU for basis matrix operations in simplex.
+
+**Status:** Complete. Sparse LU factorization, FTRAN/BTRAN, basis update/refactorization logic, and hot-path optimizations are implemented and tested.
 
 **Deliverables:**
 - Sparse Markowitz LU factorization with threshold pivoting
@@ -158,7 +264,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-7"></a>
+
 ## Step 7: Dual Simplex ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Working LP solver. First real solves.
 
@@ -215,7 +325,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-8"></a>
+
 ## Step 8: Incremental LP Updates ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Efficient LP modifications for branch-and-cut use.
 
@@ -238,7 +352,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-9"></a>
+
 ## Step 9: Domain Propagation ✅ ⚡ parallel with 10
+
+[Back to top](#table-of-contents)
 
 **Goal:** Infer tighter variable bounds from constraints and integrality.
 
@@ -259,7 +377,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-10"></a>
+
 ## Step 10: Node Queue + Branching ✅ ⚡ parallel with 9
+
+[Back to top](#table-of-contents)
 
 **Goal:** Tree search infrastructure.
 
@@ -280,7 +402,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-11"></a>
+
 ## Step 11: MIP Solver Shell ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** End-to-end MIP solving. The milestone.
 
@@ -305,7 +431,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-12"></a>
+
 ## Step 12: Cutting Planes ✅ ⚡ parallel with 13, 14
+
+[Back to top](#table-of-contents)
 
 **Goal:** Strengthen LP relaxations with valid inequalities.
 
@@ -328,14 +458,20 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
-## Step 13: Presolve ⚡ parallel with 12, 14
+<a id="step-13"></a>
+
+## Step 13: Presolve ✅ ⚡ parallel with 12, 14
+
+[Back to top](#table-of-contents)
 
 **Goal:** Reduce problem size before solving.
 
+**Status:** Complete. Iterative dirty-workset presolve with postsolve recovery is integrated and validated across unit + MIPLIB parsing/solve tests.
+
 **Deliverables:**
-- `Presolver` with reductions: fixed variables, singleton rows/columns, forcing/dominated constraints, coefficient tightening, probing
+- `Presolver` with reductions: fixed variables, singleton rows/columns, forcing/dominated constraints, coefficient tightening, activity-based tightening, implied equations, dual fixing, duplicate rows
 - `PostsolveStack`: record reductions, undo them to recover full solution
-- Iterative presolve loop until no more reductions found
+- Iterative presolve loop until no more reductions found (dirty row/column workset engine)
 - Statistics: vars/cons removed, bounds tightened
 
 **Test criteria:** Presolve + solve + postsolve matches direct solve. Measurable reduction on MIPLIB instances. No incorrect eliminations (validated by postsolve).
@@ -347,11 +483,15 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-14"></a>
+
 ## Step 14: Primal Heuristics ✅ ⚡ parallel with 12, 13
+
+[Back to top](#table-of-contents)
 
 **Goal:** Find feasible solutions faster.
 
-**Status:** Complete. Root/tree heuristic portfolio integrated with conservative activation and strict work-units gate compatibility.
+**Status:** Complete. Root/tree heuristic portfolio now includes LP-based bootstrap heuristics plus adaptive budget scheduling, with strict work-units gate compatibility.
 
 **Deliverables:**
 - Rounding heuristic: round LP solution, check feasibility
@@ -359,10 +499,14 @@ Each step builds on the previous, produces something testable, and is scoped for
 - RINS (Relaxation Induced Neighborhood Search): incumbent-guided agreement fixing, periodic in-tree scheduling, fixed-count diagnostics
 - RENS (Relaxation Enforced Neighborhood Search): LP-neighborhood fixing without incumbent
 - Feasibility Pump (lightweight): round + guided LP repair loop with cycle perturbation
+- Auxiliary-objective heuristic: temporary integrality-guiding LP objective with full LP state restore
+- Zero-objective heuristic: objective-free LP feasibility probe with integer repair
+- Local Branching heuristic: incumbent-centered binary neighborhoods with multi-radius root portfolio
+- Adaptive heuristic budget manager: dynamic root/tree heuristic gating by work-share and recent hit-rate
 - Heuristic scheduler: run at root, periodically in tree, after incumbent improvement
 - MIP solver integration:
-  - Root portfolio: rounding -> feasibility pump -> RENS -> RINS (gated by root integer infeasibility/size thresholds)
-  - Tree portfolio: periodic RINS on promising fractional nodes with incumbent and relative-gap gating
+  - Root portfolio: rounding -> aux-objective -> zero-objective -> feasibility pump -> RENS -> RINS -> local branching (radii 8/16/24; gated by root integer infeasibility/size thresholds)
+  - Tree portfolio: periodic RINS on promising fractional nodes with incumbent and relative-gap gating, with adaptive spacing
   - LP state hygiene: bounds/objective/iteration-limit/basis restoration around heuristic subsolves
   - Instrumentation: per-heuristic LP iterations/work units and skip reasons for tuning
 - Regression hardening:
@@ -378,7 +522,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-15"></a>
+
 ## Step 15: Parallel Tree Search ✅
+
+[Back to top](#table-of-contents)
 
 **Goal:** Exploit multicore via TBB.
 
@@ -401,6 +549,452 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 ---
 
+<a id="step-16"></a>
+
+## Step 16: Heuristic Runtime Subsystem (mip-heuristics merge foundation)
+
+[Back to top](#table-of-contents)
+
+**Goal:** Introduce a composable heuristic runtime that supports cross-heuristic cooperation.
+
+**Deliverables:**
+- Two-level heuristic API:
+  - standalone solve entrypoint (full solver context)
+  - worker entrypoint (shared state, seed, thread id)
+- Thread-safe `SolutionPool` for incumbent sharing across heuristic workers
+- Restart strategy engine (uniform/tournament crossover, perturbation, polarity/activity/distance-guided restarts)
+- Callback interface for heuristics (`on_header`, `on_incumbent`, `on_heartbeat`, `on_finish`)
+- Deterministic vs opportunistic mode switch (reproducibility vs max throughput)
+
+**Test criteria:**
+- Same-seed determinism in deterministic mode
+- Opportunistic mode improves incumbent discovery speed on multi-thread runs
+- No regression in existing MIP solve correctness/perf gates
+
+**References:** `mip-heuristics` `Heuristic` + `SolutionPool` + callback design.
+
+**Depends on:** 14, 15
+**Unlocks:** 17, 18, 19
+
+---
+
+<a id="step-17"></a>
+
+## Step 17: LP-Free Parallel Pre-Root Heuristic Stage
+
+[Back to top](#table-of-contents)
+
+**Goal:** Add a parallel pre-root primal stage (before/alongside root LP) using LP-free heuristics.
+
+**Deliverables:**
+- Integrate LP-free heuristic arms from `../mip-heuristics`:
+  - Feasibility Jump
+  - Fix-Propagate-Repair (LP-free ranking)
+  - Local-MIP neighborhood search
+- Configurable pre-root budget and early-stop policy once good incumbent is found
+- Shared incumbent handoff into branch-and-bound and root LP cuts/branching
+- Pre-root effectiveness telemetry (time-to-first-feasible, incumbent quality at root)
+
+**Test criteria:**
+- Earlier feasible incumbents on hard instances vs LP-only root start
+- No strict `work_units` regression by default when pre-root stage is disabled
+- With pre-root enabled, improved anytime objective profile on selected MIPLIB cases
+
+**References:** Feasibility Jump (MPC 2023), Local-MIP (CP 2024 / AIJ 2025), FPR (MPC 2025).
+
+**Depends on:** 16
+**Unlocks:** 19, 20
+
+---
+
+<a id="step-18"></a>
+
+## Step 18: LP-Light Heuristics Integration
+
+[Back to top](#table-of-contents)
+
+**Goal:** Add LP-assisted heuristic arms without forcing core solver dependency changes.
+
+**Deliverables:**
+- Optional LP-backend adapter for heuristic-only LP calls (HiGHS first target)
+- Scylla-style LP-fractionality-ranked FPR arm
+- LP diving arm (fractional/guided/pseudocost scoring)
+- Build-time flag and runtime capability detection for optional arms
+
+**Test criteria:**
+- No behavior change when optional backend is off
+- Additional feasible/improved incumbents when optional arms are enabled
+- No strict-gate regression in default configuration
+
+**References:** Scylla (OR 2023), PDLP-ranked fix-and-propagate follow-up work.
+
+**Depends on:** 16
+**Unlocks:** 19
+
+---
+
+<a id="step-19"></a>
+
+## Step 19: Adaptive Portfolio Orchestrator
+
+[Back to top](#table-of-contents)
+
+**Goal:** Replace fixed heuristic schedules with data-driven arm selection.
+
+**Deliverables:**
+- Thompson Sampling scheduler over available heuristic arms (LP-free + LP-light + existing LP-based arms)
+- Warm-up arm rotation and reward model (first feasible / new best / stagnant / fail)
+- Adaptive epoch effort scheduler (shrink on stagnation, grow on wins)
+- Arm-level observability (selection counts, reward stats, incumbent contribution)
+
+**Test criteria:**
+- Portfolio determinism tests in deterministic mode
+- Better median time-to-first-feasible and best-at-T metrics on benchmark set
+- Strict non-regression gates remain default for merge
+
+**References:** `mip-heuristics` adaptive portfolio, SCIP ALNS bandit literature.
+
+**Depends on:** 16, 17, 18
+**Unlocks:** 20, 29
+
+---
+
+<a id="step-20"></a>
+
+## Step 20: Python API + Multi-Platform Release Pipeline
+
+[Back to top](#table-of-contents)
+
+**Goal:** Provide first-class Python distribution and automated releases.
+
+**Deliverables:**
+- Nanobind module for core model/solver APIs
+- `pyproject.toml` + scikit-build-core packaging with stable ABI wheels
+- cibuildwheel matrix for:
+  - Linux x86_64
+  - Linux aarch64
+  - macOS arm64
+  - Windows x64
+- GitHub Actions workflows:
+  - CI build/test (C++)
+  - wheel + sdist build
+  - tagged release publish to PyPI via trusted publisher (OIDC)
+- Python binding tests in CI and wheel smoke tests
+
+**Test criteria:**
+- `pip install` wheel works on all target platforms
+- Python API parity checks for basic load/solve/result flow
+- Release process reproducible from tag-only trigger
+
+**References:** `mip-heuristics` nanobind/scikit-build/cibuildwheel pipeline.
+
+**Depends on:** 16, 17, 19
+**Unlocks:** external integration and benchmark ecosystem growth, 29
+
+---
+
+<a id="janitor-pre21"></a>
+
+## Janitor Block (recurring; run before Step 21 and after each major feature wave)
+
+**Purpose:** Keep correctness/performance baselines trustworthy as new capabilities land.
+**Dependency:** run after Step 17 + Step 18 + Step 19 + Step 20.
+
+**Janitor 1: Correctness and E2E validation**
+- Ensure all relevant unit/integration tests exist for newly added features.
+- Add/update end-to-end solve checks against known optimal or best-known solutions (`.solu`) on curated Netlib/MIPLIB sets.
+- Require pass on full correctness suite before performance comparisons are accepted.
+
+**Janitor 2: `work_units` KPI coverage audit**
+- Verify `work_units` accounting is present for all relevant hot paths and solver stages (root, tree, heuristics, cuts, presolve, branching probes).
+- Add missing counters and expose them in logs/benchmark outputs where absent.
+- Keep regression gating on `work_units` as default (0% regression unless explicitly overridden).
+
+**Janitor 3: Low-level optimization opportunity pass**
+- Run profiling/perf analysis to identify top hot loops and low-hanging fruit.
+- Evaluate optimization options in order: data-layout/locality changes -> SIMD (AVX2/AVX-512 where available) -> algorithmic parallelism -> selective kernel rewrites (C/assembly/GPU offload) when justified by measured gains.
+- Current state: AVX2-gated kernels are already used in selected dual-simplex dense update paths; broad GPU offload and C/assembly microkernels are not yet standard in `mipx`.
+- Any low-level rewrite must preserve numerical behavior and pass strict correctness + `work_units` gates.
+
+**Janitor 4: Documentation synchronization**
+- Update `README.md` for user-visible behavior, flags, workflows, and benchmark commands changed in the cycle.
+- Update `docs/roadmap.md` completion markers/status text for finished steps or substeps.
+- Refresh related docs/changelogs/benchmark notes so implementation status and guidance stay consistent.
+
+**Cadence:** Run this block periodically (for example every 3-5 merged feature PRs, or at least once per release cycle).
+
+---
+
+<a id="step-21"></a>
+
+## Step 21: Branching Quality Upgrade (core MIP track)
+
+[Back to top](#table-of-contents)
+
+**Goal:** Reduce branch-and-bound tree size by upgrading branching decisions.
+
+**Deliverables:**
+- Pseudocost storage and updates (up/down gains, reliability counters)
+- Reliability branching: strong-branch a limited candidate set until pseudocosts are reliable, then switch to pseudocost scoring
+- Root strong-branch bootstrap to seed pseudocosts early
+- Candidate prefiltering (fractionality + estimated gain) with capped strong-branch budget per node
+- Logging/instrumentation: strong-branch calls, average probe LP iterations/work units, pseudocost hit-rates
+
+**Test criteria:**
+- No correctness regressions (`ctest` unchanged pass rate)
+- Strict perf gate preserved: `tests/perf/run_full_gate.sh` with default 0% regression allowance on `work_units`
+- On MIPLIB small set, demonstrate reduced median explored nodes/work units vs. current most-fractional branching
+
+**References:** SCIP reliability branching, Achterberg (2007), Fischetti & Monaci branching surveys.
+
+**Depends on:** 15
+**Unlocks:** 22
+
+---
+
+<a id="step-22"></a>
+
+## Step 22: Core Cut Family Expansion
+
+[Back to top](#table-of-contents)
+
+**Goal:** Implement the high-impact cut families that are default-relevant in commercial solvers.
+
+**Deliverables:**
+- Separator framework expansion beyond Gomory:
+  - MIR/CMIR (row and tableau driven variants)
+  - Cover cut families (knapsack cover, lifted cover, mixed binary/integer cover, flow-cover where structure matches)
+  - Implied-bound cuts (using propagation/implication data)
+  - Clique cuts (binary conflict graph)
+  - Zero-half and mixing cuts (initial conservative implementation)
+- Family-level runtime toggles and common separator API so families can be independently tuned/disabled
+- Numerically safe candidate generation rules (scaling checks, coefficient growth guards, reject unstable candidates)
+- Root separation telemetry by family (attempted/generated/accepted, efficacy, LP delta, time)
+
+**Test criteria:**
+- No correctness regressions (`ctest`)
+- Strict `work_units` gate remains non-regressive by default
+- On MIPLIB small set, improved root gap closure and fewer median nodes/work units than Gomory-only baseline
+
+**References:** HiGHS separation modules, SCIP default separators, Gurobi/CPLEX/Xpress cut-family defaults (automatic mode).
+
+**Depends on:** 21
+**Unlocks:** 23
+
+---
+
+<a id="step-23"></a>
+
+## Step 23: AUTO Cut Policy + Cut Manager
+
+[Back to top](#table-of-contents)
+
+**Goal:** Add commercial-style automatic cut control instead of fixed static cut settings.
+
+**Deliverables:**
+- Cut effort modes: `off`, `conservative`, `aggressive`, `auto` (default)
+- Dynamic per-family scheduling in `auto` mode using online KPIs:
+  - attempted, generated, accepted, rejected
+  - efficacy and orthogonality
+  - LP bound improvement per cut-family work unit
+  - separation time and resulting LP reoptimization overhead
+- Root vs tree adaptive policy:
+  - Root: broader family activation, capped rounds with diminishing-return stop rules
+  - Tree: selective family activation by depth/node type/stagnation state
+- Candidate filtering and budget manager:
+  - duplicate/near-parallel filtering
+  - numerical safety gating
+  - per-node/per-round/global work-unit cut budgets
+- Auto-demotion/auto-promotion of families based on recent ROI windows
+- Logging/reporting for policy decisions so tuning and regressions are auditable
+
+**Test criteria:**
+- Deterministic policy behavior in deterministic mode at fixed seed
+- On benchmark set, `auto` is non-regressive by default and improves median root gap/work units over static baseline
+- Families with negative ROI are automatically throttled in telemetry-backed runs
+
+**References:** Gurobi/CPLEX/Xpress automatic cut controls, SCIP separator frequency/priority model, HiGHS cut management patterns.
+
+**Depends on:** 22
+**Unlocks:** 24, 29
+
+---
+
+<a id="step-24"></a>
+
+## Step 24: In-Tree Cut Management
+
+[Back to top](#table-of-contents)
+
+**Goal:** Move from root-only cutting to tree-effective separation without exploding LP time.
+
+**Deliverables:**
+- In-tree cut rounds with depth/node-type gating (aggressive near root, conservative deep in tree)
+- Local-vs-global cut policy (local cuts stay on subtree, global cuts promoted by efficacy tests)
+- Stronger cut lifecycle (aging, activity tracking, purge/revive)
+- Node-level cut skip logic when LP resolve overhead dominates recent gains
+- Cut telemetry in progress logs (added/active/purged, root-vs-tree impact)
+
+**Test criteria:**
+- No correctness regressions (`ctest`)
+- Strict `work_units` gate remains non-regressive by default
+- On MIPLIB small set, fewer median nodes/work units than root-only cuts with similar LP-time overhead
+
+**References:** SCIP separator scheduling, HiGHS cut lifecycle patterns.
+
+**Depends on:** 21, 23
+**Unlocks:** 25, 27
+
+---
+
+<a id="step-25"></a>
+
+## Step 25: Conflict Analysis + No-Good Learning
+
+[Back to top](#table-of-contents)
+
+**Goal:** Learn from infeasible nodes to prevent repeated dead-end exploration.
+
+**Deliverables:**
+- Conflict extraction from domain propagation and LP-infeasible subproblems
+- No-good constraints / bound-disjunction cuts with clause minimization
+- Conflict pool with aging and reuse at sibling/cousin nodes
+- Branching feedback from conflict participation scores
+
+**Test criteria:**
+- Learned conflicts are valid (never cut incumbent-feasible solutions)
+- Reduced repeated infeasibility patterns in regression tests
+- Non-regressive strict `work_units` gate
+
+**References:** SCIP conflict analysis, Achterberg (2007), CDCL-inspired MIP conflict learning.
+
+**Depends on:** 21, 24
+**Unlocks:** 26
+
+---
+
+<a id="step-26"></a>
+
+## Step 26: Search + Restart Controller
+
+[Back to top](#table-of-contents)
+
+**Goal:** Add strategy control to reduce heavy-tail behavior in branch-and-bound.
+
+**Deliverables:**
+- Node selector portfolio (best-bound, best-estimate, depth-biased dives) with switch rules
+- Controlled restarts/restarts-on-stagnation with incumbent carryover
+- Strong-branch budget controller and sibling reuse/caching policy
+- Runtime strategy profiles (`stable`, `default`, `aggressive`)
+
+**Test criteria:**
+- Deterministic profile remains reproducible at fixed seed
+- Stagnation cases show improved anytime incumbent behavior
+- Strict gate stays non-regressive by default
+
+**References:** SCIP search control, MIP restart studies, reliability branching practice.
+
+**Depends on:** 21, 25
+**Unlocks:** 27, 29
+
+---
+
+<a id="step-27"></a>
+
+## Step 27: In-Processing Presolve
+
+[Back to top](#table-of-contents)
+
+**Goal:** Re-apply safe reductions during tree search, not only at root.
+
+**Deliverables:**
+- Triggered in-tree presolve at selected nodes (depth/fractionality/time based)
+- Safe rollback/postsolve mapping for local reductions
+- Reduced-cost and activity tightening refresh in long-running subtrees
+- Presolve benefit model to skip low-yield invocations
+
+**Test criteria:**
+- Solution mapping remains correct on all tested instances
+- Measurable subtree-size reduction on selected MIPLIB cases
+- No strict-gate regression
+
+**References:** In-processing in SCIP/CP-SAT style solvers.
+
+**Depends on:** 13, 24, 26
+**Unlocks:** 28, 29
+
+---
+
+<a id="step-28"></a>
+
+## Step 28: MIP Feature Coverage Expansion
+
+[Back to top](#table-of-contents)
+
+**Goal:** Support common production model features beyond baseline MPS integer LP.
+
+**Deliverables:**
+- SOS1/SOS2 support
+- Indicator constraints (native handling and linearization fallback)
+- Semi-continuous and semi-integer variable types
+- Validation and writer support updates for new constructs
+
+**Test criteria:**
+- Round-trip parse/write/solve tests for each feature
+- Compatibility checks against reference solvers on representative models
+
+**References:** SCIP and Gurobi feature behavior conventions.
+
+**Depends on:** 11, 27
+**Unlocks:** 29
+
+---
+
+<a id="step-29"></a>
+
+## Step 29: Reproducibility + Tuning + Benchmark Hardening
+
+[Back to top](#table-of-contents)
+
+**Goal:** Make performance claims auditable and tuning repeatable.
+
+**Deliverables:**
+- Determinism test suite (single-thread and configured multi-thread deterministic mode)
+- Full benchmark matrix runner (`solver x time x threads x mode`) and summary artifact generation
+- Parameter sweep tooling with structured CSV/Markdown outputs
+- Baselines stored/versioned for mipx and external references (HiGHS/highspy)
+- Solver output contract tests across LP and MIP modes:
+  - stable summary fields (`Status`, `Objective`, `Iterations`/`LP iterations`, `Work units`, `Time`)
+  - consistency checks across dual-simplex root, barrier root, and MIP solve reporting
+
+**Test criteria:**
+- Repeated runs at fixed seed produce stable metrics in deterministic mode
+- Benchmark scripts are CI-runnable on small subsets
+- Strict default regression gate stays in place for merge decisions
+- Output schema remains parse-stable and numerically consistent across supported LP backends and MIP mode
+
+**References:** `mip-heuristics` phase-9 matrix/sweep workflows; existing `mipx` perf gates.
+
+**Depends on:** 19, 20, 23, 26, 28
+**Unlocks:** reliable solver engineering loop
+
+---
+
+<a id="janitor-post29"></a>
+
+## Janitor Block (post-Step-29 recurring maintenance)
+
+Run this after Step 29 and then periodically after major feature batches (including post-Step-29 expansion steps):
+
+1. **Correctness + E2E catch-up:** extend tests for all new features and verify end-to-end objective correctness on known-optimal/known-best benchmark sets.
+2. **`work_units` coverage catch-up:** audit that new code paths are measured by `work_units`, and extend logs/gates where metrics are missing.
+3. **Performance opportunity catch-up:** profile new code, prioritize low-risk wins, and only then consider deeper rewrites (SIMD/AVX, GPU kernels, or selective C/assembly) with proof from benchmarks and no regression in correctness/stability.
+4. **Documentation catch-up:** update `README.md`, mark completed items in `docs/roadmap.md`, and refresh related docs/changelog notes.
+
+---
+
+<a id="solver-output"></a>
+
 ## Cross-cutting: Solver Output
 
 Woven into steps as they become relevant:
@@ -411,56 +1005,155 @@ Woven into steps as they become relevant:
 | 11 (MIP shell) | MIP tree log: nodes, open, LP iters, incumbent, best bound, gap%, time |
 | 11 (MIP shell) | Solution file (`.sol` format) |
 | 12+ | Cut statistics in log (cuts added, root gap closed) |
+| 29 | Output contract and cross-backend consistency tests (dual/barrier/MIP) |
 
-Format follows HiGHS style — compact, fixed-width columns, periodic summary lines.
+Current state:
+- Stable LP and MIP summary lines are already present and consumed by benchmark scripts.
+- Cross-backend/output-contract consistency is explicitly gated in Step 29.
 
----
-
-## Technical Notes: State of the Art
-
-### Simplex factorization (settled)
-
-Sparse LU factorization for simplex has not changed fundamentally in decades:
-- **Markowitz ordering** with threshold pivoting for initial factorization — Suhl & Suhl (1990)
-- **Forrest-Tomlin updates** for basis changes — Forrest & Tomlin (1972). Maintains sparsity far better than product-form updates across hundreds of pivots. Every major solver (HiGHS, CPLEX, Gurobi, Xpress, COPT) uses this.
-- Huangfu & Hall (2015) explored product-form variants approaching FT performance on some problems, but FT remains the default.
-
-No GPU acceleration applies here — sparse triangular solves are irregular and memory-bound.
-
-### Dual simplex techniques (settled, well-documented)
-
-The three techniques that separate competitive solvers from textbook implementations:
-1. **Devex pricing** (approximate steepest-edge) — halves iteration counts vs. Dantzig
-2. **Bound Flipping Ratio Test** — Koberstein (2005) gives the definitive integration of Harris + BFRT + cost shifting
-3. **Hyper-sparsity** — Hall & McKinnon (2005), order-of-magnitude wall-clock wins on large sparse LPs
-
-Parallelism within simplex (Huangfu & Hall 2018: PAMI/SIP) gives real speedups but is complex — defer.
-
-### Where the action is: barrier and first-order methods on GPU
-
-Recent advances are all on the barrier/PDLP side, not simplex:
-- **cuPDLP-C** — GPU first-order LP solver from the COPT team (Huangfu et al.), open-sourced Dec 2023, integrated into COPT 7.1 Feb 2024. Avoids factorization entirely — only needs SpMV. [github.com/COPT-Public/cuPDLP-C](https://github.com/COPT-Public/cuPDLP-C)
-- **cuPDLP+** — enhanced version (2025). [arxiv.org/abs/2507.14051](https://arxiv.org/abs/2507.14051)
-- **cuDSS** — NVIDIA's GPU sparse direct solver, enabling GPU-accelerated barrier methods in cuOpt. Reports 8x average speedup over open-source CPU solvers.
-- **cuOpt concurrent mode** — runs PDLP + barrier on GPU + dual simplex on CPU simultaneously, ranked #1 among open-source solvers (Oct 2025).
-- **Iterative refinement** — Eifler, Nicolas-Thouvenin & Gleixner (2024) combined precision boosting with LP iterative refinement for exact rational LP without numerical tolerances.
-
-These validate our roadmap: get dual simplex right on CPU first, add barrier/PDLP+GPU as future work.
+Format follows HiGHS style: compact, fixed-width columns, periodic summary lines.
 
 ---
 
-## Future Work (after end-to-end MIP is working)
+<a id="post29-expansion"></a>
 
-- **GPU MIP Workstream (deferred dependency)** — no in-repo PDLP or barrier backend exists yet, so this is design/integration scaffolding only for now.
-  - Current scope: root policy interface + alternate backend adapter API.
-  - Deferred implementation: root concurrent race (CPU dual simplex + alternate GPU LP backend) after backend integration.
-  - Tree policy remains dual-simplex-first for warm-start and basis continuity.
-- **Barrier / Interior Point Method** — Mehrotra predictor-corrector, sparse Cholesky. GPU-accelerated via cuDSS.
-- **PDLP + GPU** — First-order method (PDHG) with CUDA acceleration. Only needs SpMV — ideal for GPU. See cuPDLP-C/cuPDLP+ from COPT team.
-- **Concurrent LP** — Run dual simplex (CPU) + barrier (GPU) + PDLP (GPU) simultaneously, return first solution (cuOpt pattern).
-- **Simplex parallelism** — PAMI (parallel across multiple iterations) and SIP (single iteration parallelism) from Huangfu & Hall (2018).
-- **Column generation** — LP interface already supports `addColumns()`/`removeColumns()`; build pricing loop, branching integration (branch-and-price).
-- **Advanced cuts** — Lift-and-project, flow covers, clique cuts.
-- **Symmetry handling** — Orbital fixing, isomorphism pruning.
-- **Conflict analysis** — CDCL-style learning from infeasible nodes.
-- **Exact LP** — Iterative refinement for rational arithmetic solutions (Gleixner & Steffy 2016, Eifler et al. 2024).
+## Post-Step-29 Expansion Steps (planned)
+
+**Already covered in current roadmap (removed from future backlog):**
+- Core default cut families and automatic cut control are now explicit in Steps 22-24.
+- Dual-simplex intra-iteration parallel paths (SIP-style) and GPU backend seam scaffolding were already completed in Step 7.
+
+---
+
+<a id="step-30"></a>
+
+## Step 30: Barrier / Interior-Point LP Backend ✅
+
+[Back to top](#table-of-contents)
+
+**Goal:** Provide a robust barrier/IPM backend for large root LP relaxations and root-policy integration.
+
+**Status:** Complete. Barrier solver, root barrier policy integration, GPU-capable backend selection, and barrier LP perf harness are implemented.
+
+**Deliverables:**
+- `BarrierSolver` `LpSolver` backend with predictor-corrector style IPM solve loop
+- Root policy controls in MIP (`DualDefault`, `BarrierRoot`, concurrent stub policy)
+- GPU-capable barrier backend path with thresholds and runtime toggles
+- Dual-simplex handoff/sync solve path for tree continuation after barrier-root solves
+- Barrier-vs-reference benchmark harness and baselines in `tests/perf`
+
+**Test criteria:**
+- Numerical robustness on curated large sparse LPs (stable primal/dual residuals)
+- Competitive root LP wall-clock on selected MIPLIB roots
+- No regressions in default dual-simplex-first configuration
+
+**References:** Mehrotra (1992), commercial barrier implementations, cuDSS integration patterns.
+
+**Depends on:** 29
+**Unlocks:** 32
+
+---
+
+<a id="step-31"></a>
+
+## Step 31: PDLP + GPU LP Backend ✅
+
+[Back to top](#table-of-contents)
+
+**Goal:** Add a first-order LP backend optimized for very large sparse root relaxations.
+
+**Status:** Complete. In-repo `PdlpSolver` backend, LP CLI mode (`--pdlp`), MIP root PDLP policy integration, GPU-capable execution path, and dedicated PDLP tests are implemented.
+
+**Deliverables:**
+- PDHG/PDLP backend with CPU baseline and CUDA acceleration path
+- Scaling/preconditioning and restart policy suitable for MIP root use
+- Early-stop and certification hooks (primal/dual bounds, infeasibility checks)
+- Backend integration with root policy selector
+
+**Test criteria:**
+- Correctness against reference LP objectives/bounds on benchmark set
+- Throughput wins on very large sparse LP roots where first-order methods are favorable
+- Default configuration remains non-regressive
+
+**References:** cuPDLP-C/cuPDLP+, Google PDLP literature.
+
+**Depends on:** 29
+**Unlocks:** 32
+
+---
+
+<a id="step-32"></a>
+
+## Step 32: Concurrent Root LP Racing (CPU + GPU)
+
+[Back to top](#table-of-contents)
+
+**Goal:** Run complementary LP backends concurrently at root and use the first high-quality result.
+
+**Deliverables:**
+- Root race orchestration across dual simplex (CPU), barrier, and PDLP backends
+- Shared stop/cancel protocol and deterministic policy mode
+- Winner selection policy balancing latency, bound quality, and downstream warm-start value
+- Logging and KPIs for backend race outcomes and contribution
+
+**Test criteria:**
+- Improved median time-to-root-bound on benchmark set
+- Stable deterministic behavior in deterministic mode
+- No strict-gate regression when race mode is disabled (default-safe)
+
+**References:** cuOpt concurrent LP strategy, concurrent LP literature.
+
+**Depends on:** 7, 30, 31
+**Unlocks:** faster root processing on large instances
+
+---
+
+<a id="step-33"></a>
+
+## Step 33: Symmetry Handling
+
+[Back to top](#table-of-contents)
+
+**Goal:** Reduce redundant branch-and-bound exploration from symmetric solution spaces.
+
+**Deliverables:**
+- Symmetry detection pipeline (lightweight graph/group analysis)
+- Orbital fixing and symmetry-breaking cuts/constraints
+- Integration with branching and propagation to avoid symmetry-breaking conflicts
+- Symmetry diagnostics in logs
+
+**Test criteria:**
+- Fewer nodes on symmetry-heavy benchmark families
+- No incorrect pruning on validation set
+- Non-regressive strict `work_units` gate by default
+
+**References:** Orbital fixing and symmetry handling literature in MIP/CP.
+
+**Depends on:** 29
+**Unlocks:** 34
+
+---
+
+<a id="step-34"></a>
+
+## Step 34: Exact LP Refinement Mode
+
+[Back to top](#table-of-contents)
+
+**Goal:** Offer optional high-precision/exact LP refinement for numerically difficult instances.
+
+**Deliverables:**
+- Iterative refinement pipeline for LP solutions/certificates
+- Optional exact/rational verification path for final certificates
+- Trigger rules (numerical warning thresholds, user flag) and reporting
+- Compatibility with dual-simplex and barrier-produced solutions
+
+**Test criteria:**
+- Improved reliability on numerically fragile instances
+- Certified objective/bound consistency within configured tolerances
+- Default mode unchanged and non-regressive
+
+**References:** Gleixner & Steffy, Eifler et al. iterative refinement work.
+
+**Depends on:** 30, 33
+**Unlocks:** high-reliability solve mode
