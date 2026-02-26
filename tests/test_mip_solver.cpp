@@ -621,3 +621,51 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(sstats.restarts >= 1);
     CHECK(sstats.strong_budget_updates >= 1);
 }
+
+TEST_CASE("MipSolver: in-tree presolve telemetry is populated", "[mip][presolve][tree]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(true);
+    solver.setNodeLimit(300);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::Infeasible ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& stats = solver.getTreePresolveStats();
+    CHECK(stats.attempts >= 1);
+    CHECK((stats.runs >= 1 || stats.infeasible >= 1));
+    CHECK(stats.activity_tightenings >= 0);
+    CHECK(stats.reduced_cost_tightenings >= 0);
+}
+
+TEST_CASE("MipSolver: in-tree presolve preserves feasible optimum", "[mip][presolve][tree]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver with_tree_presolve;
+    with_tree_presolve.setVerbose(false);
+    with_tree_presolve.setCutsEnabled(false);
+    with_tree_presolve.setPresolve(false);
+    with_tree_presolve.setTreePresolveEnabled(true);
+    with_tree_presolve.setSearchProfile(SearchProfile::Stable);
+    with_tree_presolve.load(lp);
+    const auto a = with_tree_presolve.solve();
+
+    MipSolver without_tree_presolve;
+    without_tree_presolve.setVerbose(false);
+    without_tree_presolve.setCutsEnabled(false);
+    without_tree_presolve.setPresolve(false);
+    without_tree_presolve.setTreePresolveEnabled(false);
+    without_tree_presolve.setSearchProfile(SearchProfile::Stable);
+    without_tree_presolve.load(lp);
+    const auto b = without_tree_presolve.solve();
+
+    REQUIRE(a.status == Status::Optimal);
+    REQUIRE(b.status == Status::Optimal);
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+}
