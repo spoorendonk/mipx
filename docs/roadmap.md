@@ -731,8 +731,8 @@ implemented pre-21 solver track (Steps 17-19 plus shared infrastructure):
 - Re-ran strict `work_units` perf gate and full correctness suite.
 - Synced roadmap/README status guidance.
 
-Step-20-specific packaging/release checks remain tied to Step 20 delivery and
-should be re-run when Step 20 is implemented.
+Step-20 packaging/release checks are now implemented and validated through the
+Python API test suite plus CI wheel workflow coverage.
 
 **Janitor 1: Correctness and E2E validation**
 - Ensure all relevant unit/integration tests exist for newly added features.
