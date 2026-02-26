@@ -21,6 +21,7 @@ add_library(mipx STATIC
     heuristics/feaspump.cpp
     heuristics/local_branching.cpp
     heuristics/aux_objective.cpp
+    heuristics/zero_objective.cpp
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp

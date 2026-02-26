@@ -1070,6 +1070,20 @@ MipResult MipSolver::solve() {
     }
 
     if (run_root_lp_heuristics && incumbent == kInf) {
+        ZeroObjectiveHeuristic zeroobj;
+        zeroobj.setSubproblemIterLimit(kRootZeroObjSubproblemIterLimit);
+        auto hsol = zeroobj.run(problem_, lp, root_primals, incumbent);
+        root_basis_dirty = root_basis_dirty || zeroobj.lastExecutedSolve();
+        total_lp_iters += zeroobj.lastLpIterations();
+        total_work += zeroobj.lastWorkUnits();
+        if (hsol && hsol->objective < incumbent) {
+            incumbent = hsol->objective;
+            best_solution = std::move(hsol->values);
+            if (verbose_) log_.log("Root heuristic (zeroobj): obj = %.10e\n", incumbent);
+        }
+    }
+
+    if (run_root_lp_heuristics && incumbent == kInf) {
         FeasibilityPumpHeuristic feaspump;
         feaspump.setMaxIterations(kRootFeasPumpMaxIter);
         feaspump.setSubproblemIterLimit(kRootFeasPumpSubproblemIterLimit);

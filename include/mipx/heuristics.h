@@ -342,6 +342,35 @@ private:
     double last_work_units_ = 0.0;
 };
 
+/// Zero-objective (min-relaxation-style) heuristic:
+/// solve a short LP with objective 0 to focus on feasibility structure,
+/// then try integer repair.
+class ZeroObjectiveHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "zeroobj"; }
+
+private:
+    Int subproblem_iter_limit_ = 40;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
 /// Schedules and manages heuristic execution.
 class HeuristicScheduler {
 public:
