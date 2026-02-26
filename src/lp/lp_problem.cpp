@@ -154,16 +154,19 @@ void validateModelFeatures(const LpProblem& problem) {
     }
 }
 
+bool hasAdvancedModelFeatures(const LpProblem& problem) {
+    if (!problem.sos_constraints.empty() || !problem.indicator_constraints.empty()) {
+        return true;
+    }
+    return std::ranges::any_of(problem.col_type, [](VarType t) {
+        return t == VarType::SemiContinuous || t == VarType::SemiInteger;
+    });
+}
+
 LpProblem linearizeModelFeatures(const LpProblem& problem) {
     validateModelFeatures(problem);
 
-    const bool has_semi =
-        std::ranges::any_of(problem.col_type, [](VarType t) {
-            return t == VarType::SemiContinuous || t == VarType::SemiInteger;
-        });
-    if (!has_semi &&
-        problem.sos_constraints.empty() &&
-        problem.indicator_constraints.empty()) {
+    if (!hasAdvancedModelFeatures(problem)) {
         LpProblem out = problem;
         if (out.col_semi_lower.empty()) {
             out.col_semi_lower.assign(static_cast<std::size_t>(out.num_cols), 0.0);
