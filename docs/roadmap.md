@@ -36,7 +36,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 25: Conflict Analysis + No-Good Learning](#step-25)
 - [🟢 Step 26: Search + Restart Controller](#step-26)
 - [🟢 Step 27: In-Processing Presolve](#step-27)
-- [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
+- [🟢 Step 28: MIP Feature Coverage Expansion](#step-28)
 - [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
 - [Janitor Block (post-Step-29)](#janitor-post29)
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
@@ -945,11 +945,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-28"></a>
 
-## Step 28: MIP Feature Coverage Expansion
+## Step 28: MIP Feature Coverage Expansion ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Support common production model features beyond baseline MPS integer LP.
+
+**Status:** Complete. Added SOS1/SOS2, indicator, semi-continuous, and semi-integer model constructs with validation + linearization fallback, integrated feature linearization into solver load and MPS writer, and added solve + round-trip tests.
 
 **Deliverables:**
 - SOS1/SOS2 support

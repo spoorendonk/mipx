@@ -25,6 +25,8 @@ enum class VarType {
     Continuous,
     Integer,
     Binary,
+    SemiContinuous,
+    SemiInteger,
 };
 
 enum class ConstraintSense {

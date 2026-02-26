@@ -7,7 +7,8 @@
 
 namespace mipx {
 
-void writeMps(const std::string& filename, const LpProblem& problem) {
+void writeMps(const std::string& filename, const LpProblem& input) {
+    LpProblem problem = linearizeModelFeatures(input);
     std::ofstream out(filename);
     if (!out.is_open()) {
         throw std::runtime_error("Cannot open file for writing: " + filename);

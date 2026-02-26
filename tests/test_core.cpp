@@ -25,6 +25,11 @@ TEST_CASE("VarType enum", "[core]") {
     REQUIRE(mipx::VarType::Continuous != mipx::VarType::Integer);
     REQUIRE(mipx::VarType::Integer != mipx::VarType::Binary);
     REQUIRE(mipx::VarType::Continuous != mipx::VarType::Binary);
+    REQUIRE(mipx::VarType::SemiContinuous != mipx::VarType::Continuous);
+    REQUIRE(mipx::VarType::SemiContinuous != mipx::VarType::Integer);
+    REQUIRE(mipx::VarType::SemiInteger != mipx::VarType::Continuous);
+    REQUIRE(mipx::VarType::SemiInteger != mipx::VarType::Binary);
+    REQUIRE(mipx::VarType::SemiContinuous != mipx::VarType::SemiInteger);
 }
 
 TEST_CASE("ConstraintSense enum", "[core]") {
