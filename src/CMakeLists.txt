@@ -32,6 +32,8 @@ add_library(mipx STATIC
     cuts/separators.cpp
 )
 
+set_target_properties(mipx PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
 target_link_libraries(mipx PUBLIC ZLIB::ZLIB)

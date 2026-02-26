@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(cmake/CompilerFlags.cmake)
+include(FetchContent)
 
 # --- Dependencies ---
 
@@ -19,6 +20,12 @@ option(MIPX_USE_CUDA "Enable CUDA acceleration in barrier solver" ${CUDAToolkit_
 option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
        "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
        ON)
+option(MIPX_STRICT_WARNINGS
+       "Treat warnings as errors for project targets"
+       ON)
+option(MIPX_BUILD_CLI "Build mipx CLI executable" ON)
+option(MIPX_BUILD_TESTS "Build and run C++ test suite" ON)
+option(MIPX_BUILD_PYTHON "Build Python nanobind extension module" OFF)
 
 if(MIPX_USE_CUDA AND NOT CUDAToolkit_FOUND)
     message(FATAL_ERROR "MIPX_USE_CUDA=ON but CUDAToolkit was not found")
@@ -40,22 +47,39 @@ add_subdirectory(src)
 
 # --- CLI executable ---
 
-add_executable(mipx-solve src/cli/main.cpp)
-target_link_libraries(mipx-solve PRIVATE mipx)
-mipx_set_compiler_flags(mipx-solve)
+if(MIPX_BUILD_CLI)
+    add_executable(mipx-solve src/cli/main.cpp)
+    target_link_libraries(mipx-solve PRIVATE mipx)
+    mipx_set_compiler_flags(mipx-solve)
+endif()
+
+# --- Python extension ---
+
+if(MIPX_BUILD_PYTHON)
+    find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
+    FetchContent_Declare(
+        nanobind
+        GIT_REPOSITORY https://github.com/wjakob/nanobind.git
+        GIT_TAG        v2.4.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(nanobind)
+    add_subdirectory(python)
+endif()
 
 # --- Tests ---
 
-include(FetchContent)
-FetchContent_Declare(
-    Catch2
-    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-    GIT_TAG        v3.7.1
-    GIT_SHALLOW    TRUE
-)
-FetchContent_MakeAvailable(Catch2)
+if(MIPX_BUILD_TESTS)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v3.7.1
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(Catch2)
 
-include(${Catch2_SOURCE_DIR}/extras/Catch.cmake)
+    include(${Catch2_SOURCE_DIR}/extras/Catch.cmake)
 
-enable_testing()
-add_subdirectory(tests)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

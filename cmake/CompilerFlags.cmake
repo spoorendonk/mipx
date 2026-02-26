@@ -80,8 +80,11 @@ endfunction()
 function(mipx_set_compiler_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic -Werror
+            -Wall -Wextra -Wpedantic
         )
+        if(MIPX_STRICT_WARNINGS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
         if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             target_compile_options(${target} PRIVATE
                 -fsanitize=address,undefined
@@ -92,7 +95,10 @@ function(mipx_set_compiler_flags target)
             )
         endif()
     elseif(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
+        target_compile_options(${target} PRIVATE /W4 /utf-8)
+        if(MIPX_STRICT_WARNINGS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
     endif()
 
     mipx_set_simd_flags(${target})
