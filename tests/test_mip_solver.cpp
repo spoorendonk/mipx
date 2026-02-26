@@ -354,3 +354,34 @@ TEST_CASE("MipSolver: work units are positive", "[mip][work_units]") {
     REQUIRE(result.status == Status::Optimal);
     CHECK(result.work_units > 0.0);
 }
+
+TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
+          "[mip][heuristics]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setNodeLimit(1);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(1234);
+    solver_a.load(lp);
+    auto result_a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setNodeLimit(1);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(1234);
+    solver_b.load(lp);
+    auto result_b = solver_b.solve();
+
+    REQUIRE((result_a.status == Status::NodeLimit || result_a.status == Status::Optimal));
+    REQUIRE((result_b.status == Status::NodeLimit || result_b.status == Status::Optimal));
+    CHECK_THAT(result_a.objective, WithinAbs(result_b.objective, 1e-9));
+    REQUIRE(result_a.solution.size() == result_b.solution.size());
+    for (size_t i = 0; i < result_a.solution.size(); ++i) {
+        CHECK_THAT(result_a.solution[i], WithinAbs(result_b.solution[i], 1e-9));
+    }
+}

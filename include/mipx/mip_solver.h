@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -14,13 +15,12 @@
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
+#include "mipx/heuristic_runtime.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
 
 namespace mipx {
-
-class HeuristicBudgetManager;
 
 enum class RootLpPolicy {
     DualDefault,
@@ -81,6 +81,8 @@ public:
         pdlp_gpu_min_rows_ = std::max<Int>(0, min_rows);
         pdlp_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
     }
+    void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
+    void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
 
 private:
@@ -100,7 +102,8 @@ private:
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                      Int& nodes_explored, Int& total_lp_iters,
                      double& total_work,
-                     HeuristicBudgetManager& heuristic_budget,
+                     HeuristicRuntime& heuristic_runtime,
+                     SolutionPool& solution_pool,
                      Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound,
                      const std::function<double()>& elapsed);
@@ -109,6 +112,8 @@ private:
     void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
                        Int& nodes_explored, Int& total_lp_iters,
                        double& total_work,
+                       const HeuristicRuntimeConfig& runtime_config,
+                       SolutionPool& solution_pool,
                        Real& incumbent, std::vector<Real>& best_solution,
                        Real root_bound,
                        const std::function<double()>& elapsed);
@@ -138,6 +143,7 @@ private:
                      std::vector<Index>& touched_vars,
                      NodeWorkStats& node_stats,
                      Int& int_inf_out);
+    HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
 
     // Problem data.
     LpProblem problem_;
@@ -162,6 +168,8 @@ private:
     bool pdlp_use_gpu_ = true;
     Int pdlp_gpu_min_rows_ = 512;
     Int pdlp_gpu_min_nnz_ = 10000;
+    HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
+    uint64_t heuristic_seed_ = 1;
     MipLpStats lp_stats_{};
     mutable Logger log_;
 
