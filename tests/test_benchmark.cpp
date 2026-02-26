@@ -347,6 +347,67 @@ TEST_CASE("MIPLIB: p0201 objective matches .solu", "[benchmark][miplib][solve]")
     CHECK(result.work_units > 0.0);
 }
 
+TEST_CASE("MIPLIB: p0201 objective matches .solu across root LP policies",
+          "[benchmark][miplib][solve][rootpolicy]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/p0201.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("p0201 not downloaded. Run tests/data/download_miplib.sh --small");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "p0201");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite p0201 objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    struct RootPolicyCase {
+        const char* name;
+        RootLpPolicy policy;
+    };
+    const std::array<RootPolicyCase, 4> root_policies = {{
+        {"dual", RootLpPolicy::DualDefault},
+        {"barrier", RootLpPolicy::BarrierRoot},
+        {"pdlp", RootLpPolicy::PdlpRoot},
+        {"concurrent", RootLpPolicy::ConcurrentRootExperimental},
+    }};
+
+    for (const auto& root_case : root_policies) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setTimeLimit(60.0);
+        solver.setNodeLimit(300000);
+        solver.setGapTolerance(1e-6);
+        solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+        solver.setHeuristicSeed(11);
+        solver.setSearchProfile(SearchProfile::Stable);
+        solver.setRootLpPolicy(root_case.policy);
+        solver.setBarrierUseGpu(false);
+        solver.setPdlpUseGpu(false);
+        solver.load(problem);
+
+        INFO(std::format("root_policy={}", root_case.name));
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+        CHECK(result.work_units > 0.0);
+
+        const auto& lp_stats = solver.getLpStats();
+        if (root_case.policy == RootLpPolicy::ConcurrentRootExperimental) {
+            CHECK(lp_stats.root_race_runs == 1);
+            CHECK(lp_stats.root_race_candidates == 3);
+        }
+    }
+}
+
 TEST_CASE("MIPLIB: p0201 objective matches .solu with pre-root heuristics",
           "[benchmark][miplib][solve][preroot]") {
     const std::string miplib_dir = testDataDir() + "/miplib";
