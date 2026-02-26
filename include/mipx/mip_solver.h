@@ -82,6 +82,7 @@ public:
         pdlp_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
     }
     const MipLpStats& getLpStats() const { return lp_stats_; }
+    const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
     struct NodeWorkStats {
@@ -163,6 +164,9 @@ private:
     Int pdlp_gpu_min_rows_ = 512;
     Int pdlp_gpu_min_nnz_ = 10000;
     MipLpStats lp_stats_{};
+    ReliabilityBranching branching_rule_;
+    BranchingTelemetry branching_stats_{};
+    std::mutex branching_mutex_;
     mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;

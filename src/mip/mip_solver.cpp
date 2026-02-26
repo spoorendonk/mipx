@@ -266,10 +266,19 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         return false;  // Caller handles incumbent update.
     }
 
-    // Branch.
-    MostFractionalBranching branching;
-    Index branch_var = branching.select(node_primals_out, problem_.col_type,
-                                        problem_.col_lower, problem_.col_upper);
+    // Branch with reliability branching (strong-branch bootstrap + pseudocosts).
+    Index branch_var = -1;
+    {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        auto selection = branching_rule_.select(lp, problem_,
+                                                node_primals_out,
+                                                current_lower,
+                                                current_upper,
+                                                node_result.objective,
+                                                false,
+                                                branching_stats_);
+        branch_var = selection.variable;
+    }
     if (branch_var < 0) {
         return false;
     }
@@ -875,6 +884,9 @@ MipResult MipSolver::solve() {
         return result;
     }
 
+    branching_rule_.reset(problem_.num_cols);
+    branching_stats_ = {};
+
     // Solve root LP.
     DualSimplexSolver lp;
     lp.load(problem_);
@@ -1232,7 +1244,6 @@ MipResult MipSolver::solve() {
     }
 
     NodeQueue queue(NodePolicy::BestFirst);
-    MostFractionalBranching branching;
 
     // Create root children.
     BnbNode root_node;
@@ -1241,9 +1252,18 @@ MipResult MipSolver::solve() {
     root_node.lp_bound = root_bound;
     root_node.basis = root_basis;
 
-    Index branch_var = branching.select(
-        root_primals, problem_.col_type,
-        problem_.col_lower, problem_.col_upper);
+    Index branch_var = -1;
+    {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        auto selection = branching_rule_.select(lp, problem_,
+                                                root_primals,
+                                                problem_.col_lower,
+                                                problem_.col_upper,
+                                                root_bound,
+                                                true,
+                                                branching_stats_);
+        branch_var = selection.variable;
+    }
 
     if (branch_var >= 0) {
         auto [left, right] = createChildren(root_node, branch_var,
@@ -1306,6 +1326,31 @@ MipResult MipSolver::solve() {
     applyPostsolve(result);
 
     if (verbose_) {
+        if (branching_stats_.selections > 0) {
+            const double avg_probe_iters =
+                branching_stats_.strong_branch_probes > 0
+                    ? static_cast<double>(branching_stats_.strong_branch_probe_iters) /
+                          static_cast<double>(branching_stats_.strong_branch_probes)
+                    : 0.0;
+            const double avg_probe_work =
+                branching_stats_.strong_branch_probes > 0
+                    ? branching_stats_.strong_branch_probe_work_units /
+                          static_cast<double>(branching_stats_.strong_branch_probes)
+                    : 0.0;
+            const double pseudocost_hit_rate =
+                branching_stats_.pseudocost_uses > 0
+                    ? 100.0 * static_cast<double>(branching_stats_.pseudocost_hits) /
+                          static_cast<double>(branching_stats_.pseudocost_uses)
+                    : 0.0;
+            log_.log("Branching: strong_calls=%d probes=%d avg_probe_lp_it=%.1f "
+                     "avg_probe_work=%.2f pseudocost_uses=%d hit_rate=%.1f%%\n",
+                     branching_stats_.strong_branch_calls,
+                     branching_stats_.strong_branch_probes,
+                     avg_probe_iters,
+                     avg_probe_work,
+                     branching_stats_.pseudocost_uses,
+                     pseudocost_hit_rate);
+        }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
         Logger::formatCount(result.lp_iterations, iter_buf, sizeof(iter_buf));

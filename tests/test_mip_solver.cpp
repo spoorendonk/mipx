@@ -247,6 +247,24 @@ TEST_CASE("MipSolver: needs branching", "[mip]") {
     CHECK_THAT(obj, WithinAbs(-8.0, 1e-6));
 }
 
+TEST_CASE("MipSolver: reliability branching collects strong-branch telemetry", "[mip][branching]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& stats = solver.getBranchingStats();
+    CHECK(stats.selections >= 1);
+    CHECK(stats.strong_branch_calls >= 1);
+    CHECK(stats.strong_branch_probes >= 2);
+    CHECK(stats.strong_branch_probe_iters >= 0);
+    CHECK(stats.strong_branch_probe_work_units >= 0.0);
+}
+
 TEST_CASE("MipSolver: infeasible", "[mip]") {
     auto lp = buildInfeasibleMip();
 
