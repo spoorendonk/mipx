@@ -9,6 +9,7 @@
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
+#include "mipx/separators.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -191,6 +192,56 @@ static LpProblem buildFractionalMip() {
     return lp;
 }
 
+// min -x1 -x2 -x3  s.t. x1 + x2 + x3 <= 1.5, x binary
+// LP optimum is fractional (sum 1.5), good for cover/clique separation tests.
+static LpProblem buildBinaryConflictMip() {
+    LpProblem lp;
+    lp.name = "binary_conflict";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-3.0, -2.0, -0.1};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x1", "x2", "x3"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.5};
+    lp.row_names = {"cap"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+    return lp;
+}
+
+// min -x  s.t. x <= 2.7, x integer
+// MIR-style rounding gives x <= 2 at the root LP solution x = 2.7.
+static LpProblem buildMirTestMip() {
+    LpProblem lp;
+    lp.name = "mir_test";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {10.0};
+    lp.col_type = {VarType::Integer};
+    lp.col_names = {"x"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {2.7};
+    lp.row_names = {"ub"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+    return lp;
+}
+
 // ---------------------------------------------------------------------------
 // Gomory separator tests
 // ---------------------------------------------------------------------------
@@ -238,6 +289,96 @@ TEST_CASE("Gomory: generate cuts on small MIP", "[cuts][gomory]") {
         if (cut.lower > -kInf) {
             CHECK(lhs < cut.lower + 1e-3);  // violated or nearly so
         }
+    }
+}
+
+TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][families]") {
+    auto problem = buildBinaryConflictMip();
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = false;
+    config.cover = true;
+    config.implied_bound = false;
+    config.clique = false;
+    config.zero_half = false;
+    config.mixing = false;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    Int cuts = manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+    CHECK(cuts >= 1);
+    CHECK(stats.at(CutFamily::Cover).attempted >= 1);
+    CHECK(stats.at(CutFamily::Cover).accepted >= 1);
+    for (Index i = 0; i < pool.size(); ++i) {
+        CHECK(pool[i].family == CutFamily::Cover);
+    }
+}
+
+TEST_CASE("SeparatorManager: clique family generates conflict cuts", "[cuts][families]") {
+    auto problem = buildBinaryConflictMip();
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = false;
+    config.cover = false;
+    config.implied_bound = false;
+    config.clique = true;
+    config.zero_half = false;
+    config.mixing = false;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    Int cuts = manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+    CHECK(cuts >= 1);
+    CHECK(stats.at(CutFamily::Clique).attempted >= 1);
+    CHECK(stats.at(CutFamily::Clique).accepted >= 1);
+    for (Index i = 0; i < pool.size(); ++i) {
+        CHECK(pool[i].family == CutFamily::Clique);
+    }
+}
+
+TEST_CASE("SeparatorManager: MIR family generates rounding cuts", "[cuts][families]") {
+    auto problem = buildMirTestMip();
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = true;
+    config.cover = false;
+    config.implied_bound = false;
+    config.clique = false;
+    config.zero_half = false;
+    config.mixing = false;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    Int cuts = manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+    CHECK(cuts >= 1);
+    CHECK(stats.at(CutFamily::Mir).attempted >= 1);
+    CHECK(stats.at(CutFamily::Mir).accepted >= 1);
+    for (Index i = 0; i < pool.size(); ++i) {
+        CHECK(pool[i].family == CutFamily::Mir);
     }
 }
 
@@ -291,6 +432,65 @@ TEST_CASE("MipSolver: cuts disabled gives same result", "[cuts][integration]") {
     REQUIRE(result_no.status == Status::Optimal);
     REQUIRE(result_cuts.status == Status::Optimal);
     CHECK_THAT(result_no.objective, WithinAbs(result_cuts.objective, 1e-6));
+}
+
+TEST_CASE("MipSolver: cut family toggles preserve correctness", "[cuts][integration]") {
+    auto lp = buildFractionalMip();
+
+    MipSolver solver_no_families;
+    solver_no_families.setVerbose(false);
+    solver_no_families.setCutsEnabled(true);
+    CutFamilyConfig no_families;
+    no_families.gomory = false;
+    no_families.mir = false;
+    no_families.cover = false;
+    no_families.implied_bound = false;
+    no_families.clique = false;
+    no_families.zero_half = false;
+    no_families.mixing = false;
+    solver_no_families.setCutFamilyConfig(no_families);
+    solver_no_families.load(lp);
+    auto result_no = solver_no_families.solve();
+
+    MipSolver solver_mir_only;
+    solver_mir_only.setVerbose(false);
+    solver_mir_only.setCutsEnabled(true);
+    CutFamilyConfig mir_only;
+    mir_only.gomory = false;
+    mir_only.mir = true;
+    mir_only.cover = false;
+    mir_only.implied_bound = false;
+    mir_only.clique = false;
+    mir_only.zero_half = false;
+    mir_only.mixing = false;
+    solver_mir_only.setCutFamilyConfig(mir_only);
+    solver_mir_only.load(lp);
+    auto result_mir = solver_mir_only.solve();
+
+    REQUIRE(result_no.status == Status::Optimal);
+    REQUIRE(result_mir.status == Status::Optimal);
+    CHECK_THAT(result_no.objective, WithinAbs(result_mir.objective, 1e-6));
+}
+
+TEST_CASE("MipSolver: cut effort off matches cuts-disabled behavior", "[cuts][integration]") {
+    auto lp = buildFractionalMip();
+
+    MipSolver solver_off;
+    solver_off.setVerbose(false);
+    solver_off.setCutsEnabled(true);
+    solver_off.setCutEffortMode(CutEffortMode::Off);
+    solver_off.load(lp);
+    auto result_off = solver_off.solve();
+
+    MipSolver solver_disabled;
+    solver_disabled.setVerbose(false);
+    solver_disabled.setCutsEnabled(false);
+    solver_disabled.load(lp);
+    auto result_disabled = solver_disabled.solve();
+
+    REQUIRE(result_off.status == Status::Optimal);
+    REQUIRE(result_disabled.status == Status::Optimal);
+    CHECK_THAT(result_off.objective, WithinAbs(result_disabled.objective, 1e-6));
 }
 
 TEST_CASE("MipSolver with cuts: MIPLIB gt2", "[cuts][miplib]") {

@@ -6,6 +6,21 @@
 
 namespace mipx {
 
+const char* cutFamilyName(CutFamily family) {
+    switch (family) {
+        case CutFamily::Gomory: return "gomory";
+        case CutFamily::Mir: return "mir";
+        case CutFamily::Cover: return "cover";
+        case CutFamily::ImpliedBound: return "implbd";
+        case CutFamily::Clique: return "clique";
+        case CutFamily::ZeroHalf: return "zerohalf";
+        case CutFamily::Mixing: return "mixing";
+        case CutFamily::Unknown:
+        case CutFamily::Count:
+        default: return "unknown";
+    }
+}
+
 Real CutPool::cosineSimilarity(
     std::span<const Index> ind_a, std::span<const Real> val_a,
     std::span<const Index> ind_b, std::span<const Real> val_b) {

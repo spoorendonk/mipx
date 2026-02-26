@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <numeric>
 #include <thread>
 #include <unordered_map>
 
@@ -14,7 +15,6 @@
 
 #include "mipx/cut_pool.h"
 #include "mipx/barrier.h"
-#include "mipx/gomory.h"
 #include "mipx/heuristics.h"
 #include "mipx/pdlp.h"
 
@@ -66,6 +66,61 @@ const char* rootPolicyName(RootLpPolicy p) {
         case RootLpPolicy::ConcurrentRootExperimental: return "concurrent";
         default: return "dual";
     }
+}
+
+const char* cutEffortName(CutEffortMode mode) {
+    switch (mode) {
+        case CutEffortMode::Off: return "off";
+        case CutEffortMode::Conservative: return "conservative";
+        case CutEffortMode::Aggressive: return "aggressive";
+        case CutEffortMode::Auto: return "auto";
+        default: return "auto";
+    }
+}
+
+Real sparseCosineSimilarity(std::span<const Index> ind_a, std::span<const Real> val_a,
+                            std::span<const Index> ind_b, std::span<const Real> val_b) {
+    Real dot = 0.0;
+    Real norm_a = 0.0;
+    Real norm_b = 0.0;
+
+    for (Real v : val_a) norm_a += v * v;
+    for (Real v : val_b) norm_b += v * v;
+    if (norm_a <= 1e-30 || norm_b <= 1e-30) return 0.0;
+
+    Index ia = 0;
+    Index ib = 0;
+    while (ia < static_cast<Index>(ind_a.size()) &&
+           ib < static_cast<Index>(ind_b.size())) {
+        if (ind_a[ia] == ind_b[ib]) {
+            dot += val_a[ia] * val_b[ib];
+            ++ia;
+            ++ib;
+        } else if (ind_a[ia] < ind_b[ib]) {
+            ++ia;
+        } else {
+            ++ib;
+        }
+    }
+
+    return std::abs(dot) / (std::sqrt(norm_a) * std::sqrt(norm_b));
+}
+
+Real averageOrthogonality(const std::vector<const Cut*>& cuts) {
+    if (cuts.size() < 2) return 1.0;
+    const std::size_t pair_cap = 32;
+    std::size_t pairs = 0;
+    Real sim_sum = 0.0;
+    for (std::size_t i = 0; i < cuts.size() && pairs < pair_cap; ++i) {
+        for (std::size_t j = i + 1; j < cuts.size() && pairs < pair_cap; ++j) {
+            sim_sum += sparseCosineSimilarity(cuts[i]->indices, cuts[i]->values,
+                                              cuts[j]->indices, cuts[j]->values);
+            ++pairs;
+        }
+    }
+    if (pairs == 0) return 1.0;
+    const Real avg_sim = sim_sum / static_cast<Real>(pairs);
+    return std::clamp<Real>(1.0 - avg_sim, 0.0, 1.0);
 }
 
 }  // namespace
@@ -301,10 +356,19 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         return false;  // Caller handles incumbent update.
     }
 
-    // Branch.
-    MostFractionalBranching branching;
-    Index branch_var = branching.select(node_primals_out, problem_.col_type,
-                                        problem_.col_lower, problem_.col_upper);
+    // Branch with reliability branching (strong-branch bootstrap + pseudocosts).
+    Index branch_var = -1;
+    {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        auto selection = branching_rule_.select(lp, problem_,
+                                                node_primals_out,
+                                                current_lower,
+                                                current_upper,
+                                                node_result.objective,
+                                                false,
+                                                branching_stats_);
+        branch_var = selection.variable;
+    }
     if (branch_var < 0) {
         return false;
     }
@@ -802,6 +866,10 @@ MipResult MipSolver::solve() {
         if (!presolve_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "presolve=off ");
         if (!cuts_enabled_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cuts=off ");
         if (max_cut_rounds_ != 20) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cut_rounds=%d ", max_cut_rounds_);
+        if (cut_effort_mode_ != CutEffortMode::Auto) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "cut_mode=%s ", cutEffortName(cut_effort_mode_));
+        }
         if (root_lp_policy_ != RootLpPolicy::DualDefault) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
                                 "root_lp=%s ", rootPolicyName(root_lp_policy_));
@@ -943,6 +1011,9 @@ MipResult MipSolver::solve() {
         applyPostsolve(result);
         return result;
     }
+
+    branching_rule_.reset(problem_.num_cols);
+    branching_stats_ = {};
 
     // Solve root LP.
     DualSimplexSolver lp;
@@ -1172,7 +1243,6 @@ MipResult MipSolver::solve() {
     }
 
     NodeQueue queue(NodePolicy::BestFirst);
-    MostFractionalBranching branching;
 
     // Create root children.
     BnbNode root_node;
@@ -1181,9 +1251,18 @@ MipResult MipSolver::solve() {
     root_node.lp_bound = root_bound;
     root_node.basis = root_basis;
 
-    Index branch_var = branching.select(
-        root_primals, problem_.col_type,
-        problem_.col_lower, problem_.col_upper);
+    Index branch_var = -1;
+    {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        auto selection = branching_rule_.select(lp, problem_,
+                                                root_primals,
+                                                problem_.col_lower,
+                                                problem_.col_upper,
+                                                root_bound,
+                                                true,
+                                                branching_stats_);
+        branch_var = selection.variable;
+    }
 
     if (branch_var >= 0) {
         auto [left, right] = createChildren(root_node, branch_var,
@@ -1257,6 +1336,31 @@ MipResult MipSolver::solve() {
     applyPostsolve(result);
 
     if (verbose_) {
+        if (branching_stats_.selections > 0) {
+            const double avg_probe_iters =
+                branching_stats_.strong_branch_probes > 0
+                    ? static_cast<double>(branching_stats_.strong_branch_probe_iters) /
+                          static_cast<double>(branching_stats_.strong_branch_probes)
+                    : 0.0;
+            const double avg_probe_work =
+                branching_stats_.strong_branch_probes > 0
+                    ? branching_stats_.strong_branch_probe_work_units /
+                          static_cast<double>(branching_stats_.strong_branch_probes)
+                    : 0.0;
+            const double pseudocost_hit_rate =
+                branching_stats_.pseudocost_uses > 0
+                    ? 100.0 * static_cast<double>(branching_stats_.pseudocost_hits) /
+                          static_cast<double>(branching_stats_.pseudocost_uses)
+                    : 0.0;
+            log_.log("Branching: strong_calls=%d probes=%d avg_probe_lp_it=%.1f "
+                     "avg_probe_work=%.2f pseudocost_uses=%d hit_rate=%.1f%%\n",
+                     branching_stats_.strong_branch_calls,
+                     branching_stats_.strong_branch_probes,
+                     avg_probe_iters,
+                     avg_probe_work,
+                     branching_stats_.pseudocost_uses,
+                     pseudocost_hit_rate);
+        }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
         Logger::formatCount(result.lp_iterations, iter_buf, sizeof(iter_buf));
@@ -1274,36 +1378,104 @@ MipResult MipSolver::solve() {
 }
 
 Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work) {
+    if (cut_effort_mode_ == CutEffortMode::Off) return 0;
+
     CutPool pool;
-    GomorySeparator gomory;
-    gomory.setMaxCuts(max_cuts_per_round_);
+    SeparatorManager separators;
+    CutSeparationStats total_family_stats;
+    CutManager cut_manager;
+    cut_manager.setMode(cut_effort_mode_);
+    cut_manager.setBaseLimits(max_cut_rounds_, max_cuts_per_round_);
+    cut_manager.setBudgets(cut_per_node_work_budget_,
+                           cut_per_round_work_budget_,
+                           cut_global_work_budget_);
+    cut_manager.resetNodeState(true, 0);
+    cut_manager.setFamilyEnabled(CutFamily::Gomory, cut_family_config_.gomory);
+    cut_manager.setFamilyEnabled(CutFamily::Mir, cut_family_config_.mir);
+    cut_manager.setFamilyEnabled(CutFamily::Cover, cut_family_config_.cover);
+    cut_manager.setFamilyEnabled(CutFamily::ImpliedBound, cut_family_config_.implied_bound);
+    cut_manager.setFamilyEnabled(CutFamily::Clique, cut_family_config_.clique);
+    cut_manager.setFamilyEnabled(CutFamily::ZeroHalf, cut_family_config_.zero_half);
+    cut_manager.setFamilyEnabled(CutFamily::Mixing, cut_family_config_.mixing);
+
+    auto userFamilyEnabled = [&](CutFamily family) -> bool {
+        switch (family) {
+            case CutFamily::Gomory: return cut_family_config_.gomory;
+            case CutFamily::Mir: return cut_family_config_.mir;
+            case CutFamily::Cover: return cut_family_config_.cover;
+            case CutFamily::ImpliedBound: return cut_family_config_.implied_bound;
+            case CutFamily::Clique: return cut_family_config_.clique;
+            case CutFamily::ZeroHalf: return cut_family_config_.zero_half;
+            case CutFamily::Mixing: return cut_family_config_.mixing;
+            case CutFamily::Unknown:
+            case CutFamily::Count:
+            default: return false;
+        }
+    };
 
     Int total_cuts = 0;
     Int rounds_done = 0;
     Real start_obj = lp.getObjective();
+    Int stagnation_rounds = 0;
+    double cut_node_work = 0.0;
 
     for (Int round = 0; round < max_cut_rounds_; ++round) {
+        const auto policy = cut_manager.beginRound(
+            round, true, 0, cut_node_work, total_work);
+        if (!policy.run) break;
+
+        CutFamilyConfig round_config{};
+        round_config.gomory = policy.family_enabled[static_cast<std::size_t>(CutFamily::Gomory)] &&
+                              userFamilyEnabled(CutFamily::Gomory);
+        round_config.mir = policy.family_enabled[static_cast<std::size_t>(CutFamily::Mir)] &&
+                           userFamilyEnabled(CutFamily::Mir);
+        round_config.cover = policy.family_enabled[static_cast<std::size_t>(CutFamily::Cover)] &&
+                             userFamilyEnabled(CutFamily::Cover);
+        round_config.implied_bound =
+            policy.family_enabled[static_cast<std::size_t>(CutFamily::ImpliedBound)] &&
+            userFamilyEnabled(CutFamily::ImpliedBound);
+        round_config.clique = policy.family_enabled[static_cast<std::size_t>(CutFamily::Clique)] &&
+                              userFamilyEnabled(CutFamily::Clique);
+        round_config.zero_half =
+            policy.family_enabled[static_cast<std::size_t>(CutFamily::ZeroHalf)] &&
+            userFamilyEnabled(CutFamily::ZeroHalf);
+        round_config.mixing = policy.family_enabled[static_cast<std::size_t>(CutFamily::Mixing)] &&
+                              userFamilyEnabled(CutFamily::Mixing);
+        separators.setConfig(round_config);
+        separators.setMaxCutsPerFamily(std::max<Int>(1, policy.max_cuts_per_round));
+
         auto primals = lp.getPrimalValues();
 
         if (isFeasibleMip(primals)) break;
 
         Real prev_obj = lp.getObjective();
 
-        Int new_cuts = gomory.separate(lp, problem_, primals, pool);
+        CutSeparationStats round_family_stats;
+        Int new_cuts = separators.separate(lp, problem_, primals, pool, round_family_stats);
 
         if (new_cuts == 0) break;
 
-        auto top_indices = pool.topByEfficacy(max_cuts_per_round_);
+        auto top_indices = pool.topByEfficacy(policy.max_cuts_per_round);
 
         std::vector<Index> starts;
         std::vector<Index> col_indices;
         std::vector<Real> values;
         std::vector<Real> lower;
         std::vector<Real> upper;
+        std::vector<const Cut*> selected_cuts;
+        std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};
+        selected_by_family.fill(0);
+        Int selected_total = 0;
 
         for (Index idx : top_indices) {
             const auto& cut = pool[idx];
             if (cut.age > 0) continue;
+            const auto fi = static_cast<std::size_t>(cut.family);
+            if (!policy.family_enabled[fi]) continue;
+            if (policy.per_family_cap[fi] > 0 &&
+                selected_by_family[fi] >= policy.per_family_cap[fi]) {
+                continue;
+            }
 
             starts.push_back(static_cast<Index>(col_indices.size()));
             for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -1312,6 +1484,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             }
             lower.push_back(cut.lower);
             upper.push_back(cut.upper);
+            selected_cuts.push_back(&cut);
+            selected_by_family[fi] += 1;
+            ++selected_total;
         }
 
         if (lower.empty()) break;
@@ -1323,6 +1498,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         auto result = lp.solve();
         total_lp_iters += result.iterations;
         total_work += result.work_units;
+        cut_node_work += result.work_units;
 
         if (result.status != Status::Optimal) break;
 
@@ -1330,18 +1506,89 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         rounds_done = round + 1;
         Real new_obj = result.objective;
         Real improvement = std::abs(new_obj - prev_obj);
+        const Real orthogonality = averageOrthogonality(selected_cuts);
+        const double separation_seconds = std::accumulate(
+            round_family_stats.families.begin(),
+            round_family_stats.families.end(),
+            0.0,
+            [](double acc, const CutFamilyStats& s) {
+                return acc + s.time_seconds;
+            });
+
+        for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
+            auto& dst = total_family_stats.families[fi];
+            auto& src = round_family_stats.families[fi];
+            if (selected_total > 0 && selected_by_family[fi] > 0) {
+                src.lp_delta += improvement * static_cast<Real>(selected_by_family[fi]) /
+                                static_cast<Real>(selected_total);
+            }
+            dst.attempted += src.attempted;
+            dst.generated += src.generated;
+            dst.accepted += src.accepted;
+            dst.efficacy_sum += src.efficacy_sum;
+            dst.lp_delta += src.lp_delta;
+            dst.time_seconds += src.time_seconds;
+        }
+        cut_manager.recordRound(round_family_stats, selected_by_family,
+                                improvement, orthogonality,
+                                separation_seconds, result.work_units,
+                                true, 0);
 
         auto new_primals = lp.getPrimalValues();
         pool.ageAll(new_primals);
         pool.purge(10);
 
-        if (improvement < kCutImprovementTol) break;
+        if (verbose_) {
+            log_.log("  cut-round %d: selected=%d lp_delta=%.3e ortho=%.3f "
+                     "reopt_work=%.1f policy={%s}\n",
+                     round + 1, selected_total, improvement, orthogonality,
+                     result.work_units, cut_manager.summarizeState().c_str());
+        }
+
+        if (result.work_units > cut_per_round_work_budget_) break;
+        if (improvement < kCutImprovementTol) {
+            ++stagnation_rounds;
+            if (stagnation_rounds >= 2) break;
+        } else {
+            stagnation_rounds = 0;
+        }
+        if (cut_node_work >= cut_per_node_work_budget_) break;
+        if (total_work >= cut_global_work_budget_) break;
     }
 
     if (verbose_ && total_cuts > 0) {
         Real end_obj = lp.getObjective();
-        log_.log("Cutting planes: %d rounds, %d cuts, obj %.10e -> %.10e\n",
-                 rounds_done, total_cuts, start_obj, end_obj);
+        log_.log("Cutting planes (%s): %d rounds, %d cuts, obj %.10e -> %.10e\n",
+                 cutEffortName(cut_effort_mode_), rounds_done, total_cuts,
+                 start_obj, end_obj);
+        for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
+            const auto family = static_cast<CutFamily>(fi);
+            if (family == CutFamily::Unknown || family == CutFamily::Count) continue;
+            const auto& s = total_family_stats.families[fi];
+            if (s.attempted == 0 && s.generated == 0 && s.accepted == 0) continue;
+            const Real avg_eff = (s.accepted > 0)
+                ? s.efficacy_sum / static_cast<Real>(s.accepted)
+                : 0.0;
+            log_.log("  cuts[%s]: attempted=%d generated=%d accepted=%d "
+                     "avg_eff=%.3e lp_delta=%.3e time=%.3fs\n",
+                     cutFamilyName(family), s.attempted, s.generated, s.accepted,
+                     avg_eff, s.lp_delta, s.time_seconds);
+        }
+        for (std::size_t fi = 0; fi < cut_manager.kpis().size(); ++fi) {
+            const auto family = static_cast<CutFamily>(fi);
+            if (family == CutFamily::Unknown || family == CutFamily::Count) continue;
+            const auto& kpi = cut_manager.kpis()[fi];
+            if (kpi.attempted == 0) continue;
+            log_.log("  policy[%s]: enabled=%d roi=%.3e ortho=%.3f "
+                     "rejected=%d demotions=%d promotions=%d\n",
+                     cutFamilyName(family),
+                     kpi.enabled ? 1 : 0,
+                     kpi.roi_ema,
+                     kpi.orthogonality_ema,
+                     kpi.rejected,
+                     kpi.demotions,
+                     kpi.promotions);
+        }
     }
 
     return total_cuts;

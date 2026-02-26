@@ -11,14 +11,15 @@
 #include "mipx/bnb_node.h"
 #include "mipx/branching.h"
 #include "mipx/core.h"
+#include "mipx/cut_manager.h"
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
-#include "mipx/gomory.h"
 #include "mipx/heuristic_runtime.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
+#include "mipx/separators.h"
 
 namespace mipx {
 
@@ -69,6 +70,29 @@ public:
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
+    void setCutFamilyEnabled(CutFamily family, bool enabled) {
+        switch (family) {
+            case CutFamily::Gomory: cut_family_config_.gomory = enabled; break;
+            case CutFamily::Mir: cut_family_config_.mir = enabled; break;
+            case CutFamily::Cover: cut_family_config_.cover = enabled; break;
+            case CutFamily::ImpliedBound: cut_family_config_.implied_bound = enabled; break;
+            case CutFamily::Clique: cut_family_config_.clique = enabled; break;
+            case CutFamily::ZeroHalf: cut_family_config_.zero_half = enabled; break;
+            case CutFamily::Mixing: cut_family_config_.mixing = enabled; break;
+            case CutFamily::Unknown:
+            case CutFamily::Count:
+            default: break;
+        }
+    }
+    void setCutFamilyConfig(const CutFamilyConfig& config) { cut_family_config_ = config; }
+    [[nodiscard]] const CutFamilyConfig& getCutFamilyConfig() const { return cut_family_config_; }
+    void setCutEffortMode(CutEffortMode mode) { cut_effort_mode_ = mode; }
+    [[nodiscard]] CutEffortMode getCutEffortMode() const { return cut_effort_mode_; }
+    void setCutWorkBudgets(double per_node, double per_round, double global) {
+        cut_per_node_work_budget_ = std::max(1.0, per_node);
+        cut_per_round_work_budget_ = std::max(1.0, per_round);
+        cut_global_work_budget_ = std::max(1.0, global);
+    }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
@@ -84,6 +108,7 @@ public:
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
+    const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
     struct NodeWorkStats {
@@ -161,6 +186,11 @@ private:
     Int max_cut_rounds_ = 20;
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
+    CutFamilyConfig cut_family_config_{};
+    CutEffortMode cut_effort_mode_ = CutEffortMode::Auto;
+    double cut_per_node_work_budget_ = 2.5e5;
+    double cut_per_round_work_budget_ = 5.0e4;
+    double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     bool barrier_use_gpu_ = true;
     Int barrier_gpu_min_rows_ = 512;
@@ -171,6 +201,9 @@ private:
     HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     MipLpStats lp_stats_{};
+    ReliabilityBranching branching_rule_;
+    BranchingTelemetry branching_stats_{};
+    std::mutex branching_mutex_;
     mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;

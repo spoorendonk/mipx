@@ -9,12 +9,27 @@
 
 namespace mipx {
 
+enum class CutFamily : Int {
+    Unknown = 0,
+    Gomory,
+    Mir,
+    Cover,
+    ImpliedBound,
+    Clique,
+    ZeroHalf,
+    Mixing,
+    Count,
+};
+
+[[nodiscard]] const char* cutFamilyName(CutFamily family);
+
 /// A single cut: sparse row with bounds (row_lower <= a^T x <= row_upper).
 struct Cut {
     std::vector<Index> indices;
     std::vector<Real> values;
     Real lower = -std::numeric_limits<Real>::infinity();
     Real upper = std::numeric_limits<Real>::infinity();
+    CutFamily family = CutFamily::Unknown;
     Real efficacy = 0.0;   // violation / ||a||
     Int age = 0;           // rounds since last active (binding)
 };

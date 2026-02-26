@@ -136,3 +136,23 @@ TEST_CASE("fractionality helper", "[branching]") {
     REQUIRE_THAT(fractionality(3.3), Catch::Matchers::WithinAbs(0.3, 1e-12));
     REQUIRE_THAT(fractionality(3.7), Catch::Matchers::WithinAbs(0.3, 1e-12));
 }
+
+TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[branching]") {
+    ReliabilityBranching branching;
+    branching.reset(3);
+    branching.setReliabilityThreshold(2);
+
+    branching.updatePseudoCost(1, false, 2.0);
+    branching.updatePseudoCost(1, true, 6.0);
+    CHECK_FALSE(branching.isReliable(1));
+    CHECK(branching.downReliability(1) == 1);
+    CHECK(branching.upReliability(1) == 1);
+
+    branching.updatePseudoCost(1, false, 4.0);
+    branching.updatePseudoCost(1, true, 2.0);
+    CHECK(branching.isReliable(1));
+    CHECK(branching.downReliability(1) == 2);
+    CHECK(branching.upReliability(1) == 2);
+    CHECK_THAT(branching.downPseudoCost(1), Catch::Matchers::WithinAbs(3.0, 1e-12));
+    CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
+}

@@ -29,9 +29,9 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
-- [⚪ Step 21: Branching Quality Upgrade](#step-21)
-- [⚪ Step 22: Core Cut Family Expansion](#step-22)
-- [⚪ Step 23: AUTO Cut Policy + Cut Manager](#step-23)
+- [🟢 Step 21: Branching Quality Upgrade](#step-21)
+- [🟢 Step 22: Core Cut Family Expansion](#step-22)
+- [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [⚪ Step 24: In-Tree Cut Management](#step-24)
 - [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
 - [⚪ Step 26: Search + Restart Controller](#step-26)
@@ -731,11 +731,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-21"></a>
 
-## Step 21: Branching Quality Upgrade (core MIP track)
+## Step 21: Branching Quality Upgrade (core MIP track) ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Reduce branch-and-bound tree size by upgrading branching decisions.
+
+**Status:** Complete. Reliability branching with pseudocost learning, capped strong-branch probing, root bootstrap, and branching telemetry is integrated.
 
 **Deliverables:**
 - Pseudocost storage and updates (up/down gains, reliability counters)
@@ -758,11 +760,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-22"></a>
 
-## Step 22: Core Cut Family Expansion
+## Step 22: Core Cut Family Expansion ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Implement the high-impact cut families that are default-relevant in commercial solvers.
+
+**Status:** Complete. Added multi-family root separation (Gomory + MIR + cover + implied-bound + clique + zero-half + mixing), family toggles, numerical safety guards, and per-family root telemetry.
 
 **Deliverables:**
 - Separator framework expansion beyond Gomory:
@@ -789,11 +793,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-23"></a>
 
-## Step 23: AUTO Cut Policy + Cut Manager
+## Step 23: AUTO Cut Policy + Cut Manager ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add commercial-style automatic cut control instead of fixed static cut settings.
+
+**Status:** Complete. Added `off/conservative/aggressive/auto` cut effort modes with AUTO KPI-driven throttling/promotion, per-round/per-node/global work budgets, root-vs-tree policy hooks, and auditable policy telemetry.
 
 **Deliverables:**
 - Cut effort modes: `off`, `conservative`, `aggressive`, `auto` (default)
