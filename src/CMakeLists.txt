@@ -22,6 +22,7 @@ add_library(mipx STATIC
     heuristics/local_branching.cpp
     heuristics/aux_objective.cpp
     heuristics/zero_objective.cpp
+    heuristics/budget.cpp
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp

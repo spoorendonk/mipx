@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <span>
@@ -369,6 +370,35 @@ private:
     bool last_executed_solve_ = false;
     Int last_lp_iterations_ = 0;
     double last_work_units_ = 0.0;
+};
+
+/// Adaptive budget controller for primal heuristics.
+/// Tracks heuristic effort and adapts tree-call spacing from outcomes.
+class HeuristicBudgetManager {
+public:
+    void setBaseTreeFrequency(Int freq) { base_tree_frequency_ = std::max<Int>(1, freq); }
+    void setMaxFrequencyScale(Int scale) { max_frequency_scale_ = std::max<Int>(1, scale); }
+    void setMaxWorkShare(Real share) { max_work_share_ = std::max<Real>(0.0, share); }
+
+    [[nodiscard]] bool allowRootHeuristic(double total_work_units) const;
+    [[nodiscard]] bool allowTreeHeuristic(Int node_count, double total_work_units) const;
+
+    void recordHeuristicCall(Int node_count, double work_units, bool improved);
+
+    [[nodiscard]] Int currentTreeFrequency() const;
+    [[nodiscard]] Int totalCalls() const { return calls_; }
+    [[nodiscard]] Int totalSuccesses() const { return successes_; }
+    [[nodiscard]] double totalWorkUnits() const { return total_work_units_; }
+
+private:
+    Int base_tree_frequency_ = 64;
+    Int max_frequency_scale_ = 8;
+    Real max_work_share_ = 0.20;
+
+    Int next_tree_node_ = 0;
+    Int calls_ = 0;
+    Int successes_ = 0;
+    double total_work_units_ = 0.0;
 };
 
 /// Schedules and manages heuristic execution.
