@@ -87,6 +87,15 @@ const char* heuristicModeName(HeuristicRuntimeMode mode) {
     }
 }
 
+const char* searchProfileName(SearchProfile profile) {
+    switch (profile) {
+        case SearchProfile::Stable: return "stable";
+        case SearchProfile::Default: return "default";
+        case SearchProfile::Aggressive: return "aggressive";
+        default: return "default";
+    }
+}
+
 Real sparseCosineSimilarity(std::span<const Index> ind_a, std::span<const Real> val_a,
                             std::span<const Index> ind_b, std::span<const Real> val_b) {
     Real dot = 0.0;
@@ -980,6 +989,150 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     int_inf_out = frac_count;
 
+    // In-tree presolve: run safe local tightening passes at selected tree nodes.
+    if (tree_presolve_enabled_ && num_threads_ <= 1 &&
+        node.depth > 0 && node.depth <= tree_presolve_max_depth_) {
+        ++tree_presolve_stats_.attempts;
+        const bool depth_gate = (node.depth % tree_presolve_depth_frequency_ == 0);
+        const bool frac_gate = (frac_count >= tree_presolve_min_frac_);
+
+        bool benefit_skip = false;
+        if (tree_presolve_stats_.runs >= 6) {
+            const Real avg_tight = static_cast<Real>(
+                tree_presolve_stats_.activity_tightenings +
+                tree_presolve_stats_.reduced_cost_tightenings) /
+                static_cast<Real>(std::max<Int>(1, tree_presolve_stats_.runs));
+            if (avg_tight < 0.5 && frac_count < tree_presolve_min_frac_ * 2 &&
+                !depth_gate) {
+                benefit_skip = true;
+            }
+        }
+
+        if ((depth_gate || frac_gate) && !benefit_skip) {
+            DomainPropagator dp;
+            dp.load(problem_);
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
+                    current_upper[j] < problem_.col_upper[j] - 1e-9) {
+                    dp.setBound(j, current_lower[j], current_upper[j]);
+                }
+            }
+
+            if (!dp.propagate()) {
+                ++tree_presolve_stats_.infeasible;
+                if (use_conflicts) {
+                    learnConflictFromNode(node.bound_changes, false);
+                }
+                return false;
+            }
+
+            Int activity_tight = 0;
+            Int rc_tight = 0;
+            auto applyTightening = [&](Index j, Real new_lb, Real new_ub, bool from_rc) {
+                const Real lb = std::max(current_lower[j], new_lb);
+                const Real ub = std::min(current_upper[j], new_ub);
+                if (lb > ub + 1e-12) {
+                    ++tree_presolve_stats_.infeasible;
+                    return false;
+                }
+                if (lb > current_lower[j] + 1e-9 || ub < current_upper[j] - 1e-9) {
+                    lp.setColBounds(j, lb, ub);
+                    current_lower[j] = lb;
+                    current_upper[j] = ub;
+                    touched_vars.push_back(j);
+                    if (from_rc) {
+                        ++rc_tight;
+                    } else {
+                        ++activity_tight;
+                    }
+                }
+                return true;
+            };
+
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                if (!applyTightening(j, dp.getLower(j), dp.getUpper(j), false)) {
+                    if (use_conflicts) {
+                        learnConflictFromNode(node.bound_changes, false);
+                    }
+                    return false;
+                }
+            }
+
+            if (incumbent_snapshot < kInf && node_obj_out < incumbent_snapshot - 1e-6) {
+                const auto reduced = lp.getReducedCosts();
+                if (static_cast<Index>(reduced.size()) >= problem_.num_cols) {
+                    const Real gap = incumbent_snapshot - node_obj_out;
+                    for (Index j = 0; j < problem_.num_cols; ++j) {
+                        if (!std::isfinite(current_lower[j]) || !std::isfinite(current_upper[j])) {
+                            continue;
+                        }
+                        if (current_lower[j] >= current_upper[j] - 1e-9) continue;
+
+                        const Real rc = reduced[j];
+                        if (rc > 1e-7 &&
+                            std::abs(node_primals_out[j] - current_lower[j]) <= 1e-6) {
+                            const Real new_ub = current_lower[j] + gap / rc;
+                            if (!applyTightening(j, current_lower[j], new_ub, true)) {
+                                if (use_conflicts) {
+                                    learnConflictFromNode(node.bound_changes, false);
+                                }
+                                return false;
+                            }
+                        } else if (rc < -1e-7 &&
+                                   std::abs(node_primals_out[j] - current_upper[j]) <= 1e-6) {
+                            const Real new_lb = current_upper[j] + gap / rc;  // rc is negative
+                            if (!applyTightening(j, new_lb, current_upper[j], true)) {
+                                if (use_conflicts) {
+                                    learnConflictFromNode(node.bound_changes, false);
+                                }
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            ++tree_presolve_stats_.runs;
+            tree_presolve_stats_.activity_tightenings += activity_tight;
+            tree_presolve_stats_.reduced_cost_tightenings += rc_tight;
+            const Int total_tight = activity_tight + rc_tight;
+            if (total_tight > 0) {
+                const Real prev_obj = node_obj_out;
+                const auto refresh = lp.solve();
+                node_iters_out += refresh.iterations;
+                node_work_out += refresh.work_units;
+                ++tree_presolve_stats_.lp_resolves;
+
+                if (refresh.status == Status::Infeasible) {
+                    ++tree_presolve_stats_.infeasible;
+                    if (use_conflicts) {
+                        learnConflictFromNode(node.bound_changes, true);
+                    }
+                    return false;
+                }
+                if (refresh.status != Status::Optimal) {
+                    return false;
+                }
+                node_obj_out = refresh.objective;
+                node_primals_out = lp.getPrimalValues();
+                tree_presolve_stats_.lp_delta += std::abs(prev_obj - node_obj_out);
+                if (incumbent_snapshot < kInf &&
+                    node_obj_out >= incumbent_snapshot - 1e-6) {
+                    return false;
+                }
+
+                frac_count = 0;
+                for (Index j = 0; j < problem_.num_cols; ++j) {
+                    if (problem_.col_type[j] == VarType::Continuous) continue;
+                    if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+                }
+                int_inf_out = frac_count;
+            }
+        } else {
+            ++tree_presolve_stats_.skipped;
+        }
+    }
+
     std::vector<Cut> node_local_cuts = node.local_cuts;
     if (!node_local_cuts.empty()) {
         std::vector<Cut> kept;
@@ -1107,22 +1260,42 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     int_inf_out = frac_count;
 
-    // Branch with reliability branching (strong-branch bootstrap + pseudocosts).
+    // Branch with reliability branching (strong-branch bootstrap + pseudocosts),
+    // with optional sibling branch-variable reuse.
     Index branch_var = -1;
-    {
-        std::lock_guard<std::mutex> lock(branching_mutex_);
-        auto selection = branching_rule_.select(lp, problem_,
-                                                node_primals_out,
-                                                current_lower,
-                                                current_upper,
-                                                node_result.objective,
-                                                false,
-                                                branching_stats_);
-        branch_var = selection.variable;
+    const bool use_sibling_cache = (num_threads_ <= 1);
+    if (use_sibling_cache && node.parent_id >= 0) {
+        auto it = sibling_branch_cache_.find(node.parent_id);
+        if (it != sibling_branch_cache_.end()) {
+            const Index cached = it->second;
+            if (cached >= 0 && cached < problem_.num_cols &&
+                problem_.col_type[cached] != VarType::Continuous &&
+                current_lower[cached] < current_upper[cached] - 1e-9 &&
+                !isIntegral(node_primals_out[cached], kIntTol)) {
+                branch_var = cached;
+                ++search_stats_.sibling_cache_hits;
+            } else {
+                ++search_stats_.sibling_cache_misses;
+            }
+        }
     }
-    if (use_conflicts && branch_var >= 0) {
-        branch_var = selectConflictAwareBranchVariable(
-            node_primals_out, current_lower, current_upper, branch_var);
+
+    if (branch_var < 0) {
+        {
+            std::lock_guard<std::mutex> lock(branching_mutex_);
+            auto selection = branching_rule_.select(lp, problem_,
+                                                    node_primals_out,
+                                                    current_lower,
+                                                    current_upper,
+                                                    node_result.objective,
+                                                    false,
+                                                    branching_stats_);
+            branch_var = selection.variable;
+        }
+        if (use_conflicts && branch_var >= 0) {
+            branch_var = selectConflictAwareBranchVariable(
+                node_primals_out, current_lower, current_upper, branch_var);
+        }
     }
     if (branch_var < 0) {
         return false;
@@ -1130,6 +1303,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
 
     BnbNode solved_node = std::move(node);
     solved_node.lp_bound = node_obj_out;
+    solved_node.estimate = node_obj_out + 0.05 * static_cast<Real>(std::max<Int>(0, frac_count));
     solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
     if (temp_local_rows.empty()) {
         solved_node.basis = lp.getBasis();
@@ -1142,6 +1316,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                                         node_primals_out[branch_var]);
     left.lp_bound = node_obj_out;
     right.lp_bound = node_obj_out;
+    left.estimate = solved_node.estimate;
+    right.estimate = solved_node.estimate;
 
     children_out.push_back(std::move(left));
     children_out.push_back(std::move(right));
@@ -1168,6 +1344,22 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     Int rins_skip_no_inc = 0;
     Int rins_skip_few_fix = 0;
     Int rins_fixed_sum = 0;
+    Int nodes_since_incumbent = 0;
+
+    auto selectPolicy = [&](Int stagnation_nodes) -> NodePolicy {
+        switch (search_profile_) {
+            case SearchProfile::Stable:
+                return NodePolicy::BestFirst;
+            case SearchProfile::Aggressive:
+                if (stagnation_nodes >= 24) return NodePolicy::DepthBiased;
+                return NodePolicy::BestEstimate;
+            case SearchProfile::Default:
+            default:
+                if (stagnation_nodes >= 64) return NodePolicy::DepthBiased;
+                if (stagnation_nodes >= 20) return NodePolicy::BestEstimate;
+                return NodePolicy::BestFirst;
+        }
+    };
 
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
@@ -1190,7 +1382,50 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
             break;
         }
 
+        const NodePolicy target_policy = selectPolicy(nodes_since_incumbent);
+        if (queue.policy() != target_policy) {
+            queue.setPolicy(target_policy);
+            ++search_stats_.policy_switches;
+        }
+
+        const bool allow_restarts =
+            (search_profile_ == SearchProfile::Aggressive) || restarts_enabled_;
+        if (allow_restarts && search_profile_ != SearchProfile::Stable &&
+            nodes_since_incumbent >= restart_stagnation_nodes_ &&
+            queue.size() > restart_keep_nodes_) {
+            auto pending = queue.takeAll();
+            const Int old_size = static_cast<Int>(pending.size());
+            std::sort(pending.begin(), pending.end(),
+                      [](const BnbNode& a, const BnbNode& b) {
+                          if (a.lp_bound != b.lp_bound) return a.lp_bound < b.lp_bound;
+                          if (a.depth != b.depth) return a.depth > b.depth;
+                          return a.id < b.id;
+                      });
+            const Int keep = std::min<Int>(restart_keep_nodes_,
+                                           static_cast<Int>(pending.size()));
+            pending.resize(static_cast<std::size_t>(keep));
+            queue.replaceAll(std::move(pending));
+            queue.setPolicy(NodePolicy::BestFirst);
+            ++search_stats_.restarts;
+            search_stats_.restart_nodes_dropped += (old_size - keep);
+            nodes_since_incumbent = 0;
+            if (queue.empty()) break;
+        }
+
         BnbNode node = queue.pop();
+        Int strong_budget = 8;
+        switch (search_profile_) {
+            case SearchProfile::Stable: strong_budget = 4; break;
+            case SearchProfile::Default: strong_budget = 8; break;
+            case SearchProfile::Aggressive: strong_budget = 12; break;
+        }
+        if (node.depth >= 8) strong_budget -= 2;
+        if (nodes_since_incumbent >= restart_stagnation_nodes_ / 2) {
+            strong_budget += (search_profile_ == SearchProfile::Aggressive) ? 4 : 2;
+        }
+        strong_budget = std::clamp<Int>(strong_budget, 4, 24);
+        branching_rule_.setStrongBranchProbeBudget(strong_budget);
+        ++search_stats_.strong_budget_updates;
         ++nodes_explored;
 
         std::vector<BnbNode> children;
@@ -1207,6 +1442,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                                     node_stats, node_int_inf);
         total_lp_iters += node_iters;
         total_work += node_work;
+        bool improved_this_node = false;
 
         WorkerHeuristicContext heur_ctx{
             .problem = problem_,
@@ -1244,6 +1480,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                         queue.empty() ? incumbent : queue.bestBound(),
                         elapsed(), true, node_int_inf);
             queue.prune(incumbent - 1e-6);
+            nodes_since_incumbent = 0;
+            improved_this_node = true;
         }
 
         // Log progress periodically (time-based).
@@ -1266,11 +1504,23 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                            queue.empty() ? incumbent : queue.bestBound(),
                            elapsed(), true, 0);
                 queue.prune(incumbent - 1e-6);
+                nodes_since_incumbent = 0;
+                improved_this_node = true;
             }
         }
 
+        if (branched && !children.empty()) {
+            sibling_branch_cache_[node.id] = children.front().branch.variable;
+            if (static_cast<Int>(sibling_branch_cache_.size()) > 4096) {
+                sibling_branch_cache_.clear();
+            }
+        }
         for (auto& child : children) {
             queue.push(std::move(child));
+        }
+
+        if (!improved_this_node) {
+            ++nodes_since_incumbent;
         }
     }
 
@@ -1570,8 +1820,11 @@ MipResult MipSolver::solve() {
     cut_stats_ = {};
     conflict_stats_ = {};
     pre_root_stats_ = {};
+    search_stats_ = {};
+    tree_presolve_stats_ = {};
     conflict_pool_.clear();
     conflict_scores_.assign(problem_.num_cols, 0.0);
+    sibling_branch_cache_.clear();
     lp_stats_.root_policy = root_lp_policy_;
 
     auto start_time = std::chrono::steady_clock::now();
@@ -1630,6 +1883,9 @@ MipResult MipSolver::solve() {
         if (gap_tol_ != 1e-4) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "gap=%.2f%% ", gap_tol_ * 100.0);
         if (node_limit_ != 1000000) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "nodes=%d ", node_limit_);
         if (!presolve_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "presolve=off ");
+        if (!tree_presolve_enabled_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_presolve=off ");
+        }
         if (!cuts_enabled_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cuts=off ");
         if (max_cut_rounds_ != 20) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cut_rounds=%d ", max_cut_rounds_);
         if (cut_effort_mode_ != CutEffortMode::Auto) {
@@ -1648,6 +1904,10 @@ MipResult MipSolver::solve() {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
                                 "heur_seed=%llu ",
                                 static_cast<unsigned long long>(heuristic_seed_));
+        }
+        if (search_profile_ != SearchProfile::Default) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "search=%s ", searchProfileName(search_profile_));
         }
         if (pre_root_lp_free_enabled_) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
@@ -2181,13 +2441,18 @@ MipResult MipSolver::solve() {
                  "BestBound", "BestSolution", "Gap", "Time");
     }
 
-    NodeQueue queue(NodePolicy::BestFirst);
+    NodePolicy initial_policy = NodePolicy::BestFirst;
+    if (search_profile_ == SearchProfile::Aggressive) {
+        initial_policy = NodePolicy::BestEstimate;
+    }
+    NodeQueue queue(initial_policy);
 
     // Create root children.
     BnbNode root_node;
     root_node.id = 0;
     root_node.depth = 0;
     root_node.lp_bound = root_bound;
+    root_node.estimate = root_bound;
     root_node.basis = root_basis;
     root_node.basis_rows = lp.numRows();
 
@@ -2209,6 +2474,8 @@ MipResult MipSolver::solve() {
                                             root_primals[branch_var]);
         left.lp_bound = root_bound;
         right.lp_bound = root_bound;
+        left.estimate = root_bound + 0.05 * static_cast<Real>(std::max<Int>(0, root_int_inf));
+        right.estimate = left.estimate;
         queue.push(std::move(left));
         queue.push(std::move(right));
     }
@@ -2327,6 +2594,30 @@ MipResult MipSolver::solve() {
                      conflict_stats_.lp_infeasible_conflicts,
                      conflict_stats_.bound_infeasible_conflicts,
                      conflict_stats_.branch_score_overrides);
+        }
+        if (search_stats_.policy_switches > 0 || search_stats_.restarts > 0 ||
+            search_stats_.sibling_cache_hits > 0) {
+            log_.log("Search: profile=%s switches=%d restarts=%d dropped=%d "
+                     "sibling_hits=%d sibling_misses=%d strong_budget_updates=%d\n",
+                     searchProfileName(search_profile_),
+                     search_stats_.policy_switches,
+                     search_stats_.restarts,
+                     search_stats_.restart_nodes_dropped,
+                     search_stats_.sibling_cache_hits,
+                     search_stats_.sibling_cache_misses,
+                     search_stats_.strong_budget_updates);
+        }
+        if (tree_presolve_stats_.attempts > 0) {
+            log_.log("TreePresolve: attempts=%d runs=%d skipped=%d infeasible=%d "
+                     "tight_activity=%d tight_rc=%d resolves=%d lp_delta=%.3e\n",
+                     tree_presolve_stats_.attempts,
+                     tree_presolve_stats_.runs,
+                     tree_presolve_stats_.skipped,
+                     tree_presolve_stats_.infeasible,
+                     tree_presolve_stats_.activity_tightenings,
+                     tree_presolve_stats_.reduced_cost_tightenings,
+                     tree_presolve_stats_.lp_resolves,
+                     tree_presolve_stats_.lp_delta);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));

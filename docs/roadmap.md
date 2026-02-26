@@ -34,8 +34,8 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [🟢 Step 24: In-Tree Cut Management](#step-24)
 - [🟢 Step 25: Conflict Analysis + No-Good Learning](#step-25)
-- [⚪ Step 26: Search + Restart Controller](#step-26)
-- [⚪ Step 27: In-Processing Presolve](#step-27)
+- [🟢 Step 26: Search + Restart Controller](#step-26)
+- [🟢 Step 27: In-Processing Presolve](#step-27)
 - [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
 - [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
 - [Janitor Block (post-Step-29)](#janitor-post29)
@@ -894,11 +894,13 @@ work/round budgets with early-stop, and telemetry for calls/work/time-to-first-f
 
 <a id="step-26"></a>
 
-## Step 26: Search + Restart Controller
+## Step 26: Search + Restart Controller ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add strategy control to reduce heavy-tail behavior in branch-and-bound.
+
+**Status:** Complete. Added node-selector portfolio switching (`best-bound`, `best-estimate`, `depth-biased`), stagnation-triggered controlled restarts, dynamic strong-branch budget control, sibling branch-variable reuse cache, and runtime search profiles (`stable/default/aggressive`) exposed in API/CLI with tests.
 
 **Deliverables:**
 - Node selector portfolio (best-bound, best-estimate, depth-biased dives) with switch rules
@@ -920,11 +922,13 @@ work/round budgets with early-stop, and telemetry for calls/work/time-to-first-f
 
 <a id="step-27"></a>
 
-## Step 27: In-Processing Presolve
+## Step 27: In-Processing Presolve ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Re-apply safe reductions during tree search, not only at root.
+
+**Status:** Complete. Added depth/fractionality-triggered in-tree presolve passes, safe local rollback via node-bound restoration, activity + reduced-cost tightening refresh, and a low-yield benefit model with telemetry and skip controls.
 
 **Deliverables:**
 - Triggered in-tree presolve at selected nodes (depth/fractionality/time based)

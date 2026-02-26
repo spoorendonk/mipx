@@ -21,6 +21,7 @@ struct BnbNode {
     Int parent_id = -1;
     Int depth = 0;
     Real lp_bound = -kInf;
+    Real estimate = -kInf;
     bool is_solved = false;
     bool is_pruned = false;
 
@@ -42,6 +43,8 @@ struct BnbNode {
 enum class NodePolicy {
     BestFirst,
     DepthFirst,
+    BestEstimate,
+    DepthBiased,
 };
 
 /// Priority queue for branch-and-bound nodes.
@@ -60,9 +63,16 @@ public:
 
     Int size() const;
     bool empty() const;
+    void setPolicy(NodePolicy policy) { policy_ = policy; }
 
     /// Remove nodes with bound >= cutoff.
     void prune(Real cutoff);
+
+    /// Extract all nodes from the queue.
+    std::vector<BnbNode> takeAll();
+
+    /// Replace queue contents with the given nodes.
+    void replaceAll(std::vector<BnbNode> nodes);
 
     NodePolicy policy() const { return policy_; }
 

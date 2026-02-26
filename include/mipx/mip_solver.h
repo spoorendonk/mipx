@@ -7,6 +7,7 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include "mipx/bnb_node.h"
@@ -29,6 +30,12 @@ enum class RootLpPolicy {
     BarrierRoot,
     PdlpRoot,
     ConcurrentRootExperimental,
+};
+
+enum class SearchProfile {
+    Stable,
+    Default,
+    Aggressive,
 };
 
 struct MipLpStats {
@@ -81,6 +88,26 @@ struct MipPreRootStats {
     double time_seconds = 0.0;
     double time_to_first_feasible = kInf;
     Real incumbent_at_root = kInf;
+};
+
+struct MipSearchStats {
+    Int policy_switches = 0;
+    Int restarts = 0;
+    Int restart_nodes_dropped = 0;
+    Int sibling_cache_hits = 0;
+    Int sibling_cache_misses = 0;
+    Int strong_budget_updates = 0;
+};
+
+struct MipTreePresolveStats {
+    Int attempts = 0;
+    Int runs = 0;
+    Int skipped = 0;
+    Int infeasible = 0;
+    Int activity_tightenings = 0;
+    Int reduced_cost_tightenings = 0;
+    Int lp_resolves = 0;
+    Real lp_delta = 0.0;
 };
 
 struct MipResult {
@@ -157,10 +184,24 @@ public:
     }
     void setPreRootLpFreeEarlyStop(bool enabled) { pre_root_lp_free_early_stop_ = enabled; }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
+    void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
+    void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
+        restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
+        restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
+    }
+    void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
+        tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
+        tree_presolve_min_frac_ = std::max<Int>(1, min_frac);
+        tree_presolve_depth_frequency_ = std::max<Int>(1, depth_frequency);
+    }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
     const MipPreRootStats& getPreRootStats() const { return pre_root_stats_; }
+    const MipSearchStats& getSearchStats() const { return search_stats_; }
+    const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -282,12 +323,23 @@ private:
     bool conflicts_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
+    SearchProfile search_profile_ = SearchProfile::Default;
+    bool restarts_enabled_ = false;
+    Int restart_stagnation_nodes_ = 96;
+    Int restart_keep_nodes_ = 32;
+    bool tree_presolve_enabled_ = true;
+    Int tree_presolve_max_depth_ = 24;
+    Int tree_presolve_min_frac_ = 4;
+    Int tree_presolve_depth_frequency_ = 3;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     MipConflictStats conflict_stats_{};
     MipPreRootStats pre_root_stats_{};
+    MipSearchStats search_stats_{};
+    MipTreePresolveStats tree_presolve_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
+    std::unordered_map<Int, Index> sibling_branch_cache_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;

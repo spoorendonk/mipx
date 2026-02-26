@@ -24,6 +24,7 @@ int main(int argc, char* argv[]) {
             "[--heur-deterministic|--heur-opportunistic] [--seed N] "
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
+            "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -51,6 +52,7 @@ int main(int argc, char* argv[]) {
     double pre_root_work = 5.0e4;
     mipx::Int pre_root_rounds = 24;
     bool pre_root_early_stop = true;
+    mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -99,6 +101,12 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--pre-root-no-early-stop") {
             pre_root_early_stop = false;
+        } else if (arg == "--search-stable") {
+            search_profile = mipx::SearchProfile::Stable;
+        } else if (arg == "--search-default") {
+            search_profile = mipx::SearchProfile::Default;
+        } else if (arg == "--search-aggressive") {
+            search_profile = mipx::SearchProfile::Aggressive;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -147,6 +155,11 @@ int main(int argc, char* argv[]) {
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setHeuristicMode(heuristic_mode);
             solver.setHeuristicSeed(heuristic_seed);
+            solver.setPreRootLpFreeEnabled(pre_root_lpfree);
+            solver.setPreRootLpFreeWorkBudget(pre_root_work);
+            solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
+            solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
+            solver.setSearchProfile(search_profile);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
