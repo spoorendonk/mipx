@@ -83,6 +83,17 @@ struct MipSearchStats {
     Int strong_budget_updates = 0;
 };
 
+struct MipTreePresolveStats {
+    Int attempts = 0;
+    Int runs = 0;
+    Int skipped = 0;
+    Int infeasible = 0;
+    Int activity_tightenings = 0;
+    Int reduced_cost_tightenings = 0;
+    Int lp_resolves = 0;
+    Real lp_delta = 0.0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -155,10 +166,17 @@ public:
         restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
     }
+    void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
+        tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
+        tree_presolve_min_frac_ = std::max<Int>(1, min_frac);
+        tree_presolve_depth_frequency_ = std::max<Int>(1, depth_frequency);
+    }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
     const MipSearchStats& getSearchStats() const { return search_stats_; }
+    const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -280,10 +298,15 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
+    bool tree_presolve_enabled_ = true;
+    Int tree_presolve_max_depth_ = 24;
+    Int tree_presolve_min_frac_ = 4;
+    Int tree_presolve_depth_frequency_ = 3;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     MipConflictStats conflict_stats_{};
     MipSearchStats search_stats_{};
+    MipTreePresolveStats tree_presolve_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
     std::unordered_map<Int, Index> sibling_branch_cache_{};

@@ -174,6 +174,7 @@ TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
     solver_a.setCutsEnabled(false);
     solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
     solver_a.setHeuristicSeed(77);
+    solver_a.setSearchProfile(SearchProfile::Stable);
     solver_a.load(lp);
     const auto a = solver_a.solve();
 
@@ -183,6 +184,7 @@ TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
     solver_b.setCutsEnabled(false);
     solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
     solver_b.setHeuristicSeed(77);
+    solver_b.setSearchProfile(SearchProfile::Stable);
     solver_b.load(lp);
     const auto b = solver_b.solve();
 
