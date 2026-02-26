@@ -33,7 +33,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
 - [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [🟢 Step 24: In-Tree Cut Management](#step-24)
-- [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
+- [🟢 Step 25: Conflict Analysis + No-Good Learning](#step-25)
 - [⚪ Step 26: Search + Restart Controller](#step-26)
 - [⚪ Step 27: In-Processing Presolve](#step-27)
 - [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
@@ -861,11 +861,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-25"></a>
 
-## Step 25: Conflict Analysis + No-Good Learning
+## Step 25: Conflict Analysis + No-Good Learning ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Learn from infeasible nodes to prevent repeated dead-end exploration.
+
+**Status:** Complete. Added LP/bound-infeasible conflict extraction, minimized no-good literals, conflict pool aging/reuse for subtree pruning, and conflict-participation branching feedback with solver telemetry.
 
 **Deliverables:**
 - Conflict extraction from domain propagation and LP-infeasible subproblems

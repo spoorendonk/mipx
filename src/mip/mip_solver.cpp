@@ -200,6 +200,182 @@ HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     return config;
 }
 
+void MipSolver::ageConflictPool() {
+    if (conflict_pool_.empty()) return;
+
+    for (auto& clause : conflict_pool_) {
+        ++clause.age;
+    }
+    for (auto& score : conflict_scores_) {
+        score = std::max<Real>(0.0, score * 0.995);
+    }
+
+    const auto old_size = conflict_pool_.size();
+    std::erase_if(conflict_pool_, [&](const ConflictClause& clause) {
+        return clause.age > conflict_max_age_ || clause.literals.empty();
+    });
+    conflict_stats_.purged += static_cast<Int>(old_size - conflict_pool_.size());
+}
+
+void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
+                                      bool lp_infeasible) {
+    if (bound_changes.empty()) return;
+
+    struct AggregatedBounds {
+        bool has_lb = false;
+        bool has_ub = false;
+        Real lb = -kInf;
+        Real ub = kInf;
+    };
+
+    std::unordered_map<Index, AggregatedBounds> aggregated;
+    aggregated.reserve(bound_changes.size());
+    for (const auto& bc : bound_changes) {
+        auto& bounds = aggregated[bc.variable];
+        if (bc.is_upper) {
+            bounds.has_ub = true;
+            bounds.ub = std::min(bounds.ub, bc.bound);
+        } else {
+            bounds.has_lb = true;
+            bounds.lb = std::max(bounds.lb, bc.bound);
+        }
+    }
+
+    ConflictClause clause;
+    clause.literals.reserve(aggregated.size() * 2);
+    for (const auto& [var, bounds] : aggregated) {
+        if (bounds.has_lb) clause.literals.push_back({var, bounds.lb, false});
+        if (bounds.has_ub) clause.literals.push_back({var, bounds.ub, true});
+    }
+    if (clause.literals.empty()) return;
+
+    std::sort(clause.literals.begin(), clause.literals.end(),
+              [](const ConflictLiteral& a, const ConflictLiteral& b) {
+                  if (a.variable != b.variable) return a.variable < b.variable;
+                  if (a.is_upper != b.is_upper) return a.is_upper < b.is_upper;
+                  return a.bound < b.bound;
+              });
+
+    conflict_stats_.minimized_literals +=
+        std::max<Int>(0, static_cast<Int>(bound_changes.size()) -
+                             static_cast<Int>(clause.literals.size()));
+    conflict_stats_.learned += 1;
+    if (lp_infeasible) {
+        ++conflict_stats_.lp_infeasible_conflicts;
+    } else {
+        ++conflict_stats_.bound_infeasible_conflicts;
+    }
+
+    for (const auto& lit : clause.literals) {
+        if (lit.variable >= 0 &&
+            lit.variable < static_cast<Index>(conflict_scores_.size())) {
+            conflict_scores_[lit.variable] += 1.0;
+        }
+    }
+
+    conflict_pool_.push_back(std::move(clause));
+    while (static_cast<Int>(conflict_pool_.size()) > conflict_max_pool_size_) {
+        auto victim = std::max_element(
+            conflict_pool_.begin(), conflict_pool_.end(),
+            [](const ConflictClause& a, const ConflictClause& b) {
+                if (a.age != b.age) return a.age < b.age;
+                return a.hits < b.hits;
+            });
+        if (victim == conflict_pool_.end()) break;
+        conflict_pool_.erase(victim);
+        ++conflict_stats_.purged;
+    }
+}
+
+bool MipSolver::isConflictTriggered(std::span<const Index> vars,
+                                    std::span<const Real> node_lb,
+                                    std::span<const Real> node_ub) {
+    if (conflict_pool_.empty()) return false;
+
+    std::unordered_map<Index, Index> pos;
+    pos.reserve(vars.size());
+    for (Index i = 0; i < static_cast<Index>(vars.size()); ++i) {
+        pos.emplace(vars[i], i);
+    }
+
+    for (auto& clause : conflict_pool_) {
+        bool triggered = true;
+        for (const auto& lit : clause.literals) {
+            auto it = pos.find(lit.variable);
+            if (it == pos.end()) {
+                triggered = false;
+                break;
+            }
+            const Index p = it->second;
+            if (lit.is_upper) {
+                if (node_ub[p] > lit.bound + 1e-9) {
+                    triggered = false;
+                    break;
+                }
+            } else {
+                if (node_lb[p] < lit.bound - 1e-9) {
+                    triggered = false;
+                    break;
+                }
+            }
+        }
+
+        if (triggered) {
+            ++conflict_stats_.reused;
+            ++conflict_stats_.pruned;
+            clause.age = 0;
+            ++clause.hits;
+            for (const auto& lit : clause.literals) {
+                if (lit.variable >= 0 &&
+                    lit.variable < static_cast<Index>(conflict_scores_.size())) {
+                    conflict_scores_[lit.variable] += 0.25;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+Index MipSolver::selectConflictAwareBranchVariable(
+    std::span<const Real> primals,
+    std::span<const Real> current_lower,
+    std::span<const Real> current_upper,
+    Index default_var) {
+    if (default_var < 0 || default_var >= static_cast<Index>(conflict_scores_.size())) {
+        return default_var;
+    }
+
+    const Real default_score = conflict_scores_[default_var];
+    Index best_var = default_var;
+    Real best_score = default_score;
+
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Continuous) continue;
+        if (j >= static_cast<Index>(primals.size())) continue;
+        if (j >= static_cast<Index>(current_lower.size()) ||
+            j >= static_cast<Index>(current_upper.size())) {
+            continue;
+        }
+        if (current_lower[j] >= current_upper[j] - 1e-9) continue;
+        if (isIntegral(primals[j], kIntTol)) continue;
+        const Real score = (j < static_cast<Index>(conflict_scores_.size()))
+                               ? conflict_scores_[j]
+                               : 0.0;
+        if (score > best_score + 1e-12 ||
+            (std::abs(score - best_score) <= 1e-12 && j < best_var)) {
+            best_var = j;
+            best_score = score;
+        }
+    }
+
+    if (best_var != default_var && best_score > default_score + 0.25) {
+        ++conflict_stats_.branch_score_overrides;
+        return best_var;
+    }
+    return default_var;
+}
+
 bool MipSolver::isFeasibleMip(const std::vector<Real>& primals) const {
     for (Index j = 0; j < problem_.num_cols; ++j) {
         if (problem_.col_type[j] == VarType::Continuous) continue;
@@ -285,6 +461,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_work_out = 0.0;
     int_inf_out = -1;
     ++node_stats.nodes_solved;
+    const bool use_conflicts = conflicts_enabled_ && num_threads_ <= 1;
+    if (use_conflicts) ageConflictPool();
     std::vector<Index> temp_local_rows;
     ScopedRowRemoval local_row_guard(lp, temp_local_rows);
 
@@ -332,6 +510,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     for (Index p = 0; p < static_cast<Index>(vars.size()); ++p) {
         Index j = vars[p];
         if (node_lb[p] > node_ub[p] + 1e-12) {
+            if (use_conflicts) {
+                learnConflictFromNode(node.bound_changes, false);
+            }
             node_stats.bound_apply_seconds += std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
             return false;
@@ -345,6 +526,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     node_stats.bound_apply_seconds += std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
+    if (use_conflicts && isConflictTriggered(vars, node_lb, node_ub)) {
+        return false;
+    }
 
     // Set basis for warm-start.
     t0 = std::chrono::steady_clock::now();
@@ -391,6 +575,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_work_out = node_result.work_units;
 
     if (node_result.status == Status::Infeasible) {
+        if (use_conflicts) {
+            learnConflictFromNode(node.bound_changes, true);
+        }
         return false;
     }
     if (node_result.status != Status::Optimal) {
@@ -552,6 +739,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                                                 false,
                                                 branching_stats_);
         branch_var = selection.variable;
+    }
+    if (use_conflicts && branch_var >= 0) {
+        branch_var = selectConflictAwareBranchVariable(
+            node_primals_out, current_lower, current_upper, branch_var);
     }
     if (branch_var < 0) {
         return false;
@@ -997,6 +1188,9 @@ MipResult MipSolver::solve() {
     if (!loaded_) return {};
     lp_stats_ = {};
     cut_stats_ = {};
+    conflict_stats_ = {};
+    conflict_pool_.clear();
+    conflict_scores_.assign(problem_.num_cols, 0.0);
     lp_stats_.root_policy = root_lp_policy_;
 
     auto start_time = std::chrono::steady_clock::now();
@@ -1567,6 +1761,18 @@ MipResult MipSolver::solve() {
                      cut_stats_.tree_cuts_purged,
                      cut_stats_.tree_cuts_revived,
                      cut_stats_.tree_lp_delta);
+        }
+        if (conflict_stats_.learned > 0 || conflict_stats_.reused > 0) {
+            log_.log("Conflicts: learned=%d reused=%d pruned=%d purged=%d "
+                     "min_literals=%d src_lp=%d src_bound=%d branch_overrides=%d\n",
+                     conflict_stats_.learned,
+                     conflict_stats_.reused,
+                     conflict_stats_.pruned,
+                     conflict_stats_.purged,
+                     conflict_stats_.minimized_literals,
+                     conflict_stats_.lp_infeasible_conflicts,
+                     conflict_stats_.bound_infeasible_conflicts,
+                     conflict_stats_.branch_score_overrides);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
