@@ -472,6 +472,27 @@ TEST_CASE("MipSolver: cut family toggles preserve correctness", "[cuts][integrat
     CHECK_THAT(result_no.objective, WithinAbs(result_mir.objective, 1e-6));
 }
 
+TEST_CASE("MipSolver: cut effort off matches cuts-disabled behavior", "[cuts][integration]") {
+    auto lp = buildFractionalMip();
+
+    MipSolver solver_off;
+    solver_off.setVerbose(false);
+    solver_off.setCutsEnabled(true);
+    solver_off.setCutEffortMode(CutEffortMode::Off);
+    solver_off.load(lp);
+    auto result_off = solver_off.solve();
+
+    MipSolver solver_disabled;
+    solver_disabled.setVerbose(false);
+    solver_disabled.setCutsEnabled(false);
+    solver_disabled.load(lp);
+    auto result_disabled = solver_disabled.solve();
+
+    REQUIRE(result_off.status == Status::Optimal);
+    REQUIRE(result_disabled.status == Status::Optimal);
+    CHECK_THAT(result_off.objective, WithinAbs(result_disabled.objective, 1e-6));
+}
+
 TEST_CASE("MipSolver with cuts: MIPLIB gt2", "[cuts][miplib]") {
     std::string path = std::string(TEST_DATA_DIR) + "/miplib/gt2.mps.gz";
     if (!std::filesystem::exists(path)) {

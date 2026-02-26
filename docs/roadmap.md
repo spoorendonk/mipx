@@ -31,7 +31,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
-- [⚪ Step 23: AUTO Cut Policy + Cut Manager](#step-23)
+- [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [⚪ Step 24: In-Tree Cut Management](#step-24)
 - [⚪ Step 25: Conflict Analysis + No-Good Learning](#step-25)
 - [⚪ Step 26: Search + Restart Controller](#step-26)
@@ -790,11 +790,13 @@ callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/
 
 <a id="step-23"></a>
 
-## Step 23: AUTO Cut Policy + Cut Manager
+## Step 23: AUTO Cut Policy + Cut Manager ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add commercial-style automatic cut control instead of fixed static cut settings.
+
+**Status:** Complete. Added `off/conservative/aggressive/auto` cut effort modes with AUTO KPI-driven throttling/promotion, per-round/per-node/global work budgets, root-vs-tree policy hooks, and auditable policy telemetry.
 
 **Deliverables:**
 - Cut effort modes: `off`, `conservative`, `aggressive`, `auto` (default)
