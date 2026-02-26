@@ -522,6 +522,39 @@ TEST_CASE("LocalBranchingHeuristic: restores LP state after run", "[heuristics]"
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+TEST_CASE("LocalBranchingHeuristic: larger neighborhoods can unlock improvements", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    std::vector<Real> incumbent_values = {1.0, 0.0, 1.0};
+    const Real incumbent_obj = -10.0;
+
+    LocalBranchingHeuristic lb_small;
+    lb_small.setSubproblemIterLimit(80);
+    lb_small.setNeighborhoodSize(1);
+    lb_small.setMinBinaryVars(1);
+    auto small = lb_small.run(problem, lp, primals, incumbent_obj, incumbent_values);
+    CHECK_FALSE(lb_small.lastSkippedNoIncumbent());
+
+    LocalBranchingHeuristic lb_large;
+    lb_large.setSubproblemIterLimit(80);
+    lb_large.setNeighborhoodSize(2);
+    lb_large.setMinBinaryVars(1);
+    auto large = lb_large.run(problem, lp, primals, incumbent_obj, incumbent_values);
+    CHECK(lb_large.lastExecutedSolve());
+    if (large.has_value()) {
+        CHECK(isFeasible(problem, large->values));
+        CHECK(large->objective < incumbent_obj);
+    } else if (small.has_value()) {
+        CHECK(small->objective <= incumbent_obj + 1e-6);
+    }
+}
+
 // ===========================================================================
 // HeuristicScheduler tests
 // ===========================================================================

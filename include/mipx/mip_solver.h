@@ -171,7 +171,9 @@ private:
     static constexpr Int kRootRensMinFixedVars = 16;
     static constexpr Real kRootRensMinFixedRate = 0.25;
     static constexpr Int kRootLocalBranchingSubproblemIterLimit = 40;
-    static constexpr Int kRootLocalBranchingNeighborhood = 12;
+    static constexpr Int kRootLocalBranchingNeighborhoodSmall = 8;
+    static constexpr Int kRootLocalBranchingNeighborhoodMedium = 16;
+    static constexpr Int kRootLocalBranchingNeighborhoodLarge = 24;
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
 };
 

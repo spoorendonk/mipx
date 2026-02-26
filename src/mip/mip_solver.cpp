@@ -1,6 +1,7 @@
 #include "mipx/mip_solver.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -1106,19 +1107,27 @@ MipResult MipSolver::solve() {
     if (run_root_lp_heuristics &&
         incumbent < kInf && !best_solution.empty() &&
         root_int_inf > 0) {
-        LocalBranchingHeuristic local_branching;
-        local_branching.setSubproblemIterLimit(kRootLocalBranchingSubproblemIterLimit);
-        local_branching.setNeighborhoodSize(kRootLocalBranchingNeighborhood);
-        local_branching.setMinBinaryVars(kRootLocalBranchingMinBinaryVars);
-        auto hsol = local_branching.run(problem_, lp, root_primals, incumbent, best_solution);
-        root_basis_dirty = true;
-        total_lp_iters += local_branching.lastLpIterations();
-        total_work += local_branching.lastWorkUnits();
-        if (hsol && hsol->objective < incumbent) {
-            incumbent = hsol->objective;
-            best_solution = std::move(hsol->values);
-            if (verbose_) {
-                log_.log("Root heuristic (localbranching): obj = %.10e\n", incumbent);
+        constexpr std::array<Int, 3> kNeighborhoods = {
+            kRootLocalBranchingNeighborhoodSmall,
+            kRootLocalBranchingNeighborhoodMedium,
+            kRootLocalBranchingNeighborhoodLarge,
+        };
+        for (Int radius : kNeighborhoods) {
+            LocalBranchingHeuristic local_branching;
+            local_branching.setSubproblemIterLimit(kRootLocalBranchingSubproblemIterLimit);
+            local_branching.setNeighborhoodSize(radius);
+            local_branching.setMinBinaryVars(kRootLocalBranchingMinBinaryVars);
+            auto hsol = local_branching.run(problem_, lp, root_primals, incumbent, best_solution);
+            root_basis_dirty = true;
+            total_lp_iters += local_branching.lastLpIterations();
+            total_work += local_branching.lastWorkUnits();
+            if (hsol && hsol->objective < incumbent) {
+                incumbent = hsol->objective;
+                best_solution = std::move(hsol->values);
+                if (verbose_) {
+                    log_.log("Root heuristic (localbranching r=%d): obj = %.10e\n",
+                             radius, incumbent);
+                }
             }
         }
     }
