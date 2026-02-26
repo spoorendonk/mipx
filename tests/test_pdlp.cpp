@@ -154,6 +154,8 @@ TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mi
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(pdlp_result.status == Status::Optimal);
     CHECK_THAT(pdlp_result.objective, WithinAbs(dual_result.objective, 1e-4));
+    CHECK(dual_result.work_units > 0.0);
+    CHECK(pdlp_result.work_units > 0.0);
 }
 
 TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
@@ -180,6 +182,8 @@ TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(concurrent_result.status == Status::Optimal);
     CHECK_THAT(concurrent_result.objective, WithinAbs(dual_result.objective, 1e-4));
+    CHECK(dual_result.work_units > 0.0);
+    CHECK(concurrent_result.work_units > 0.0);
 }
 
 TEST_CASE("Concurrent root deterministic mode is reproducible",
@@ -205,6 +209,8 @@ TEST_CASE("Concurrent root deterministic mode is reproducible",
     REQUIRE(a_result.status == Status::Optimal);
     REQUIRE(b_result.status == Status::Optimal);
     CHECK_THAT(a_result.objective, WithinAbs(b_result.objective, 1e-9));
+    CHECK(a_result.work_units > 0.0);
+    CHECK_THAT(a_result.work_units, WithinAbs(b_result.work_units, 1e-9));
     CHECK(a_stats.root_race_runs == 1);
     CHECK(a_stats.root_race_candidates == 3);
     CHECK(a_stats.root_race_dual_wins + a_stats.root_race_barrier_wins +

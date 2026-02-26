@@ -147,7 +147,7 @@ Netlib and MIPLIB instances are not included in the repo. Download them before r
 Tests that require missing instances are skipped automatically.
 
 Post-Step-29 janitor correctness/E2E checks (objective validation against
-curated `.solu` references):
+curated `.solu` references, including root-policy variants):
 
 ```bash
 ctest --test-dir build -R "benchmark.*solve" --output-on-failure
