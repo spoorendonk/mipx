@@ -479,6 +479,49 @@ TEST_CASE("FeasibilityPumpHeuristic: LP state restored after run", "[heuristics]
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+TEST_CASE("LocalBranchingHeuristic: improves incumbent in binary neighborhood", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    LocalBranchingHeuristic lb;
+    lb.setSubproblemIterLimit(100);
+    lb.setNeighborhoodSize(1);
+    lb.setMinBinaryVars(1);
+    std::vector<Real> incumbent_values = {1.0, 0.0, 0.0};
+    auto result = lb.run(problem, lp, primals, -6.0, incumbent_values);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+    CHECK(result->objective < -6.0);
+}
+
+TEST_CASE("LocalBranchingHeuristic: restores LP state after run", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    LocalBranchingHeuristic lb;
+    lb.setSubproblemIterLimit(50);
+    lb.setNeighborhoodSize(1);
+    lb.setMinBinaryVars(1);
+    std::vector<Real> incumbent_values = {1.0, 0.0, 0.0};
+    (void)lb.run(problem, lp, primals, -6.0, incumbent_values);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
 // ===========================================================================
 // HeuristicScheduler tests
 // ===========================================================================

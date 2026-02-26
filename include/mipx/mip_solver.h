@@ -163,6 +163,9 @@ private:
     static constexpr Int kRootRensSubproblemIterLimit = 40;
     static constexpr Int kRootRensMinFixedVars = 16;
     static constexpr Real kRootRensMinFixedRate = 0.25;
+    static constexpr Int kRootLocalBranchingSubproblemIterLimit = 40;
+    static constexpr Int kRootLocalBranchingNeighborhood = 12;
+    static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
 };
 
 }  // namespace mipx
