@@ -550,7 +550,7 @@ std::optional<HeuristicSolution> runLpFreeLocalMip(
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
-    problem_ = problem;
+    problem_ = linearizeModelFeatures(problem);
     loaded_ = true;
 }
 

@@ -1,5 +1,6 @@
 #include "mipx/io.h"
 
+#include <algorithm>
 #include <cassert>
 #include <charconv>
 #include <cmath>
@@ -158,6 +159,7 @@ LpProblem readMps(const std::string& filename) {
         prob.col_lower.push_back(0.0);
         prob.col_upper.push_back(kInf);
         prob.col_type.push_back(VarType::Continuous);
+        prob.col_semi_lower.push_back(0.0);
         return idx;
     };
 
@@ -310,6 +312,16 @@ LpProblem readMps(const std::string& filename) {
                 } else if (bound_type == "UI") {
                     prob.col_upper[col_idx] = parseReal(tokens[3]);
                     prob.col_type[col_idx] = VarType::Integer;
+                } else if (bound_type == "SC") {
+                    const Real semi_lb = (tokens.size() >= 4) ? parseReal(tokens[3]) : 1.0;
+                    prob.col_type[col_idx] = VarType::SemiContinuous;
+                    prob.col_lower[col_idx] = 0.0;
+                    prob.col_semi_lower[col_idx] = std::max<Real>(0.0, semi_lb);
+                } else if (bound_type == "SI") {
+                    const Real semi_lb = (tokens.size() >= 4) ? parseReal(tokens[3]) : 1.0;
+                    prob.col_type[col_idx] = VarType::SemiInteger;
+                    prob.col_lower[col_idx] = 0.0;
+                    prob.col_semi_lower[col_idx] = std::max<Real>(0.0, semi_lb);
                 }
                 break;
             }
