@@ -516,6 +516,42 @@ TEST_CASE("AuxObjectiveHeuristic: LP state restored after run", "[heuristics]") 
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+TEST_CASE("ZeroObjectiveHeuristic: can produce feasible integer point", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ZeroObjectiveHeuristic zeroobj;
+    zeroobj.setSubproblemIterLimit(30);
+    auto result = zeroobj.run(problem, lp, primals, 100.0);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("ZeroObjectiveHeuristic: LP state restored after run", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    ZeroObjectiveHeuristic zeroobj;
+    zeroobj.setSubproblemIterLimit(30);
+    (void)zeroobj.run(problem, lp, primals, 100.0);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
 TEST_CASE("LocalBranchingHeuristic: improves incumbent in binary neighborhood", "[heuristics]") {
     auto problem = buildKnapsack();
 
