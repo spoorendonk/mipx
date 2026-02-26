@@ -131,4 +131,6 @@ TEST_CASE("Barrier root policy: MIP objective matches dual root policy", "[barri
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(barrier_result.status == Status::Optimal);
     CHECK_THAT(barrier_result.objective, WithinAbs(dual_result.objective, 1e-4));
+    CHECK(dual_result.work_units > 0.0);
+    CHECK(barrier_result.work_units > 0.0);
 }
