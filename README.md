@@ -18,6 +18,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Heuristic runtime** | Deterministic/opportunistic heuristic execution, restart engine, incumbent sharing pool |
 | **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
 | **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
+| **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -95,6 +96,8 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_ENABLE_LP_LIGHT_HEURISTICS=OFF
 | `--pre-root-no-early-stop` | off | Do not stop pre-root stage after first feasible |
 | `--pre-root-lplight` | off | Enable LP-light pre-root arms (requires LP-light capability) |
 | `--no-pre-root-lplight` | — | Disable LP-light pre-root arms |
+| `--pre-root-portfolio` | on | Enable adaptive pre-root arm scheduler (Thompson sampling) |
+| `--pre-root-fixed` | off | Use fixed pre-root arm schedule (disable adaptive portfolio) |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
@@ -254,8 +257,8 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** adaptive portfolio orchestration (Step 19) and
-Python/release pipeline integration (Step 20).
+**Current focus:** Python/release pipeline integration (Step 20) and
+post-Step-20 quality/performance janitor work.
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 

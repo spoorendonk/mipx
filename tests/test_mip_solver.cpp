@@ -706,6 +706,65 @@ TEST_CASE("MipSolver: pre-root LP-light deterministic mode reproduces with seed"
     CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
 }
 
+TEST_CASE("MipSolver: pre-root fixed schedule can be selected",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(5);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(false);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(6);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+    CHECK(stats.calls == 6);
+    CHECK(stats.fj_calls == 2);
+    CHECK(stats.fpr_calls == 2);
+    CHECK(stats.local_mip_calls == 2);
+}
+
+TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(23);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(true);
+    solver.setPreRootPortfolioEnabled(true);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(10);
+    solver.setPreRootLpFreeWorkBudget(1.0e6);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK((stats.portfolio_enabled || stats.calls <= 1));
+    CHECK(stats.portfolio_epochs == stats.calls);
+    CHECK(stats.effort_scale_final > 0.0);
+    CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls +
+              stats.lp_light_fpr_calls + stats.lp_light_diving_calls ==
+          stats.calls);
+}
+
 TEST_CASE("MipSolver: conflict learning learns and reuses no-goods", "[mip][conflicts]") {
     auto lp = buildConflictLearningMip();
 
