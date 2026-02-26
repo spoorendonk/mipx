@@ -1,5 +1,11 @@
 build/
+build-*/
 benchmark-results/
+dist/
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
 tests/data/netlib/
 tests/data/miplib/
 tests/data/mittelman_lp/

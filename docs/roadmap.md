@@ -27,7 +27,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
 - [🟢 Step 18: LP-Light Heuristics Integration](#step-18)
 - [🟢 Step 19: Adaptive Portfolio Orchestrator](#step-19)
-- [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
+- [🟢 Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
@@ -681,11 +681,15 @@ contribution) across LP-free and LP-light arms.
 
 <a id="step-20"></a>
 
-## Step 20: Python API + Multi-Platform Release Pipeline
+## Step 20: Python API + Multi-Platform Release Pipeline ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Provide first-class Python distribution and automated releases.
+
+**Status:** Complete. Nanobind Python bindings, scikit-build-core packaging
+(`abi3`), cibuildwheel matrix, and tag-driven PyPI publish workflows are in
+place with Python API tests and wheel smoke coverage.
 
 **Deliverables:**
 - Nanobind module for core model/solver APIs

@@ -19,6 +19,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
 | **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
 | **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
+| **Python API** | Nanobind bindings for model I/O and MIP solve flow (`LpProblem`, `MipSolver`) |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -60,6 +61,25 @@ Disable optional LP-light heuristic arms at build time:
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_ENABLE_LP_LIGHT_HEURISTICS=OFF
 ```
+
+## Python API
+
+Build and install the Python package with scikit-build-core:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install .[test]
+```
+
+Quick smoke test:
+
+```bash
+.venv/bin/python -c "import mipx; r = mipx.solve_mps('tests/data/tiny.mps', verbose=False); print(r.status)"
+```
+
+The wheel build uses a portable configuration (`abi3`, no `-march=native`) and
+is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 
 ## Usage
 
@@ -257,6 +277,8 @@ src/
   io/             MPS/LP readers, solution file I/O
   cli/            Command-line interface
 tests/             Catch2 tests and MIPLIB benchmarks
+python/            Nanobind bindings, Python package, and Python tests
+.github/workflows/ CI, wheel build, and tagged PyPI publish workflows
 docs/              Documentation and roadmap
 ```
 
@@ -264,8 +286,8 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** Python/release pipeline integration (Step 20) and
-post-Step-20 quality/performance janitor work.
+**Current focus:** post-Step-20 quality/performance janitor work and
+core MIP quality/performance track.
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 
