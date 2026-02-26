@@ -1,4 +1,4 @@
-# mip-exact
+# mipx
 
 Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex,
 barrier, and PDLP LP modes, cutting planes, presolve, and primal heuristics.
@@ -11,35 +11,15 @@ barrier, and PDLP LP modes, cutting planes, presolve, and primal heuristics.
 |-----------|-------------|
 | **Dual simplex** | Phase 1+2, steepest-edge pricing, sparse LU with rank-1 updates |
 | **Barrier / PDLP** | Optional root/LP solve modes with GPU SpMV acceleration + CPU fallback |
-| **Branch-and-bound** | Best-first/DFS/hybrid node selection, reliability branching |
+| **Branch-and-bound** | Best-first/depth-first node selection, most-fractional/first-fractional branching |
 | **Cutting planes** | Gomory MIR, cut pool with aging and parallelism filtering |
 | **Presolve** | Singleton, dominated, probing reductions + postsolve stack |
-| **Primal heuristics** | Rounding, diving, RINS |
+| **Primal heuristics** | Rounding, diving, RINS, RENS, Feasibility Pump, local branching |
 | **Parallel tree search** | Optional TBB-parallel node processing |
-
-## Output
-
-HiGHS-style progress table during solve:
-
-```
-mipx v0.1
-  Variables   : 1024 (512 binary, 128 integer, 384 continuous)
-  Constraints : 768
-  Threads     : 8
-
-        Time    Nodes    Open   LP Iter    Incumbent   Best Bound    Gap%
-  *      0.1s       1       0      342        85.50        72.30   15.5%
-  *      0.4s      28      12     2.1k        83.20        74.10   10.9%
-         2.0s     500     180    45.2k        83.20        79.40    4.6%
-  *      3.1s     820     210    62.4k        81.00        79.80    1.5%
-         5.0s    1.4k      40   104.3k        81.00        80.90    0.1%
-
-  Optimal: 81.00 in 5.2s (1482 nodes, 112k LP iterations)
-```
 
 ## Build
 
-Requires C++23 and CMake 3.25+. TBB is optional.
+Requires C++23 and CMake 3.25+. TBB and CUDA are optional.
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -85,14 +65,14 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--time-limit <seconds>` | 3600 | Wall-clock time limit |
-| `--threads <n>` | 1 | Number of parallel tree search threads |
+| `--time-limit <seconds>` | 3600 (MIP) | Wall-clock time limit for MIP solves |
+| `--threads <n>` | 1 | Number of parallel tree-search threads (MIP mode) |
 | `--presolve` | on | Enable presolve reductions |
 | `--no-presolve` | — | Disable presolve |
 | `--cuts` | on | Enable cutting planes |
 | `--no-cuts` | — | Disable cutting planes |
 | `--gap-tol <g>` | 1e-4 | Relative gap tolerance for optimality |
-| `--node-limit <n>` | ∞ | Maximum nodes to explore |
+| `--node-limit <n>` | 1000000 | Maximum nodes to explore (MIP mode) |
 | `--dual` | on | Use dual simplex for LP/root LP solve |
 | `--barrier` | off | Use barrier for LP/root LP solve |
 | `--pdlp` | off | Use PDLP for LP/root LP solve |
@@ -100,7 +80,9 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
 | `--gpu-min-nnz <n>` | 10000 | Minimum nonzeros before GPU backend is considered |
-| `--verbose` | off | Verbose output |
+| `--relax-integrality` | off | Treat integer variables as continuous (LP relaxation mode) |
+| `--verbose` | on | Enable verbose output |
+| `--quiet` | off | Suppress verbose progress output |
 
 ## Tests
 
