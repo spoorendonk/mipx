@@ -28,7 +28,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 18: LP-Light Heuristics Integration](#step-18)
 - [🟢 Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
-- [Janitor Block (pre-Step-21)](#janitor-pre21)
+- [🟢 Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
 - [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
@@ -38,7 +38,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 27: In-Processing Presolve](#step-27)
 - [🟢 Step 28: MIP Feature Coverage Expansion](#step-28)
 - [🟢 Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
-- [Janitor Block (post-Step-29)](#janitor-post29)
+- [🟢 Janitor Block (post-Step-29)](#janitor-post29)
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
@@ -715,10 +715,20 @@ contribution) across LP-free and LP-light arms.
 
 <a id="janitor-pre21"></a>
 
-## Janitor Block (recurring; run before Step 21 and after each major feature wave)
+## Janitor Block (recurring; run before Step 21 and after each major feature wave) ✅
 
 **Purpose:** Keep correctness/performance baselines trustworthy as new capabilities land.
 **Dependency:** run after Step 17 + Step 18 + Step 19 + Step 20.
+
+**Status (2026-02-26):** Pre-Step-21 janitor catch-up completed for the
+implemented pre-21 solver track (Steps 17-19 plus shared infrastructure):
+- Added/verified deterministic pre-root heuristic tests (LP-free, LP-light, fixed/adaptive portfolio paths).
+- Added benchmark-backed objective checks against `.solu` references, including pre-root solve flow on curated MIPLIB.
+- Re-ran strict `work_units` perf gate and full correctness suite.
+- Synced roadmap/README status guidance.
+
+Step-20-specific packaging/release checks remain tied to Step 20 delivery and
+should be re-run when Step 20 is implemented.
 
 **Janitor 1: Correctness and E2E validation**
 - Ensure all relevant unit/integration tests exist for newly added features.
@@ -1021,7 +1031,7 @@ CSV/Markdown outputs (`run_param_sweep.py`), while preserving strict default
 
 <a id="janitor-post29"></a>
 
-## Janitor Block (post-Step-29 recurring maintenance)
+## Janitor Block (post-Step-29 recurring maintenance) ✅
 
 Run this after Step 29 and then periodically after major feature batches (including post-Step-29 expansion steps):
 
