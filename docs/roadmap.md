@@ -34,7 +34,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [🟢 Step 24: In-Tree Cut Management](#step-24)
 - [🟢 Step 25: Conflict Analysis + No-Good Learning](#step-25)
-- [⚪ Step 26: Search + Restart Controller](#step-26)
+- [🟢 Step 26: Search + Restart Controller](#step-26)
 - [⚪ Step 27: In-Processing Presolve](#step-27)
 - [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
 - [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
@@ -889,11 +889,13 @@ delivery, and regression tests for deterministic/opportunistic runtime paths.
 
 <a id="step-26"></a>
 
-## Step 26: Search + Restart Controller
+## Step 26: Search + Restart Controller ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Add strategy control to reduce heavy-tail behavior in branch-and-bound.
+
+**Status:** Complete. Added node-selector portfolio switching (`best-bound`, `best-estimate`, `depth-biased`), stagnation-triggered controlled restarts, dynamic strong-branch budget control, sibling branch-variable reuse cache, and runtime search profiles (`stable/default/aggressive`) exposed in API/CLI with tests.
 
 **Deliverables:**
 - Node selector portfolio (best-bound, best-estimate, depth-biased dives) with switch rules

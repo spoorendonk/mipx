@@ -1,6 +1,7 @@
 #include "mipx/bnb_node.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace mipx {
@@ -27,11 +28,36 @@ BnbNode NodeQueue::pop() {
                 best = it;
             }
         }
-    } else {
+    } else if (policy_ == NodePolicy::DepthFirst) {
         // DepthFirst: deepest node first; break ties by smaller lp_bound.
         for (auto it = nodes_.begin() + 1; it != nodes_.end(); ++it) {
             if (it->depth > best->depth ||
                 (it->depth == best->depth && it->lp_bound < best->lp_bound)) {
+                best = it;
+            }
+        }
+    } else if (policy_ == NodePolicy::BestEstimate) {
+        auto score = [](const BnbNode& n) {
+            return std::isfinite(n.estimate) ? n.estimate : n.lp_bound;
+        };
+        for (auto it = nodes_.begin() + 1; it != nodes_.end(); ++it) {
+            const Real it_score = score(*it);
+            const Real best_score = score(*best);
+            if (it_score < best_score ||
+                (it_score == best_score && it->depth > best->depth)) {
+                best = it;
+            }
+        }
+    } else {
+        // DepthBiased: mostly best-bound, but reward deeper dives.
+        auto score = [](const BnbNode& n) {
+            return n.lp_bound - 1e-3 * static_cast<Real>(n.depth);
+        };
+        for (auto it = nodes_.begin() + 1; it != nodes_.end(); ++it) {
+            const Real it_score = score(*it);
+            const Real best_score = score(*best);
+            if (it_score < best_score ||
+                (it_score == best_score && it->lp_bound < best->lp_bound)) {
                 best = it;
             }
         }
@@ -67,6 +93,16 @@ void NodeQueue::prune(Real cutoff) {
     std::erase_if(nodes_, [cutoff](const BnbNode& n) {
         return n.lp_bound >= cutoff;
     });
+}
+
+std::vector<BnbNode> NodeQueue::takeAll() {
+    std::vector<BnbNode> out = std::move(nodes_);
+    nodes_.clear();
+    return out;
+}
+
+void NodeQueue::replaceAll(std::vector<BnbNode> nodes) {
+    nodes_ = std::move(nodes);
 }
 
 }  // namespace mipx

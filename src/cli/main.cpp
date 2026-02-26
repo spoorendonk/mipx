@@ -22,6 +22,7 @@ int main(int argc, char* argv[]) {
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual] "
             "[--heur-deterministic|--heur-opportunistic] [--seed N] "
+            "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -45,6 +46,7 @@ int main(int argc, char* argv[]) {
     mipx::HeuristicRuntimeMode heuristic_mode =
         mipx::HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed = 1;
+    mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -82,6 +84,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(
                 std::strtoull(argv[++i], nullptr, 10));
+        } else if (arg == "--search-stable") {
+            search_profile = mipx::SearchProfile::Stable;
+        } else if (arg == "--search-default") {
+            search_profile = mipx::SearchProfile::Default;
+        } else if (arg == "--search-aggressive") {
+            search_profile = mipx::SearchProfile::Aggressive;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -130,6 +138,7 @@ int main(int argc, char* argv[]) {
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setHeuristicMode(heuristic_mode);
             solver.setHeuristicSeed(heuristic_seed);
+            solver.setSearchProfile(search_profile);
             solver.load(lp);
             auto result = solver.solve();
 

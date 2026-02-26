@@ -252,6 +252,38 @@ static LpProblem buildConflictLearningMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: infeasible parity-like binary model to trigger search stagnation.
+// sum x_i = 2.5, x_i binary.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildSearchStagnationMip() {
+    constexpr Index n = 10;
+    LpProblem lp;
+    lp.name = "search_stagnation_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj.assign(n, 0.0);
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Binary);
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5",
+                    "x6", "x7", "x8", "x9", "x10"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {4.5};
+    lp.row_upper = {4.5};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips;
+    trips.reserve(n);
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({0, j, 1.0});
+    }
+    lp.matrix = SparseMatrix(1, n, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -535,4 +567,57 @@ TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conf
     REQUIRE(with_result.status == Status::Optimal);
     REQUIRE(without_result.status == Status::Optimal);
     CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
+}
+
+TEST_CASE("MipSolver: stable search profile is reproducible", "[mip][search]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setSearchProfile(SearchProfile::Stable);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(42);
+    solver_a.setNodeLimit(300);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setSearchProfile(SearchProfile::Stable);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(42);
+    solver_b.setNodeLimit(300);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    REQUIRE(a.status == b.status);
+    CHECK(a.nodes == b.nodes);
+    CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
+}
+
+TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][search]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setSearchProfile(SearchProfile::Aggressive);
+    solver.setRestartsEnabled(true);
+    solver.setRestartControls(8, 2);
+    solver.setNodeLimit(300);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::Infeasible ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& sstats = solver.getSearchStats();
+    CHECK(sstats.policy_switches >= 1);
+    CHECK(sstats.restarts >= 1);
+    CHECK(sstats.strong_budget_updates >= 1);
 }

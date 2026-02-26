@@ -106,6 +106,45 @@ TEST_CASE("DepthFirst tie-breaking prefers better bound", "[node_queue]") {
     REQUIRE(q.pop().lp_bound == 5.0);
 }
 
+TEST_CASE("BestEstimate pops by smallest estimate", "[node_queue]") {
+    NodeQueue q(NodePolicy::BestEstimate);
+
+    BnbNode a, b, c;
+    a.lp_bound = 1.0;
+    a.estimate = 10.0;
+    a.depth = 1;
+    b.lp_bound = 3.0;
+    b.estimate = 4.0;
+    b.depth = 2;
+    c.lp_bound = 2.0;
+    c.estimate = 6.0;
+    c.depth = 3;
+
+    q.push(a);
+    q.push(b);
+    q.push(c);
+
+    REQUIRE(q.pop().estimate == 4.0);
+    REQUIRE(q.pop().estimate == 6.0);
+    REQUIRE(q.pop().estimate == 10.0);
+}
+
+TEST_CASE("DepthBiased favors deeper nodes at near-equal bounds", "[node_queue]") {
+    NodeQueue q(NodePolicy::DepthBiased);
+
+    BnbNode shallow, deep;
+    shallow.lp_bound = 5.0;
+    shallow.depth = 1;
+    deep.lp_bound = 5.0;
+    deep.depth = 9;
+
+    q.push(shallow);
+    q.push(deep);
+
+    auto first = q.pop();
+    REQUIRE(first.depth == 9);
+}
+
 TEST_CASE("bestBound returns minimum bound in queue", "[node_queue]") {
     NodeQueue q;
 
@@ -163,4 +202,21 @@ TEST_CASE("Single node push/pop roundtrip", "[node_queue]") {
     REQUIRE(result.depth == 7);
     REQUIRE(result.parent_id == 3);
     REQUIRE(result.id >= 0);
+}
+
+TEST_CASE("takeAll and replaceAll preserve queue contents", "[node_queue]") {
+    NodeQueue q;
+    BnbNode a, b;
+    a.lp_bound = 3.0;
+    b.lp_bound = 1.0;
+    q.push(a);
+    q.push(b);
+
+    auto nodes = q.takeAll();
+    REQUIRE(q.empty());
+    REQUIRE(nodes.size() == 2);
+
+    q.replaceAll(std::move(nodes));
+    REQUIRE(q.size() == 2);
+    REQUIRE(q.bestBound() == 1.0);
 }
