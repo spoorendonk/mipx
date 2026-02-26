@@ -255,6 +255,7 @@ TEST_CASE("Feature linearization: semi-continuous and semi-integer", "[lp_proble
     const auto semi_cont_result = solveFeatureModel(semi_cont);
     REQUIRE(semi_cont_result.status == Status::Optimal);
     CHECK_THAT(semi_cont_result.objective, WithinAbs(-5.0, 1e-6));
+    CHECK(semi_cont_result.work_units > 0.0);
 
     LpProblem semi_int = semi_cont;
     semi_int.name = "semi_int";
@@ -262,6 +263,7 @@ TEST_CASE("Feature linearization: semi-continuous and semi-integer", "[lp_proble
     const auto semi_int_result = solveFeatureModel(semi_int);
     REQUIRE(semi_int_result.status == Status::Optimal);
     CHECK_THAT(semi_int_result.objective, WithinAbs(-5.0, 1e-6));
+    CHECK(semi_int_result.work_units > 0.0);
 }
 
 TEST_CASE("Feature linearization: indicator fallback and MPS round-trip",
@@ -290,6 +292,7 @@ TEST_CASE("Feature linearization: indicator fallback and MPS round-trip",
     const auto direct = solveFeatureModel(lp);
     REQUIRE(direct.status == Status::Optimal);
     CHECK_THAT(direct.objective, WithinAbs(-4.0, 1e-6));
+    CHECK(direct.work_units > 0.0);
 
     const std::string path = testDataDir() + "/indicator_roundtrip.mps";
     writeMps(path, lp);
@@ -297,6 +300,7 @@ TEST_CASE("Feature linearization: indicator fallback and MPS round-trip",
     const auto reread_result = solveFeatureModel(reread);
     REQUIRE(reread_result.status == Status::Optimal);
     CHECK_THAT(reread_result.objective, WithinAbs(-4.0, 1e-6));
+    CHECK(reread_result.work_units > 0.0);
     std::filesystem::remove(path);
 }
 
@@ -321,6 +325,7 @@ TEST_CASE("Feature linearization: SOS1 and SOS2", "[lp_problem][features]") {
     const auto sos1_result = solveFeatureModel(sos1);
     REQUIRE(sos1_result.status == Status::Optimal);
     CHECK_THAT(sos1_result.objective, WithinAbs(-5.0, 1e-6));
+    CHECK(sos1_result.work_units > 0.0);
 
     LpProblem sos2;
     sos2.name = "sos2_model";
@@ -342,4 +347,5 @@ TEST_CASE("Feature linearization: SOS1 and SOS2", "[lp_problem][features]") {
     const auto sos2_result = solveFeatureModel(sos2);
     REQUIRE(sos2_result.status == Status::Optimal);
     CHECK_THAT(sos2_result.objective, WithinAbs(-5.0, 1e-6));
+    CHECK(sos2_result.work_units > 0.0);
 }

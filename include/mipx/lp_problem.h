@@ -66,6 +66,9 @@ struct LpProblem {
 /// Throws std::runtime_error if advanced feature declarations are invalid.
 void validateModelFeatures(const LpProblem& problem);
 
+/// Returns true when SOS / indicator / semi-variable features are present.
+[[nodiscard]] bool hasAdvancedModelFeatures(const LpProblem& problem);
+
 /// Linearize SOS/indicator/semi features into core row/bound form.
 LpProblem linearizeModelFeatures(const LpProblem& problem);
 
