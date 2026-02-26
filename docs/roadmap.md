@@ -29,7 +29,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
 - [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [Janitor Block (pre-Step-21)](#janitor-pre21)
-- [⚪ Step 21: Branching Quality Upgrade](#step-21)
+- [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [⚪ Step 22: Core Cut Family Expansion](#step-22)
 - [⚪ Step 23: AUTO Cut Policy + Cut Manager](#step-23)
 - [⚪ Step 24: In-Tree Cut Management](#step-24)
@@ -728,11 +728,13 @@ callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/
 
 <a id="step-21"></a>
 
-## Step 21: Branching Quality Upgrade (core MIP track)
+## Step 21: Branching Quality Upgrade (core MIP track) ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Reduce branch-and-bound tree size by upgrading branching decisions.
+
+**Status:** Complete. Reliability branching with pseudocost learning, capped strong-branch probing, root bootstrap, and branching telemetry is integrated.
 
 **Deliverables:**
 - Pseudocost storage and updates (up/down gains, reliability counters)

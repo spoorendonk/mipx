@@ -84,6 +84,7 @@ public:
     void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     const MipLpStats& getLpStats() const { return lp_stats_; }
+    const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
     struct NodeWorkStats {
@@ -171,6 +172,9 @@ private:
     HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     MipLpStats lp_stats_{};
+    ReliabilityBranching branching_rule_;
+    BranchingTelemetry branching_stats_{};
+    std::mutex branching_mutex_;
     mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;
