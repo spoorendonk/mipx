@@ -7,12 +7,22 @@
 
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
+#include "mipx/mip_solver.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
 static std::string testDataDir() {
     return std::string(TEST_DATA_DIR);
+}
+
+static MipResult solveFeatureModel(const LpProblem& lp) {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.load(lp);
+    return solver.solve();
 }
 
 TEST_CASE("LpProblem: default construction", "[lp_problem]") {
@@ -228,4 +238,108 @@ TEST_CASE("MPS reader: gzip support", "[io][mps]") {
 
     // Clean up.
     std::filesystem::remove(dst);
+}
+
+TEST_CASE("Feature linearization: semi-continuous and semi-integer", "[lp_problem][features]") {
+    LpProblem semi_cont;
+    semi_cont.name = "semi_cont";
+    semi_cont.num_cols = 1;
+    semi_cont.obj = {-1.0};
+    semi_cont.col_lower = {0.0};
+    semi_cont.col_upper = {5.0};
+    semi_cont.col_type = {VarType::SemiContinuous};
+    semi_cont.col_semi_lower = {2.0};
+    semi_cont.col_names = {"x"};
+    semi_cont.num_rows = 0;
+    semi_cont.matrix = SparseMatrix(0, 1, {});
+    const auto semi_cont_result = solveFeatureModel(semi_cont);
+    REQUIRE(semi_cont_result.status == Status::Optimal);
+    CHECK_THAT(semi_cont_result.objective, WithinAbs(-5.0, 1e-6));
+
+    LpProblem semi_int = semi_cont;
+    semi_int.name = "semi_int";
+    semi_int.col_type = {VarType::SemiInteger};
+    const auto semi_int_result = solveFeatureModel(semi_int);
+    REQUIRE(semi_int_result.status == Status::Optimal);
+    CHECK_THAT(semi_int_result.objective, WithinAbs(-5.0, 1e-6));
+}
+
+TEST_CASE("Feature linearization: indicator fallback and MPS round-trip",
+          "[lp_problem][features][io]") {
+    LpProblem lp;
+    lp.name = "indicator_fallback";
+    lp.num_cols = 2;
+    lp.obj = {-0.5, 1.0};  // x, y
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {10.0, 1.0};
+    lp.col_type = {VarType::Continuous, VarType::Binary};
+    lp.col_semi_lower = {0.0, 0.0};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 0;
+    lp.matrix = SparseMatrix(0, 2, {});
+    lp.indicator_constraints.push_back({
+        .binary_var = 1,
+        .active_value = false,
+        .indices = {0},
+        .values = {1.0},
+        .lower = -kInf,
+        .upper = 0.0,
+        .name = "ind",
+    });
+
+    const auto direct = solveFeatureModel(lp);
+    REQUIRE(direct.status == Status::Optimal);
+    CHECK_THAT(direct.objective, WithinAbs(-4.0, 1e-6));
+
+    const std::string path = testDataDir() + "/indicator_roundtrip.mps";
+    writeMps(path, lp);
+    const auto reread = readMps(path);
+    const auto reread_result = solveFeatureModel(reread);
+    REQUIRE(reread_result.status == Status::Optimal);
+    CHECK_THAT(reread_result.objective, WithinAbs(-4.0, 1e-6));
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("Feature linearization: SOS1 and SOS2", "[lp_problem][features]") {
+    LpProblem sos1;
+    sos1.name = "sos1_model";
+    sos1.num_cols = 2;
+    sos1.obj = {-1.0, -1.0};
+    sos1.col_lower = {0.0, 0.0};
+    sos1.col_upper = {5.0, 5.0};
+    sos1.col_type = {VarType::Continuous, VarType::Continuous};
+    sos1.col_semi_lower = {0.0, 0.0};
+    sos1.col_names = {"x1", "x2"};
+    sos1.num_rows = 0;
+    sos1.matrix = SparseMatrix(0, 2, {});
+    sos1.sos_constraints.push_back({
+        .type = LpProblem::SosConstraint::Type::Sos1,
+        .vars = {0, 1},
+        .weights = {1.0, 2.0},
+        .name = "s1",
+    });
+    const auto sos1_result = solveFeatureModel(sos1);
+    REQUIRE(sos1_result.status == Status::Optimal);
+    CHECK_THAT(sos1_result.objective, WithinAbs(-5.0, 1e-6));
+
+    LpProblem sos2;
+    sos2.name = "sos2_model";
+    sos2.num_cols = 3;
+    sos2.obj = {-1.0, 0.0, -1.0};
+    sos2.col_lower = {0.0, 0.0, 0.0};
+    sos2.col_upper = {5.0, 5.0, 5.0};
+    sos2.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    sos2.col_semi_lower = {0.0, 0.0, 0.0};
+    sos2.col_names = {"x1", "x2", "x3"};
+    sos2.num_rows = 0;
+    sos2.matrix = SparseMatrix(0, 3, {});
+    sos2.sos_constraints.push_back({
+        .type = LpProblem::SosConstraint::Type::Sos2,
+        .vars = {0, 1, 2},
+        .weights = {1.0, 2.0, 3.0},
+        .name = "s2",
+    });
+    const auto sos2_result = solveFeatureModel(sos2);
+    REQUIRE(sos2_result.status == Status::Optimal);
+    CHECK_THAT(sos2_result.objective, WithinAbs(-5.0, 1e-6));
 }
