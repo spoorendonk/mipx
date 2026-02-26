@@ -9,7 +9,7 @@ Required CSV columns:
 Full LP+MIP gate example (single command):
 
 ```bash
-./tests/perf/run_full_gate.sh \
+python3 tests/perf/run_full_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
@@ -17,12 +17,13 @@ Full LP+MIP gate example (single command):
   --solver-arg --quiet
 ```
 
-Generate and store HiGHS/highspy wall-clock baselines:
+Generate and store HiGHS CLI + mipx wall-clock baselines:
 
 ```bash
-./tests/perf/generate_highspy_baselines.sh
-./tests/perf/generate_mipx_baselines.sh
-./tests/perf/generate_barrier_lp_baselines.sh
+python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_barrier_lp_baselines.py
+python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
 
 This writes:
@@ -32,14 +33,18 @@ This writes:
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
+- `tests/perf/baselines/pdlp_lp_compare_netlib.csv`
+- `tests/perf/baselines/pdlp_lp_compare_netlib_forced_gpu.csv`
 
-The MIP highspy baseline uses the stable small trio:
+The MIP HiGHS baseline uses the stable small trio:
 `p0201,gt2,flugpl`.
+Legacy output filenames keep the `highspy_` prefix for compatibility.
+Shell wrapper entrypoints remain available under `tests/perf/generate_*.sh`.
 
 LP example (Netlib, gate on `work_units`):
 
 ```bash
-./tests/perf/run_netlib_lp_bench.sh \
+python3 tests/perf/run_netlib_lp_bench.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --output /tmp/mipx_candidate.csv \
@@ -55,7 +60,7 @@ python3 tests/perf/check_regression.py \
 MIP example (MIPLIB, gate on `work_units`):
 
 ```bash
-./tests/perf/run_miplib_mip_bench.sh \
+python3 tests/perf/run_miplib_mip_bench.py \
   --binary ./build/mipx-solve \
   --miplib-dir ./tests/data/miplib \
   --output /tmp/mipx_mip_candidate.csv \
@@ -100,18 +105,53 @@ Notes:
 - `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
 - `--relax-integrality` solves LP relaxations for MIP instances (e.g., MIPLIB `.mps.gz`) in all solvers.
 
-To compare mipx against HiGHS/highspy, use `--metric time_seconds` and one of
-the stored highspy baseline CSV files as `--baseline`.
+To compare mipx against HiGHS CLI, use `--metric time_seconds` and one of
+the stored HiGHS baseline CSV files as `--baseline`.
 These comparisons are informational (cross-solver wall-clock), not strict
 no-regression gates.
 
-MIP comparison example (same instance set as highspy MIP baseline):
+## PDLP LP Comparison (mipx vs HiGHS vs cuOpt)
+
+For LP PDLP-focused comparisons (CPU/GPU and cross-solver):
 
 ```bash
-./tests/perf/run_miplib_mip_bench.sh \
+python3 tests/perf/run_pdlp_lp_compare.py \
+  --mipx-binary ./build/mipx-solve \
+  --instances-dir tests/data/netlib \
+  --output /tmp/pdlp_lp_compare.csv \
+  --repeats 3 \
+  --threads 1 \
+  --time-limit 60 \
+  --disable-presolve \
+  --force-mipx-gpu
+```
+
+This emits one CSV row per `(instance, solver)` with:
+- `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, highs_pdlp|highs_ipx, cuopt_pdlp}`
+- `time_seconds, iterations, status, objective, work_units`
+
+Notes:
+- `--disable-presolve` isolates PDLP-kernel behavior and avoids presolve skew.
+- `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
+- `--highs-ipx` forces HiGHS IPX instead of attempting HiGHS PDLP.
+- `--relax-integrality` solves LP relaxations for MIP instances (e.g., MIPLIB `.mps.gz`) in all solvers.
+
+PDLP self-regression gate (candidate vs baseline mipx binaries):
+
+```bash
+python3 tests/perf/run_pdlp_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib
+```
+
+MIP comparison example (same instance set as HiGHS MIP baseline):
+
+```bash
+python3 tests/perf/run_miplib_mip_bench.py \
   --binary ./build/mipx-solve \
   --miplib-dir ./tests/data/miplib \
-  --output /tmp/mipx_mip_candidate_highspyset.csv \
+  --output /tmp/mipx_mip_candidate_highsset.csv \
   --repeats 1 \
   --threads 1 \
   --time-limit 30 \
@@ -120,7 +160,7 @@ MIP comparison example (same instance set as highspy MIP baseline):
 
 python3 tests/perf/check_regression.py \
   --baseline tests/perf/baselines/highspy_mip_miplib_small.csv \
-  --candidate /tmp/mipx_mip_candidate_highspyset.csv \
+  --candidate /tmp/mipx_mip_candidate_highsset.csv \
   --metric time_seconds \
   --max-regression-pct 100000 \
   --min-common-instances 3
@@ -174,13 +214,13 @@ faster testing (instances HiGHS can solve in <30 min).
 
 ```bash
 # LP benchmark (Mittelman LPopt-style):
-./tests/perf/run_mittelman_lp_bench.sh \
+python3 tests/perf/run_mittelman_lp_bench.py \
   --binary ./build/mipx-solve \
   --output /tmp/mittelman_lp.csv \
   --solver-arg --quiet
 
 # MIP benchmark (Mittelman MILP-style):
-./tests/perf/run_mittelman_mip_bench.sh \
+python3 tests/perf/run_mittelman_mip_bench.py \
   --binary ./build/mipx-solve \
   --miplib-dir ./tests/data/miplib \
   --output /tmp/mittelman_mip.csv \
@@ -194,7 +234,7 @@ faster testing (instances HiGHS can solve in <30 min).
 Self-regression (candidate vs baseline mipx on work_units):
 
 ```bash
-./tests/perf/run_mittelman_gate.sh \
+python3 tests/perf/run_mittelman_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve
 ```
@@ -202,7 +242,7 @@ Self-regression (candidate vs baseline mipx on work_units):
 Compare against HiGHS (informational, time_seconds):
 
 ```bash
-./tests/perf/run_mittelman_gate.sh \
+python3 tests/perf/run_mittelman_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-lp-csv tests/perf/baselines/highspy_lp_mittelman.csv \
   --baseline-mip-csv tests/perf/baselines/highspy_mip_mittelman.csv \
@@ -214,14 +254,20 @@ Compare against HiGHS (informational, time_seconds):
 
 ```bash
 # Both HiGHS and mipx baselines
-./tests/perf/generate_mittelman_baselines.sh
+python3 tests/perf/generate_mittelman_baselines.py
 
 # HiGHS only
-./tests/perf/generate_mittelman_baselines.sh --highs-only
+python3 tests/perf/generate_mittelman_baselines.py --highs-only
 
 # mipx only
-./tests/perf/generate_mittelman_baselines.sh --mipx-only
+python3 tests/perf/generate_mittelman_baselines.py --mipx-only
 ```
+
+Shell wrapper equivalent:
+`./tests/perf/generate_mittelman_baselines.sh [--highs-only|--mipx-only]`.
+
+All `tests/perf/run_*.sh` scripts are compatibility wrappers that forward to
+the Python entrypoints shown above.
 
 This writes:
 - `tests/perf/baselines/highspy_lp_mittelman.csv`

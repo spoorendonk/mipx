@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
-"""Benchmark mipx dual simplex vs HiGHS on Netlib LP instances."""
+"""Benchmark mipx dual simplex vs HiGHS CLI on Netlib LP instances."""
 
-import subprocess
-import time
-import sys
-import os
+from __future__ import annotations
+
 import glob
-import gzip
-import tempfile
+import os
 import re
-
-try:
-    import highspy
-except ImportError:
-    print("highspy not installed. Install with: pip install highspy")
-    sys.exit(1)
+import shutil
+import subprocess
+import sys
+import time
 
 # Known optimal values for correctness checking.
 KNOWN_OPTIMA = {
@@ -36,10 +31,49 @@ NETLIB_DIR = os.path.join(os.path.dirname(__file__), "data", "netlib")
 TIMEOUT = 60  # seconds
 
 
+def locate_highs_binary() -> str | None:
+    explicit = os.environ.get("HIGHS_BINARY")
+    if explicit:
+        return explicit
+    return shutil.which("highs")
+
+
 def instance_name(path: str) -> str:
     """Extract instance name from path like .../afiro.mps.gz."""
     base = os.path.basename(path)
     return base.replace(".mps.gz", "").replace(".mps", "")
+
+
+def parse_first_float(pattern: str, text: str) -> float | None:
+    m = re.search(pattern, text, re.MULTILINE)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def normalize_status(raw: str) -> str:
+    status = re.sub(r"[^a-z0-9]+", "_", raw.strip().lower()).strip("_")
+    return {
+        "time_limit_reached": "time_limit",
+        "iteration_limit_reached": "iteration_limit",
+    }.get(status, status or "unknown")
+
+
+def parse_highs_status(text: str) -> str:
+    m = re.search(r"^\s*Model status\s*:\s*(.+?)\s*$", text, re.MULTILINE)
+    if m:
+        return normalize_status(m.group(1))
+    matches = re.findall(r"^\s*Status\s+(.+?)\s*$", text, re.MULTILINE)
+    if matches:
+        return normalize_status(matches[-1])
+    if re.search(r"\binfeasible\b", text, re.IGNORECASE):
+        return "infeasible"
+    if re.search(r"\bunbounded\b", text, re.IGNORECASE):
+        return "unbounded"
+    return "unknown"
 
 
 def solve_mipx(filepath: str) -> dict:
@@ -49,7 +83,9 @@ def solve_mipx(filepath: str) -> dict:
         start = time.perf_counter()
         proc = subprocess.run(
             [MIPX_BINARY, filepath],
-            capture_output=True, text=True, timeout=TIMEOUT,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
         )
         elapsed = time.perf_counter() - start
         result["time"] = elapsed
@@ -68,6 +104,9 @@ def solve_mipx(filepath: str) -> dict:
             m = re.match(r"Status:\s*(.+)", line)
             if m:
                 result["status"] = m.group(1).strip().lower()
+            m = re.match(r"Time:\s*([\-+0-9.eE]+)s", line)
+            if m:
+                result["time"] = float(m.group(1))
 
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
@@ -78,50 +117,48 @@ def solve_mipx(filepath: str) -> dict:
     return result
 
 
-def solve_highs(filepath: str) -> dict:
-    """Solve with HiGHS, return dict with obj, iters, time, status."""
+def solve_highs(filepath: str, highs_binary: str) -> dict:
+    """Solve with HiGHS CLI, return dict with obj, iters, time, status."""
     result = {"obj": None, "iters": None, "time": None, "status": "error"}
-    tmp_path = None
+    cmd = [
+        highs_binary,
+        filepath,
+        "--solver",
+        "simplex",
+        "--presolve",
+        "choose",
+        "--parallel",
+        "off",
+        "--time_limit",
+        str(TIMEOUT),
+    ]
     try:
-        # HiGHS can't read .gz files directly; decompress if needed.
-        if filepath.endswith(".gz"):
-            with gzip.open(filepath, "rb") as f:
-                data = f.read()
-            tmp = tempfile.NamedTemporaryFile(suffix=".mps", delete=False)
-            tmp.write(data)
-            tmp.close()
-            tmp_path = tmp.name
-            read_path = tmp_path
-        else:
-            read_path = filepath
-
-        h = highspy.Highs()
-        h.setOptionValue("output_flag", False)
-
         start = time.perf_counter()
-        h.readModel(read_path)
-        h.run()
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
         elapsed = time.perf_counter() - start
-        result["time"] = elapsed
+        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
 
-        result["obj"] = h.getObjectiveValue()
-        result["iters"] = int(h.getInfoValue("simplex_iteration_count")[1])
+        if proc.returncode != 0:
+            result["status"] = "error"
+            result["time"] = elapsed
+            return result
 
-        model_status = h.getModelStatus()
-        if model_status == highspy.HighsModelStatus.kOptimal:
-            result["status"] = "optimal"
-        elif model_status == highspy.HighsModelStatus.kInfeasible:
-            result["status"] = "infeasible"
-        elif model_status == highspy.HighsModelStatus.kUnbounded:
-            result["status"] = "unbounded"
-        else:
-            result["status"] = str(model_status)
+        result["status"] = parse_highs_status(output)
+        result["obj"] = parse_first_float(r"^\s*Objective value\s*:\s*([\-+0-9.eE]+)\s*$", output)
+        result["iters"] = parse_first_float(
+            r"^\s*Simplex\s+iterations:\s*([\-+0-9.eE]+)\s*$", output
+        )
+        if result["iters"] is None:
+            result["iters"] = parse_first_float(r"^\s*LP iterations\s+([\-+0-9.eE]+)\s*$", output)
+        result["time"] = parse_first_float(r"^\s*HiGHS run time\s*:\s*([\-+0-9.eE]+)\s*$", output)
+        if result["time"] is None:
+            result["time"] = elapsed
 
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["time"] = TIMEOUT
     except Exception as e:
         result["status"] = f"error: {e}"
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
 
     return result
 
@@ -139,13 +176,20 @@ def check_obj(name: str, obj, label: str) -> str:
 
 
 def main():
+    highs_binary = locate_highs_binary()
+    if not highs_binary:
+        print("HiGHS CLI not found. Set HIGHS_BINARY or add highs to PATH.")
+        sys.exit(1)
+
     if not os.path.isdir(NETLIB_DIR):
         print(f"Netlib directory not found: {NETLIB_DIR}")
         sys.exit(1)
 
     files = sorted(glob.glob(os.path.join(NETLIB_DIR, "*.mps.gz")))
     if not files:
-        print("No .mps.gz files found in", NETLIB_DIR)
+        files = sorted(glob.glob(os.path.join(NETLIB_DIR, "*.mps")))
+    if not files:
+        print("No .mps/.mps.gz files found in", NETLIB_DIR)
         sys.exit(1)
 
     if not os.path.isfile(MIPX_BINARY):
@@ -170,15 +214,19 @@ def main():
         name = instance_name(filepath)
 
         mipx_res = solve_mipx(filepath)
-        highs_res = solve_highs(filepath)
+        highs_res = solve_highs(filepath, highs_binary)
 
-        mipx_obj_s = f"{mipx_res['obj']:.8e}" if mipx_res["obj"] is not None else mipx_res["status"]
+        mipx_obj_s = (
+            f"{mipx_res['obj']:.8e}" if mipx_res["obj"] is not None else mipx_res["status"]
+        )
         mipx_it_s = str(mipx_res["iters"]) if mipx_res["iters"] is not None else "-"
         mipx_t_s = f"{mipx_res['time']:.4f}" if mipx_res["time"] is not None else "-"
         mipx_chk = check_obj(name, mipx_res["obj"], "mipx")
 
-        highs_obj_s = f"{highs_res['obj']:.8e}" if highs_res["obj"] is not None else highs_res["status"]
-        highs_it_s = str(highs_res["iters"]) if highs_res["iters"] is not None else "-"
+        highs_obj_s = (
+            f"{highs_res['obj']:.8e}" if highs_res["obj"] is not None else highs_res["status"]
+        )
+        highs_it_s = str(int(highs_res["iters"])) if highs_res["iters"] is not None else "-"
         highs_t_s = f"{highs_res['time']:.4f}" if highs_res["time"] is not None else "-"
         highs_chk = check_obj(name, highs_res["obj"], "HiGHS")
 
