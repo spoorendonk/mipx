@@ -23,7 +23,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 13: Presolve](#step-13)
 - [🟢 Step 14: Primal Heuristics](#step-14)
 - [🟢 Step 15: Parallel Tree Search](#step-15)
-- [⚪ Step 16: Heuristic Runtime Subsystem](#step-16)
+- [🟢 Step 16: Heuristic Runtime Subsystem](#step-16)
 - [⚪ Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
 - [⚪ Step 18: LP-Light Heuristics Integration](#step-18)
 - [⚪ Step 19: Adaptive Portfolio Orchestrator](#step-19)
@@ -548,13 +548,13 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 <a id="step-16"></a>
 
-## Step 16: Heuristic Runtime Subsystem (mip-heuristics merge foundation)
+## Step 16: Heuristic Runtime Subsystem (mip-heuristics merge foundation) ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Introduce a composable heuristic runtime that supports cross-heuristic cooperation.
 
-**Status:** In progress. A mipx-native runtime foundation now exists with
+**Status:** Complete. A mipx-native runtime foundation now exists with
 `HeuristicRuntime`, thread-safe `SolutionPool`, restart strategy selection,
 callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/API.
 Latest hardening integrated shared runtime budgeting across parallel workers,
