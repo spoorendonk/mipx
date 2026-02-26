@@ -112,6 +112,13 @@ Netlib and MIPLIB instances are not included in the repo. Download them before r
 
 Tests that require missing instances are skipped automatically.
 
+Post-Step-29 janitor correctness/E2E checks (objective validation against
+curated `.solu` references):
+
+```bash
+ctest --test-dir build -R "benchmark.*solve" --output-on-failure
+```
+
 ## Benchmarking
 
 Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:

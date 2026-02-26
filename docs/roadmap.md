@@ -1014,6 +1014,12 @@ CSV/Markdown outputs (`run_param_sweep.py`), while preserving strict default
 
 Run this after Step 29 and then periodically after major feature batches (including post-Step-29 expansion steps):
 
+**Status (2026-02-26):** Initial post-Step-29 janitor pass completed:
+- Added curated Netlib LP and MIPLIB MIP end-to-end objective checks against `.solu` references.
+- Added `work_units` assertions on Step-28 feature-linearization solve paths.
+- Added a low-risk fast path to skip advanced-feature linearization on plain models in `MipSolver::load` / `writeMps`.
+- Synced roadmap + README guidance for the janitor pass.
+
 1. **Correctness + E2E catch-up:** extend tests for all new features and verify end-to-end objective correctness on known-optimal/known-best benchmark sets.
 2. **`work_units` coverage catch-up:** audit that new code paths are measured by `work_units`, and extend logs/gates where metrics are missing.
 3. **Performance opportunity catch-up:** profile new code, prioritize low-risk wins, and only then consider deeper rewrites (SIMD/AVX, GPU kernels, or selective C/assembly) with proof from benchmarks and no regression in correctness/stability.

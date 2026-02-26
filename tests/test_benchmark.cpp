@@ -1,13 +1,18 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <array>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <iostream>
+#include <span>
 #include <string>
 #include <vector>
 
+#include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
+#include "mipx/mip_solver.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -41,6 +46,18 @@ static std::string instanceName(const std::string& path) {
         return stem.stem().string();  // strip .mps from .mps.gz
     }
     return stem.string();
+}
+
+static const SoluEntry* findSoluEntry(std::span<const SoluEntry> entries,
+                                      const std::string& name) {
+    for (const auto& e : entries) {
+        if (e.name == name) return &e;
+    }
+    return nullptr;
+}
+
+static Real objectiveTol(Real reference) {
+    return std::max<Real>(1e-6, std::abs(reference) * 1e-7);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,4 +272,77 @@ TEST_CASE("Netlib: MPS round-trip on afiro", "[benchmark][netlib]") {
     }
 
     fs::remove(tmp);
+}
+
+TEST_CASE("Netlib: LP solve objectives match .solu on curated set",
+          "[benchmark][netlib][solve]") {
+    const std::string netlib_dir = testDataDir() + "/netlib";
+    const std::string solu_file = netlib_dir + "/netlib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("netlib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const std::array<std::string, 3> instances = {"afiro", "blend", "sc50a"};
+
+    bool ran_any = false;
+    for (const auto& name : instances) {
+        const std::string path = netlib_dir + "/" + name + ".mps.gz";
+        if (!fs::exists(path)) continue;
+
+        const auto* entry = findSoluEntry(solu_entries, name);
+        if (entry == nullptr || entry->is_infeasible) continue;
+
+        const auto problem = readMps(path);
+        REQUIRE_FALSE(problem.hasIntegers());
+
+        DualSimplexSolver solver;
+        solver.load(problem);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+        CHECK(result.work_units > 0.0);
+        ran_any = true;
+    }
+
+    if (!ran_any) {
+        SKIP("No curated Netlib LP instances available locally for objective check");
+    }
+}
+
+TEST_CASE("MIPLIB: p0201 objective matches .solu", "[benchmark][miplib][solve]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/p0201.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("p0201 not downloaded. Run tests/data/download_miplib.sh --small");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "p0201");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite p0201 objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setTimeLimit(60.0);
+    solver.setNodeLimit(300000);
+    solver.setGapTolerance(1e-6);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(1);
+    solver.setSearchProfile(SearchProfile::Stable);
+    solver.load(problem);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK(result.work_units > 0.0);
 }
