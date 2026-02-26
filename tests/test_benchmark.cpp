@@ -346,3 +346,52 @@ TEST_CASE("MIPLIB: p0201 objective matches .solu", "[benchmark][miplib][solve]")
     CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
     CHECK(result.work_units > 0.0);
 }
+
+TEST_CASE("MIPLIB: p0201 objective matches .solu with pre-root heuristics",
+          "[benchmark][miplib][solve][preroot]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/p0201.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("p0201 not downloaded. Run tests/data/download_miplib.sh --small");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "p0201");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite p0201 objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setTimeLimit(60.0);
+    solver.setNodeLimit(300000);
+    solver.setGapTolerance(1e-6);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(7);
+    solver.setSearchProfile(SearchProfile::Stable);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(true);
+    solver.setPreRootPortfolioEnabled(true);
+    solver.setPreRootLpFreeMaxRounds(8);
+    solver.setPreRootLpFreeWorkBudget(2.0e5);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.load(problem);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK(result.work_units > 0.0);
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK(stats.calls >= 1);
+    CHECK(stats.work_units > 0.0);
+    CHECK(result.work_units >= stats.work_units);
+}
