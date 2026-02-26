@@ -1,4 +1,4 @@
-# mip-exact Roadmap
+# mipx Roadmap
 
 Stepwise implementation plan for an end-to-end MIP solver (branch-and-cut) in C++23.
 
@@ -39,7 +39,6 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [⚪ Step 28: MIP Feature Coverage Expansion](#step-28)
 - [⚪ Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
 - [Janitor Block (post-Step-29)](#janitor-post29)
-- [Cross-cutting: Solver Output](#solver-output)
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
@@ -113,7 +112,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Deliverables:**
 - CMake build system (C++23, `-Wall -Wextra -Werror`, sanitizers in debug)
-- Directory structure: `src/`, `include/mipx/`, `test/`, `benchmark/`, `docs/`
+- Directory structure: `src/`, `include/mipx/`, `tests/`, `docs/`
 - Catch2 test framework (FetchContent)
 - Core type aliases: `Int`, `Real` (double), `Index`, status/sense enums
 - Optional TBB dependency (`-DMIPX_USE_TBB=ON`, off by default)
@@ -281,7 +280,6 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Augmented matrix formulation `[A | -I]` with slack variables
 - Primal simplex pivot fallback for dual-infeasible cleanup after perturbation removal
 - Unbounded detection via primal ratio test
-- Solver output: iteration count, objective value, primal infeasibility
 - CLI tool `mipx-solve` with MPS file input
 - HiGHS comparison benchmark script (`tests/benchmark_vs_highs.py`)
 
@@ -410,7 +408,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Goal:** End-to-end MIP solving. The milestone.
 
-**Status:** Complete. Branch-and-bound MIP solver with warm-started LP re-solves, bound pruning, and HiGHS-style progress logging.
+**Status:** Complete. Branch-and-bound MIP solver with warm-started LP re-solves, bound pruning, and progress logging.
 
 **Deliverables:**
 - `MipSolver` class: load problem → solve root LP → branch-and-bound loop → report solution
@@ -418,7 +416,6 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Pruning: by bound, by infeasibility, by integrality (all-integer solution)
 - Gap tracking: `(incumbent - best_bound) / incumbent`
 - Limits: node limit, time limit, gap tolerance
-- **Solver output:** HiGHS-style MIP progress table — nodes explored, open nodes, LP iters, incumbent, best bound, gap%, time
 - CLI tool (`mipx-solve`) auto-detects MIP problems and uses MipSolver
 - **Bug fix:** Internal LP primals kept in scaled coordinates (no unscaleResults in-place), getters unscale on-the-fly. Fixes warm-start double-scaling issue.
 
@@ -963,15 +960,11 @@ Each step builds on the previous, produces something testable, and is scoped for
 - Full benchmark matrix runner (`solver x time x threads x mode`) and summary artifact generation
 - Parameter sweep tooling with structured CSV/Markdown outputs
 - Baselines stored/versioned for mipx and external references (HiGHS/highspy)
-- Solver output contract tests across LP and MIP modes:
-  - stable summary fields (`Status`, `Objective`, `Iterations`/`LP iterations`, `Work units`, `Time`)
-  - consistency checks across dual-simplex root, barrier root, and MIP solve reporting
 
 **Test criteria:**
 - Repeated runs at fixed seed produce stable metrics in deterministic mode
 - Benchmark scripts are CI-runnable on small subsets
 - Strict default regression gate stays in place for merge decisions
-- Output schema remains parse-stable and numerically consistent across supported LP backends and MIP mode
 
 **References:** `mip-heuristics` phase-9 matrix/sweep workflows; existing `mipx` perf gates.
 
@@ -990,28 +983,6 @@ Run this after Step 29 and then periodically after major feature batches (includ
 2. **`work_units` coverage catch-up:** audit that new code paths are measured by `work_units`, and extend logs/gates where metrics are missing.
 3. **Performance opportunity catch-up:** profile new code, prioritize low-risk wins, and only then consider deeper rewrites (SIMD/AVX, GPU kernels, or selective C/assembly) with proof from benchmarks and no regression in correctness/stability.
 4. **Documentation catch-up:** update `README.md`, mark completed items in `docs/roadmap.md`, and refresh related docs/changelog notes.
-
----
-
-<a id="solver-output"></a>
-
-## Cross-cutting: Solver Output
-
-Woven into steps as they become relevant:
-
-| Step | Output added |
-|------|-------------|
-| 7 (Dual simplex) | LP iteration log: iter, objective, primal/dual infeasibility, time |
-| 11 (MIP shell) | MIP tree log: nodes, open, LP iters, incumbent, best bound, gap%, time |
-| 11 (MIP shell) | Solution file (`.sol` format) |
-| 12+ | Cut statistics in log (cuts added, root gap closed) |
-| 29 | Output contract and cross-backend consistency tests (dual/barrier/MIP) |
-
-Current state:
-- Stable LP and MIP summary lines are already present and consumed by benchmark scripts.
-- Cross-backend/output-contract consistency is explicitly gated in Step 29.
-
-Format follows HiGHS style: compact, fixed-width columns, periodic summary lines.
 
 ---
 
