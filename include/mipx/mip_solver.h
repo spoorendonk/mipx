@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -68,6 +69,10 @@ public:
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
+    void setBarrierGpuThresholds(Int min_rows, Int min_nnz) {
+        barrier_gpu_min_rows_ = std::max<Int>(0, min_rows);
+        barrier_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
+    }
     const MipLpStats& getLpStats() const { return lp_stats_; }
 
 private:
@@ -143,6 +148,8 @@ private:
     bool cuts_enabled_ = true;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     bool barrier_use_gpu_ = true;
+    Int barrier_gpu_min_rows_ = 512;
+    Int barrier_gpu_min_nnz_ = 10000;
     MipLpStats lp_stats_{};
     mutable Logger log_;
 

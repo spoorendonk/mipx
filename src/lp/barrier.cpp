@@ -668,7 +668,8 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 
     auto solveNormalEq = [&](std::span<const Real> rhs_local,
                              std::span<Real> sol,
-                             std::span<const Real> theta_local) -> bool {
+                             std::span<const Real> theta_local,
+                             Real cg_rel_tol_local) -> bool {
         std::fill(sol.begin(), sol.end(), 0.0);
 
         std::fill(diag_precond.begin(), diag_precond.end(), reg);
@@ -694,7 +695,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
             return true;
         }
 
-        Real tol_abs = std::max(options_.cg_rel_tol * rhs_n, 1e-14);
+        Real tol_abs = std::max(cg_rel_tol_local * rhs_n, 1e-14);
 
         for (Index it = 0; it < options_.max_cg_iter; ++it) {
             std::fill(cg_q.begin(), cg_q.end(), 0.0);
@@ -733,7 +734,8 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
                            std::span<const Real> rc_local,
                            std::span<Real> dz_out,
                            std::span<Real> dy_out,
-                           std::span<Real> ds_out) -> bool {
+                           std::span<Real> ds_out,
+                           Real cg_rel_tol_local) -> bool {
         for (Index j = 0; j < n; ++j) {
             Real sj = std::max(s[j], 1e-12);
             theta[j] = z[j] / sj;
@@ -744,7 +746,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         if (!backend->multiply(h, ah)) return false;
         for (Index i = 0; i < m; ++i) rhs[i] = rp_local[i] - ah[i];
 
-        if (!solveNormalEq(rhs, dy_out, theta)) return false;
+        if (!solveNormalEq(rhs, dy_out, theta, cg_rel_tol_local)) return false;
 
         std::fill(at_dy.begin(), at_dy.end(), 0.0);
         if (!backend->multiplyTranspose(dy_out, at_dy)) return false;
@@ -789,7 +791,11 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         }
 
         for (Index j = 0; j < n; ++j) rc[j] = -z[j] * s[j];
-        if (!solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff)) return false;
+        const Real cg_rel_tol_iter =
+            std::clamp(std::sqrt(std::max(std::abs(mu), 1e-30)),
+                       options_.cg_rel_tol, 1e-3);
+
+        if (!solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff, cg_rel_tol_iter)) return false;
 
         Real alpha_aff_p = maxStepToBoundary(z, dz_aff, 1.0);
         Real alpha_aff_d = maxStepToBoundary(s, ds_aff, 1.0);
@@ -808,7 +814,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
             rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
         }
 
-        if (!solveNewton(rp, rd, rc, dz, dy, ds)) return false;
+        if (!solveNewton(rp, rd, rc, dz, dy, ds, cg_rel_tol_iter)) return false;
 
         Real alpha_p = maxStepToBoundary(z, dz, options_.step_fraction);
         Real alpha_d = maxStepToBoundary(s, ds, options_.step_fraction);
