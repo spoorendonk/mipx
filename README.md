@@ -161,6 +161,42 @@ Shell wrappers remain available for compatibility:
 `./tests/perf/generate_highspy_baselines.sh` and
 `./tests/perf/generate_mipx_baselines.sh`.
 
+Step-29 reproducibility/tuning tooling:
+
+```bash
+# Determinism checks (single-thread + configured multi-thread deterministic mode)
+python3 tests/perf/run_determinism_suite.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --instances p0201,gt2,flugpl \
+  --runs 5 \
+  --single-threads 1 \
+  --multi-threads 4 \
+  --solver-arg --quiet
+
+# Benchmark matrix artifacts (solver x time x threads x mode)
+python3 tests/perf/run_benchmark_matrix.py \
+  --mipx-binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --solvers mipx \
+  --modes deterministic,opportunistic \
+  --threads 1,4 \
+  --time-limits 30,120 \
+  --instances p0201,gt2,flugpl \
+  --solver-arg --quiet
+
+# Parameter sweep artifacts (CSV + Markdown ranking)
+python3 tests/perf/run_param_sweep.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
+  --instances p0201,gt2,flugpl \
+  --search-profiles stable,default,aggressive \
+  --heur-modes deterministic,opportunistic \
+  --cuts on,off \
+  --presolve on,off \
+  --solver-arg --quiet
+```
+
 Example comparison against stored HiGHS LP baseline
 (legacy filename prefix `highspy_`):
 
