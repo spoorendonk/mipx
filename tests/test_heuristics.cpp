@@ -2,10 +2,12 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <memory>
+#include <thread>
 
 #include "mipx/branching.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
+#include "mipx/heuristic_runtime.h"
 #include "mipx/lp_problem.h"
 
 using namespace mipx;
@@ -755,4 +757,46 @@ TEST_CASE("HeuristicScheduler: multiple heuristics, best solution wins", "[heuri
     if (result.has_value()) {
         CHECK(isFeasible(problem, result->values));
     }
+}
+
+TEST_CASE("SolutionPool: keeps best incumbent", "[heuristics][runtime]") {
+    SolutionPool pool(Sense::Minimize);
+    CHECK_FALSE(pool.hasSolution());
+
+    CHECK(pool.submit({{1.0}, 5.0}, "h1", 0));
+    CHECK_FALSE(pool.submit({{2.0}, 6.0}, "h2", 1));
+    CHECK(pool.submit({{3.0}, 4.0}, "h3", 2));
+
+    REQUIRE(pool.hasSolution());
+    auto best = pool.bestSolution();
+    REQUIRE(best.has_value());
+    CHECK_THAT(best->objective, WithinAbs(4.0, 1e-9));
+    REQUIRE(best->values.size() == 1);
+    CHECK_THAT(best->values[0], WithinAbs(3.0, 1e-9));
+}
+
+TEST_CASE("SolutionPool: concurrent submits preserve best solution", "[heuristics][runtime]") {
+    SolutionPool pool(Sense::Minimize);
+    constexpr Int kThreads = 8;
+    constexpr Int kPerThread = 128;
+    std::vector<std::thread> workers;
+    workers.reserve(kThreads);
+
+    for (Int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&pool, t]() {
+            for (Int i = 0; i < kPerThread; ++i) {
+                const Real obj = 10'000.0 - static_cast<Real>(t * kPerThread + i);
+                pool.submit({{obj}, obj}, "stress", t);
+            }
+        });
+    }
+    for (auto& w : workers) w.join();
+
+    const Real expected = 10'000.0 -
+                          static_cast<Real>((kThreads - 1) * kPerThread + (kPerThread - 1));
+    auto best = pool.bestSolution();
+    REQUIRE(best.has_value());
+    CHECK_THAT(best->objective, WithinAbs(expected, 1e-9));
+    REQUIRE(best->values.size() == 1);
+    CHECK_THAT(best->values[0], WithinAbs(expected, 1e-9));
 }

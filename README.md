@@ -1,7 +1,7 @@
 # mipx
 
 Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex,
-barrier, and PDLP LP modes, cutting planes, presolve, and primal heuristics.
+barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic runtime.
 
 > **Disclaimer:** This project is developed entirely through [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
@@ -15,6 +15,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and primal heuristics.
 | **Cutting planes** | Gomory MIR, cut pool with aging and parallelism filtering |
 | **Presolve** | Singleton, dominated, probing reductions + postsolve stack |
 | **Primal heuristics** | Rounding, diving, RINS, RENS, Feasibility Pump, local branching |
+| **Heuristic runtime** | Deterministic/opportunistic heuristic execution, restart engine, incumbent sharing pool |
 | **Parallel tree search** | Optional TBB-parallel node processing |
 
 ## Build
@@ -76,6 +77,9 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 | `--dual` | on | Use dual simplex for LP/root LP solve |
 | `--barrier` | off | Use barrier for LP/root LP solve |
 | `--pdlp` | off | Use PDLP for LP/root LP solve |
+| `--heur-deterministic` | on | Deterministic heuristic runtime mode |
+| `--heur-opportunistic` | off | Opportunistic heuristic runtime mode (throughput-first) |
+| `--seed <n>` | 1 | Seed for heuristic runtime restart scheduling |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
@@ -188,7 +192,7 @@ src/
   mip/            Branch-and-bound, node queue, branching
   cuts/           Cut pool, Gomory MIR separation
   presolve/       Reductions and postsolve stack
-  heuristics/     Rounding, diving, RINS
+  heuristics/     Heuristic arms + runtime orchestration
   io/             MPS/LP readers, solution file I/O
   cli/            Command-line interface
 tests/             Catch2 tests and MIPLIB benchmarks
@@ -199,7 +203,8 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** root-LP quality/performance (dual/barrier/PDLP), presolve, and MIP heuristics.
+**Current focus:** heuristic runtime (Step 16), root-LP quality/performance
+(dual/barrier/PDLP), presolve, and MIP heuristics.
 
 **Future work:** concurrent root racing, crossover improvements, and column generation.
 

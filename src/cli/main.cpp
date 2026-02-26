@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <string>
@@ -20,6 +21,7 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual] "
+            "[--heur-deterministic|--heur-opportunistic] [--seed N] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -40,6 +42,9 @@ int main(int argc, char* argv[]) {
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
+    mipx::HeuristicRuntimeMode heuristic_mode =
+        mipx::HeuristicRuntimeMode::Deterministic;
+    uint64_t heuristic_seed = 1;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -70,6 +75,13 @@ int main(int argc, char* argv[]) {
             lp_mode = LpMode::Pdlp;
         } else if (arg == "--dual") {
             lp_mode = LpMode::Dual;
+        } else if (arg == "--heur-deterministic") {
+            heuristic_mode = mipx::HeuristicRuntimeMode::Deterministic;
+        } else if (arg == "--heur-opportunistic") {
+            heuristic_mode = mipx::HeuristicRuntimeMode::Opportunistic;
+        } else if (arg == "--seed" && i + 1 < argc) {
+            heuristic_seed = static_cast<uint64_t>(
+                std::strtoull(argv[++i], nullptr, 10));
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -116,6 +128,8 @@ int main(int argc, char* argv[]) {
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setPdlpUseGpu(barrier_gpu);
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
+            solver.setHeuristicMode(heuristic_mode);
+            solver.setHeuristicSeed(heuristic_seed);
             solver.load(lp);
             auto result = solver.solve();
 

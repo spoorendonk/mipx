@@ -554,6 +554,10 @@ Each step builds on the previous, produces something testable, and is scoped for
 
 **Goal:** Introduce a composable heuristic runtime that supports cross-heuristic cooperation.
 
+**Status:** In progress. A mipx-native runtime foundation now exists with
+`HeuristicRuntime`, thread-safe `SolutionPool`, restart strategy selection,
+callback hooks, and deterministic/opportunistic + seed controls exposed via CLI/API.
+
 **Deliverables:**
 - Two-level heuristic API:
   - standalone solve entrypoint (full solver context)
