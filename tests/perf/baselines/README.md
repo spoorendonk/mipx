@@ -1,12 +1,12 @@
-# highspy Baselines
+# HiGHS and mipx Baselines
 
 This directory stores versioned wall-clock baseline CSVs generated with
-`highspy` for quick mipx-vs-HiGHS comparisons.
+HiGHS CLI and mipx for quick comparisons.
 
 Files:
 - `highspy_lp_netlib_small.csv`: Netlib small LP set.
 - `highspy_mip_miplib_small.csv`: MIPLIB small trio (`p0201,gt2,flugpl`).
-- `highspy_baseline_meta.json`: generation metadata (timestamp, highspy version,
+- `highspy_baseline_meta.json`: generation metadata (timestamp, HiGHS version,
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
@@ -16,14 +16,23 @@ Files:
 - `barrier_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
 - `barrier_lp_compare_meta.json`: barrier comparison generation metadata
   (tool versions, GPU/driver info).
+- `pdlp_lp_compare_netlib.csv`: LP PDLP comparison on Netlib
+  (`mipx_pdlp_cpu`, `mipx_pdlp_gpu`, `highs_pdlp` or `highs_ipx`, `cuopt_pdlp`).
+- `pdlp_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
+- `pdlp_lp_compare_meta.json`: PDLP comparison generation metadata
+  (tool versions, GPU/driver info).
 
-Regenerate with:
+Regenerate with (canonical Python entrypoints):
 
 ```bash
-./tests/perf/generate_highspy_baselines.sh
-./tests/perf/generate_mipx_baselines.sh
-./tests/perf/generate_barrier_lp_baselines.sh
+python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_barrier_lp_baselines.py
+python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
+
+Shell wrappers remain available under `tests/perf/generate_*.sh`.
+Legacy HiGHS baseline CSV filenames keep the `highspy_` prefix for compatibility.
 
 ## Mittelman Baselines
 
@@ -40,8 +49,11 @@ Baselines matching Hans Mittelman's benchmark configuration
 Regenerate with:
 
 ```bash
-./tests/perf/generate_mittelman_baselines.sh
+python3 tests/perf/generate_mittelman_baselines.py
 ```
+
+Shell wrapper equivalent:
+`./tests/perf/generate_mittelman_baselines.sh`.
 
 Notes:
 - These are machine-specific wall-clock references.

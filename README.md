@@ -1,7 +1,7 @@
 # mip-exact
 
-Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex LP,
-cutting planes, presolve, and primal heuristics — no external solver dependencies.
+Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex,
+barrier, and PDLP LP modes, cutting planes, presolve, and primal heuristics.
 
 > **Disclaimer:** This project is developed entirely through [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
@@ -10,6 +10,7 @@ cutting planes, presolve, and primal heuristics — no external solver dependenc
 | Component | Description |
 |-----------|-------------|
 | **Dual simplex** | Phase 1+2, steepest-edge pricing, sparse LU with rank-1 updates |
+| **Barrier / PDLP** | Optional root/LP solve modes with GPU SpMV acceleration + CPU fallback |
 | **Branch-and-bound** | Best-first/DFS/hybrid node selection, reliability branching |
 | **Cutting planes** | Gomory MIR, cut pool with aging and parallelism filtering |
 | **Presolve** | Singleton, dominated, probing reductions + postsolve stack |
@@ -92,6 +93,13 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
 | `--no-cuts` | — | Disable cutting planes |
 | `--gap-tol <g>` | 1e-4 | Relative gap tolerance for optimality |
 | `--node-limit <n>` | ∞ | Maximum nodes to explore |
+| `--dual` | on | Use dual simplex for LP/root LP solve |
+| `--barrier` | off | Use barrier for LP/root LP solve |
+| `--pdlp` | off | Use PDLP for LP/root LP solve |
+| `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
+| `--no-gpu` | — | Force CPU backend for barrier/PDLP |
+| `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
+| `--gpu-min-nnz <n>` | 10000 | Minimum nonzeros before GPU backend is considered |
 | `--verbose` | off | Verbose output |
 
 ## Tests
@@ -121,7 +129,7 @@ Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
 ./tests/data/download_test_instances.sh
 
 # Full LP+MIP gate (strict: 0% median regression by default)
-./tests/perf/run_full_gate.sh \
+python3 tests/perf/run_full_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
@@ -131,7 +139,7 @@ Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
 # Optional: run LP/MIP gates separately
 
 # LP gate input (Netlib)
-./tests/perf/run_netlib_lp_bench.sh \
+python3 tests/perf/run_netlib_lp_bench.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --output /tmp/netlib_candidate.csv \
@@ -139,7 +147,7 @@ Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
   --solver-arg --quiet
 
 # MIP gate input (MIPLIB)
-./tests/perf/run_miplib_mip_bench.sh \
+python3 tests/perf/run_miplib_mip_bench.py \
   --binary ./build/mipx-solve \
   --miplib-dir ./tests/data/miplib \
   --output /tmp/miplib_candidate.csv \
@@ -155,19 +163,23 @@ python3 tests/perf/check_regression.py \
   --candidate /tmp/netlib_candidate.csv
 ```
 
-Generate reproducible HiGHS/highspy wall-clock baselines:
+Generate reproducible HiGHS CLI and mipx wall-clock baselines:
 
 ```bash
-./tests/perf/generate_highspy_baselines.sh
-./tests/perf/generate_mipx_baselines.sh
+python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_mipx_baselines.py
 ```
 
 Baselines are stored in `tests/perf/baselines/`.
+Shell wrappers remain available for compatibility:
+`./tests/perf/generate_highspy_baselines.sh` and
+`./tests/perf/generate_mipx_baselines.sh`.
 
-Example comparison against stored highspy LP baseline:
+Example comparison against stored HiGHS LP baseline
+(legacy filename prefix `highspy_`):
 
 ```bash
-./tests/perf/run_netlib_lp_bench.sh \
+python3 tests/perf/run_netlib_lp_bench.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --output /tmp/netlib_candidate.csv \
@@ -205,9 +217,9 @@ docs/              Documentation and roadmap
 
 See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
 
-**Current focus:** LP solver interface → LU factorization → dual simplex.
+**Current focus:** root-LP quality/performance (dual/barrier/PDLP), presolve, and MIP heuristics.
 
-**Future work:** Barrier/IPM, PDLP+GPU, column generation.
+**Future work:** concurrent root racing, crossover improvements, and column generation.
 
 ## References
 

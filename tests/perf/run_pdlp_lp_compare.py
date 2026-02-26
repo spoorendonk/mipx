@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Compare LP barrier performance across mipx, HiGHS-IPX, and cuOpt barrier.
+"""Compare LP PDLP performance across mipx, HiGHS, and cuOpt.
 
 Example:
-  python3 tests/perf/run_barrier_lp_compare.py \
+  python3 tests/perf/run_pdlp_lp_compare.py \
     --mipx-binary ./build/mipx-solve \
     --instances-dir tests/data/netlib \
-    --output /tmp/barrier_lp_compare.csv \
+    --output /tmp/pdlp_lp_compare.csv \
     --repeats 3 \
     --threads 1 \
     --time-limit 60
@@ -93,11 +93,17 @@ def parse_highs_status(text: str) -> str:
     m = re.search(r"^\s*Model status\s*:\s*(.+?)\s*$", text, re.MULTILINE)
     if m:
         return normalize_status(m.group(1))
+    matches = re.findall(r"^\s*Status\s+(.+?)\s*$", text, re.MULTILINE)
+    if matches:
+        return normalize_status(matches[-1])
     return "unknown"
 
 
 def parse_highs_runtime(text: str) -> float | None:
-    return parse_first_float(r"^\s*HiGHS run time\s*:\s*([\-+0-9.eE]+)\s*$", text)
+    runtime = parse_first_float(r"^\s*HiGHS run time\s*:\s*([\-+0-9.eE]+)\s*$", text)
+    if runtime is not None:
+        return runtime
+    return parse_first_float(r"^\s*Timing\s+([\-+0-9.eE]+)\s*$", text)
 
 
 def locate_cuopt_cli(explicit: str) -> str | None:
@@ -159,7 +165,7 @@ def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
     return proc.returncode, output, elapsed
 
 
-def run_mipx_barrier(
+def run_mipx_pdlp(
     binary: str,
     model: Path,
     use_gpu: bool,
@@ -168,7 +174,7 @@ def run_mipx_barrier(
     time_limit: float,
     relax_integrality: bool,
 ) -> SolverResult:
-    cmd = [binary, str(model), "--barrier", "--quiet"]
+    cmd = [binary, str(model), "--pdlp", "--quiet"]
     if use_gpu:
         cmd.append("--gpu")
         if force_gpu:
@@ -201,14 +207,16 @@ def run_mipx_barrier(
     )
 
 
-def run_highs_ipx(
+def run_highs(
     highs_binary: str,
     model: Path,
     threads: int,
     time_limit: float,
     disable_presolve: bool,
     relax_integrality: bool,
+    prefer_pdlp: bool,
 ) -> SolverResult:
+    requested_solver = "pdlp" if prefer_pdlp else "ipx"
     options_file = write_highs_options_file(threads, relax_integrality)
     try:
         cmd = [
@@ -217,7 +225,7 @@ def run_highs_ipx(
             "--options_file",
             options_file,
             "--solver",
-            "ipx",
+            requested_solver,
             "--presolve",
             "off" if disable_presolve else "choose",
             "--parallel",
@@ -227,20 +235,30 @@ def run_highs_ipx(
             cmd.extend(["--time_limit", f"{time_limit:g}"])
 
         code, out, elapsed = run_cmd(cmd)
+        solver_note = ""
+        if code != 0 and requested_solver == "pdlp":
+            fallback = cmd.copy()
+            solver_idx = fallback.index("--solver") + 1
+            fallback[solver_idx] = "ipx"
+            code, out, elapsed = run_cmd(fallback)
+            solver_note = "highs_pdlp_unavailable_fallback_ipx"
         if code != 0:
             return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 
         status = parse_highs_status(out)
-        ipm_iters = parse_first_float(r"^\s*IPM\s+iterations:\s*([\-+0-9.eE]+)\s*$", out)
-        if ipm_iters is None:
-            ipm_iters = parse_first_float(r"^\s*Simplex\s+iterations:\s*([\-+0-9.eE]+)\s*$", out)
+        iters = parse_first_float(r"^\s*PDLP\s+iterations:\s*([\-+0-9.eE]+)\s*$", out)
+        if iters is None:
+            iters = parse_first_float(r"^\s*IPM\s+iterations:\s*([\-+0-9.eE]+)\s*$", out)
+        if iters is None:
+            iters = parse_first_float(r"^\s*Simplex\s+iterations:\s*([\-+0-9.eE]+)\s*$", out)
         objective = parse_first_float(r"^\s*Objective value\s*:\s*([\-+0-9.eE]+)\s*$", out)
         highs_time = parse_highs_runtime(out)
         return SolverResult(
             status=status,
             time_seconds=highs_time if highs_time is not None else elapsed,
-            iterations=ipm_iters,
+            iterations=iters,
             objective=objective,
+            error=solver_note or None,
         )
     finally:
         try:
@@ -249,7 +267,7 @@ def run_highs_ipx(
             pass
 
 
-def run_cuopt_barrier(
+def run_cuopt_pdlp(
     cli_path: str,
     model: Path,
     time_limit: float,
@@ -261,7 +279,7 @@ def run_cuopt_barrier(
         cli_path,
         str(model),
         "--method",
-        "3",  # cuOpt barrier
+        "1",  # cuOpt PDLP
         "--log-to-console",
         "true",
         "--num-gpus",
@@ -280,12 +298,20 @@ def run_cuopt_barrier(
 
     status = parse_status(out)
     objective = parse_last_float(r"\bObjective[: ]+([\-+0-9.eE]+)\b", out)
-    iterations = parse_last_float(r"Optimal solution found in\s+([0-9]+)\s+iterations", out)
-    barrier_time = parse_last_float(r"Barrier finished in\s+([\-+0-9.eE]+)\s+seconds", out)
+    iterations = parse_last_float(r"\bIterations:\s*([0-9]+)\b", out)
+    if iterations is None:
+        iterations = parse_last_float(
+            r"(?:Optimal solution found in|PDLP converged in)\s+([0-9]+)\s+iterations", out
+        )
+    pdlp_time = parse_last_float(r"PDLP finished in\s+([\-+0-9.eE]+)\s+seconds", out)
+    if pdlp_time is None:
+        pdlp_time = parse_last_float(r"Solve finished in\s+([\-+0-9.eE]+)\s+seconds", out)
+    if pdlp_time is None:
+        pdlp_time = parse_last_float(r"\bTime:\s*([\-+0-9.eE]+)s\b", out)
 
     return SolverResult(
         status=status,
-        time_seconds=barrier_time if barrier_time is not None else elapsed,
+        time_seconds=pdlp_time if pdlp_time is not None else elapsed,
         iterations=iterations,
         objective=objective,
     )
@@ -306,6 +332,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--force-mipx-gpu", action="store_true")
     p.add_argument("--no-highs", action="store_true")
     p.add_argument("--highs-binary", default="")
+    p.add_argument("--highs-ipx", action="store_true", help="Use HiGHS IPX instead of PDLP.")
     p.add_argument("--no-cuopt", action="store_true")
     p.add_argument("--cuopt-cli", default="")
     p.add_argument("--cuopt-num-gpus", type=int, default=1)
@@ -415,8 +442,8 @@ def main() -> int:
     solvers: list[tuple[str, Callable[[Path], SolverResult]]] = []
     solvers.append(
         (
-            "mipx_barrier_cpu",
-            lambda p: run_mipx_barrier(
+            "mipx_pdlp_cpu",
+            lambda p: run_mipx_pdlp(
                 args.mipx_binary,
                 p,
                 use_gpu=False,
@@ -429,8 +456,8 @@ def main() -> int:
     )
     solvers.append(
         (
-            "mipx_barrier_gpu",
-            lambda p: run_mipx_barrier(
+            "mipx_pdlp_gpu",
+            lambda p: run_mipx_pdlp(
                 args.mipx_binary,
                 p,
                 use_gpu=True,
@@ -442,24 +469,26 @@ def main() -> int:
         )
     )
     if not args.no_highs:
+        highs_solver = "highs_ipx" if args.highs_ipx else "highs_pdlp"
         solvers.append(
             (
-                "highs_ipx",
-                lambda p: run_highs_ipx(
+                highs_solver,
+                lambda p: run_highs(
                     highs_binary,
                     p,
                     threads=args.threads,
                     time_limit=args.time_limit,
                     disable_presolve=args.disable_presolve,
                     relax_integrality=args.relax_integrality,
+                    prefer_pdlp=not args.highs_ipx,
                 ),
             )
         )
     if cuopt_cli:
         solvers.append(
             (
-                "cuopt_barrier",
-                lambda p: run_cuopt_barrier(
+                "cuopt_pdlp",
+                lambda p: run_cuopt_pdlp(
                     cuopt_cli,
                     p,
                     time_limit=args.time_limit,
@@ -498,7 +527,7 @@ def main() -> int:
             }
             rows.append(row)
             print(
-                f"{name:16s} {solver_name:18s} status={status:14s} "
+                f"{name:16s} {solver_name:14s} status={status:14s} "
                 f"time={row['time_seconds'] or '-':>9s} "
                 f"iter={row['iterations'] or '-':>6s}"
             )
