@@ -300,6 +300,48 @@ private:
     double last_work_units_ = 0.0;
 };
 
+/// Auxiliary-objective heuristic:
+/// temporarily replace the original objective by an integrality-guidance
+/// objective and solve a short LP to obtain a nearby integer-feasible point.
+class AuxObjectiveHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setMinActiveIntegerVars(Int count) { min_active_integer_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent,
+        std::span<const Real> incumbent_values);
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] bool lastSkippedTooSmall() const { return last_skipped_too_small_; }
+    [[nodiscard]] Int lastActiveIntegerVars() const { return last_active_integer_vars_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "auxobj"; }
+
+private:
+    Int subproblem_iter_limit_ = 40;
+    Int min_active_integer_vars_ = 1;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    bool last_skipped_too_small_ = false;
+    Int last_active_integer_vars_ = 0;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
 /// Schedules and manages heuristic execution.
 class HeuristicScheduler {
 public:

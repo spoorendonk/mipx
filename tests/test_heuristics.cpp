@@ -479,6 +479,43 @@ TEST_CASE("FeasibilityPumpHeuristic: LP state restored after run", "[heuristics]
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+TEST_CASE("AuxObjectiveHeuristic: can produce feasible integer point", "[heuristics]") {
+    auto problem = buildFractionalSingleIntMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    AuxObjectiveHeuristic aux;
+    aux.setSubproblemIterLimit(40);
+    std::vector<Real> incumbent_values = {4.0};
+    auto result = aux.run(problem, lp, primals, 100.0, incumbent_values);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("AuxObjectiveHeuristic: LP state restored after run", "[heuristics]") {
+    auto problem = buildFractionalSingleIntMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    AuxObjectiveHeuristic aux;
+    aux.setSubproblemIterLimit(40);
+    (void)aux.run(problem, lp, primals, kInf);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
 TEST_CASE("LocalBranchingHeuristic: improves incumbent in binary neighborhood", "[heuristics]") {
     auto problem = buildKnapsack();
 
