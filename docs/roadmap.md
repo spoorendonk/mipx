@@ -27,7 +27,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 17: LP-Free Parallel Pre-Root Heuristic Stage](#step-17)
 - [🟢 Step 18: LP-Light Heuristics Integration](#step-18)
 - [🟢 Step 19: Adaptive Portfolio Orchestrator](#step-19)
-- [⚪ Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
+- [🟢 Step 20: Python API + Multi-Platform Release Pipeline](#step-20)
 - [🟢 Janitor Block (pre-Step-21)](#janitor-pre21)
 - [🟢 Step 21: Branching Quality Upgrade](#step-21)
 - [🟢 Step 22: Core Cut Family Expansion](#step-22)
@@ -42,7 +42,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
-- [⚪ Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
+- [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
 - [⚪ Step 33: Symmetry Handling](#step-33)
 - [⚪ Step 34: Exact LP Refinement Mode](#step-34)
 
@@ -681,11 +681,15 @@ contribution) across LP-free and LP-light arms.
 
 <a id="step-20"></a>
 
-## Step 20: Python API + Multi-Platform Release Pipeline
+## Step 20: Python API + Multi-Platform Release Pipeline ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Provide first-class Python distribution and automated releases.
+
+**Status:** Complete. Nanobind Python bindings, scikit-build-core packaging
+(`abi3`), cibuildwheel matrix, and tag-driven PyPI publish workflows are in
+place with Python API tests and wheel smoke coverage.
 
 **Deliverables:**
 - Nanobind module for core model/solver APIs
@@ -1117,11 +1121,16 @@ Run this after Step 29 and then periodically after major feature batches (includ
 
 <a id="step-32"></a>
 
-## Step 32: Concurrent Root LP Racing (CPU + GPU)
+## Step 32: Concurrent Root LP Racing (CPU + GPU) ✅
 
 [Back to top](#table-of-contents)
 
 **Goal:** Run complementary LP backends concurrently at root and use the first high-quality result.
+
+**Status:** Complete. `ConcurrentRootExperimental` now launches dual/barrier/PDLP
+root candidates, applies cooperative stop signaling, records race telemetry
+(winner/cancel/candidate counts), and selects a winner by bound quality,
+latency, and warm-start preference in deterministic/opportunistic modes.
 
 **Deliverables:**
 - Root race orchestration across dual simplex (CPU), barrier, and PDLP backends

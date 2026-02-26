@@ -698,6 +698,10 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         Real tol_abs = std::max(cg_rel_tol_local * rhs_n, 1e-14);
 
         for (Index it = 0; it < options_.max_cg_iter; ++it) {
+            if (options_.stop_flag != nullptr &&
+                options_.stop_flag->load(std::memory_order_relaxed)) {
+                return false;
+            }
             std::fill(cg_q.begin(), cg_q.end(), 0.0);
             if (!applyNormalEq(cg_p, cg_q, theta_local)) return false;
             Real pAp = dot(cg_p, cg_q);
@@ -762,6 +766,11 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     const Real inv_c = 1.0 / (1.0 + infNorm(cstd_));
 
     for (Index iter = 0; iter < options_.max_iter; ++iter) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            iters = iter;
+            return false;
+        }
         std::fill(az.begin(), az.end(), 0.0);
         std::fill(at_y.begin(), at_y.end(), 0.0);
         if (!backend->multiply(z, az)) return false;
@@ -853,6 +862,14 @@ LpResult BarrierSolver::solve() {
     bool ok = solveStandardForm(z, y, s, iters);
 
     if (!ok) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            status_ = Status::IterLimit;
+            objective_ = 0.0;
+            iterations_ = iters;
+            return {status_, objective_, iterations_, 0.0};
+        }
+
         // Robust fallback: preserve correctness if IPM fails to converge.
         DualSimplexSolver fallback;
         fallback.load(original_);

@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <utility>
+
 #include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
@@ -152,4 +154,61 @@ TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mi
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(pdlp_result.status == Status::Optimal);
     CHECK_THAT(pdlp_result.objective, WithinAbs(dual_result.objective, 1e-4));
+}
+
+TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
+          "[pdlp][mip][concurrent]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver dual_solver;
+    dual_solver.setVerbose(false);
+    dual_solver.setCutsEnabled(false);
+    dual_solver.setRootLpPolicy(RootLpPolicy::DualDefault);
+    dual_solver.load(lp);
+    auto dual_result = dual_solver.solve();
+
+    MipSolver concurrent_solver;
+    concurrent_solver.setVerbose(false);
+    concurrent_solver.setCutsEnabled(false);
+    concurrent_solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    concurrent_solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
+    concurrent_solver.setBarrierUseGpu(false);
+    concurrent_solver.setPdlpUseGpu(false);
+    concurrent_solver.load(lp);
+    auto concurrent_result = concurrent_solver.solve();
+
+    REQUIRE(dual_result.status == Status::Optimal);
+    REQUIRE(concurrent_result.status == Status::Optimal);
+    CHECK_THAT(concurrent_result.objective, WithinAbs(dual_result.objective, 1e-4));
+}
+
+TEST_CASE("Concurrent root deterministic mode is reproducible",
+          "[pdlp][mip][concurrent]") {
+    auto lp = buildBranchingMip();
+
+    auto run_once = [&]() {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setCutsEnabled(false);
+        solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+        solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
+        solver.setBarrierUseGpu(false);
+        solver.setPdlpUseGpu(false);
+        solver.load(lp);
+        auto result = solver.solve();
+        return std::make_pair(result, solver.getLpStats());
+    };
+
+    const auto [a_result, a_stats] = run_once();
+    const auto [b_result, b_stats] = run_once();
+
+    REQUIRE(a_result.status == Status::Optimal);
+    REQUIRE(b_result.status == Status::Optimal);
+    CHECK_THAT(a_result.objective, WithinAbs(b_result.objective, 1e-9));
+    CHECK(a_stats.root_race_runs == 1);
+    CHECK(a_stats.root_race_candidates == 3);
+    CHECK(a_stats.root_race_dual_wins + a_stats.root_race_barrier_wins +
+              a_stats.root_race_pdlp_wins ==
+          1);
+    CHECK(b_stats.root_race_runs == 1);
 }

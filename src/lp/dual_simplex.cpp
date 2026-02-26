@@ -635,6 +635,12 @@ LpResult DualSimplexSolver::solve() {
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            status_ = Status::IterLimit;
+            break;
+        }
+
         // Log every kLogFrequency iterations.
         if (iterations_ % kLogFrequency == 0) {
             // Compute current objective.
@@ -658,12 +664,14 @@ LpResult DualSimplexSolver::solve() {
                                       "Dual", iterations_, obj_val, pinf_count, solve_elapsed);
         }
 
+        #ifdef MIPX_HAS_TBB
         bool sip_numerical_gate = true;
         if (options_.sip_parallel_disable_on_stall &&
             options_.sip_parallel_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.sip_parallel_stall_pivots) {
             sip_numerical_gate = false;
         }
+        #endif
 
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
         work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
@@ -784,7 +792,9 @@ LpResult DualSimplexSolver::solve() {
             // No cost shifts active. Check dual feasibility.
             Index entering_p = -1;
             Real worst_rc = 0.0;
+            #ifdef MIPX_HAS_TBB
             Index nnb = static_cast<Index>(nonbasic_.size());
+            #endif
 
 #ifdef MIPX_HAS_TBB
             if (options_.enable_sip_parallel_dual_scan &&

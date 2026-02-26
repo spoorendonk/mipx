@@ -1,0 +1,46 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "mipx"
+version = "0.1.0"
+description = "MIPX branch-and-cut solver Python bindings"
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "mipx contributors" }]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.25"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+wheel.py-api = "cp312"
+wheel.packages = ["python/mipx"]
+
+[tool.scikit-build.cmake.define]
+MIPX_BUILD_PYTHON = "ON"
+MIPX_BUILD_TESTS = "OFF"
+MIPX_BUILD_CLI = "OFF"
+MIPX_USE_TBB = "OFF"
+MIPX_USE_CUDA = "OFF"
+MIPX_STRICT_WARNINGS = "OFF"
+MIPX_SIMD_ISA = "off"
+
+[tool.scikit-build.sdist]
+include = [
+  "CMakeLists.txt",
+  "cmake/**",
+  "include/**",
+  "src/**",
+  "python/**",
+  "tests/data/tiny.lp",
+  "tests/data/tiny.mps",
+  "README.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <span>
 #include <vector>
 
@@ -20,6 +21,7 @@ struct BarrierOptions {
     Int gpu_min_rows = 512;
     Int gpu_min_nnz = 10000;
     bool verbose = true;
+    const std::atomic<bool>* stop_flag = nullptr;
 };
 
 class BarrierSolver : public LpSolver {
