@@ -2320,15 +2320,21 @@ MipResult MipSolver::solve() {
                     if (mode_ == HeuristicRuntimeMode::Deterministic) {
                         const std::size_t idx =
                             static_cast<std::size_t>(std::max<Int>(0, round)) % arms_.size();
+                        ++pulls_[preRootArmIndex(arms_[idx])];
                         return arms_[idx];
                     }
-                    return arms_[std::uniform_int_distribution<std::size_t>(
-                        0, arms_.size() - 1)(rng)];
+                    const std::size_t idx = std::uniform_int_distribution<std::size_t>(
+                        0, arms_.size() - 1)(rng);
+                    ++pulls_[preRootArmIndex(arms_[idx])];
+                    return arms_[idx];
                 }
 
                 // Warm-up: make one pull from each available arm before sampling.
                 for (PreRootArm arm : arms_) {
-                    if (pulls_[preRootArmIndex(arm)] == 0) return arm;
+                    if (pulls_[preRootArmIndex(arm)] == 0) {
+                        ++pulls_[preRootArmIndex(arm)];
+                        return arm;
+                    }
                 }
 
                 PreRootArm best_arm = arms_.front();
@@ -2341,6 +2347,7 @@ MipResult MipSolver::solve() {
                         best_arm = arm;
                     }
                 }
+                ++pulls_[preRootArmIndex(best_arm)];
                 return best_arm;
             }
 
@@ -2348,7 +2355,6 @@ MipResult MipSolver::solve() {
                 std::lock_guard<std::mutex> lock(mutex_);
                 const std::size_t idx = preRootArmIndex(arm);
                 const double clipped = std::clamp(reward, 0.0, 1.0);
-                ++pulls_[idx];
                 reward_sum_[idx] += clipped;
                 alpha_[idx] += clipped;
                 beta_[idx] += (1.0 - clipped);
