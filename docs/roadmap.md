@@ -39,7 +39,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 28: MIP Feature Coverage Expansion](#step-28)
 - [🟢 Step 29: Reproducibility + Tuning + Benchmark Hardening](#step-29)
 - [🟢 Janitor Block (post-Step-29)](#janitor-post29)
-- [Post-Step-29 Expansion Steps (planned)](#post29-expansion)
+- [🟢 Post-Step-29 Expansion Steps](#post29-expansion)
 - [🟢 Step 30: Barrier / Interior-Point LP Backend](#step-30)
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
 - [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
@@ -1056,7 +1056,7 @@ Run this after Step 29 and then periodically after major feature batches (includ
 
 <a id="post29-expansion"></a>
 
-## Post-Step-29 Expansion Steps (planned)
+## Post-Step-29 Expansion Steps ✅
 
 **Already covered in current roadmap (removed from future backlog):**
 - Core default cut families and automatic cut control are now explicit in Steps 22-24.
