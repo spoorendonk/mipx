@@ -11,6 +11,7 @@
 #include "mipx/bnb_node.h"
 #include "mipx/branching.h"
 #include "mipx/core.h"
+#include "mipx/cut_manager.h"
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
@@ -85,6 +86,13 @@ public:
     }
     void setCutFamilyConfig(const CutFamilyConfig& config) { cut_family_config_ = config; }
     [[nodiscard]] const CutFamilyConfig& getCutFamilyConfig() const { return cut_family_config_; }
+    void setCutEffortMode(CutEffortMode mode) { cut_effort_mode_ = mode; }
+    [[nodiscard]] CutEffortMode getCutEffortMode() const { return cut_effort_mode_; }
+    void setCutWorkBudgets(double per_node, double per_round, double global) {
+        cut_per_node_work_budget_ = std::max(1.0, per_node);
+        cut_per_round_work_budget_ = std::max(1.0, per_round);
+        cut_global_work_budget_ = std::max(1.0, global);
+    }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
@@ -179,6 +187,10 @@ private:
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
     CutFamilyConfig cut_family_config_{};
+    CutEffortMode cut_effort_mode_ = CutEffortMode::Auto;
+    double cut_per_node_work_budget_ = 2.5e5;
+    double cut_per_round_work_budget_ = 5.0e4;
+    double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     bool barrier_use_gpu_ = true;
     Int barrier_gpu_min_rows_ = 512;

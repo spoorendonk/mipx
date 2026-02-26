@@ -14,6 +14,7 @@ add_executable(mipx-tests
     test_heuristics.cpp
     test_presolve.cpp
     test_cuts.cpp
+    test_cut_manager.cpp
     test_parallel.cpp
     test_barrier.cpp
     test_pdlp.cpp
