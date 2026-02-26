@@ -385,3 +385,21 @@ TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
         CHECK_THAT(result_a.solution[i], WithinAbs(result_b.solution[i], 1e-9));
     }
 }
+
+TEST_CASE("MipSolver: opportunistic heuristic mode solves", "[mip][heuristics]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Opportunistic);
+    solver.setHeuristicSeed(7);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    REQUIRE(!result.solution.empty());
+    CHECK(result.solution[0] >= 0.0);
+    CHECK(result.solution[0] <= 4.6 + 1e-6);
+}

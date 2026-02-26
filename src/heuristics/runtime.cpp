@@ -107,6 +107,7 @@ HeuristicRuntime::HeuristicRuntime(const HeuristicRuntimeConfig& config)
 }
 
 void HeuristicRuntime::resetForSolve() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     budget_.setBaseTreeFrequency(config_.rins_node_frequency);
     budget_.setMaxFrequencyScale(config_.budget_max_frequency_scale);
     budget_.setMaxWorkShare(config_.budget_max_work_share);
@@ -118,7 +119,15 @@ void HeuristicRuntime::resetForSolve() {
 }
 
 void HeuristicRuntime::finish() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (callback_ != nullptr) callback_->onFinish(stats_);
+}
+
+double HeuristicRuntime::canonicalWorkUnits(double work_units) {
+    if (!std::isfinite(work_units)) return 0.0;
+    const double clamped = std::max(0.0, work_units);
+    constexpr double kScale = 1e6;
+    return std::round(clamped * kScale) / kScale;
 }
 
 bool HeuristicRuntime::hasIncumbent(Real incumbent) {
@@ -142,6 +151,7 @@ bool HeuristicRuntime::isImprovement(Sense sense, Real candidate, Real incumbent
 }
 
 bool HeuristicRuntime::allowRootCall(double total_work_units) const {
+    total_work_units = canonicalWorkUnits(total_work_units);
     if (config_.mode == HeuristicRuntimeMode::Opportunistic) {
         return true;
     }
@@ -149,6 +159,7 @@ bool HeuristicRuntime::allowRootCall(double total_work_units) const {
 }
 
 bool HeuristicRuntime::allowTreeCall(Int node_count, double total_work_units) const {
+    total_work_units = canonicalWorkUnits(total_work_units);
     if (config_.mode == HeuristicRuntimeMode::Deterministic) {
         return budget_.allowTreeHeuristic(node_count, total_work_units);
     }
@@ -158,6 +169,7 @@ bool HeuristicRuntime::allowTreeCall(Int node_count, double total_work_units) co
 }
 
 void HeuristicRuntime::recordCall(Int node_count, double work_units, bool improved) {
+    work_units = canonicalWorkUnits(work_units);
     budget_.recordHeuristicCall(node_count, work_units, improved);
     ++stats_.calls;
     if (improved) {
@@ -173,6 +185,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
     const RootHeuristicContext& ctx,
     Real& incumbent,
     std::vector<Real>& best_solution) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (!emitted_root_header_ && callback_ != nullptr) {
         callback_->onHeader("root", config_.mode);
         emitted_root_header_ = true;
@@ -331,6 +344,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
 
 WorkerHeuristicOutcome HeuristicRuntime::runTreeWorker(
     const WorkerHeuristicContext& ctx) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (!emitted_worker_header_ && callback_ != nullptr) {
         callback_->onHeader("worker", config_.mode);
         emitted_worker_header_ = true;

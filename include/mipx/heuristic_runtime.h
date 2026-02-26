@@ -185,6 +185,7 @@ public:
     WorkerHeuristicOutcome runTreeWorker(const WorkerHeuristicContext& ctx);
 
 private:
+    static double canonicalWorkUnits(double work_units);
     static bool hasIncumbent(Real incumbent);
     static Real relativeGap(Real incumbent, Real bound);
     static bool isImprovement(Sense sense, Real candidate, Real incumbent);
@@ -198,6 +199,7 @@ private:
     RestartStrategyEngine restart_engine_;
     HeuristicRuntimeStats stats_;
     HeuristicCallback* callback_ = nullptr;
+    mutable std::mutex state_mutex_;
     Int stagnation_epochs_ = 0;
     bool emitted_root_header_ = false;
     bool emitted_worker_header_ = false;

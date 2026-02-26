@@ -800,3 +800,43 @@ TEST_CASE("SolutionPool: concurrent submits preserve best solution", "[heuristic
     REQUIRE(best->values.size() == 1);
     CHECK_THAT(best->values[0], WithinAbs(expected, 1e-9));
 }
+
+TEST_CASE("HeuristicRuntime: finish triggers callback", "[heuristics][runtime]") {
+    struct Callback final : public HeuristicCallback {
+        Int finish_calls = 0;
+        HeuristicRuntimeStats last_stats{};
+
+        void onFinish(const HeuristicRuntimeStats& stats) override {
+            ++finish_calls;
+            last_stats = stats;
+        }
+    };
+
+    HeuristicRuntime runtime;
+    Callback callback;
+    runtime.setCallback(&callback);
+    runtime.finish();
+
+    CHECK(callback.finish_calls == 1);
+    CHECK(callback.last_stats.calls == 0);
+    CHECK(callback.last_stats.improvements == 0);
+}
+
+TEST_CASE("RestartStrategyEngine: seed controls opportunistic sequence",
+          "[heuristics][runtime]") {
+    RestartStrategyEngine a(42);
+    RestartStrategyEngine b(42);
+    RestartStrategyEngine c(99);
+
+    bool differs_from_other_seed = false;
+    for (Int epoch = 0; epoch < 32; ++epoch) {
+        const Int stagnation = epoch / 3;
+        CHECK(a.choose(HeuristicRuntimeMode::Opportunistic, epoch, stagnation) ==
+              b.choose(HeuristicRuntimeMode::Opportunistic, epoch, stagnation));
+        if (a.choose(HeuristicRuntimeMode::Opportunistic, epoch, stagnation) !=
+            c.choose(HeuristicRuntimeMode::Opportunistic, epoch, stagnation)) {
+            differs_from_other_seed = true;
+        }
+    }
+    CHECK(differs_from_other_seed);
+}

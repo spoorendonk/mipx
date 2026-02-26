@@ -470,7 +470,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
 void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
                                Int& nodes_explored, Int& total_lp_iters,
                                double& total_work,
-                               const HeuristicRuntimeConfig& runtime_config,
+                               HeuristicRuntime& heuristic_runtime,
                                SolutionPool& solution_pool,
                                Real& incumbent, std::vector<Real>& best_solution,
                                Real root_bound,
@@ -501,8 +501,6 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 
     // Worker function.
     auto worker = [&](Int thread_id) {
-        HeuristicRuntime heuristic_runtime(runtime_config);
-
         // Create thread-local LP solver by loading problem fresh.
         DualSimplexSolver local_lp;
         local_lp.load(problem_);
@@ -720,7 +718,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& queue,
                                Int& nodes_explored, Int& total_lp_iters,
                                double& total_work,
-                               const HeuristicRuntimeConfig& runtime_config,
+                               HeuristicRuntime& heuristic_runtime,
                                SolutionPool& solution_pool,
                                Real& incumbent, std::vector<Real>& best_solution,
                                Real root_bound,
@@ -735,7 +733,6 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
     auto root_result = lp.solve();
     total_lp_iters += root_result.iterations;
     total_work += root_result.work_units;
-    HeuristicRuntime heuristic_runtime(runtime_config);
     solveSerial(lp, queue, nodes_explored, total_lp_iters,
                 total_work, heuristic_runtime, solution_pool, incumbent,
                 best_solution, root_bound, elapsed);
@@ -1121,6 +1118,7 @@ MipResult MipSolver::solve() {
         best_solution = root_primals;
         solution_pool.submit({best_solution, incumbent}, "root_lp", 0);
         if (verbose_) log_.log("Root solution is integer feasible!\n");
+        root_runtime.finish();
         MipResult result;
         result.status = Status::Optimal;
         result.objective = incumbent;
@@ -1206,7 +1204,7 @@ MipResult MipSolver::solve() {
 
     if (use_parallel) {
         solveParallel(lp, queue, nodes_explored, total_lp_iters,
-                      total_work, runtime_config, solution_pool,
+                      total_work, root_runtime, solution_pool,
                       incumbent, best_solution, root_bound, elapsed);
     } else {
         solveSerial(lp, queue, nodes_explored, total_lp_iters,
@@ -1221,6 +1219,8 @@ MipResult MipSolver::solve() {
             best_solution = std::move(pooled->values);
         }
     }
+
+    root_runtime.finish();
 
     // Build result.
     MipResult result;

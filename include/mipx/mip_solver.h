@@ -112,7 +112,7 @@ private:
     void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
                        Int& nodes_explored, Int& total_lp_iters,
                        double& total_work,
-                       const HeuristicRuntimeConfig& runtime_config,
+                       HeuristicRuntime& heuristic_runtime,
                        SolutionPool& solution_pool,
                        Real& incumbent, std::vector<Real>& best_solution,
                        Real root_bound,
