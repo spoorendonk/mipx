@@ -284,6 +284,33 @@ static LpProblem buildSearchStagnationMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: symmetric binary pair so symmetry cuts should be generated/applied.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildSymmetryProbeMip() {
+    LpProblem lp;
+    lp.name = "symmetry_probe_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x0", "x1"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.row_names = {"sum"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -441,6 +468,46 @@ TEST_CASE("MipSolver: in-tree cut telemetry is populated", "[mip][cuts]") {
     const auto& cut_stats = solver.getCutStats();
     CHECK(cut_stats.tree_nodes_with_cuts + cut_stats.tree_nodes_skipped >= 1);
     CHECK(cut_stats.tree_rounds >= 0);
+}
+
+TEST_CASE("MipSolver: symmetry cuts are applied when presolve is off", "[mip][symmetry]") {
+    auto lp = buildSymmetryProbeMip();
+
+    MipSolver without_symmetry;
+    without_symmetry.setVerbose(false);
+    without_symmetry.setCutsEnabled(false);
+    without_symmetry.setPresolve(false);
+    without_symmetry.setSymmetryEnabled(false);
+    without_symmetry.load(lp);
+    const auto off = without_symmetry.solve();
+
+    MipSolver with_symmetry;
+    with_symmetry.setVerbose(false);
+    with_symmetry.setCutsEnabled(false);
+    with_symmetry.setPresolve(false);
+    with_symmetry.setSymmetryEnabled(true);
+    with_symmetry.load(lp);
+    const auto on = with_symmetry.solve();
+
+    CHECK((off.status == Status::Optimal ||
+           off.status == Status::NodeLimit ||
+           off.status == Status::TimeLimit));
+    CHECK((on.status == Status::Optimal ||
+           on.status == Status::NodeLimit ||
+           on.status == Status::TimeLimit));
+    CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
+
+    const auto& off_stats = without_symmetry.getSymmetryStats();
+    CHECK(off_stats.orbits == 0);
+    CHECK(off_stats.cuts_added == 0);
+    CHECK_FALSE(off_stats.cuts_applied);
+
+    const auto& on_stats = with_symmetry.getSymmetryStats();
+    CHECK(on_stats.orbits == 1);
+    CHECK(on_stats.cuts_added == 1);
+    CHECK(on_stats.cuts_applied);
+    CHECK(on_stats.detect_work_units > 0.0);
+    CHECK(on_stats.cut_work_units > 0.0);
 }
 
 TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {

@@ -14,6 +14,7 @@
 #include "mipx/branching.h"
 #include "mipx/core.h"
 #include "mipx/cut_manager.h"
+#include "mipx/symmetry.h"
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
@@ -140,6 +141,14 @@ struct MipTreePresolveStats {
     Real lp_delta = 0.0;
 };
 
+struct MipSymmetryStats {
+    Int orbits = 0;
+    Int cuts_added = 0;
+    bool cuts_applied = false;
+    double detect_work_units = 0.0;
+    double cut_work_units = 0.0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -215,6 +224,7 @@ public:
     void setPreRootLpFreeEarlyStop(bool enabled) { pre_root_lp_free_early_stop_ = enabled; }
     void setPreRootLpLightEnabled(bool enabled) { pre_root_lp_light_enabled_ = enabled; }
     void setPreRootPortfolioEnabled(bool enabled) { pre_root_portfolio_enabled_ = enabled; }
+    void setSymmetryEnabled(bool enabled) { symmetry_enabled_ = enabled; }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
@@ -235,6 +245,7 @@ public:
     [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
+    const MipSymmetryStats& getSymmetryStats() const { return symmetry_stats_; }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -306,6 +317,10 @@ private:
                                             std::span<const Real> current_upper,
                                             Index default_var);
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
+    [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower,
+                                             std::vector<Real>& upper,
+                                             std::vector<Index>* tightened_vars = nullptr,
+                                             double* work_units = nullptr) const;
 
     struct ConflictLiteral {
         Index variable = -1;
@@ -372,12 +387,15 @@ private:
     MipPreRootStats pre_root_stats_{};
     MipSearchStats search_stats_{};
     MipTreePresolveStats tree_presolve_stats_{};
+    MipSymmetryStats symmetry_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
     std::unordered_map<Int, Index> sibling_branch_cache_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
+    SymmetryManager symmetry_manager_;
+    bool symmetry_enabled_ = true;
     mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;

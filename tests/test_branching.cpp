@@ -2,6 +2,8 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "mipx/branching.h"
+#include "mipx/dual_simplex.h"
+#include "mipx/symmetry.h"
 
 using namespace mipx;
 
@@ -171,4 +173,138 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK(branching.upReliability(1) == 2);
     CHECK_THAT(branching.downPseudoCost(1), Catch::Matchers::WithinAbs(3.0, 1e-12));
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
+}
+
+TEST_CASE("SymmetryManager adds canonical symmetry cuts", "[symmetry]") {
+    LpProblem lp;
+    lp.name = "symmetry";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.row_names = {"sum"};
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    SymmetryManager manager;
+    manager.detect(lp);
+    REQUIRE(manager.hasSymmetry());
+    REQUIRE(!manager.orbitalFixes().empty());
+
+    LpProblem working = lp;
+    const Index root_rows = working.num_rows;
+    const Index cuts = manager.addSymmetryCuts(working);
+    CHECK(cuts == static_cast<Index>(manager.orbitalFixes().size()));
+    CHECK(working.num_rows == root_rows + cuts);
+
+    const Index sym_row = working.num_rows - 1;
+    CHECK(working.row_lower[sym_row] == -kInf);
+    CHECK(working.row_upper[sym_row] == 0.0);
+    CHECK(working.matrix.coeff(sym_row, 0) == -1.0);
+    CHECK(working.matrix.coeff(sym_row, 1) == 1.0);
+    CHECK(manager.detectWorkUnits() > 0.0);
+    CHECK(manager.cutWorkUnits() > 0.0);
+}
+
+TEST_CASE("SymmetryManager orbit and cut order is deterministic", "[symmetry]") {
+    LpProblem lp;
+    lp.name = "symmetry_order";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {1.0, 1.0, 2.0, 2.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x0", "x1", "x2", "x3"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1.0, 1.0};
+    lp.row_names = {"r0", "r1"};
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 2, 1.0}, {1, 3, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+
+    SymmetryManager manager;
+    manager.detect(lp);
+    REQUIRE(manager.hasSymmetry());
+    REQUIRE(manager.orbits().size() == 2);
+    CHECK(manager.orbits()[0].size() == 2);
+    CHECK(manager.orbits()[0][0] == 0);
+    CHECK(manager.orbits()[0][1] == 1);
+    CHECK(manager.orbits()[1].size() == 2);
+    CHECK(manager.orbits()[1][0] == 2);
+    CHECK(manager.orbits()[1][1] == 3);
+
+    LpProblem working = lp;
+    working.row_names = {"r0"};
+    const Index cuts = manager.addSymmetryCuts(working);
+    CHECK(cuts == 2);
+    CHECK(working.row_names.size() == static_cast<std::size_t>(working.num_rows));
+    CHECK(working.row_names[2] == "sym_cut_0_1");
+    CHECK(working.row_names[3] == "sym_cut_2_3");
+    CHECK(manager.cutWorkUnits() == 4.0);
+}
+
+TEST_CASE("Symmetry detection enforces canonical branching", "[branching][symmetry]") {
+    LpProblem lp;
+    lp.name = "symmetry";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.row_names = {"sum"};
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    SymmetryManager manager;
+    manager.detect(lp);
+    REQUIRE(manager.hasSymmetry());
+    CHECK(manager.canonical(0) == 0);
+    CHECK(manager.canonical(1) == 0);
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setSymmetryManager(&manager);
+    branching.setReliabilityThreshold(1);
+    branching.updatePseudoCost(0, false, 1.0);
+    branching.updatePseudoCost(0, true, 1.0);
+    DualSimplexSolver solver;
+    solver.load(lp);
+    solver.setVerbose(false);
+    solver.solve();
+
+    std::vector<Real> primal = {0.5, 0.5};
+    std::vector<Real> lb = lp.col_lower;
+    std::vector<Real> ub = lp.col_upper;
+    BranchingTelemetry telemetry;
+    auto selection = branching.select(solver,
+                                      lp,
+                                      primal,
+                                      lb,
+                                      ub,
+                                      0.0,
+                                      false,
+                                      telemetry);
+    CHECK(selection.variable == 0);
 }

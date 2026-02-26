@@ -18,6 +18,7 @@
 #include "mipx/barrier.h"
 #include "mipx/heuristics.h"
 #include "mipx/pdlp.h"
+#include "mipx/symmetry.h"
 
 #ifdef MIPX_HAS_TBB
 #include <tbb/parallel_for.h>
@@ -1018,6 +1019,69 @@ void MipSolver::logProgress(Int nodes, Int open, Int lp_iters,
     }
 }
 
+bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower,
+                                      std::vector<Real>& upper,
+                                      std::vector<Index>* tightened_vars,
+                                      double* work_units) const {
+    if (!symmetry_enabled_) return true;
+    const auto& fixes = symmetry_manager_.orbitalFixes();
+    if (fixes.empty()) return true;
+
+    if (work_units != nullptr) {
+        *work_units += static_cast<double>(fixes.size());
+    }
+
+    std::vector<unsigned char> seen;
+    if (tightened_vars != nullptr) {
+        seen.assign(lower.size(), 0);
+        tightened_vars->clear();
+    }
+
+    bool changed = true;
+    const Index cols = static_cast<Index>(lower.size());
+    while (changed) {
+        changed = false;
+        for (const auto& fix : fixes) {
+            if (fix.canonical < 0 || fix.canonical >= cols ||
+                fix.variable < 0 || fix.variable >= cols) {
+                continue;
+            }
+            const Real new_canon_lower = std::max(lower[fix.canonical],
+                                                  lower[fix.variable]);
+            if (new_canon_lower > upper[fix.canonical] + 1e-12) {
+                return false;
+            }
+            if (new_canon_lower > lower[fix.canonical]) {
+                lower[fix.canonical] = new_canon_lower;
+                changed = true;
+                if (tightened_vars != nullptr &&
+                    !seen[static_cast<std::size_t>(fix.canonical)]) {
+                    tightened_vars->push_back(fix.canonical);
+                    seen[static_cast<std::size_t>(fix.canonical)] = 1;
+                }
+            }
+            const Real new_var_upper = std::min(upper[fix.variable],
+                                                upper[fix.canonical]);
+            if (new_var_upper < lower[fix.variable] - 1e-12) {
+                return false;
+            }
+            if (new_var_upper < upper[fix.variable]) {
+                upper[fix.variable] = new_var_upper;
+                changed = true;
+                if (tightened_vars != nullptr &&
+                    !seen[static_cast<std::size_t>(fix.variable)]) {
+                    tightened_vars->push_back(fix.variable);
+                    seen[static_cast<std::size_t>(fix.variable)] = 1;
+                }
+            }
+        }
+        if (work_units != nullptr && changed) {
+            *work_units += static_cast<double>(fixes.size());
+        }
+    }
+    return true;
+}
+
 bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              Real incumbent_snapshot,
                              std::vector<BnbNode>& children_out,
@@ -1056,6 +1120,20 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         }
     }
     touched_vars.clear();
+    std::vector<Index> symmetry_tightened;
+    if (!enforceSymmetryBounds(current_lower, current_upper,
+                               &symmetry_tightened, &node_work_out)) {
+        if (use_conflicts) {
+            learnConflictFromNode(node.bound_changes, false);
+        }
+        node_stats.bound_apply_seconds += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        return false;
+    }
+    for (Index j : symmetry_tightened) {
+        lp.setColBounds(j, current_lower[j], current_upper[j]);
+        touched_vars.push_back(j);
+    }
 
     // Apply this node's bound changes using per-variable aggregation.
     std::unordered_map<Index, Index> var_pos;
@@ -1096,6 +1174,20 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
             current_lower[j] = node_lb[p];
             current_upper[j] = node_ub[p];
         }
+        touched_vars.push_back(j);
+    }
+    symmetry_tightened.clear();
+    if (!enforceSymmetryBounds(current_lower, current_upper,
+                               &symmetry_tightened, &node_work_out)) {
+        if (use_conflicts) {
+            learnConflictFromNode(node.bound_changes, false);
+        }
+        node_stats.bound_apply_seconds += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        return false;
+    }
+    for (Index j : symmetry_tightened) {
+        lp.setColBounds(j, current_lower[j], current_upper[j]);
         touched_vars.push_back(j);
     }
     node_stats.bound_apply_seconds += std::chrono::duration<double>(
@@ -1146,7 +1238,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     node_stats.lp_solve_seconds += std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
     node_iters_out = node_result.iterations;
-    node_work_out = node_result.work_units;
+    node_work_out += node_result.work_units;
 
     if (node_result.status == Status::Infeasible) {
         if (use_conflicts) {
@@ -1243,6 +1335,21 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 }
             }
 
+            symmetry_tightened.clear();
+            if (!enforceSymmetryBounds(current_lower, current_upper,
+                                       &symmetry_tightened, &node_work_out)) {
+                ++tree_presolve_stats_.infeasible;
+                if (use_conflicts) {
+                    learnConflictFromNode(node.bound_changes, false);
+                }
+                return false;
+            }
+            for (Index j : symmetry_tightened) {
+                lp.setColBounds(j, current_lower[j], current_upper[j]);
+                touched_vars.push_back(j);
+                ++activity_tight;
+            }
+
             if (incumbent_snapshot < kInf && node_obj_out < incumbent_snapshot - 1e-6) {
                 const auto reduced = lp.getReducedCosts();
                 if (static_cast<Index>(reduced.size()) >= problem_.num_cols) {
@@ -1273,6 +1380,21 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                                 return false;
                             }
                         }
+                    }
+                    symmetry_tightened.clear();
+                    if (!enforceSymmetryBounds(current_lower, current_upper,
+                                               &symmetry_tightened,
+                                               &node_work_out)) {
+                        ++tree_presolve_stats_.infeasible;
+                        if (use_conflicts) {
+                            learnConflictFromNode(node.bound_changes, false);
+                        }
+                        return false;
+                    }
+                    for (Index j : symmetry_tightened) {
+                        lp.setColBounds(j, current_lower[j], current_upper[j]);
+                        touched_vars.push_back(j);
+                        ++rc_tight;
                     }
                 }
             }
@@ -1519,6 +1641,20 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                              const std::function<double()>& elapsed) {
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
+    std::vector<Index> root_symmetry_tightened;
+    double root_symmetry_work = 0.0;
+    if (!enforceSymmetryBounds(current_lower, current_upper,
+                               &root_symmetry_tightened,
+                               &root_symmetry_work)) {
+        if (verbose_) {
+            log_.log("Symmetry propagation detected infeasible root bounds.\n");
+        }
+        return;
+    }
+    for (Index j : root_symmetry_tightened) {
+        lp.setColBounds(j, current_lower[j], current_upper[j]);
+    }
+    total_work += root_symmetry_work;
     std::vector<Index> touched_vars;
     double last_log_time = -kLogInterval;  // ensure first node is logged
     touched_vars.reserve(problem_.num_cols);
@@ -1769,6 +1905,20 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         local_lp.setBasis(root_lp.getBasis());
         std::vector<Real> current_lower = problem_.col_lower;
         std::vector<Real> current_upper = problem_.col_upper;
+        std::vector<Index> root_symmetry_tightened;
+        double root_symmetry_work = 0.0;
+        if (!enforceSymmetryBounds(current_lower, current_upper,
+                                   &root_symmetry_tightened,
+                                   &root_symmetry_work)) {
+            return;
+        }
+        for (Index j : root_symmetry_tightened) {
+            local_lp.setColBounds(j, current_lower[j], current_upper[j]);
+        }
+        auto old_worker_w = atomic_work.load(std::memory_order_relaxed);
+        while (!atomic_work.compare_exchange_weak(old_worker_w,
+                                                  old_worker_w + root_symmetry_work,
+                                                  std::memory_order_relaxed)) {}
         std::vector<Index> touched_vars;
         touched_vars.reserve(problem_.num_cols);
         NodeWorkStats local_node_stats;
@@ -2007,6 +2157,7 @@ MipResult MipSolver::solve() {
     pre_root_stats_ = {};
     search_stats_ = {};
     tree_presolve_stats_ = {};
+    symmetry_stats_ = {};
     conflict_pool_.clear();
     conflict_scores_.assign(problem_.num_cols, 0.0);
     sibling_branch_cache_.clear();
@@ -2121,6 +2272,8 @@ MipResult MipSolver::solve() {
     Presolver presolver;
     LpProblem working_problem;
     bool did_presolve = false;
+    double symmetry_pre_work = 0.0;
+    Index symmetry_cuts_added = 0;
 
     if (presolve_) {
         working_problem = presolver.presolve(problem_);
@@ -2149,11 +2302,41 @@ MipResult MipSolver::solve() {
         working_problem = problem_;
     }
 
+    if (symmetry_enabled_) {
+        symmetry_manager_.detect(working_problem);
+        const double detect_work = symmetry_manager_.detectWorkUnits();
+        symmetry_pre_work += detect_work;
+        symmetry_stats_.detect_work_units = detect_work;
+        const SymmetryManager* ptr = symmetry_manager_.hasSymmetry()
+            ? &symmetry_manager_
+            : nullptr;
+        symmetry_stats_.orbits =
+            static_cast<Int>(symmetry_manager_.orbits().size());
+        branching_rule_.setSymmetryManager(ptr);
+        if (ptr) {
+            symmetry_cuts_added = symmetry_manager_.addSymmetryCuts(working_problem);
+            symmetry_stats_.cuts_added = symmetry_cuts_added;
+            const double cut_work = symmetry_manager_.cutWorkUnits();
+            symmetry_pre_work += cut_work;
+            symmetry_stats_.cut_work_units = cut_work;
+            if (verbose_) {
+                const auto& orbits = symmetry_manager_.orbits();
+                log_.log("Symmetry detected %zu orbit%s (canonical branching enforced, "
+                         "%d symmetry cut%s added).\n",
+                         orbits.size(), orbits.size() == 1 ? "" : "s",
+                         symmetry_cuts_added, symmetry_cuts_added == 1 ? "" : "s");
+            }
+        }
+    } else {
+        branching_rule_.setSymmetryManager(nullptr);
+    }
+
     if (presolver.isInfeasible()) {
         MipResult result;
         result.status = Status::Infeasible;
         result.nodes = 0;
         result.lp_iterations = 0;
+        result.work_units = symmetry_pre_work;
         result.time_seconds = elapsed();
         if (verbose_) log_.log("Presolve detected infeasibility.\n");
         return result;
@@ -2167,6 +2350,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 0;
         result.lp_iterations = 0;
+        result.work_units = symmetry_pre_work;
         result.time_seconds = elapsed();
         if (did_presolve) {
             result.solution = presolver.postsolve({});
@@ -2174,11 +2358,18 @@ MipResult MipSolver::solve() {
         return result;
     }
 
+    const bool using_transformed_problem = did_presolve || symmetry_cuts_added > 0;
+    symmetry_stats_.cuts_applied = (symmetry_cuts_added > 0) &&
+                                   using_transformed_problem;
     LpProblem original_problem;
-    if (did_presolve) {
+    if (using_transformed_problem) {
         original_problem = std::move(problem_);
         problem_ = std::move(working_problem);
     }
+    auto restoreProblem = [&]() {
+        if (!using_transformed_problem) return;
+        problem_ = std::move(original_problem);
+    };
 
     auto applyPostsolve = [&](MipResult& result) {
         if (did_presolve) {
@@ -2192,7 +2383,6 @@ MipResult MipSolver::solve() {
                     result.best_bound += problem_.obj_offset;
                 }
             }
-            problem_ = std::move(original_problem);
         }
     };
 
@@ -2224,7 +2414,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 0;
         result.lp_iterations = lr.iterations;
-        result.work_units = lr.work_units;
+        result.work_units = lr.work_units + symmetry_pre_work;
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
@@ -2235,6 +2425,7 @@ MipResult MipSolver::solve() {
             }
         }
         applyPostsolve(result);
+        restoreProblem();
         return result;
     }
 
@@ -2243,7 +2434,7 @@ MipResult MipSolver::solve() {
     Real incumbent = kInf;
     std::vector<Real> best_solution;
     Int total_lp_iters = 0;
-    double total_work = 0.0;
+    double total_work = symmetry_pre_work;
 
     std::vector<Index> discrete_vars;
     discrete_vars.reserve(problem_.num_cols);
@@ -2936,6 +3127,7 @@ MipResult MipSolver::solve() {
         result.lp_iterations = total_lp_iters;
         result.work_units = total_work;
         result.time_seconds = elapsed();
+        restoreProblem();
         return result;
     }
 
@@ -2947,6 +3139,7 @@ MipResult MipSolver::solve() {
         result.lp_iterations = total_lp_iters;
         result.work_units = total_work;
         result.time_seconds = elapsed();
+        restoreProblem();
         return result;
     }
 
@@ -2958,6 +3151,7 @@ MipResult MipSolver::solve() {
         result.lp_iterations = total_lp_iters;
         result.work_units = total_work;
         result.time_seconds = elapsed();
+        restoreProblem();
         return result;
     }
 
@@ -2985,6 +3179,7 @@ MipResult MipSolver::solve() {
             result.lp_iterations = total_lp_iters;
             result.work_units = total_work;
             result.time_seconds = elapsed();
+            restoreProblem();
             return result;
         }
         if (sync.status == Status::Unbounded) {
@@ -2997,6 +3192,7 @@ MipResult MipSolver::solve() {
             result.lp_iterations = total_lp_iters;
             result.work_units = total_work;
             result.time_seconds = elapsed();
+            restoreProblem();
             return result;
         }
         if (sync.status != Status::Optimal) {
@@ -3009,6 +3205,7 @@ MipResult MipSolver::solve() {
             result.lp_iterations = total_lp_iters;
             result.work_units = total_work;
             result.time_seconds = elapsed();
+            restoreProblem();
             return result;
         }
         root_bound = sync.objective;
@@ -3057,6 +3254,8 @@ MipResult MipSolver::solve() {
         result.work_units = total_work;
         result.time_seconds = elapsed();
         result.solution = std::move(best_solution);
+        applyPostsolve(result);
+        restoreProblem();
         return result;
     }
 
@@ -3199,6 +3398,7 @@ MipResult MipSolver::solve() {
     }
 
     applyPostsolve(result);
+    restoreProblem();
 
     if (verbose_) {
         if (branching_stats_.selections > 0) {

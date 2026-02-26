@@ -159,6 +159,19 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
 
     if (candidates.empty()) return selection;
 
+    if (symmetry_manager_ != nullptr) {
+        std::vector<Candidate> filtered;
+        filtered.reserve(candidates.size());
+        for (const auto& c : candidates) {
+            if (isCanonicalCandidate(c.var, primal_values)) {
+                filtered.push_back(c);
+            }
+        }
+        if (!filtered.empty()) {
+            candidates.swap(filtered);
+        }
+    }
+
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) {
                   if (a.prefilter_score != b.prefilter_score) {

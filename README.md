@@ -19,6 +19,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
 | **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
 | **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
+| **Symmetry handling** | Column orbit detection, symmetry-breaking cuts, and orbital bound fixing to enforce canonical order |
 | **Python API** | Nanobind bindings for model I/O and MIP solve flow (`LpProblem`, `MipSolver`) |
 | **Concurrent root racing** | Optional dual/barrier/PDLP root race with cooperative stop and winner telemetry |
 | **Parallel tree search** | Optional TBB-parallel node processing |
@@ -120,6 +121,7 @@ is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 | `--no-pre-root-lplight` | — | Disable LP-light pre-root arms |
 | `--pre-root-portfolio` | on | Enable adaptive pre-root arm scheduler (Thompson sampling) |
 | `--pre-root-fixed` | off | Use fixed pre-root arm schedule (disable adaptive portfolio) |
+| `--no-symmetry` | off | Disable symmetry detection and canonical branch selection |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
