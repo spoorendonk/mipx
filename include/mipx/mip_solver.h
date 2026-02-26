@@ -167,6 +167,8 @@ private:
     static constexpr Int kRootHeuristicMaxIntVars = 96;
     static constexpr Int kRootFeasPumpMaxIter = 3;
     static constexpr Int kRootFeasPumpSubproblemIterLimit = 20;
+    static constexpr Int kRootAuxObjSubproblemIterLimit = 30;
+    static constexpr Int kRootAuxObjMinActiveIntegerVars = 1;
     static constexpr Int kRootRensSubproblemIterLimit = 40;
     static constexpr Int kRootRensMinFixedVars = 16;
     static constexpr Real kRootRensMinFixedRate = 0.25;
