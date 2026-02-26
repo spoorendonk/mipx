@@ -1,0 +1,9 @@
+{
+  "generated_at_utc": "2026-02-26T07:25:55.963562+00:00",
+  "python_version": "3.12.3",
+  "platform": "Linux-6.17.0-14-generic-x86_64-with-glibc2.39",
+  "mipx_binary": "/home/simon/code/mip-exact/build/mipx-solve",
+  "highspy_version": "1.13.1",
+  "cuopt_version": "",
+  "nvidia_smi": "NVIDIA GeForce RTX 5070 Ti, 580.95.05, 16303 MiB"
+}

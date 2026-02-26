@@ -11,12 +11,18 @@ Files:
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
+- `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
+  (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).
+- `barrier_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
+- `barrier_lp_compare_meta.json`: barrier comparison generation metadata
+  (tool versions, GPU/driver info).
 
 Regenerate with:
 
 ```bash
 ./tests/perf/generate_highspy_baselines.sh
 ./tests/perf/generate_mipx_baselines.sh
+./tests/perf/generate_barrier_lp_baselines.sh
 ```
 
 ## Mittelman Baselines

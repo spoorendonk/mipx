@@ -22,6 +22,7 @@ Generate and store HiGHS/highspy wall-clock baselines:
 ```bash
 ./tests/perf/generate_highspy_baselines.sh
 ./tests/perf/generate_mipx_baselines.sh
+./tests/perf/generate_barrier_lp_baselines.sh
 ```
 
 This writes:
@@ -29,6 +30,8 @@ This writes:
 - `tests/perf/baselines/highspy_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
+- `tests/perf/baselines/barrier_lp_compare_netlib.csv`
+- `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
 
 The MIP highspy baseline uses the stable small trio:
 `p0201,gt2,flugpl`.
@@ -71,6 +74,31 @@ python3 tests/perf/check_regression.py \
 The regression gate fails if the median candidate metric regresses by more
 than the configured percentage. Default gate is strict: `0.0%` allowed median
 regression.
+
+## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
+
+For LP barrier-focused comparisons (CPU/GPU and cross-solver):
+
+```bash
+python3 tests/perf/run_barrier_lp_compare.py \
+  --mipx-binary ./build/mipx-solve \
+  --instances-dir tests/data/netlib \
+  --output /tmp/barrier_lp_compare.csv \
+  --repeats 3 \
+  --threads 1 \
+  --time-limit 60 \
+  --disable-presolve \
+  --force-mipx-gpu
+```
+
+This emits one CSV row per `(instance, solver)` with:
+- `solver in {mipx_barrier_cpu, mipx_barrier_gpu, highs_ipx, cuopt_barrier}`
+- `time_seconds, iterations, status, objective, work_units`
+
+Notes:
+- `--disable-presolve` isolates barrier-kernel behavior and avoids presolve skew.
+- `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
+- `--relax-integrality` solves LP relaxations for MIP instances (e.g., MIPLIB `.mps.gz`) in all solvers.
 
 To compare mipx against HiGHS/highspy, use `--metric time_seconds` and one of
 the stored highspy baseline CSV files as `--baseline`.
