@@ -194,6 +194,7 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
 
         cut.lower = cut_rhs;
         cut.upper = kInf;
+        cut.family = CutFamily::Gomory;
 
         // Compute violation: lhs = sum cut_coeff[j] * x_j, violation = rhs - lhs.
         Real lhs = 0.0;

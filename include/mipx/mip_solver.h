@@ -14,11 +14,11 @@
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
-#include "mipx/gomory.h"
 #include "mipx/heuristic_runtime.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
+#include "mipx/separators.h"
 
 namespace mipx {
 
@@ -69,6 +69,22 @@ public:
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
+    void setCutFamilyEnabled(CutFamily family, bool enabled) {
+        switch (family) {
+            case CutFamily::Gomory: cut_family_config_.gomory = enabled; break;
+            case CutFamily::Mir: cut_family_config_.mir = enabled; break;
+            case CutFamily::Cover: cut_family_config_.cover = enabled; break;
+            case CutFamily::ImpliedBound: cut_family_config_.implied_bound = enabled; break;
+            case CutFamily::Clique: cut_family_config_.clique = enabled; break;
+            case CutFamily::ZeroHalf: cut_family_config_.zero_half = enabled; break;
+            case CutFamily::Mixing: cut_family_config_.mixing = enabled; break;
+            case CutFamily::Unknown:
+            case CutFamily::Count:
+            default: break;
+        }
+    }
+    void setCutFamilyConfig(const CutFamilyConfig& config) { cut_family_config_ = config; }
+    [[nodiscard]] const CutFamilyConfig& getCutFamilyConfig() const { return cut_family_config_; }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
@@ -162,6 +178,7 @@ private:
     Int max_cut_rounds_ = 20;
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
+    CutFamilyConfig cut_family_config_{};
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     bool barrier_use_gpu_ = true;
     Int barrier_gpu_min_rows_ = 512;

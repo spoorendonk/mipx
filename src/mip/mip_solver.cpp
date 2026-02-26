@@ -14,7 +14,6 @@
 
 #include "mipx/cut_pool.h"
 #include "mipx/barrier.h"
-#include "mipx/gomory.h"
 #include "mipx/heuristics.h"
 #include "mipx/pdlp.h"
 
@@ -1320,8 +1319,10 @@ MipResult MipSolver::solve() {
 
 Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work) {
     CutPool pool;
-    GomorySeparator gomory;
-    gomory.setMaxCuts(max_cuts_per_round_);
+    SeparatorManager separators;
+    separators.setConfig(cut_family_config_);
+    separators.setMaxCutsPerFamily(max_cuts_per_round_);
+    CutSeparationStats total_family_stats;
 
     Int total_cuts = 0;
     Int rounds_done = 0;
@@ -1334,7 +1335,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
         Real prev_obj = lp.getObjective();
 
-        Int new_cuts = gomory.separate(lp, problem_, primals, pool);
+        CutSeparationStats round_family_stats;
+        Int new_cuts = separators.separate(lp, problem_, primals, pool,
+                                           round_family_stats);
 
         if (new_cuts == 0) break;
 
@@ -1345,6 +1348,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         std::vector<Real> values;
         std::vector<Real> lower;
         std::vector<Real> upper;
+        std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};
+        selected_by_family.fill(0);
+        Int selected_total = 0;
 
         for (Index idx : top_indices) {
             const auto& cut = pool[idx];
@@ -1357,6 +1363,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             }
             lower.push_back(cut.lower);
             upper.push_back(cut.upper);
+            selected_by_family[static_cast<std::size_t>(cut.family)] += 1;
+            ++selected_total;
         }
 
         if (lower.empty()) break;
@@ -1376,6 +1384,21 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         Real new_obj = result.objective;
         Real improvement = std::abs(new_obj - prev_obj);
 
+        for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
+            auto& dst = total_family_stats.families[fi];
+            auto& src = round_family_stats.families[fi];
+            if (selected_total > 0 && selected_by_family[fi] > 0) {
+                src.lp_delta += improvement * static_cast<Real>(selected_by_family[fi]) /
+                                static_cast<Real>(selected_total);
+            }
+            dst.attempted += src.attempted;
+            dst.generated += src.generated;
+            dst.accepted += src.accepted;
+            dst.efficacy_sum += src.efficacy_sum;
+            dst.lp_delta += src.lp_delta;
+            dst.time_seconds += src.time_seconds;
+        }
+
         auto new_primals = lp.getPrimalValues();
         pool.ageAll(new_primals);
         pool.purge(10);
@@ -1387,6 +1410,19 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         Real end_obj = lp.getObjective();
         log_.log("Cutting planes: %d rounds, %d cuts, obj %.10e -> %.10e\n",
                  rounds_done, total_cuts, start_obj, end_obj);
+        for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
+            const auto family = static_cast<CutFamily>(fi);
+            if (family == CutFamily::Unknown || family == CutFamily::Count) continue;
+            const auto& s = total_family_stats.families[fi];
+            if (s.attempted == 0 && s.generated == 0 && s.accepted == 0) continue;
+            const Real avg_eff = (s.accepted > 0)
+                ? s.efficacy_sum / static_cast<Real>(s.accepted)
+                : 0.0;
+            log_.log("  cuts[%s]: attempted=%d generated=%d accepted=%d "
+                     "avg_eff=%.3e lp_delta=%.3e time=%.3fs\n",
+                     cutFamilyName(family), s.attempted, s.generated, s.accepted,
+                     avg_eff, s.lp_delta, s.time_seconds);
+        }
     }
 
     return total_cuts;

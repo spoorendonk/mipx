@@ -28,6 +28,7 @@ add_library(mipx STATIC
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp
+    cuts/separators.cpp
 )
 
 target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
