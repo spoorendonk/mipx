@@ -547,6 +547,147 @@ TEST_CASE("MipSolver: work units are positive", "[mip][work_units]") {
     CHECK(result.work_units > 0.0);
 }
 
+TEST_CASE("MipSolver: exact refinement default remains off and non-regressive",
+          "[mip][exact_refinement]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver_default;
+    solver_default.setVerbose(false);
+    solver_default.setCutsEnabled(false);
+    solver_default.load(lp);
+    const auto default_result = solver_default.solve();
+
+    MipSolver solver_explicit_off;
+    solver_explicit_off.setVerbose(false);
+    solver_explicit_off.setCutsEnabled(false);
+    solver_explicit_off.setExactRefinementMode(ExactRefinementMode::Off);
+    solver_explicit_off.load(lp);
+    const auto off_result = solver_explicit_off.solve();
+
+    REQUIRE(default_result.status == Status::Optimal);
+    REQUIRE(off_result.status == Status::Optimal);
+    CHECK_THAT(default_result.objective, WithinAbs(off_result.objective, 1e-9));
+    CHECK_THAT(default_result.work_units, WithinAbs(off_result.work_units, 1e-9));
+
+    const auto& default_stats = solver_default.getExactRefinementStats();
+    CHECK(default_stats.mode == ExactRefinementMode::Off);
+    CHECK_FALSE(default_stats.triggered);
+    CHECK(default_stats.evaluation_work_units == 0.0);
+}
+
+TEST_CASE("MipSolver: exact refinement forced mode is deterministic",
+          "[mip][exact_refinement]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setExactRefinementMode(ExactRefinementMode::On);
+    solver_a.setExactRefinementRationalCheck(true);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setExactRefinementMode(ExactRefinementMode::On);
+    solver_b.setExactRefinementRationalCheck(true);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    REQUIRE(a.status == Status::Optimal);
+    REQUIRE(b.status == Status::Optimal);
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+    CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
+
+    const auto& sa = solver_a.getExactRefinementStats();
+    const auto& sb = solver_b.getExactRefinementStats();
+    CHECK(sa.mode == ExactRefinementMode::On);
+    CHECK(sb.mode == ExactRefinementMode::On);
+    CHECK(sa.rational_verification_enabled);
+    CHECK(sb.rational_verification_enabled);
+    CHECK(sa.triggered);
+    CHECK(sb.triggered);
+    CHECK(sa.rounds >= 1);
+    CHECK(sa.evaluation_work_units > 0.0);
+    CHECK_THAT(sa.evaluation_work_units, WithinAbs(sb.evaluation_work_units, 1e-9));
+    CHECK(sa.resolve_calls == sb.resolve_calls);
+    CHECK(sa.resolve_iterations == sb.resolve_iterations);
+}
+
+TEST_CASE("MipSolver: exact refinement auto mode triggers on unsupported rational checks",
+          "[mip][exact_refinement]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setExactRefinementMode(ExactRefinementMode::Auto);
+    solver.setExactRefinementRationalCheck(true);
+    solver.setExactRefinementRationalScale(1.0e10);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& stats = solver.getExactRefinementStats();
+    CHECK(stats.triggered);
+    CHECK_FALSE(stats.rational_supported);
+    CHECK_FALSE(stats.rational_certificate_passed);
+    CHECK_FALSE(stats.certificate_passed);
+}
+
+TEST_CASE("MipSolver: exact refinement evaluates active root LP rows including cuts",
+          "[mip][exact_refinement][cuts]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(true);
+    solver.setCutEffortMode(CutEffortMode::Aggressive);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& cut_stats = solver.getCutStats();
+    REQUIRE(cut_stats.root_cuts_added > 0);
+
+    const auto& stats = solver.getExactRefinementStats();
+    CHECK(stats.rows_evaluated == lp.num_rows + cut_stats.root_cuts_added);
+    CHECK(stats.cols_evaluated == lp.num_cols);
+}
+
+TEST_CASE("MipSolver: exact refinement off mode does not evaluate certificate rows",
+          "[mip][exact_refinement][cuts]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(true);
+    solver.setCutEffortMode(CutEffortMode::Aggressive);
+    solver.setExactRefinementMode(ExactRefinementMode::Off);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& cut_stats = solver.getCutStats();
+    REQUIRE(cut_stats.root_cuts_added > 0);
+
+    const auto& stats = solver.getExactRefinementStats();
+    CHECK(stats.mode == ExactRefinementMode::Off);
+    CHECK_FALSE(stats.triggered);
+    CHECK(stats.rows_evaluated == 0);
+    CHECK(stats.cols_evaluated == 0);
+    CHECK(stats.evaluation_work_units == 0.0);
+}
+
 TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
           "[mip][heuristics]") {
     auto lp = buildRootFractionalHeuristicMip();

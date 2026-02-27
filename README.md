@@ -20,6 +20,7 @@ barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic run
 | **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
 | **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
 | **Symmetry handling** | Column orbit detection, symmetry-breaking cuts, and orbital bound fixing to enforce canonical order |
+| **Exact LP refinement** | Optional root-certificate refinement (`off/auto/on`), long-double checks, and scaled-rational verification |
 | **Python API** | Nanobind bindings for model I/O and MIP solve flow (`LpProblem`, `MipSolver`) |
 | **Concurrent root racing** | Optional dual/barrier/PDLP root race with cooperative stop and winner telemetry |
 | **Parallel tree search** | Optional TBB-parallel node processing |
@@ -122,6 +123,16 @@ is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 | `--pre-root-portfolio` | on | Enable adaptive pre-root arm scheduler (Thompson sampling) |
 | `--pre-root-fixed` | off | Use fixed pre-root arm schedule (disable adaptive portfolio) |
 | `--no-symmetry` | off | Disable symmetry detection and canonical branch selection |
+| `--exact-refine-off` | on | Disable exact LP refinement checks (default behavior) |
+| `--exact-refine-auto` | off | Trigger exact refinement only on numerical warning thresholds |
+| `--exact-refine-on` | off | Force exact refinement pipeline at root LP |
+| `--exact-rational-check` | off | Enable scaled-rational certificate verification |
+| `--exact-no-rational-check` | — | Disable scaled-rational certificate verification |
+| `--exact-warning-tol <t>` | 1e-7 | Warning threshold for auto-triggered exact refinement |
+| `--exact-cert-tol <t>` | 1e-8 | Certificate tolerance for refinement checks |
+| `--exact-max-rounds <n>` | 2 | Maximum exact refinement rounds |
+| `--exact-repair-passes <n>` | 2 | Deterministic primal repair passes per refinement round |
+| `--exact-rational-scale <s>` | 1e6 | Scaling factor used in rationalized verification |
 | `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
 | `--no-gpu` | — | Force CPU backend for barrier/PDLP |
 | `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |

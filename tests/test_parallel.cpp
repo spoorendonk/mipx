@@ -217,6 +217,38 @@ TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
     CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
 }
 
+TEST_CASE("Parallel: deterministic heuristic mode is thread-count invariant",
+          "[parallel][tbb][heuristics]") {
+    auto lp = buildBranchingMip();
+
+    MipSolver single_thread;
+    single_thread.setVerbose(false);
+    single_thread.setNumThreads(1);
+    single_thread.setCutsEnabled(false);
+    single_thread.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    single_thread.setHeuristicSeed(77);
+    single_thread.setSearchProfile(SearchProfile::Stable);
+    single_thread.load(lp);
+    const auto one = single_thread.solve();
+
+    MipSolver four_threads;
+    four_threads.setVerbose(false);
+    four_threads.setNumThreads(4);
+    four_threads.setCutsEnabled(false);
+    four_threads.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    four_threads.setHeuristicSeed(77);
+    four_threads.setSearchProfile(SearchProfile::Stable);
+    four_threads.load(lp);
+    const auto four = four_threads.solve();
+
+    REQUIRE(one.status == Status::Optimal);
+    REQUIRE(four.status == Status::Optimal);
+    CHECK(one.nodes == four.nodes);
+    CHECK(one.lp_iterations == four.lp_iterations);
+    CHECK_THAT(one.objective, WithinAbs(four.objective, 1e-9));
+    CHECK_THAT(one.work_units, WithinAbs(four.work_units, 1e-9));
+}
+
 TEST_CASE("Parallel: deterministic mode with symmetry is reproducible",
           "[parallel][tbb][heuristics][symmetry]") {
     auto lp = buildSymmetryBranchingMip();

@@ -26,6 +26,11 @@ int main(int argc, char* argv[]) {
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
             "[--pre-root-lplight|--no-pre-root-lplight] "
             "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
+            "[--exact-refine-off|--exact-refine-auto|--exact-refine-on] "
+            "[--exact-rational-check|--exact-no-rational-check] "
+            "[--exact-warning-tol T] [--exact-cert-tol T] "
+            "[--exact-max-rounds N] [--exact-repair-passes N] "
+            "[--exact-rational-scale S] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -58,6 +63,14 @@ int main(int argc, char* argv[]) {
     bool pre_root_portfolio = true;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
     bool symmetry_enabled = true;
+    mipx::ExactRefinementMode exact_refine_mode =
+        mipx::ExactRefinementMode::Off;
+    bool exact_rational_check = false;
+    double exact_warning_tol = 1e-7;
+    double exact_cert_tol = 1e-8;
+    mipx::Int exact_max_rounds = 2;
+    mipx::Int exact_repair_passes = 2;
+    double exact_rational_scale = 1.0e6;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -118,6 +131,28 @@ int main(int argc, char* argv[]) {
             pre_root_portfolio = false;
         } else if (arg == "--no-symmetry") {
             symmetry_enabled = false;
+        } else if (arg == "--exact-refine-off") {
+            exact_refine_mode = mipx::ExactRefinementMode::Off;
+        } else if (arg == "--exact-refine-auto") {
+            exact_refine_mode = mipx::ExactRefinementMode::Auto;
+        } else if (arg == "--exact-refine-on") {
+            exact_refine_mode = mipx::ExactRefinementMode::On;
+        } else if (arg == "--exact-rational-check") {
+            exact_rational_check = true;
+        } else if (arg == "--exact-no-rational-check") {
+            exact_rational_check = false;
+        } else if (arg == "--exact-warning-tol" && i + 1 < argc) {
+            exact_warning_tol = std::max(1e-12, std::atof(argv[++i]));
+        } else if (arg == "--exact-cert-tol" && i + 1 < argc) {
+            exact_cert_tol = std::max(1e-12, std::atof(argv[++i]));
+        } else if (arg == "--exact-max-rounds" && i + 1 < argc) {
+            exact_max_rounds =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--exact-repair-passes" && i + 1 < argc) {
+            exact_repair_passes =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--exact-rational-scale" && i + 1 < argc) {
+            exact_rational_scale = std::max(1.0, std::atof(argv[++i]));
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
         } else if (arg == "--search-default") {
@@ -181,6 +216,13 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setSymmetryEnabled(symmetry_enabled);
+            solver.setExactRefinementMode(exact_refine_mode);
+            solver.setExactRefinementRationalCheck(exact_rational_check);
+            solver.setExactRefinementWarningTolerance(exact_warning_tol);
+            solver.setExactRefinementCertificateTolerance(exact_cert_tol);
+            solver.setExactRefinementMaxRounds(exact_max_rounds);
+            solver.setExactRefinementRepairPasses(exact_repair_passes);
+            solver.setExactRefinementRationalScale(exact_rational_scale);
             solver.setSearchProfile(search_profile);
             solver.load(lp);
             auto result = solver.solve();

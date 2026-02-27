@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <numeric>
@@ -19,6 +20,7 @@
 #include "mipx/heuristics.h"
 #include "mipx/pdlp.h"
 #include "mipx/symmetry.h"
+#include "mipx/work_units.h"
 
 #ifdef MIPX_HAS_TBB
 #include <tbb/parallel_for.h>
@@ -97,6 +99,15 @@ const char* searchProfileName(SearchProfile profile) {
     }
 }
 
+const char* exactRefinementModeName(ExactRefinementMode mode) {
+    switch (mode) {
+        case ExactRefinementMode::Off: return "off";
+        case ExactRefinementMode::Auto: return "auto";
+        case ExactRefinementMode::On: return "on";
+        default: return "off";
+    }
+}
+
 constexpr bool kLpLightCompiled =
 #ifdef MIPX_HAS_LP_LIGHT
     true;
@@ -106,6 +117,11 @@ constexpr bool kLpLightCompiled =
 
 const char* lpLightBackendName() {
     return kLpLightCompiled ? "dual" : "none";
+}
+
+uint64_t workUnitTicks(double work_units) {
+    if (!std::isfinite(work_units) || work_units <= 0.0) return 0;
+    return static_cast<uint64_t>(std::llround(work_units * 1e6));
 }
 
 enum class PreRootArm : int {
@@ -1876,7 +1892,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     std::mutex incumbent_mutex;
     std::atomic<Int> atomic_nodes{nodes_explored};
     std::atomic<Int> atomic_lp_iters{total_lp_iters};
-    std::atomic<double> atomic_work{total_work};
+    AtomicWorkUnits atomic_work;
+    atomic_work.count(workUnitTicks(total_work));
     std::atomic<bool> should_stop{false};
     std::mutex stats_mutex;
     double last_log_time = -kLogInterval;  // ensure first log fires
@@ -1888,10 +1905,18 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     Int rins_fixed_sum = 0;
 
     // Each thread needs its own LP solver instance.
-    Int actual_threads = std::min(num_threads_, static_cast<Int>(std::thread::hardware_concurrency()));
+    Int requested_threads = num_threads_;
+    if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
+        requested_threads = 1;
+    }
+    Int actual_threads =
+        std::min(requested_threads, static_cast<Int>(std::thread::hardware_concurrency()));
     if (actual_threads < 1) actual_threads = 1;
 
     if (verbose_) {
+        if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic && num_threads_ > 1) {
+            log_.log("Deterministic heuristic mode: forcing single worker thread\n");
+        }
         log_.log("Parallel tree search with %d threads\n", actual_threads);
     }
 
@@ -1915,10 +1940,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         for (Index j : root_symmetry_tightened) {
             local_lp.setColBounds(j, current_lower[j], current_upper[j]);
         }
-        auto old_worker_w = atomic_work.load(std::memory_order_relaxed);
-        while (!atomic_work.compare_exchange_weak(old_worker_w,
-                                                  old_worker_w + root_symmetry_work,
-                                                  std::memory_order_relaxed)) {}
+        atomic_work.count(workUnitTicks(root_symmetry_work));
         std::vector<Index> touched_vars;
         touched_vars.reserve(problem_.num_cols);
         NodeWorkStats local_node_stats;
@@ -1984,10 +2006,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                         current_lower, current_upper, touched_vars,
                                         local_node_stats, node_int_inf);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
-            // Atomically add work (relaxed is fine for accumulation).
-            auto old_w = atomic_work.load(std::memory_order_relaxed);
-            while (!atomic_work.compare_exchange_weak(old_w, old_w + node_work,
-                                                       std::memory_order_relaxed)) {}
+            atomic_work.count(workUnitTicks(node_work));
 
             bool found_incumbent = false;
             std::vector<Real> incumbent_values;
@@ -2018,17 +2037,14 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 .incumbent_values = std::span<const Real>(incumbent_values.data(),
                                                           incumbent_values.size()),
                 .thread_id = thread_id,
-                .total_work_units = atomic_work.load(std::memory_order_relaxed),
+                .total_work_units = atomic_work.units(),
             };
             auto heur_outcome = heuristic_runtime.runTreeWorker(heur_ctx);
             if (heur_outcome.attempted) {
                 ++local_rins_calls;
                 atomic_lp_iters.fetch_add(heur_outcome.lp_iterations,
                                           std::memory_order_relaxed);
-                auto old_w2 = atomic_work.load(std::memory_order_relaxed);
-                while (!atomic_work.compare_exchange_weak(
-                    old_w2, old_w2 + heur_outcome.work_units,
-                    std::memory_order_relaxed)) {}
+                atomic_work.count(workUnitTicks(heur_outcome.work_units));
 
                 if (heur_outcome.executed_solve) ++local_rins_solves;
                 if (heur_outcome.skipped_no_incumbent) ++local_rins_skip_no_inc;
@@ -2109,7 +2125,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     // Sync back.
     nodes_explored = atomic_nodes.load();
     total_lp_iters = atomic_lp_iters.load();
-    total_work = atomic_work.load();
+    total_work = atomic_work.units();
 
     if (verbose_) {
         if (rins_calls > 0) {
@@ -2158,10 +2174,14 @@ MipResult MipSolver::solve() {
     search_stats_ = {};
     tree_presolve_stats_ = {};
     symmetry_stats_ = {};
+    exact_refinement_stats_ = {};
     conflict_pool_.clear();
     conflict_scores_.assign(problem_.num_cols, 0.0);
     sibling_branch_cache_.clear();
     lp_stats_.root_policy = root_lp_policy_;
+    exact_refinement_stats_.mode = exact_refinement_mode_;
+    exact_refinement_stats_.rational_verification_enabled =
+        exact_refinement_rational_check_;
 
     auto start_time = std::chrono::steady_clock::now();
     auto elapsed = [&]() -> double {
@@ -3214,11 +3234,18 @@ MipResult MipSolver::solve() {
     }
 
     // Run cutting planes at root (suppress LP iteration logs — we log per round).
+    LpProblem root_certificate_problem;
+    LpProblem* root_certificate_problem_ptr = nullptr;
+    if (exact_refinement_mode_ != ExactRefinementMode::Off) {
+        root_certificate_problem = problem_;
+        root_certificate_problem_ptr = &root_certificate_problem;
+    }
     lp.setVerbose(false);
     if (cuts_enabled_ && problem_.hasIntegers()) {
         if (root_used_dual || !root_basis.empty()) {
             t0 = std::chrono::steady_clock::now();
-            Int cuts_added = runCuttingPlanes(lp, total_lp_iters, total_work);
+            Int cuts_added =
+                runCuttingPlanes(lp, total_lp_iters, total_work, root_certificate_problem_ptr);
             lp_stats_.root_cut_lp_seconds = std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - t0).count();
             if (cuts_added > 0) {
@@ -3226,6 +3253,151 @@ MipResult MipSolver::solve() {
                 root_primals = lp.getPrimalValues();
                 root_basis = lp.getBasis();
             }
+        }
+    }
+
+    auto objectiveMismatchAllowed = [&](const LpCertificateMetrics& metrics,
+                                        Real reported_obj,
+                                        Real tol) {
+        const Real scale =
+            std::max<Real>({1.0, std::abs(reported_obj), std::abs(metrics.recomputed_objective)});
+        return metrics.objective_mismatch <= tol * scale;
+    };
+    auto certificatePassed = [&](const LpCertificateMetrics& metrics,
+                                 Real reported_obj) {
+        if (metrics.max_row_violation > exact_refinement_certificate_tol_) return false;
+        if (metrics.max_col_violation > exact_refinement_certificate_tol_) return false;
+        if (!objectiveMismatchAllowed(metrics, reported_obj,
+                                      exact_refinement_certificate_tol_)) {
+            return false;
+        }
+        if (exact_refinement_rational_check_ &&
+            (!metrics.rational_supported || !metrics.rational_ok)) {
+            return false;
+        }
+        return true;
+    };
+
+    if (exact_refinement_mode_ != ExactRefinementMode::Off) {
+        const LpProblem& certificate_problem =
+            (root_certificate_problem_ptr != nullptr) ? *root_certificate_problem_ptr : problem_;
+        double eval_work_units = 0.0;
+        auto baseline_metrics = evaluateLpCertificate(
+            certificate_problem, root_primals, root_bound,
+            exact_refinement_rational_check_,
+            exact_refinement_certificate_tol_,
+            exact_refinement_rational_scale_,
+            &eval_work_units);
+        exact_refinement_stats_.max_row_violation_before = baseline_metrics.max_row_violation;
+        exact_refinement_stats_.max_col_violation_before = baseline_metrics.max_col_violation;
+        exact_refinement_stats_.objective_mismatch_before = baseline_metrics.objective_mismatch;
+
+        const bool warning_trigger =
+            baseline_metrics.max_row_violation > exact_refinement_warning_tol_ ||
+            baseline_metrics.max_col_violation > exact_refinement_warning_tol_ ||
+            !objectiveMismatchAllowed(baseline_metrics, root_bound,
+                                      exact_refinement_warning_tol_) ||
+            (exact_refinement_rational_check_ &&
+             (!baseline_metrics.rational_supported || !baseline_metrics.rational_ok));
+
+        const bool trigger_refinement =
+            (exact_refinement_mode_ == ExactRefinementMode::On) ||
+            (exact_refinement_mode_ == ExactRefinementMode::Auto && warning_trigger);
+        exact_refinement_stats_.triggered = trigger_refinement;
+
+        auto refined_primals = root_primals;
+        Real refined_objective = root_bound;
+        auto refined_metrics = baseline_metrics;
+
+        if (trigger_refinement) {
+            for (Int round = 0; round < exact_refinement_max_rounds_; ++round) {
+                ++exact_refinement_stats_.rounds;
+
+                iterativePrimalRepair(certificate_problem, refined_primals,
+                                      exact_refinement_certificate_tol_,
+                                      exact_refinement_repair_passes_,
+                                      &eval_work_units);
+                exact_refinement_stats_.repair_passes +=
+                    exact_refinement_repair_passes_;
+
+                refined_metrics = evaluateLpCertificate(
+                    certificate_problem, refined_primals, refined_objective,
+                    exact_refinement_rational_check_,
+                    exact_refinement_certificate_tol_,
+                    exact_refinement_rational_scale_,
+                    &eval_work_units);
+                if (certificatePassed(refined_metrics, refined_objective)) {
+                    break;
+                }
+
+                auto refine_result = lp.solve();
+                ++exact_refinement_stats_.resolve_calls;
+                exact_refinement_stats_.resolve_iterations +=
+                    refine_result.iterations;
+                exact_refinement_stats_.resolve_work_units +=
+                    refine_result.work_units;
+                total_lp_iters += refine_result.iterations;
+                total_work += refine_result.work_units;
+                if (refine_result.status != Status::Optimal) {
+                    break;
+                }
+
+                refined_objective = refine_result.objective;
+                refined_primals = lp.getPrimalValues();
+                refined_metrics = evaluateLpCertificate(
+                    certificate_problem, refined_primals, refined_objective,
+                    exact_refinement_rational_check_,
+                    exact_refinement_certificate_tol_,
+                    exact_refinement_rational_scale_,
+                    &eval_work_units);
+                if (certificatePassed(refined_metrics, refined_objective)) {
+                    break;
+                }
+            }
+        }
+
+        if (trigger_refinement &&
+            objectiveMismatchAllowed(refined_metrics, refined_objective,
+                                     exact_refinement_certificate_tol_) &&
+            refined_metrics.max_row_violation <=
+                baseline_metrics.max_row_violation + exact_refinement_certificate_tol_ &&
+            refined_metrics.max_col_violation <=
+                baseline_metrics.max_col_violation + exact_refinement_certificate_tol_) {
+            root_primals = refined_primals;
+            root_bound = refined_objective;
+        }
+
+        exact_refinement_stats_.max_row_violation_after = refined_metrics.max_row_violation;
+        exact_refinement_stats_.max_col_violation_after = refined_metrics.max_col_violation;
+        exact_refinement_stats_.objective_mismatch_after = refined_metrics.objective_mismatch;
+        exact_refinement_stats_.rows_evaluated = refined_metrics.rows_evaluated;
+        exact_refinement_stats_.cols_evaluated = refined_metrics.cols_evaluated;
+        exact_refinement_stats_.rational_supported = refined_metrics.rational_supported;
+        exact_refinement_stats_.rational_certificate_passed =
+            (!exact_refinement_rational_check_) ||
+            (refined_metrics.rational_supported && refined_metrics.rational_ok);
+        exact_refinement_stats_.certificate_passed =
+            certificatePassed(refined_metrics, refined_objective);
+        exact_refinement_stats_.evaluation_work_units = eval_work_units;
+        total_work += eval_work_units;
+
+        if (verbose_) {
+            log_.log(
+                "Exact refinement: mode=%s triggered=%s rounds=%d resolves=%d "
+                "row_violation=%.3e->%.3e col_violation=%.3e->%.3e "
+                "obj_mismatch=%.3e->%.3e cert=%s rational=%s\n",
+                exactRefinementModeName(exact_refinement_mode_),
+                trigger_refinement ? "yes" : "no",
+                exact_refinement_stats_.rounds,
+                exact_refinement_stats_.resolve_calls,
+                exact_refinement_stats_.max_row_violation_before,
+                exact_refinement_stats_.max_row_violation_after,
+                exact_refinement_stats_.max_col_violation_before,
+                exact_refinement_stats_.max_col_violation_after,
+                exact_refinement_stats_.objective_mismatch_before,
+                exact_refinement_stats_.objective_mismatch_after,
+                exact_refinement_stats_.certificate_passed ? "ok" : "warn",
+                exact_refinement_stats_.rational_certificate_passed ? "ok" : "warn");
         }
     }
 
@@ -3493,7 +3665,8 @@ MipResult MipSolver::solve() {
     return result;
 }
 
-Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work) {
+Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
+                                LpProblem* certificate_problem) {
     if (cut_effort_mode_ == CutEffortMode::Off) return 0;
 
     CutPool pool;
@@ -3608,6 +3781,30 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         if (lower.empty()) break;
 
         Index cuts_this_round = static_cast<Index>(lower.size());
+
+        if (certificate_problem != nullptr) {
+            for (Index r = 0; r < cuts_this_round; ++r) {
+                const Index start = starts[r];
+                const Index end =
+                    (r + 1 < cuts_this_round) ? starts[r + 1] :
+                                                static_cast<Index>(col_indices.size());
+                const auto idx_span = std::span<const Index>(
+                    col_indices.data() + start,
+                    static_cast<std::size_t>(end - start));
+                const auto val_span = std::span<const Real>(
+                    values.data() + start,
+                    static_cast<std::size_t>(end - start));
+                certificate_problem->matrix.addRow(idx_span, val_span);
+                certificate_problem->row_lower.push_back(lower[r]);
+                certificate_problem->row_upper.push_back(upper[r]);
+                certificate_problem->row_names.push_back("");
+                const double mirror_work =
+                    static_cast<double>((end - start) + 1) * 1e-6;
+                total_work += mirror_work;
+                cut_node_work += mirror_work;
+            }
+            certificate_problem->num_rows = certificate_problem->matrix.numRows();
+        }
 
         lp.addRows(starts, col_indices, values, lower, upper);
 

@@ -44,7 +44,7 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 31: PDLP + GPU LP Backend](#step-31)
 - [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
 - [🟢 Step 33: Symmetry Handling](#step-33)
-- [⚪ Step 34: Exact LP Refinement Mode](#step-34)
+- [🟢 Step 34: Exact LP Refinement Mode](#step-34)
 
 ## Dependency Graph
 
@@ -1186,16 +1186,31 @@ latency, and warm-start preference in deterministic/opportunistic modes.
 
 **Goal:** Offer optional high-precision/exact LP refinement for numerically difficult instances.
 
+**Status:** Complete. Added an optional deterministic exact-refinement pipeline
+for root LP certificates (auto/on modes), scaled-rational verification, and
+root-level telemetry/work-unit reporting with default mode remaining off.
+Follow-up hardening canonicalized parallel work-unit aggregation to integer
+ticks and enforces single-worker execution in deterministic heuristic mode so
+same-seed runs stay reproducible independent of requested thread count.
+
 **Deliverables:**
-- Iterative refinement pipeline for LP solutions/certificates
-- Optional exact/rational verification path for final certificates
-- Trigger rules (numerical warning thresholds, user flag) and reporting
-- Compatibility with dual-simplex and barrier-produced solutions
+- Iterative refinement pipeline for LP solutions/certificates:
+  long-double residual checks, deterministic primal repair passes, and optional
+  dual resolve rounds.
+- Optional scaled-rational verification path for final certificates.
+- Trigger rules (`off/auto/on`, warning tolerance thresholds) and reporting
+  through `MipExactRefinementStats` plus verbose root logs.
+- Compatibility with dual-simplex and barrier/PDLP root policies via shared
+  root integration path.
+- Determinism hardening in the parallel tree path: canonical work-unit
+  accumulation and deterministic-mode thread-count invariance.
 
 **Test criteria:**
 - Improved reliability on numerically fragile instances
 - Certified objective/bound consistency within configured tolerances
 - Default mode unchanged and non-regressive
+- Deterministic runtime tests cover same-seed reproducibility and
+  thread-count-invariant `work_units` in deterministic mode
 
 **References:** Gleixner & Steffy, Eifler et al. iterative refinement work.
 

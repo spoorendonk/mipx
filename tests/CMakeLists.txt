@@ -18,6 +18,7 @@ add_executable(mipx-tests
     test_parallel.cpp
     test_barrier.cpp
     test_pdlp.cpp
+    test_exact_refinement.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
