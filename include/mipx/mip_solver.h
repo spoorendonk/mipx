@@ -18,6 +18,7 @@
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
+#include "mipx/exact_refinement.h"
 #include "mipx/heuristic_runtime.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
@@ -37,6 +38,12 @@ enum class SearchProfile {
     Stable,
     Default,
     Aggressive,
+};
+
+enum class ExactRefinementMode {
+    Off,
+    Auto,
+    On,
 };
 
 struct MipLpStats {
@@ -149,6 +156,29 @@ struct MipSymmetryStats {
     double cut_work_units = 0.0;
 };
 
+struct MipExactRefinementStats {
+    ExactRefinementMode mode = ExactRefinementMode::Off;
+    bool rational_verification_enabled = false;
+    bool triggered = false;
+    bool certificate_passed = true;
+    bool rational_supported = true;
+    bool rational_certificate_passed = true;
+    Int rounds = 0;
+    Int repair_passes = 0;
+    Int resolve_calls = 0;
+    Int resolve_iterations = 0;
+    Int rows_evaluated = 0;
+    Int cols_evaluated = 0;
+    double evaluation_work_units = 0.0;
+    double resolve_work_units = 0.0;
+    Real max_row_violation_before = 0.0;
+    Real max_row_violation_after = 0.0;
+    Real max_col_violation_before = 0.0;
+    Real max_col_violation_after = 0.0;
+    Real objective_mismatch_before = 0.0;
+    Real objective_mismatch_after = 0.0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -225,6 +255,25 @@ public:
     void setPreRootLpLightEnabled(bool enabled) { pre_root_lp_light_enabled_ = enabled; }
     void setPreRootPortfolioEnabled(bool enabled) { pre_root_portfolio_enabled_ = enabled; }
     void setSymmetryEnabled(bool enabled) { symmetry_enabled_ = enabled; }
+    void setExactRefinementMode(ExactRefinementMode mode) { exact_refinement_mode_ = mode; }
+    void setExactRefinementRationalCheck(bool enabled) {
+        exact_refinement_rational_check_ = enabled;
+    }
+    void setExactRefinementWarningTolerance(Real tol) {
+        exact_refinement_warning_tol_ = std::max<Real>(1e-12, tol);
+    }
+    void setExactRefinementCertificateTolerance(Real tol) {
+        exact_refinement_certificate_tol_ = std::max<Real>(1e-12, tol);
+    }
+    void setExactRefinementMaxRounds(Int rounds) {
+        exact_refinement_max_rounds_ = std::max<Int>(1, rounds);
+    }
+    void setExactRefinementRepairPasses(Int passes) {
+        exact_refinement_repair_passes_ = std::max<Int>(1, passes);
+    }
+    void setExactRefinementRationalScale(Real scale) {
+        exact_refinement_rational_scale_ = std::max<Real>(1.0, scale);
+    }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
@@ -246,6 +295,9 @@ public:
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const MipSymmetryStats& getSymmetryStats() const { return symmetry_stats_; }
+    const MipExactRefinementStats& getExactRefinementStats() const {
+        return exact_refinement_stats_;
+    }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
@@ -259,7 +311,8 @@ private:
     };
 
     /// Run cutting plane rounds at the root node.
-    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work);
+    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
+                         LpProblem* certificate_problem = nullptr);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
@@ -388,6 +441,14 @@ private:
     MipSearchStats search_stats_{};
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
+    ExactRefinementMode exact_refinement_mode_ = ExactRefinementMode::Off;
+    bool exact_refinement_rational_check_ = false;
+    Real exact_refinement_warning_tol_ = 1e-7;
+    Real exact_refinement_certificate_tol_ = 1e-8;
+    Real exact_refinement_rational_scale_ = 1.0e6;
+    Int exact_refinement_max_rounds_ = 2;
+    Int exact_refinement_repair_passes_ = 2;
+    MipExactRefinementStats exact_refinement_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<Real> conflict_scores_{};
     std::unordered_map<Int, Index> sibling_branch_cache_{};
