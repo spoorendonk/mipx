@@ -45,6 +45,10 @@ Each step builds on the previous, produces something testable, and is scoped for
 - [🟢 Step 32: Concurrent Root LP Racing (CPU + GPU)](#step-32)
 - [🟢 Step 33: Symmetry Handling](#step-33)
 - [🟢 Step 34: Exact LP Refinement Mode](#step-34)
+- [⚪ Step 35: Dual Simplex Correctness Investigation](#step-35)
+- [⚪ Step 36: Barrier Correctness Investigation](#step-36)
+- [⚪ Step 37: PDLP Correctness Investigation](#step-37)
+- [⚪ Step 38: MIP Correctness Investigation](#step-38)
 
 ## Dependency Graph
 
@@ -83,6 +87,10 @@ Each step builds on the previous, produces something testable, and is scoped for
 │       │                                                                   ├── 31 (PDLP + GPU backend ✅)      ├── 32 (Concurrent root LP racing)
 │       │                                                                   └── 33 (Symmetry handling)
 │       │                                                                       └── 34 (Exact LP refinement mode)
+│       │                                                                           └── 35 (Dual simplex correctness)
+│       │                                                                               └── 36 (Barrier correctness)
+│       │                                                                                   └── 37 (PDLP correctness)
+│       │                                                                                       └── 38 (MIP correctness)
 ```
 
 **Parallel opportunities:**
@@ -97,6 +105,8 @@ Each step builds on the previous, produces something testable, and is scoped for
 - `19 + 20 + 28 -> 29`
 - `29 -> 30` and `29 -> 31`; then `30 + 31 -> 32` (advanced LP backend and root-concurrent execution track)
 - `29 -> 33 -> 34` (symmetry + exactness track)
+- `34 -> 35 -> 36 -> 37` (LP correctness hardening track: dual simplex, barrier, PDLP)
+- `37 -> 38` (full MIP correctness hardening track)
 
 ---
 
@@ -1180,7 +1190,7 @@ latency, and warm-start preference in deterministic/opportunistic modes.
 
 <a id="step-34"></a>
 
-## Step 34: Exact LP Refinement Mode
+## Step 34: Exact LP Refinement Mode ✅
 
 [Back to top](#table-of-contents)
 
@@ -1216,3 +1226,109 @@ same-seed runs stay reproducible independent of requested thread count.
 
 **Depends on:** 30, 33
 **Unlocks:** high-reliability solve mode
+
+---
+
+<a id="step-35"></a>
+
+## Step 35: Dual Simplex Correctness Investigation
+
+[Back to top](#table-of-contents)
+
+**Goal:** Establish objective/status correctness of dual simplex on curated and larger LP suites before claiming performance.
+
+**Deliverables:**
+- Reproducible dual-simplex mismatch corpus (Netlib + Mittelman + selected large LPs)
+- Deterministic per-instance status/objective comparison harness against `.solu` and reference solvers
+- Root-cause reports for false infeasible/unknown exits and LU singular-basis error paths
+- Targeted fixes for correctness blockers and regression tests for each fix
+
+**Test criteria:**
+- No false `infeasible`/`unknown` on known-optimal validation set
+- Objective agreement within configured tolerance against `.solu`/reference on solved-optimal instances
+- Existing LP/MIP regression gates stay green
+
+**References:** Step-7 dual-simplex implementation notes; Netlib `.solu` validation workflow.
+
+**Depends on:** 7, 34
+**Unlocks:** 36
+
+---
+
+<a id="step-36"></a>
+
+## Step 36: Barrier Correctness Investigation
+
+[Back to top](#table-of-contents)
+
+**Goal:** Validate and harden barrier correctness (status, objective, residual quality) across CPU/GPU paths.
+
+**Deliverables:**
+- Barrier-specific correctness benchmark set with known-optimal references
+- Cross-check harness for `mipx_barrier_cpu/gpu` vs HiGHS IPM and cuOpt barrier
+- Residual/termination audit (primal/dual infeasibility, complementarity, crossover/postsolve consistency)
+- Fixes + regression tests for incorrect infeasible/unknown outcomes
+
+**Test criteria:**
+- Barrier status classification matches references on curated large LP set
+- Objective agreement within tolerance for optimal statuses
+- CPU/GPU barrier paths produce consistent correctness outcomes
+
+**References:** Step-30 barrier backend notes, Mehrotra/IPM validation practices.
+
+**Depends on:** 30, 35
+**Unlocks:** 37
+
+---
+
+<a id="step-37"></a>
+
+## Step 37: PDLP Correctness Investigation
+
+[Back to top](#table-of-contents)
+
+**Goal:** Verify PDLP correctness and certification behavior on large sparse LPs across CPU/GPU and external references.
+
+**Deliverables:**
+- PDLP certification checks (primal/dual feasibility, gap, termination status mapping)
+- Cross-solver objective/status validation for `mipx_pdlp_cpu/gpu` vs HiGHS PDLP and cuOpt PDLP
+- Investigation/fixes for false infeasible outcomes on known-optimal LPs
+- Regression suite and gate updates to block correctness regressions in PDLP paths
+
+**Test criteria:**
+- No false infeasible on known-optimal large LP validation set
+- Certified optimal/time-limit statuses align with reference behavior
+- Objective agreement within tolerance whenever all compared solvers report optimal
+
+**References:** Step-31 PDLP backend notes; PDLP certification literature (Google PDLP / cuPDLP-C).
+
+**Depends on:** 31, 36
+**Unlocks:** LP correctness hardening closure
+
+---
+
+<a id="step-38"></a>
+
+## Step 38: MIP Correctness Investigation
+
+[Back to top](#table-of-contents)
+
+**Goal:** Validate end-to-end MIP correctness (status, objective, bound/gap behavior, and determinism) before prioritizing additional speed work.
+
+**Deliverables:**
+- Curated MIP correctness suite (MIPLIB + known infeasible/unbounded models + feature-heavy models from Step 28)
+- Cross-solver status/objective checks vs references (`.solu`, HiGHS, and optional cuOpt where applicable)
+- Branch-and-cut correctness audits: node pruning validity, cutoff/bound logic, conflict/no-good safety, cut soundness under numerics
+- Deterministic replay checks for fixed-seed runs with strict metric invariants on correctness-critical cases
+- Targeted fixes + regression tests for each discovered correctness defect
+
+**Test criteria:**
+- No false infeasible/unbounded/optimal outcomes on curated reference set
+- Objective/best-bound/gap trajectories remain consistent with references within configured tolerances
+- Deterministic mode reproduces final status/objective/bound at fixed seed
+- Existing performance gates remain non-regressive after correctness fixes
+
+**References:** MIPLIB `.solu` workflows, existing `tests/perf` regression gates, conflict/cut correctness literature.
+
+**Depends on:** 28, 32, 37
+**Unlocks:** solver correctness hardening closure
