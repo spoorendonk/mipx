@@ -745,15 +745,14 @@ LpResult DualSimplexSolver::solve() {
     };
 
     // Size LU update budget by default from basis dimension to reduce costly
-    // full reinversions on large LPs while still retaining an explicit cap.
+    // full reinversions and update-drift stalls.
     Int lu_update_limit = options_.lu_update_limit;
     if (lu_update_limit <= 0) {
-        if (num_rows_ >= 2000) {
-            lu_update_limit = 100;
-        } else if (num_rows_ >= 1000) {
-            lu_update_limit = 300;
-        } else {
-            lu_update_limit = 500;
+        lu_update_limit = 100;
+        if (num_rows_ >= 1000 &&
+            num_rows_ < 2000 &&
+            num_cols_ <= 3 * num_rows_) {
+            lu_update_limit = 200;
         }
     }
     lu_.setMaxUpdates(lu_update_limit);
