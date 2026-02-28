@@ -3260,25 +3260,33 @@ MipResult MipSolver::solve() {
                 improvements_.fill(0);
             }
 
-            PreRootArm select(Int round, std::mt19937_64& rng) {
+            PreRootArm select(Int round, std::mt19937_64& rng, bool local_mip_allowed) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++epochs_;
                 if (arms_.empty()) return PreRootArm::FeasJump;
+                std::array<PreRootArm, kPreRootArmCount> eligible{};
+                std::size_t eligible_count = 0;
+                for (PreRootArm arm : arms_) {
+                    if (!local_mip_allowed && arm == PreRootArm::LocalMip) continue;
+                    eligible[eligible_count++] = arm;
+                }
+                if (eligible_count == 0) return PreRootArm::FeasJump;
                 if (!enabled_) {
                     if (mode_ == HeuristicRuntimeMode::Deterministic) {
                         const std::size_t idx =
-                            static_cast<std::size_t>(std::max<Int>(0, round)) % arms_.size();
-                        ++pulls_[preRootArmIndex(arms_[idx])];
-                        return arms_[idx];
+                            static_cast<std::size_t>(std::max<Int>(0, round)) % eligible_count;
+                        ++pulls_[preRootArmIndex(eligible[idx])];
+                        return eligible[idx];
                     }
                     const std::size_t idx = std::uniform_int_distribution<std::size_t>(
-                        0, arms_.size() - 1)(rng);
-                    ++pulls_[preRootArmIndex(arms_[idx])];
-                    return arms_[idx];
+                        0, eligible_count - 1)(rng);
+                    ++pulls_[preRootArmIndex(eligible[idx])];
+                    return eligible[idx];
                 }
 
                 // Warm-up: make one pull from each available arm before sampling.
-                for (PreRootArm arm : arms_) {
+                for (std::size_t i = 0; i < eligible_count; ++i) {
+                    const PreRootArm arm = eligible[i];
                     if (pulls_[preRootArmIndex(arm)] == 0) {
                         ++pulls_[preRootArmIndex(arm)];
                         return arm;
@@ -3287,10 +3295,11 @@ MipResult MipSolver::solve() {
 
                 if (mode_ == HeuristicRuntimeMode::Deterministic) {
                     // Deterministic adaptive choice: pick highest posterior mean with stable tie-break.
-                    PreRootArm best_arm = arms_.front();
+                    PreRootArm best_arm = eligible[0];
                     double best_score = -1.0;
                     std::size_t best_idx = preRootArmIndex(best_arm);
-                    for (PreRootArm arm : arms_) {
+                    for (std::size_t i = 0; i < eligible_count; ++i) {
+                        const PreRootArm arm = eligible[i];
                         const std::size_t idx = preRootArmIndex(arm);
                         const double denom = alpha_[idx] + beta_[idx];
                         const double score = (denom > 0.0) ? (alpha_[idx] / denom) : 0.0;
@@ -3305,9 +3314,10 @@ MipResult MipSolver::solve() {
                     return best_arm;
                 }
 
-                PreRootArm best_arm = arms_.front();
+                PreRootArm best_arm = eligible[0];
                 double best_score = -1.0;
-                for (PreRootArm arm : arms_) {
+                for (std::size_t i = 0; i < eligible_count; ++i) {
+                    const PreRootArm arm = eligible[i];
                     const std::size_t idx = preRootArmIndex(arm);
                     const double score = sampleBeta(alpha_[idx], beta_[idx], rng);
                     if (score > best_score) {
@@ -3471,13 +3481,28 @@ MipResult MipSolver::solve() {
             PreRootRoundResult out;
             out.round = round;
             out.thread_id = thread_id;
-            out.arm = portfolio.select(round, round_rng);
             const LpProblem& round_problem = stageProblemForThread(thread_id);
 
             const Real incumbent_for_round =
                 (parallel_mode_ == ParallelMode::Deterministic)
                     ? deterministic_incumbent_for_round
                     : pre_root_pool.bestObjective();
+            std::optional<HeuristicSolution> incumbent_sol;
+            std::span<const Real> incumbent_span_for_round = deterministic_incumbent_span;
+            if (parallel_mode_ != ParallelMode::Deterministic) {
+                incumbent_sol = pre_root_pool.bestSolution();
+                if (incumbent_sol.has_value()) {
+                    incumbent_span_for_round = std::span<const Real>(
+                        incumbent_sol->values.data(),
+                        incumbent_sol->values.size());
+                } else {
+                    incumbent_span_for_round = std::span<const Real>{};
+                }
+            }
+            const bool has_incumbent =
+                std::isfinite(incumbent_for_round) && incumbent_for_round < kInf &&
+                !incumbent_span_for_round.empty();
+            out.arm = portfolio.select(round, round_rng, has_incumbent);
 
             switch (out.arm) {
                 case PreRootArm::FeasJump: {
@@ -3493,25 +3518,8 @@ MipResult MipSolver::solve() {
                     break;
                 }
                 case PreRootArm::LocalMip: {
-                    std::span<const Real> incumbent_span{};
-                    if (parallel_mode_ == ParallelMode::Deterministic) {
-                        incumbent_span = deterministic_incumbent_span;
-                    } else {
-                        auto incumbent_sol = pre_root_pool.bestSolution();
-                        if (incumbent_sol.has_value()) {
-                            incumbent_span = std::span<const Real>(
-                                incumbent_sol->values.data(),
-                                incumbent_sol->values.size());
-                        }
-                    }
-                    // Local-MIP without an incumbent is a no-op; run FPR instead.
-                    if (incumbent_span.empty()) {
-                        out.arm = PreRootArm::Fpr;
-                        out.candidate = runLpFreeFpr(round_problem, discrete_vars, round_rng,
-                                                     incumbent_for_round,
-                                                     out.local_work);
-                        break;
-                    }
+                    const std::span<const Real> incumbent_span = incumbent_span_for_round;
+                    if (incumbent_span.empty()) break;
                     out.candidate = runLpFreeLocalMip(round_problem, discrete_vars, round_rng,
                                                       incumbent_for_round,
                                                       incumbent_span, out.local_work);

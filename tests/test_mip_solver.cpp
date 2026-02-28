@@ -1131,6 +1131,35 @@ TEST_CASE("MipSolver: pre-root fixed schedule can be selected",
     CHECK(stats.local_mip_calls == 2);
 }
 
+TEST_CASE("MipSolver: pre-root fixed schedule skips LocalMip until an incumbent exists",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildConflictLearningMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(13);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(false);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(9);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+    CHECK(stats.calls > 0);
+    CHECK(stats.feasible_found == 0);
+    CHECK(stats.local_mip_calls == 0);
+    CHECK(stats.fj_calls + stats.fpr_calls == stats.calls);
+}
+
 TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
           "[mip][heuristics][preroot][portfolio]") {
     auto lp = buildRootFractionalHeuristicMip();
