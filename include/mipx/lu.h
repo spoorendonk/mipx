@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -36,11 +37,17 @@ public:
     /// with new column `entering_col` (given in terms of original row indices/values).
     void update(Index pivot_pos, std::span<const Index> indices,
                 std::span<const Real> values);
+    /// Forrest-Tomlin rank-1 update with pre-transformed column `d = B^{-1} a_q`.
+    /// `transformed_col` is in basis-position order and must have size dimension().
+    void updateFromFtranColumn(Index pivot_pos,
+                               std::span<const Real> transformed_col);
 
     /// Check if refactorization is needed.
     [[nodiscard]] bool needsRefactorization() const;
     [[nodiscard]] Index numUpdates() const { return num_updates_; }
     [[nodiscard]] Index dimension() const { return dim_; }
+    void setMaxUpdates(Index limit) { max_updates_ = std::max<Index>(1, limit); }
+    [[nodiscard]] Index maxUpdates() const { return max_updates_; }
 
     /// Access work unit counter.
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -112,7 +119,7 @@ private:
     mutable std::vector<Index> sparse_steps_;
     mutable std::vector<uint8_t> sparse_mark_;
 
-    static constexpr Index kMaxUpdates = 100;
+    Index max_updates_ = 500;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Real kFtDropTol = 1e-13;

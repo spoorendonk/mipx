@@ -115,6 +115,7 @@ TEST_CASE("SparseLU: FTRAN round-trip", "[lu]") {
     SparseMatrix A(2, 2, trips);
 
     SparseLU lu;
+    lu.setMaxUpdates(100);
     std::vector<Index> basis = {0, 1};
     lu.factorize(A, basis);
 
@@ -138,6 +139,7 @@ TEST_CASE("SparseLU: BTRAN round-trip", "[lu]") {
     SparseMatrix A(2, 2, trips);
 
     SparseLU lu;
+    lu.setMaxUpdates(100);
     std::vector<Index> basis = {0, 1};
     lu.factorize(A, basis);
 
@@ -207,6 +209,7 @@ TEST_CASE("SparseLU: rank-1 update", "[lu]") {
     SparseMatrix A(2, 3, trips);
 
     SparseLU lu;
+    lu.setMaxUpdates(100);
     std::vector<Index> basis = {0, 1};
     lu.factorize(A, basis);
 
@@ -226,6 +229,49 @@ TEST_CASE("SparseLU: rank-1 update", "[lu]") {
     lu.ftran(rhs);
     CHECK_THAT(rhs[0], WithinAbs(1.0, 1e-10));
     CHECK_THAT(rhs[1], WithinAbs(1.0, 1e-10));
+}
+
+TEST_CASE("SparseLU: updateFromFtranColumn matches update", "[lu]") {
+    std::vector<Triplet> trips = {
+        {0, 0, 4.0}, {1, 0, 1.0}, {2, 0, 0.5},
+        {0, 1, 1.0}, {1, 1, 3.0}, {2, 1, 1.0},
+        {0, 2, 0.0}, {1, 2, 2.0}, {2, 2, 5.0},
+        {0, 3, 2.0}, {1, 3, 1.0}, {2, 3, 3.0}};
+    SparseMatrix A(3, 4, trips);
+
+    std::vector<Index> basis = {0, 1, 2};
+    SparseLU lu_ref;
+    lu_ref.setMaxUpdates(100);
+    lu_ref.factorize(A, basis);
+
+    SparseLU lu_fast;
+    lu_fast.setMaxUpdates(100);
+    lu_fast.factorize(A, basis);
+
+    auto c = A.col(3);
+    std::vector<Index> idx(c.indices.begin(), c.indices.end());
+    std::vector<Real> val(c.values.begin(), c.values.end());
+
+    lu_ref.update(1, idx, val);
+
+    std::vector<Real> d(3, 0.0);
+    for (Index k = 0; k < c.size(); ++k) {
+        d[c.indices[k]] = c.values[k];
+    }
+    lu_fast.ftran(d);
+    lu_fast.updateFromFtranColumn(1, d);
+
+    CHECK(lu_ref.numUpdates() == 1);
+    CHECK(lu_fast.numUpdates() == 1);
+
+    std::vector<Real> rhs = {1.0, -2.0, 3.0};
+    std::vector<Real> x_ref = rhs;
+    std::vector<Real> x_fast = rhs;
+    lu_ref.ftran(x_ref);
+    lu_fast.ftran(x_fast);
+    for (Index i = 0; i < 3; ++i) {
+        CHECK_THAT(x_fast[i], WithinAbs(x_ref[i], 1e-10));
+    }
 }
 
 TEST_CASE("SparseLU: multiple updates", "[lu]") {
@@ -303,6 +349,7 @@ TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     SparseMatrix A(2, 4, trips);
 
     SparseLU lu;
+    lu.setMaxUpdates(100);
     std::vector<Index> basis = {0, 1};
     lu.factorize(A, basis);
 
@@ -310,7 +357,7 @@ TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     CHECK_FALSE(lu.needsRefactorization());
 
     // Keep swapping between columns to accumulate updates.
-    // The kMaxUpdates is 100, so after enough updates it should trigger.
+    // With a 100-update limit, after enough updates it should trigger.
     auto col2 = A.col(2);
     std::vector<Index> idx2(col2.indices.begin(), col2.indices.end());
     std::vector<Real> val2(col2.values.begin(), col2.values.end());
@@ -340,6 +387,32 @@ TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     }
 
     CHECK(lu.numUpdates() == 100);
+    CHECK(lu.needsRefactorization());
+}
+
+TEST_CASE("SparseLU: configurable update limit", "[lu]") {
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0},
+                                  {0, 2, 2.0}, {1, 2, 3.0}};
+    SparseMatrix A(2, 4, trips);
+
+    SparseLU lu;
+    lu.setMaxUpdates(3);
+    std::vector<Index> basis = {0, 1};
+    lu.factorize(A, basis);
+
+    auto col2 = A.col(2);
+    std::vector<Index> idx2(col2.indices.begin(), col2.indices.end());
+    std::vector<Real> val2(col2.values.begin(), col2.values.end());
+
+    auto col0 = A.col(0);
+    std::vector<Index> idx0(col0.indices.begin(), col0.indices.end());
+    std::vector<Real> val0(col0.values.begin(), col0.values.end());
+
+    lu.update(0, idx2, val2);
+    CHECK_FALSE(lu.needsRefactorization());
+    lu.update(0, idx0, val0);
+    CHECK_FALSE(lu.needsRefactorization());
+    lu.update(0, idx2, val2);
     CHECK(lu.needsRefactorization());
 }
 

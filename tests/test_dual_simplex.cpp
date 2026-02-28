@@ -383,6 +383,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.adaptive_bfrt_max_pinf = 33;
     opts.adaptive_bfrt_progress_window = 77;
     opts.enable_adaptive_refactorization = false;
+    opts.lu_update_limit = 321;
     opts.partial_pricing_chunk_min = 8;
     opts.partial_pricing_full_scan_freq = 1;
     opts.adaptive_refactor_min_updates = 8;
@@ -433,6 +434,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     CHECK(applied.adaptive_bfrt_max_pinf == 33);
     CHECK(applied.adaptive_bfrt_progress_window == 77);
     CHECK_FALSE(applied.enable_adaptive_refactorization);
+    CHECK(applied.lu_update_limit == 321);
     CHECK(applied.primal_feasible_adaptive_refactor_stall_pivots == 222);
     CHECK(applied.primal_feasible_adaptive_refactor_min_updates == 111);
     CHECK(applied.primal_feasible_dual_progress_window == 333);

@@ -744,6 +744,20 @@ LpResult DualSimplexSolver::solve() {
         runIdiotCrash();
     };
 
+    // Size LU update budget by default from basis dimension to reduce costly
+    // full reinversions on large LPs while still retaining an explicit cap.
+    Int lu_update_limit = options_.lu_update_limit;
+    if (lu_update_limit <= 0) {
+        if (num_rows_ >= 2000) {
+            lu_update_limit = 100;
+        } else if (num_rows_ >= 1000) {
+            lu_update_limit = 300;
+        } else {
+            lu_update_limit = 500;
+        }
+    }
+    lu_.setMaxUpdates(lu_update_limit);
+
     if (!has_basis_) {
         // Cold start: set up crash basis (all-slack + optional crash passes).
         setupCrashBasis();
@@ -1040,6 +1054,24 @@ LpResult DualSimplexSolver::solve() {
             if (st == BasisStatus::Free) return rc + ((k & 1) ? eps : -eps);
             return rc;
         };
+        const Real* lower_perturb =
+            bound_perturb_active_ ? lower_bound_perturb_.data() : nullptr;
+        const Real* upper_perturb =
+            bound_perturb_active_ ? upper_bound_perturb_.data() : nullptr;
+        auto lowerBoundFast = [&](Index k) -> Real {
+            Real lb = (k < num_cols_) ? col_lower_[k] : row_lower_[k - num_cols_];
+            if (lower_perturb != nullptr) {
+                lb += lower_perturb[static_cast<std::size_t>(k)];
+            }
+            return lb;
+        };
+        auto upperBoundFast = [&](Index k) -> Real {
+            Real ub = (k < num_cols_) ? col_upper_[k] : row_upper_[k - num_cols_];
+            if (upper_perturb != nullptr) {
+                ub -= upper_perturb[static_cast<std::size_t>(k)];
+            }
+            return ub;
+        };
 
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
         work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
@@ -1050,8 +1082,8 @@ LpResult DualSimplexSolver::solve() {
         auto scoreRow = [&](Index i) -> Real {
             Index k = basis_[i];
             Real xk = primal_[k];
-            Real lb = varLower(k);
-            Real ub = varUpper(k);
+            Real lb = lowerBoundFast(k);
+            Real ub = upperBoundFast(k);
 
             Real viol = 0.0;
             if (xk < lb - kPrimalTol) viol = lb - xk;
@@ -1457,17 +1489,11 @@ LpResult DualSimplexSolver::solve() {
                 nonbasic_pos_[entering_p] = -1;
             }
 
-            // LU update.
-            if (entering_p < num_cols_) {
-                auto cv = matrix_.col(entering_p);
-                lu_.update(leaving_row_p, cv.indices, cv.values);
-            } else {
-                Index si = entering_p - num_cols_;
-                static constexpr Real neg_one = -1.0;
-                lu_.update(leaving_row_p,
-                           std::span<const Index>(&si, 1),
-                           std::span<const Real>(&neg_one, 1));
-            }
+            // Reuse transformed pivot column and avoid a second FTRAN in LU update.
+            lu_.updateFromFtranColumn(
+                leaving_row_p,
+                std::span<const Real>(pivot_col.data(),
+                                      static_cast<std::size_t>(num_rows_)));
 
             if (primal_step_degenerate) {
                 ++degenerate_pivot_streak;
@@ -1514,8 +1540,8 @@ LpResult DualSimplexSolver::solve() {
 
         Index leaving_var = basis_[leaving_row];
         Real leaving_val = primal_[leaving_var];
-        Real leaving_lb = varLower(leaving_var);
-        Real leaving_ub = varUpper(leaving_var);
+        Real leaving_lb = lowerBoundFast(leaving_var);
+        Real leaving_ub = upperBoundFast(leaving_var);
 
         // Direction: +1 if below lower bound, -1 if above upper bound.
         Real sigma = (leaving_val < leaving_lb) ? 1.0 : -1.0;
@@ -1580,20 +1606,28 @@ LpResult DualSimplexSolver::solve() {
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
         Index nnb = static_cast<Index>(nonbasic_.size());
+        if (bfrt_cands.capacity() < static_cast<std::size_t>(nnb)) {
+            bfrt_cands.reserve(static_cast<std::size_t>(nnb));
+        }
         auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out) {
             Index k = nonbasic_[pos];
             Real alpha = pivot_row_alpha[k];
             if (!isEligible(k, alpha)) return;
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
-            Real lb = varLower(k);
-            Real ub = varUpper(k);
+            Real lb = lowerBoundFast(k);
+            Real ub = upperBoundFast(k);
             Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
             out.push_back({k, pos, ratio, alpha, gap});
         };
 
         auto collectCandidatesSerial = [&](Index offset, Index count) {
-            for (Index t = 0; t < count; ++t) {
-                Index pos = (offset + t) % nnb;
+            if (count <= 0) return;
+            Index first_end = std::min<Index>(nnb, offset + count);
+            for (Index pos = offset; pos < first_end; ++pos) {
+                appendCandidate(pos, bfrt_cands);
+            }
+            Index wrapped = count - (first_end - offset);
+            for (Index pos = 0; pos < wrapped; ++pos) {
                 appendCandidate(pos, bfrt_cands);
             }
         };
@@ -1613,7 +1647,8 @@ LpResult DualSimplexSolver::solve() {
                     local.reserve(local.size() +
                         static_cast<std::size_t>((range.end() - range.begin()) / 4 + 8));
                     for (Index t = range.begin(); t < range.end(); ++t) {
-                        Index pos = (offset + t) % nnb;
+                        Index pos = offset + t;
+                        if (pos >= nnb) pos -= nnb;
                         appendCandidate(pos, local);
                     }
                 });
@@ -1654,7 +1689,8 @@ LpResult DualSimplexSolver::solve() {
             for (Index i = 0; i < num_rows_; ++i) {
                 Index k = basis_[i];
                 Real xk = primal_[k];
-                if (xk < varLower(k) - kPrimalTol || xk > varUpper(k) + kPrimalTol) {
+                if (xk < lowerBoundFast(k) - kPrimalTol ||
+                    xk > upperBoundFast(k) + kPrimalTol) {
                     any_primal_violation = true;
                     break;
                 }
@@ -1802,10 +1838,10 @@ LpResult DualSimplexSolver::solve() {
 
                 // Flip this variable to its opposite bound.
                 if (var_status_[c.var] == BasisStatus::AtLower) {
-                    primal_[c.var] = varUpper(c.var);
+                    primal_[c.var] = upperBoundFast(c.var);
                     var_status_[c.var] = BasisStatus::AtUpper;
                 } else {
-                    primal_[c.var] = varLower(c.var);
+                    primal_[c.var] = lowerBoundFast(c.var);
                     var_status_[c.var] = BasisStatus::AtLower;
                 }
                 has_flips = true;
@@ -1974,16 +2010,11 @@ LpResult DualSimplexSolver::solve() {
         }
 
         // ---- LU update ----
-        if (entering_var < num_cols_) {
-            auto cv = matrix_.col(entering_var);
-            lu_.update(leaving_row, cv.indices, cv.values);
-        } else {
-            Index si = entering_var - num_cols_;
-            static constexpr Real neg_one = -1.0;
-            lu_.update(leaving_row,
-                       std::span<const Index>(&si, 1),
-                       std::span<const Real>(&neg_one, 1));
-        }
+        // Reuse transformed pivot column and avoid a second FTRAN in LU update.
+        lu_.updateFromFtranColumn(
+            leaving_row,
+            std::span<const Real>(pivot_col.data(),
+                                  static_cast<std::size_t>(num_rows_)));
 
         if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
             ++degenerate_pivot_streak;
