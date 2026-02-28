@@ -3418,13 +3418,8 @@ MipResult MipSolver::solve() {
             std::numeric_limits<uint64_t>::max();
         std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
         SolutionPool pre_root_pool(problem_.sense);
-        const Real deterministic_stage_incumbent = pre_root_pool.bestObjective();
+        Real deterministic_stage_incumbent = pre_root_pool.bestObjective();
         std::vector<Real> deterministic_incumbent_values;
-        if (const auto best = pre_root_pool.bestSolution(); best.has_value()) {
-            deterministic_incumbent_values = best->values;
-        }
-        const std::span<const Real> deterministic_incumbent_span(
-            deterministic_incumbent_values.data(), deterministic_incumbent_values.size());
         const auto stage_start = std::chrono::steady_clock::now();
         auto stageElapsed = [&]() -> double {
             return std::chrono::duration<double>(
@@ -3468,7 +3463,11 @@ MipResult MipSolver::solve() {
         };
 
         auto runPreRootRound =
-            [&](Int round, Int thread_id, std::mt19937_64& round_rng) -> PreRootRoundResult {
+            [&](Int round,
+                Int thread_id,
+                std::mt19937_64& round_rng,
+                Real deterministic_incumbent_for_round,
+                std::span<const Real> deterministic_incumbent_span) -> PreRootRoundResult {
             PreRootRoundResult out;
             out.round = round;
             out.thread_id = thread_id;
@@ -3477,7 +3476,7 @@ MipResult MipSolver::solve() {
 
             const Real incumbent_for_round =
                 (parallel_mode_ == ParallelMode::Deterministic)
-                    ? deterministic_stage_incumbent
+                    ? deterministic_incumbent_for_round
                     : pre_root_pool.bestObjective();
 
             switch (out.arm) {
@@ -3504,6 +3503,13 @@ MipResult MipSolver::solve() {
                                 incumbent_sol->values.data(),
                                 incumbent_sol->values.size());
                         }
+                    }
+                    // Local-MIP without an incumbent is a no-op; run FPR instead.
+                    if (incumbent_span.empty()) {
+                        out.candidate = runLpFreeFpr(round_problem, discrete_vars, round_rng,
+                                                     incumbent_for_round,
+                                                     out.local_work);
+                        break;
                     }
                     out.candidate = runLpFreeLocalMip(round_problem, discrete_vars, round_rng,
                                                       incumbent_for_round,
@@ -3546,6 +3552,8 @@ MipResult MipSolver::solve() {
                 ++improvements;
                 ++feasible_found;
                 if (parallel_mode_ == ParallelMode::Deterministic) {
+                    deterministic_stage_incumbent = out.candidate->objective;
+                    deterministic_incumbent_values = out.candidate->values;
                     const uint64_t seen_tick = stage_work.ticks();
                     uint64_t old_tick =
                         first_feasible_work_tick.load(std::memory_order_relaxed);
@@ -3584,6 +3592,10 @@ MipResult MipSolver::solve() {
                     stage_threads, pre_root_lp_free_max_rounds_ - next_round_value);
                 std::vector<PreRootRoundResult> batch(
                     static_cast<std::size_t>(batch_size));
+                const Real batch_incumbent = deterministic_stage_incumbent;
+                const std::span<const Real> batch_incumbent_span(
+                    deterministic_incumbent_values.data(),
+                    deterministic_incumbent_values.size());
                 std::vector<std::thread> batch_threads;
                 batch_threads.reserve(static_cast<std::size_t>(batch_size));
                 for (Int t = 0; t < batch_size; ++t) {
@@ -3591,7 +3603,9 @@ MipResult MipSolver::solve() {
                     batch_threads.emplace_back([&, t, round]() {
                         std::mt19937_64 round_rng(roundSeed(round));
                         batch[static_cast<std::size_t>(t)] =
-                            runPreRootRound(round, t, round_rng);
+                            runPreRootRound(round, t, round_rng,
+                                            batch_incumbent,
+                                            batch_incumbent_span);
                     });
                 }
                 for (auto& w : batch_threads) w.join();
@@ -3622,7 +3636,12 @@ MipResult MipSolver::solve() {
                         parallel_mode_ == ParallelMode::Deterministic
                             ? roundSeed(round)
                             : thread_rng());
-                    const auto out = runPreRootRound(round, thread_id, round_rng);
+                    const std::span<const Real> incumbent_span(
+                        deterministic_incumbent_values.data(),
+                        deterministic_incumbent_values.size());
+                    const auto out = runPreRootRound(round, thread_id, round_rng,
+                                                     deterministic_stage_incumbent,
+                                                     incumbent_span);
                     commitPreRootRound(out);
                 }
             };
