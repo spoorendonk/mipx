@@ -1126,6 +1126,7 @@ TEST_CASE("MipSolver: pre-root fixed schedule can be selected",
     CHECK(stats.enabled);
     CHECK_FALSE(stats.portfolio_enabled);
     CHECK(stats.calls == 6);
+    CHECK(stats.feasible_found >= 1);
     CHECK(stats.fj_calls == 2);
     CHECK(stats.fpr_calls == 2);
     CHECK(stats.local_mip_calls == 2);
@@ -1188,6 +1189,36 @@ TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
     CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls +
               stats.lp_light_fpr_calls + stats.lp_light_diving_calls ==
           stats.calls);
+}
+
+TEST_CASE("MipSolver: pre-root opportunistic fixed schedule enables LocalMip after incumbent",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setNumThreads(1);
+    solver.setParallelMode(ParallelMode::Opportunistic);
+    solver.setHeuristicSeed(31);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(false);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(96);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+    CHECK(stats.calls >= 1);
+    CHECK(stats.feasible_found >= 1);
+    CHECK(stats.local_mip_calls > 0);
+    CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls == stats.calls);
 }
 
 TEST_CASE("MipSolver: conflict learning learns and reuses no-goods", "[mip][conflicts]") {
