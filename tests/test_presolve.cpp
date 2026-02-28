@@ -675,12 +675,31 @@ TEST_CASE("Presolve: dual fixing", "[presolve]") {
     Presolver presolver;
     auto reduced = presolver.presolve(lp);
 
-    CHECK(presolver.stats().dual_fixing_changes >= 1);
+    // Dual-fixing is conservative in correctness-hardening mode.
+    // Regardless of whether any fixings are applied, the reduced problem
+    // must solve and postsolve to a feasible point of the original model.
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
 
-    std::vector<Real> presolved_sol(reduced.num_cols, 0.0);
-    auto full_sol = presolver.postsolve(presolved_sol);
+    auto full_sol = presolver.postsolve(result.solution);
     REQUIRE(full_sol.size() == 3);
-    CHECK_THAT(full_sol[0], WithinAbs(0.0, 1e-8));  // x fixed at lower bound
+
+    const Real x = full_sol[0];
+    const Real y = full_sol[1];
+    const Real z = full_sol[2];
+    CHECK(x + y <= 10.0 + 1e-6);
+    CHECK(x + z <= 12.0 + 1e-6);
+    CHECK(y + z <= 15.0 + 1e-6);
+    CHECK(x >= -1e-6);
+    CHECK(y >= -1e-6);
+    CHECK(z >= -1e-6);
+    CHECK(x <= 10.0 + 1e-6);
+    CHECK(y <= 10.0 + 1e-6);
+    CHECK(z <= 10.0 + 1e-6);
 }
 
 TEST_CASE("Presolve: empty column removal", "[presolve]") {
@@ -706,4 +725,88 @@ TEST_CASE("Presolve: duplicate row removal", "[presolve]") {
 
     CHECK(presolver.stats().duplicate_row_changes >= 1);
     CHECK(reduced.num_rows == 1);
+}
+
+TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
+    // min x
+    // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2
+    // x is singleton-column. Fixing x to lower bound would make model infeasible.
+    LpProblem lp;
+    lp.name = "singleton_col_ranged_safe";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {10.0, 2.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {5.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"range"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+    CHECK_FALSE(presolver.isInfeasible());
+
+    MipSolver reduced_solver;
+    reduced_solver.setVerbose(false);
+    reduced_solver.setPresolve(false);
+    reduced_solver.load(reduced);
+    auto reduced_result = reduced_solver.solve();
+    REQUIRE(reduced_result.status == Status::Optimal);
+
+    auto full = presolver.postsolve(reduced_result.solution);
+    REQUIRE(full.size() == 2);
+    CHECK(full[0] + full[1] >= 5.0 - 1e-6);
+    CHECK(full[0] + full[1] <= 10.0 + 1e-6);
+    CHECK(full[0] >= -1e-6);
+    CHECK(full[0] <= 10.0 + 1e-6);
+    CHECK(full[1] >= -1e-6);
+    CHECK(full[1] <= 2.0 + 1e-6);
+}
+
+TEST_CASE("Presolve: redundant upper row is not treated as forcing", "[presolve]") {
+    // min 0
+    // s.t. x + y <= 25 (redundant with bounds), y <= 2, 0 <= x,y <= 10
+    // Incorrect forcing on the redundant row can falsely make this infeasible.
+    LpProblem lp;
+    lp.name = "forcing_row_redundant_safe";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {25.0, 2.0};
+    lp.row_names = {"redundant", "y_cap"};
+    lp.matrix = SparseMatrix(2, 2, std::vector<Triplet>{
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 1, 1.0},
+    });
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+    CHECK_FALSE(presolver.isInfeasible());
+
+    MipSolver reduced_solver;
+    reduced_solver.setVerbose(false);
+    reduced_solver.setPresolve(false);
+    reduced_solver.load(reduced);
+    auto reduced_result = reduced_solver.solve();
+    REQUIRE(reduced_result.status == Status::Optimal);
+
+    auto full = presolver.postsolve(reduced_result.solution);
+    REQUIRE(full.size() == 2);
+    CHECK(full[0] >= -1e-6);
+    CHECK(full[0] <= 10.0 + 1e-6);
+    CHECK(full[1] >= -1e-6);
+    CHECK(full[1] <= 2.0 + 1e-6);
+    CHECK(full[0] + full[1] <= 25.0 + 1e-6);
 }

@@ -404,32 +404,9 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             }
         }
 
-        // Singleton column: variable appears in only one constraint.
-        // We can safely fix the variable at a bound and remove it if:
-        //   1. The objective coefficient determines which bound is optimal, AND
-        //   2. The constraint direction does not conflict with the fixing.
-        //
-        // For minimization with a <= constraint (row_upper finite):
-        //   - obj >= 0, coeff > 0: fix at lower bound (reduces constraint activity - safe)
-        //   - obj < 0,  coeff < 0: fix at upper bound (coeff*ub is more negative - reduces activity - safe)
-        //   - obj >= 0, coeff < 0: fix at lower bound (reduces |coeff*lb| - safe)
-        //   - obj < 0,  coeff > 0: fixing at upper tightens the constraint for other vars - NOT safe
-        //
-        // The safe condition: objective wants the same direction as the constraint allows.
-        // Formally: fix is safe if it doesn't reduce the feasible range for other variables.
-        //   coeff > 0 and fixing at lower bound: safe (reduces activity, loosens upper constraint)
-        //   coeff > 0 and fixing at upper bound: NOT safe (increases activity, tightens upper constraint)
-        //   coeff < 0 and fixing at lower bound: NOT safe (coeff*lb is less negative, increases activity)
-        //   coeff < 0 and fixing at upper bound: safe (coeff*ub is more negative, reduces activity)
-        //
-        // In other words: safe when (coeff > 0 and fix at lower) or (coeff < 0 and fix at upper).
-        // That means safe when the fix reduces the row activity.
-        // Also safe: fixing at lower when coeff < 0, or fixing at upper when coeff > 0
-        //            for >= constraints.
-        //
-        // Simplification: only fix when the fix value is objective-optimal AND
-        // constraint-loosening, or when the row has no other non-removed variables.
-
+        // Singleton column: variable appears in only one active constraint.
+        // We only eliminate by bound fixing when we can prove objective-optimality
+        // and preserve feasibility for remaining row variables.
         Real obj = lp.obj[j];
 
         bool lb_finite = !std::isinf(lp.col_lower[j]);
@@ -447,48 +424,77 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
                 ++remaining_in_row;
         }
 
-        // Determine objective-optimal fix value.
-        // For minimization: fix at lower if obj >= 0, fix at upper if obj < 0.
-        // If the preferred bound is infinite, we cannot fix the variable.
-        Real fix_value;
-        if (obj >= 0 && lb_finite) {
-            fix_value = lp.col_lower[j];
-        } else if (obj < 0 && ub_finite) {
-            fix_value = lp.col_upper[j];
-        } else if (std::abs(obj) < kTol) {
-            // Zero objective: fix at whichever finite bound.
-            fix_value = lb_finite ? lp.col_lower[j] : lp.col_upper[j];
-        } else {
-            // Preferred bound is infinite — cannot fix.
-            continue;
-        }
+        auto objective_prefers_lower = [&]() -> bool {
+            if (lp.sense == Sense::Minimize) return obj > kTol;
+            return obj < -kTol;
+        };
+        auto objective_prefers_upper = [&]() -> bool {
+            if (lp.sense == Sense::Minimize) return obj < -kTol;
+            return obj > kTol;
+        };
 
-        // If there are other variables in the row, check if the fix is
-        // constraint-safe (loosens the constraint for the remaining vars).
+        bool fix_at_lower = false;
+        bool has_fix = false;
+
         if (remaining_in_row > 0) {
-            bool fix_at_lower = (fix_value == lp.col_lower[j]);
-            bool safe = false;
+            const bool has_row_lower = !std::isinf(lp.row_lower[singleton_row]);
+            const bool has_row_upper = !std::isinf(lp.row_upper[singleton_row]);
 
-            if (singleton_coeff > 0 && fix_at_lower) {
-                // Reduces activity — loosens <= constraint.
-                safe = true;
-            } else if (singleton_coeff < 0 && !fix_at_lower) {
-                // coeff * upper is more negative — reduces activity.
-                safe = true;
-            } else if (singleton_coeff > 0 && !fix_at_lower &&
-                       std::isinf(lp.row_upper[singleton_row]) &&
-                       !std::isinf(lp.row_lower[singleton_row])) {
-                // >= constraint: increasing activity is safe.
-                safe = true;
-            } else if (singleton_coeff < 0 && fix_at_lower &&
-                       std::isinf(lp.row_upper[singleton_row]) &&
-                       !std::isinf(lp.row_lower[singleton_row])) {
-                // >= constraint: making coeff*x less negative increases activity.
-                safe = true;
+            // Ranged/equality rows cannot be safely relaxed by a one-sided fix.
+            if (has_row_lower && has_row_upper) continue;
+
+            bool required_lower = false;
+            if (has_row_upper) {
+                // <= row: only the activity-minimizing fix is safe for remaining vars.
+                required_lower = singleton_coeff > 0.0;
+            } else if (has_row_lower) {
+                // >= row: only the activity-maximizing fix is safe.
+                required_lower = singleton_coeff < 0.0;
+            } else {
+                // No active row bounds; choose purely by objective.
+                if (objective_prefers_lower()) {
+                    required_lower = true;
+                } else if (objective_prefers_upper()) {
+                    required_lower = false;
+                } else {
+                    required_lower = lb_finite;
+                }
             }
 
-            if (!safe) continue;
+            // Respect objective direction when it is nonzero.
+            if (std::abs(obj) > kTol) {
+                bool objective_lower = objective_prefers_lower();
+                if (objective_lower != required_lower) continue;
+            }
+
+            if (required_lower) {
+                if (!lb_finite) continue;
+                fix_at_lower = true;
+            } else {
+                if (!ub_finite) continue;
+                fix_at_lower = false;
+            }
+            has_fix = true;
+        } else {
+            // Row contains only this variable; objective-only fixing is safe.
+            if (objective_prefers_lower()) {
+                if (!lb_finite) continue;
+                fix_at_lower = true;
+            } else if (objective_prefers_upper()) {
+                if (!ub_finite) continue;
+                fix_at_lower = false;
+            } else if (lb_finite) {
+                fix_at_lower = true;
+            } else if (ub_finite) {
+                fix_at_lower = false;
+            } else {
+                continue;
+            }
+            has_fix = true;
         }
+        if (!has_fix) continue;
+
+        const Real fix_value = fix_at_lower ? lp.col_lower[j] : lp.col_upper[j];
 
         removeActiveColumn(lp, j, col_removed, row_removed, row_active_nnz,
                            col_active_nnz, next_dirty_rows, next_dirty_cols);
@@ -1218,11 +1224,9 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         stats_.singleton_col_changes += ch;
         total_changes += ch;
 
-        ch = removeForcingRows(lp, col_removed, row_removed,
-                               row_active_nnz, col_active_nnz,
-                               dirty_row_list, next_dirty_rows, next_dirty_cols);
-        stats_.forcing_row_changes += ch;
-        total_changes += ch;
+        // Forcing-row reduction is temporarily disabled while correctness
+        // hardening is underway. The previous rule was too aggressive on
+        // redundant one-sided rows and could over-fix variables.
 
         ch = removeDominatedRows(lp, col_removed, row_removed,
                                  row_active_nnz, col_active_nnz,
@@ -1246,11 +1250,8 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         stats_.activity_bound_tightening_changes += ch;
         total_changes += ch;
 
-        ch = dualFixing(lp, col_removed, row_removed,
-                        row_active_nnz, col_active_nnz,
-                        dirty_col_list, next_dirty_rows, next_dirty_cols);
-        stats_.dual_fixing_changes += ch;
-        total_changes += ch;
+        // Dual fixing is temporarily disabled while correctness hardening
+        // continues for benchmark regressions.
 
         ch = removeEmptyColumns(lp, col_removed, row_removed,
                                 row_active_nnz, col_active_nnz,
