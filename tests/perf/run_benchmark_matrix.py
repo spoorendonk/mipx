@@ -273,7 +273,10 @@ def main() -> int:
                     raw_csv = raw_dir / f"{tag}.csv"
 
                     if solver == "mipx":
-                        mode_flag = "--heur-deterministic" if mode == "deterministic" else "--heur-opportunistic"
+                        mode_args = [
+                            "--parallel-mode",
+                            "deterministic" if mode == "deterministic" else "opportunistic",
+                        ]
                         cmd = [
                             sys.executable,
                             str(RUN_MIPLIB),
@@ -296,12 +299,12 @@ def main() -> int:
                             "--instances",
                             instances_csv,
                             "--solver-arg",
-                            mode_flag,
-                            "--solver-arg",
                             "--seed",
                             "--solver-arg",
                             str(args.seed),
                         ]
+                        for mode_arg in mode_args:
+                            cmd.extend(["--solver-arg", mode_arg])
                         for extra in args.solver_arg:
                             cmd.extend(["--solver-arg", extra])
                         run(cmd)

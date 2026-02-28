@@ -104,7 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gap-tol", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--search-profiles", default="stable,default,aggressive")
-    parser.add_argument("--heur-modes", default="deterministic")
+    parser.add_argument("--parallel-modes", "--heur-modes",
+                        dest="parallel_modes", default="deterministic")
     parser.add_argument("--cuts", default="on,off")
     parser.add_argument("--presolve", default="on,off")
     parser.add_argument("--metric", choices=("work_units", "time_seconds"), default="work_units")
@@ -124,13 +125,13 @@ def search_flag(profile: str) -> str:
     raise SystemExit(f"Unsupported search profile: {profile}")
 
 
-def heur_flag(mode: str) -> str:
+def parallel_mode_args(mode: str) -> list[str]:
     mode = mode.lower()
     if mode == "deterministic":
-        return "--heur-deterministic"
+        return ["--parallel-mode", "deterministic"]
     if mode == "opportunistic":
-        return "--heur-opportunistic"
-    raise SystemExit(f"Unsupported heuristic mode: {mode}")
+        return ["--parallel-mode", "opportunistic"]
+    raise SystemExit(f"Unsupported parallel mode: {mode}")
 
 
 def parse_miplib_rows(path: Path) -> list[dict[str, str]]:
@@ -230,7 +231,7 @@ def main() -> int:
         raise SystemExit("--gap-tol must be > 0")
 
     search_profiles = [tok.lower() for tok in parse_csv_tokens(args.search_profiles)]
-    heur_modes = [tok.lower() for tok in parse_csv_tokens(args.heur_modes)]
+    heur_modes = [tok.lower() for tok in parse_csv_tokens(args.parallel_modes)]
     cuts_list = parse_bool_list(args.cuts, "cuts")
     presolve_list = parse_bool_list(args.presolve, "presolve")
 
@@ -252,12 +253,12 @@ def main() -> int:
 
         solver_args = [
             search_flag(search_profile),
-            heur_flag(heur_mode),
             "--cuts" if cuts_on else "--no-cuts",
             "--presolve" if presolve_on else "--no-presolve",
             "--seed",
             str(args.seed),
         ]
+        solver_args.extend(parallel_mode_args(heur_mode))
         solver_args.extend(args.solver_arg)
 
         cmd = [

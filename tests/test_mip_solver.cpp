@@ -130,6 +130,71 @@ static LpProblem buildRootFractionalHeuristicMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: LP-light Scylla-FPR probe model with many binaries.
+// min -sum_j w_j x_j
+// s.t. sum_j x_j <= 5.5, x_j binary
+// LP root is fractional, while integer-feasible incumbents are easy to verify.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildLpLightScyllaProbeMip() {
+    constexpr Index n = 12;
+    LpProblem lp;
+    lp.name = "lplight_scylla_probe_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj = {-12.0, -11.0, -10.0, -9.0, -8.0, -7.0,
+              -6.0,  -5.0,  -4.0,  -3.0, -2.0, -1.0};
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Binary);
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6",
+                    "x7", "x8", "x9", "x10", "x11", "x12"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {5.5};
+    lp.row_names = {"cap"};
+
+    std::vector<Triplet> trips;
+    trips.reserve(n);
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({0, j, 1.0});
+    }
+    lp.matrix = SparseMatrix(1, n, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: LP-light integer-repair probe
+// min -x
+// s.t. x <= 3.7, x integer
+// LP root: x=3.7, while integer rounding can violate and requires +-1 repair.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildLpLightIntegerRepairProbeMip() {
+    LpProblem lp;
+    lp.name = "lplight_integer_repair_probe_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {10.0};
+    lp.col_type = {VarType::Integer};
+    lp.col_names = {"x"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {3.7};
+    lp.row_names = {"ub_x"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Helper: build infeasible MIP
 // x >= 5, x <= 3, x integer
 // ---------------------------------------------------------------------------
@@ -696,7 +761,7 @@ TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
     solver_a.setVerbose(false);
     solver_a.setCutsEnabled(false);
     solver_a.setNodeLimit(1);
-    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setParallelMode(ParallelMode::Deterministic);
     solver_a.setHeuristicSeed(1234);
     solver_a.load(lp);
     auto result_a = solver_a.solve();
@@ -705,7 +770,7 @@ TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
     solver_b.setVerbose(false);
     solver_b.setCutsEnabled(false);
     solver_b.setNodeLimit(1);
-    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setParallelMode(ParallelMode::Deterministic);
     solver_b.setHeuristicSeed(1234);
     solver_b.load(lp);
     auto result_b = solver_b.solve();
@@ -726,7 +791,7 @@ TEST_CASE("MipSolver: opportunistic heuristic mode solves", "[mip][heuristics]")
     solver.setVerbose(false);
     solver.setCutsEnabled(false);
     solver.setNodeLimit(1);
-    solver.setHeuristicMode(HeuristicRuntimeMode::Opportunistic);
+    solver.setParallelMode(ParallelMode::Opportunistic);
     solver.setHeuristicSeed(7);
     solver.load(lp);
     const auto result = solver.solve();
@@ -914,6 +979,129 @@ TEST_CASE("MipSolver: pre-root LP-light deterministic mode reproduces with seed"
     CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
 }
 
+TEST_CASE("MipSolver: pre-root LP-light fixed schedule runs Scylla-FPR arm first",
+          "[mip][heuristics][preroot][lplight][scylla]") {
+    auto lp = buildLpLightScyllaProbeMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(2026);
+    solver.setPreRootLpFreeEnabled(false);
+    solver.setPreRootLpLightEnabled(true);
+    solver.setPreRootPortfolioEnabled(false);  // fixed schedule
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(1);       // single arm call
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+#ifdef MIPX_HAS_LP_LIGHT
+    CHECK(stats.lp_light_available);
+    CHECK(stats.calls == 1);
+    CHECK(stats.lp_light_calls == 1);
+    CHECK(stats.lp_light_fpr_calls == 1);
+    CHECK(stats.lp_light_diving_calls == 0);
+    CHECK(stats.work_units > 0.0);
+#else
+    CHECK_FALSE(stats.lp_light_available);
+    CHECK(stats.lp_light_calls == 0);
+#endif
+}
+
+TEST_CASE("MipSolver: pre-root LP-light Scylla path is deterministic on binary probe",
+          "[mip][heuristics][preroot][lplight][scylla]") {
+    auto lp = buildLpLightScyllaProbeMip();
+
+    MipSolver solver_a;
+    solver_a.setVerbose(false);
+    solver_a.setCutsEnabled(false);
+    solver_a.setPresolve(false);
+    solver_a.setNodeLimit(1);
+    solver_a.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_a.setHeuristicSeed(777);
+    solver_a.setPreRootLpFreeEnabled(false);
+    solver_a.setPreRootLpLightEnabled(true);
+    solver_a.setPreRootPortfolioEnabled(false);
+    solver_a.setPreRootLpFreeEarlyStop(false);
+    solver_a.setPreRootLpFreeMaxRounds(1);
+    solver_a.setPreRootLpFreeWorkBudget(1.0e9);
+    solver_a.load(lp);
+    const auto a = solver_a.solve();
+
+    MipSolver solver_b;
+    solver_b.setVerbose(false);
+    solver_b.setCutsEnabled(false);
+    solver_b.setPresolve(false);
+    solver_b.setNodeLimit(1);
+    solver_b.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver_b.setHeuristicSeed(777);
+    solver_b.setPreRootLpFreeEnabled(false);
+    solver_b.setPreRootLpLightEnabled(true);
+    solver_b.setPreRootPortfolioEnabled(false);
+    solver_b.setPreRootLpFreeEarlyStop(false);
+    solver_b.setPreRootLpFreeMaxRounds(1);
+    solver_b.setPreRootLpFreeWorkBudget(1.0e9);
+    solver_b.load(lp);
+    const auto b = solver_b.solve();
+
+    const auto& sa = solver_a.getPreRootStats();
+    const auto& sb = solver_b.getPreRootStats();
+    CHECK(sa.calls == sb.calls);
+    CHECK(sa.lp_light_calls == sb.lp_light_calls);
+    CHECK(sa.lp_light_fpr_calls == sb.lp_light_fpr_calls);
+    CHECK(sa.lp_light_diving_calls == sb.lp_light_diving_calls);
+    CHECK_THAT(sa.work_units, WithinAbs(sb.work_units, 1e-9));
+    CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+}
+
+TEST_CASE("MipSolver: pre-root LP-light Scylla repairs integral-step violations",
+          "[mip][heuristics][preroot][lplight][scylla]") {
+    auto lp = buildLpLightIntegerRepairProbeMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(17);
+    solver.setPreRootLpFreeEnabled(false);
+    solver.setPreRootLpLightEnabled(true);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(1);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+#ifdef MIPX_HAS_LP_LIGHT
+    CHECK(stats.lp_light_available);
+    CHECK(stats.calls == 1);
+    CHECK(stats.lp_light_calls == 1);
+    CHECK(stats.lp_light_fpr_calls == 1);
+    CHECK(stats.lp_light_diving_calls == 0);
+    CHECK(stats.feasible_found >= 1);
+    CHECK(stats.improvements >= 1);
+    REQUIRE(!result.solution.empty());
+    CHECK_THAT(result.solution[0], WithinAbs(3.0, 1e-9));
+#else
+    CHECK_FALSE(stats.lp_light_available);
+    CHECK(stats.lp_light_calls == 0);
+#endif
+}
+
 TEST_CASE("MipSolver: pre-root fixed schedule can be selected",
           "[mip][heuristics][preroot][portfolio]") {
     auto lp = buildRootFractionalHeuristicMip();
@@ -938,9 +1126,39 @@ TEST_CASE("MipSolver: pre-root fixed schedule can be selected",
     CHECK(stats.enabled);
     CHECK_FALSE(stats.portfolio_enabled);
     CHECK(stats.calls == 6);
+    CHECK(stats.feasible_found >= 1);
     CHECK(stats.fj_calls == 2);
     CHECK(stats.fpr_calls == 2);
     CHECK(stats.local_mip_calls == 2);
+}
+
+TEST_CASE("MipSolver: pre-root fixed schedule skips LocalMip until an incumbent exists",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildConflictLearningMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(13);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(false);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(9);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+    CHECK(stats.calls > 0);
+    CHECK(stats.feasible_found == 0);
+    CHECK(stats.local_mip_calls == 0);
+    CHECK(stats.fj_calls + stats.fpr_calls == stats.calls);
 }
 
 TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
@@ -971,6 +1189,36 @@ TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
     CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls +
               stats.lp_light_fpr_calls + stats.lp_light_diving_calls ==
           stats.calls);
+}
+
+TEST_CASE("MipSolver: pre-root opportunistic fixed schedule enables LocalMip after incumbent",
+          "[mip][heuristics][preroot][portfolio]") {
+    auto lp = buildRootFractionalHeuristicMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNodeLimit(1);
+    solver.setNumThreads(1);
+    solver.setParallelMode(ParallelMode::Opportunistic);
+    solver.setHeuristicSeed(31);
+    solver.setPreRootLpFreeEnabled(true);
+    solver.setPreRootLpLightEnabled(false);
+    solver.setPreRootPortfolioEnabled(false);
+    solver.setPreRootLpFreeEarlyStop(false);
+    solver.setPreRootLpFreeMaxRounds(96);
+    solver.setPreRootLpFreeWorkBudget(1.0e9);
+    solver.load(lp);
+    (void)solver.solve();
+
+    const auto& stats = solver.getPreRootStats();
+    CHECK(stats.enabled);
+    CHECK_FALSE(stats.portfolio_enabled);
+    CHECK(stats.calls >= 1);
+    CHECK(stats.feasible_found >= 1);
+    CHECK(stats.local_mip_calls > 0);
+    CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls == stats.calls);
 }
 
 TEST_CASE("MipSolver: conflict learning learns and reuses no-goods", "[mip][conflicts]") {

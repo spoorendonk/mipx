@@ -21,7 +21,8 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
-            "[--heur-deterministic|--heur-opportunistic] [--seed N] "
+            "[--parallel-mode deterministic|opportunistic] [--seed N] "
+            "[--heur-deterministic|--heur-opportunistic] "
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
             "[--pre-root-rounds N] [--pre-root-no-early-stop] "
             "[--pre-root-lplight|--no-pre-root-lplight] "
@@ -53,8 +54,7 @@ int main(int argc, char* argv[]) {
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
-    mipx::HeuristicRuntimeMode heuristic_mode =
-        mipx::HeuristicRuntimeMode::Deterministic;
+    mipx::ParallelMode parallel_mode = mipx::ParallelMode::Deterministic;
     uint64_t heuristic_seed = 1;
     bool pre_root_lpfree = false;
     double pre_root_work = 5.0e4;
@@ -105,10 +105,23 @@ int main(int argc, char* argv[]) {
             lp_mode = LpMode::Dual;
         } else if (arg == "--concurrent-root") {
             lp_mode = LpMode::Concurrent;
+        } else if (arg == "--parallel-mode" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "deterministic") {
+                parallel_mode = mipx::ParallelMode::Deterministic;
+            } else if (mode == "opportunistic") {
+                parallel_mode = mipx::ParallelMode::Opportunistic;
+            } else {
+                std::fprintf(stderr,
+                             "Invalid --parallel-mode value: %s "
+                             "(expected deterministic or opportunistic)\n",
+                             mode.c_str());
+                return 1;
+            }
         } else if (arg == "--heur-deterministic") {
-            heuristic_mode = mipx::HeuristicRuntimeMode::Deterministic;
+            parallel_mode = mipx::ParallelMode::Deterministic;
         } else if (arg == "--heur-opportunistic") {
-            heuristic_mode = mipx::HeuristicRuntimeMode::Opportunistic;
+            parallel_mode = mipx::ParallelMode::Opportunistic;
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(
                 std::strtoull(argv[++i], nullptr, 10));
@@ -213,7 +226,7 @@ int main(int argc, char* argv[]) {
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setPdlpUseGpu(barrier_gpu);
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
-            solver.setHeuristicMode(heuristic_mode);
+            solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);

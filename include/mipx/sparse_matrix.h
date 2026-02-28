@@ -1,7 +1,9 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -24,6 +26,13 @@ struct SparseVectorView {
 
 class SparseMatrix {
 public:
+    // Thread-safety contract:
+    // - Concurrent const reads (row/col/coeff/multiply) are supported.
+    // - Structural mutations (addRow/removeRow/removeRowStable) must not run
+    //   concurrently with reads or other mutations on the same matrix.
+    // - Copy/move assignment also mutates and follows the same rule.
+    // - In solver parallel regions, treat SparseMatrix as immutable.
+
     /// Construct an empty matrix with the given dimensions.
     SparseMatrix(Index rows, Index cols);
 
@@ -34,6 +43,10 @@ public:
     /// sorted within each row.
     SparseMatrix(Index rows, Index cols, std::vector<Real> values,
                  std::vector<Index> col_indices, std::vector<Index> row_starts);
+    SparseMatrix(const SparseMatrix& other);
+    SparseMatrix& operator=(const SparseMatrix& other);
+    SparseMatrix(SparseMatrix&& other) noexcept;
+    SparseMatrix& operator=(SparseMatrix&& other) noexcept;
 
     [[nodiscard]] Index numRows() const { return rows_; }
     [[nodiscard]] Index numCols() const { return cols_; }
@@ -85,7 +98,8 @@ private:
     std::vector<Index> row_starts_;
 
     // Lazy CSC cache (mutable for const col() access).
-    mutable bool csc_valid_ = false;
+    mutable std::atomic<bool> csc_valid_{false};
+    mutable std::mutex csc_mutex_;
     mutable std::vector<Real> csc_values_;
     mutable std::vector<Index> csc_row_indices_;
     mutable std::vector<Index> csc_col_starts_;

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <thread>
@@ -82,12 +83,18 @@ const char* cutEffortName(CutEffortMode mode) {
     }
 }
 
-const char* heuristicModeName(HeuristicRuntimeMode mode) {
+const char* parallelModeName(ParallelMode mode) {
     switch (mode) {
-        case HeuristicRuntimeMode::Deterministic: return "deterministic";
-        case HeuristicRuntimeMode::Opportunistic: return "opportunistic";
+        case ParallelMode::Deterministic: return "deterministic";
+        case ParallelMode::Opportunistic: return "opportunistic";
         default: return "deterministic";
     }
+}
+
+HeuristicRuntimeMode heuristicRuntimeMode(ParallelMode mode) {
+    return mode == ParallelMode::Opportunistic
+        ? HeuristicRuntimeMode::Opportunistic
+        : HeuristicRuntimeMode::Deterministic;
 }
 
 const char* searchProfileName(SearchProfile profile) {
@@ -640,51 +647,433 @@ std::optional<HeuristicSolution> runLpLightFpr(
     std::span<const Index> discrete_vars,
     std::span<const Real> lp_primals,
     std::span<const Real> reduced_costs,
+    std::mt19937_64& rng,
     Real incumbent,
     double& work_units) {
+    // Scylla-style LP-light FPR: LP-fractionality ranking + fix/propagate/repair,
+    // with an in-repo mipx sub-MIP neighborhood polish step.
     if (discrete_vars.empty() || lp_primals.empty()) return std::nullopt;
 
-    std::vector<Real> x(lp_primals.begin(), lp_primals.end());
-    projectToBounds(problem, x);
+    constexpr Real kViolationTol = 1e-6;
+    constexpr Real kBoundTol = 1e-9;
+    constexpr double kSubMipPolishWorkBudget = 2.5e4;
+
+    auto rowViolation = [&](Index i, Real lhs) -> Real {
+        Real v = 0.0;
+        if (problem.row_lower[i] > -kInf && lhs < problem.row_lower[i] - kViolationTol) {
+            v += problem.row_lower[i] - lhs;
+        }
+        if (problem.row_upper[i] < kInf && lhs > problem.row_upper[i] + kViolationTol) {
+            v += lhs - problem.row_upper[i];
+        }
+        return v;
+    };
+
+    auto fallbackDiscreteValue = [&](Index j,
+                                     Real lb,
+                                     Real ub,
+                                     bool high) -> Real {
+        Real v = high ? ub : lb;
+        if (problem.col_type[j] == VarType::Binary) {
+            v = high ? 1.0 : 0.0;
+        } else if (problem.col_type[j] == VarType::Integer) {
+            v = std::round(v);
+        }
+        return clampValue(v, problem.col_lower[j], problem.col_upper[j]);
+    };
+
+    double submip_work_used = 0.0;
+    auto localImproveWithMipSubproblem =
+        [&](const HeuristicSolution& candidate) -> std::optional<HeuristicSolution> {
+            if (candidate.values.empty() || discrete_vars.size() < 10) return std::nullopt;
+            if (submip_work_used >= kSubMipPolishWorkBudget) return std::nullopt;
+
+            LpProblem sub = problem;
+            struct FixRank {
+                Real score = 0.0;
+                Index var = -1;
+            };
+            std::vector<FixRank> ranked;
+            ranked.reserve(discrete_vars.size());
+            for (Index j : discrete_vars) {
+                const Real frac = std::abs(lp_primals[j] - std::round(lp_primals[j]));
+                const Real rc = (j >= 0 && j < static_cast<Index>(reduced_costs.size()))
+                    ? std::abs(reduced_costs[j])
+                    : 0.0;
+                // Prefer fixing variables that look stable in LP.
+                ranked.push_back({(1.0 - frac) + 0.05 * rc, j});
+            }
+            std::sort(ranked.begin(), ranked.end(),
+                      [](const FixRank& a, const FixRank& b) { return a.score > b.score; });
+
+            const Int fix_count = std::max<Int>(
+                1, static_cast<Int>(ranked.size() * 7 / 10));
+            for (Int k = 0; k < fix_count; ++k) {
+                const Index j = ranked[static_cast<std::size_t>(k)].var;
+                Real v = candidate.values[j];
+                if (problem.col_type[j] == VarType::Binary) {
+                    v = (v >= 0.5) ? 1.0 : 0.0;
+                } else if (problem.col_type[j] == VarType::Integer) {
+                    v = std::round(v);
+                }
+                v = clampValue(v, problem.col_lower[j], problem.col_upper[j]);
+                sub.col_lower[j] = v;
+                sub.col_upper[j] = v;
+            }
+
+            MipSolver sub_solver;
+            sub_solver.setVerbose(false);
+            sub_solver.setPresolve(false);
+            sub_solver.setCutsEnabled(false);
+            sub_solver.setNodeLimit(128);
+            sub_solver.setGapTolerance(0.0);
+            sub_solver.setNumThreads(1);
+            sub_solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+            sub_solver.setHeuristicSeed(
+                static_cast<uint64_t>(rng() ^ 0x9e3779b97f4a7c15ULL));
+            sub_solver.setPreRootLpFreeEnabled(false);
+            sub_solver.setPreRootLpLightEnabled(false);
+            sub_solver.setPreRootPortfolioEnabled(false);
+            sub_solver.load(sub);
+            const auto sub_result = sub_solver.solve();
+            const double sub_work = std::max(0.0, sub_result.work_units);
+            submip_work_used += sub_work;
+            work_units += sub_work;
+
+            if (sub_result.solution.empty()) return std::nullopt;
+            if (!isFeasiblePoint(problem, sub_result.solution, &work_units)) return std::nullopt;
+            const Real obj = objectiveValue(problem, sub_result.solution);
+            if (!betterObjective(problem.sense, obj, candidate.objective)) return std::nullopt;
+            return HeuristicSolution{.values = sub_result.solution, .objective = obj};
+        };
 
     struct RankedVar {
         Real score = 0.0;
         Index var = -1;
     };
 
-    std::vector<RankedVar> ranked;
-    ranked.reserve(discrete_vars.size());
+    std::vector<RankedVar> base_ranked;
+    base_ranked.reserve(discrete_vars.size());
     for (Index j : discrete_vars) {
         const Real frac = std::abs(lp_primals[j] - std::round(lp_primals[j]));
         const Real rc = (j >= 0 && j < static_cast<Index>(reduced_costs.size()))
             ? std::abs(reduced_costs[j])
             : 0.0;
         const Real degree = static_cast<Real>(problem.matrix.col(j).size());
-        ranked.push_back({frac * (1.0 + rc + 0.1 * degree), j});
+        base_ranked.push_back({frac * (1.0 + rc + 0.1 * degree), j});
         work_units += (1.0 + degree) * 1e-6;
     }
-    std::sort(ranked.begin(), ranked.end(),
+    std::sort(base_ranked.begin(), base_ranked.end(),
               [](const RankedVar& a, const RankedVar& b) { return a.score > b.score; });
 
-    const Int fix_count = std::max<Int>(1, static_cast<Int>(ranked.size() / 2));
-    for (Int k = 0; k < fix_count; ++k) {
-        const Index j = ranked[static_cast<std::size_t>(k)].var;
-        const Real lpv = lp_primals[j];
-        const Real down = std::floor(lpv);
-        const Real up = std::ceil(lpv);
-        const bool prefer_up = (problem.sense == Sense::Minimize)
-            ? (problem.obj[j] < 0.0)
-            : (problem.obj[j] > 0.0);
-        x[j] = prefer_up ? up : down;
-        x[j] = clampValue(x[j], problem.col_lower[j], problem.col_upper[j]);
+    std::optional<HeuristicSolution> best_candidate;
+
+    const Int attempts = 4;
+    const Int repair_budget = std::max<Int>(
+        128, static_cast<Int>(12 * discrete_vars.size()));
+    for (Int attempt = 0; attempt < attempts; ++attempt) {
+        std::vector<Real> x(lp_primals.begin(), lp_primals.end());
+        projectToBounds(problem, x);
+
+        std::vector<Real> implied_lb(problem.col_lower.begin(), problem.col_lower.end());
+        std::vector<Real> implied_ub(problem.col_upper.begin(), problem.col_upper.end());
+        std::vector<char> fixed(problem.num_cols, 0);
+
+        auto chooseFixValue = [&](Index j) -> Real {
+            const Real lb = clampValue(implied_lb[j], problem.col_lower[j], problem.col_upper[j]);
+            const Real ub = clampValue(implied_ub[j], problem.col_lower[j], problem.col_upper[j]);
+            if (ub <= lb + kBoundTol) {
+                return fallbackDiscreteValue(j, lb, ub, true);
+            }
+
+            const Real hint = clampValue(lp_primals[j], lb, ub);
+            Real down = std::floor(hint);
+            Real up = std::ceil(hint);
+            if (problem.col_type[j] == VarType::Binary) {
+                down = 0.0;
+                up = 1.0;
+            }
+            down = clampValue(down, lb, ub);
+            up = clampValue(up, lb, ub);
+            const bool prefer_up = (problem.sense == Sense::Minimize)
+                ? (problem.obj[j] < 0.0)
+                : (problem.obj[j] > 0.0);
+            Real value = prefer_up ? up : down;
+            if (attempt > 0 &&
+                std::uniform_int_distribution<int>(0, 9)(rng) == 0) {
+                value = prefer_up ? down : up;
+            }
+            if (problem.col_type[j] == VarType::Integer) value = std::round(value);
+            if (problem.col_type[j] == VarType::Binary) value = (value >= 0.5) ? 1.0 : 0.0;
+            return clampValue(value, lb, ub);
+        };
+
+        auto propagateBounds = [&]() -> bool {
+            bool changed = true;
+            Int rounds = 0;
+            while (changed && rounds < 24) {
+                changed = false;
+                ++rounds;
+                for (Index i = 0; i < problem.num_rows; ++i) {
+                    const auto row = problem.matrix.row(i);
+                    Real fixed_sum = 0.0;
+                    Real min_activity = 0.0;
+                    Real max_activity = 0.0;
+                    Index unfixed = 0;
+
+                    for (Index k = 0; k < row.size(); ++k) {
+                        const Index j = row.indices[k];
+                        const Real a = row.values[k];
+                        if (fixed[j]) {
+                            fixed_sum += a * x[j];
+                            continue;
+                        }
+                        ++unfixed;
+                        const Real lb = implied_lb[j];
+                        const Real ub = implied_ub[j];
+                        if (a >= 0.0) {
+                            min_activity += a * lb;
+                            max_activity += a * ub;
+                        } else {
+                            min_activity += a * ub;
+                            max_activity += a * lb;
+                        }
+                    }
+                    work_units += static_cast<double>(row.size()) * 1e-6;
+                    if (unfixed == 0) continue;
+
+                    const Real row_lb = problem.row_lower[i];
+                    const Real row_ub = problem.row_upper[i];
+                    for (Index k = 0; k < row.size(); ++k) {
+                        const Index j = row.indices[k];
+                        const Real a = row.values[k];
+                        if (fixed[j] || std::abs(a) <= 1e-15) continue;
+
+                        const Real cur_lb = implied_lb[j];
+                        const Real cur_ub = implied_ub[j];
+                        Real new_lb = cur_lb;
+                        Real new_ub = cur_ub;
+
+                        const Real min_others = min_activity - (a >= 0.0 ? a * cur_lb : a * cur_ub);
+                        const Real max_others = max_activity - (a >= 0.0 ? a * cur_ub : a * cur_lb);
+
+                        if (row_ub < kInf) {
+                            const Real rhs = row_ub - fixed_sum;
+                            const Real b = (rhs - min_others) / a;
+                            if (a > 0.0) new_ub = std::min(new_ub, b);
+                            else new_lb = std::max(new_lb, b);
+                        }
+                        if (row_lb > -kInf) {
+                            const Real rhs = row_lb - fixed_sum;
+                            const Real b = (rhs - max_others) / a;
+                            if (a > 0.0) new_lb = std::max(new_lb, b);
+                            else new_ub = std::min(new_ub, b);
+                        }
+
+                        new_lb = std::max(new_lb, problem.col_lower[j]);
+                        new_ub = std::min(new_ub, problem.col_upper[j]);
+                        if (isDiscreteType(problem.col_type[j])) {
+                            new_lb = std::ceil(new_lb - kViolationTol);
+                            new_ub = std::floor(new_ub + kViolationTol);
+                        }
+                        if (new_lb > new_ub + kViolationTol) return false;
+                        if (new_lb > implied_lb[j] + kBoundTol) {
+                            implied_lb[j] = new_lb;
+                            changed = true;
+                        }
+                        if (new_ub < implied_ub[j] - kBoundTol) {
+                            implied_ub[j] = new_ub;
+                            changed = true;
+                        }
+                        if (!fixed[j] && implied_ub[j] <= implied_lb[j] + kBoundTol) {
+                            fixed[j] = 1;
+                            x[j] = fallbackDiscreteValue(j, implied_lb[j], implied_ub[j], true);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            return true;
+        };
+
+        std::vector<Index> order;
+        order.reserve(base_ranked.size());
+        for (const auto& entry : base_ranked) order.push_back(entry.var);
+        if (attempt > 0 && order.size() > 4) {
+            const std::size_t prefix = std::max<std::size_t>(2, order.size() / 3);
+            std::shuffle(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(prefix), rng);
+        }
+
+        for (Index j : order) {
+            if (fixed[j]) continue;
+            const auto saved_lb = implied_lb;
+            const auto saved_ub = implied_ub;
+            const auto saved_fixed = fixed;
+            const auto saved_x = x;
+
+            const Real first = chooseFixValue(j);
+            x[j] = first;
+            fixed[j] = 1;
+            if (!propagateBounds()) {
+                implied_lb = saved_lb;
+                implied_ub = saved_ub;
+                fixed = saved_fixed;
+                x = saved_x;
+                const Real alt = fallbackDiscreteValue(j, implied_lb[j], implied_ub[j], first <= 0.5);
+                x[j] = alt;
+                fixed[j] = 1;
+                if (!propagateBounds()) {
+                    implied_lb = saved_lb;
+                    implied_ub = saved_ub;
+                    fixed = saved_fixed;
+                    x = saved_x;
+                }
+            }
+        }
+
+        for (Index j = 0; j < problem.num_cols; ++j) {
+            if (fixed[j]) continue;
+            if (problem.col_type[j] == VarType::Continuous) {
+                const Real lb = clampValue(implied_lb[j], problem.col_lower[j], problem.col_upper[j]);
+                const Real ub = clampValue(implied_ub[j], problem.col_lower[j], problem.col_upper[j]);
+                if (problem.obj[j] > 0.0) {
+                    x[j] = (problem.sense == Sense::Minimize) ? lb : ub;
+                } else if (problem.obj[j] < 0.0) {
+                    x[j] = (problem.sense == Sense::Minimize) ? ub : lb;
+                } else {
+                    x[j] = clampValue(lp_primals[j], lb, ub);
+                }
+            } else {
+                x[j] = chooseFixValue(j);
+            }
+        }
+        canonicalizePoint(problem, x);
+
+        auto runWalksatRepair = [&]() -> bool {
+            std::vector<Real> lhs(problem.num_rows, 0.0);
+            std::vector<char> violated(problem.num_rows, 0);
+            std::vector<Index> violated_rows;
+            for (Index i = 0; i < problem.num_rows; ++i) {
+                const auto row = problem.matrix.row(i);
+                for (Index k = 0; k < row.size(); ++k) {
+                    lhs[i] += row.values[k] * x[row.indices[k]];
+                }
+                work_units += static_cast<double>(row.size()) * 1e-6;
+                if (rowViolation(i, lhs[i]) > kViolationTol) {
+                    violated[i] = 1;
+                    violated_rows.push_back(i);
+                }
+            }
+
+            for (Int step = 0; step < repair_budget && !violated_rows.empty(); ++step) {
+                const Index idx = std::uniform_int_distribution<Index>(
+                    0, static_cast<Index>(violated_rows.size()) - 1)(rng);
+                const Index row_id = violated_rows[static_cast<std::size_t>(idx)];
+                const auto row = problem.matrix.row(row_id);
+                if (row.size() == 0) continue;
+
+                Index best_var = -1;
+                Real best_value = 0.0;
+                Real best_delta = kInf;
+
+                for (Index k = 0; k < row.size(); ++k) {
+                    const Index j = row.indices[k];
+                    if (!isDiscreteType(problem.col_type[j])) continue;
+                    const Real cur = x[j];
+                    std::array<Real, 2> candidates{};
+                    if (problem.col_type[j] == VarType::Binary) {
+                        candidates = {0.0, 1.0};
+                    } else if (problem.col_type[j] == VarType::Integer) {
+                        const Real down = std::floor(cur);
+                        const Real up = std::ceil(cur);
+                        if (std::abs(up - down) <= kBoundTol) {
+                            // If already integral, try neighboring lattice points.
+                            candidates = {down - 1.0, up + 1.0};
+                        } else {
+                            candidates = {down, up};
+                        }
+                    } else {
+                        candidates = {std::floor(cur), std::ceil(cur)};
+                    }
+                    for (Real cand : candidates) {
+                        if (problem.col_type[j] == VarType::Integer) cand = std::round(cand);
+                        if (problem.col_type[j] == VarType::Binary) cand = (cand >= 0.5) ? 1.0 : 0.0;
+                        cand = clampValue(cand, implied_lb[j], implied_ub[j]);
+                        if (std::abs(cand - cur) <= kBoundTol) continue;
+
+                        const Real delta_x = cand - cur;
+                        Real delta_viol = 0.0;
+                        const auto col = problem.matrix.col(j);
+                        for (Index p = 0; p < col.size(); ++p) {
+                            const Index i2 = col.indices[p];
+                            const Real old_lhs = lhs[i2];
+                            const Real new_lhs = old_lhs + col.values[p] * delta_x;
+                            const Real old_v = rowViolation(i2, old_lhs);
+                            const Real new_v = rowViolation(i2, new_lhs);
+                            delta_viol += (new_v - old_v);
+                        }
+                        work_units += static_cast<double>(col.size()) * 1e-6;
+
+                        if (delta_viol < best_delta) {
+                            best_delta = delta_viol;
+                            best_var = j;
+                            best_value = cand;
+                        }
+                    }
+                }
+
+                if (best_var < 0) continue;
+                const Real delta_x = best_value - x[best_var];
+                x[best_var] = best_value;
+
+                const auto col = problem.matrix.col(best_var);
+                for (Index p = 0; p < col.size(); ++p) {
+                    const Index i2 = col.indices[p];
+                    lhs[i2] += col.values[p] * delta_x;
+                    const bool is_viol = rowViolation(i2, lhs[i2]) > kViolationTol;
+                    if (violated[i2] && !is_viol) {
+                        violated[i2] = 0;
+                        const auto it = std::find(violated_rows.begin(), violated_rows.end(), i2);
+                        if (it != violated_rows.end()) {
+                            *it = violated_rows.back();
+                            violated_rows.pop_back();
+                        }
+                    } else if (!violated[i2] && is_viol) {
+                        violated[i2] = 1;
+                        violated_rows.push_back(i2);
+                    }
+                }
+                work_units += static_cast<double>(col.size()) * 1e-6;
+            }
+
+            return violated_rows.empty();
+        };
+
+        bool feasible = isFeasiblePoint(problem, x, &work_units);
+        if (!feasible) {
+            feasible = runWalksatRepair();
+            if (feasible) {
+                canonicalizePoint(problem, x);
+                feasible = isFeasiblePoint(problem, x, &work_units);
+            }
+        }
+        if (!feasible) continue;
+
+        const Real obj = objectiveValue(problem, x);
+        if (!betterObjective(problem.sense, obj, incumbent)) continue;
+
+        HeuristicSolution candidate{.values = x, .objective = obj};
+        if (const auto polished = localImproveWithMipSubproblem(candidate); polished.has_value()) {
+            candidate = *polished;
+        }
+
+        if (!best_candidate.has_value() ||
+            betterObjective(problem.sense, candidate.objective, best_candidate->objective)) {
+            best_candidate = std::move(candidate);
+        }
     }
 
-    canonicalizePoint(problem, x);
-    greedyRepair(problem, x, 6, work_units);
-    if (!isFeasiblePoint(problem, x, &work_units)) return std::nullopt;
-    const Real obj = objectiveValue(problem, x);
-    if (!betterObjective(problem.sense, obj, incumbent)) return std::nullopt;
-    return HeuristicSolution{.values = std::move(x), .objective = obj};
+    return best_candidate;
 }
 
 std::optional<HeuristicSolution> runLpLightDiving(
@@ -758,7 +1147,7 @@ bool MipSolver::hasLpLightCapability() const {
 
 HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     HeuristicRuntimeConfig config;
-    config.mode = heuristic_mode_;
+    config.mode = heuristicRuntimeMode(parallel_mode_);
     config.seed = heuristic_seed_;
     config.rins_node_frequency = kRinsNodeFrequency;
     config.rins_subproblem_iter_limit = kRinsSubproblemIterLimit;
@@ -1673,6 +2062,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     total_work += root_symmetry_work;
     std::vector<Index> touched_vars;
     double last_log_time = -kLogInterval;  // ensure first node is logged
+    uint64_t det_log_next_tick = 1000000;
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
     Int rins_calls = 0;
@@ -1812,23 +2202,45 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
             best_solution = std::move(heur_outcome.solution->values);
             solution_pool.submit({best_solution, incumbent}, "rins", 0);
             ++rins_found;
+            const double log_elapsed =
+                (parallel_mode_ == ParallelMode::Deterministic)
+                    ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
+                    : elapsed();
             logProgress(nodes_explored, queue.size(), total_lp_iters,
                         incumbent,
                         queue.empty() ? incumbent : queue.bestBound(),
-                        elapsed(), true, node_int_inf);
+                        log_elapsed, true, node_int_inf);
             queue.prune(incumbent - 1e-6);
             nodes_since_incumbent = 0;
             improved_this_node = true;
         }
 
-        // Log progress periodically (time-based).
-        double now = elapsed();
-        if (verbose_ && (now - last_log_time >= kLogInterval || nodes_explored <= 1)) {
-            logProgress(nodes_explored, queue.size(), total_lp_iters,
-                       incumbent,
-                       queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
-                       now, false, node_int_inf);
-            last_log_time = now;
+        if (verbose_) {
+            if (parallel_mode_ == ParallelMode::Deterministic) {
+                const uint64_t cur_ticks = workUnitTicks(total_work);
+                if (cur_ticks >= det_log_next_tick || nodes_explored <= 1) {
+                    while (cur_ticks >= det_log_next_tick) {
+                        det_log_next_tick += 1000000;
+                    }
+                    logProgress(nodes_explored, queue.size(), total_lp_iters,
+                               incumbent,
+                               queue.empty() ? (incumbent < kInf ? incumbent : root_bound)
+                                             : queue.bestBound(),
+                               static_cast<double>(cur_ticks) * 1e-6,
+                               false, node_int_inf);
+                }
+            } else {
+                // Log progress periodically (time-based).
+                double now = elapsed();
+                if (now - last_log_time >= kLogInterval || nodes_explored <= 1) {
+                    logProgress(nodes_explored, queue.size(), total_lp_iters,
+                               incumbent,
+                               queue.empty() ? (incumbent < kInf ? incumbent : root_bound)
+                                             : queue.bestBound(),
+                               now, false, node_int_inf);
+                    last_log_time = now;
+                }
+            }
         }
 
         if (!branched && !node_primals.empty() && node_int_inf == 0) {
@@ -1836,10 +2248,14 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                 incumbent = node_obj;
                 best_solution = node_primals;
                 solution_pool.submit({best_solution, incumbent}, "tree_integral", 0);
+                const double log_elapsed =
+                    (parallel_mode_ == ParallelMode::Deterministic)
+                        ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
+                        : elapsed();
                 logProgress(nodes_explored, queue.size(), total_lp_iters,
                            incumbent,
                            queue.empty() ? incumbent : queue.bestBound(),
-                           elapsed(), true, 0);
+                           log_elapsed, true, 0);
                 queue.prune(incumbent - 1e-6);
                 nodes_since_incumbent = 0;
                 improved_this_node = true;
@@ -1895,6 +2311,9 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     AtomicWorkUnits atomic_work;
     atomic_work.count(workUnitTicks(total_work));
     std::atomic<bool> should_stop{false};
+    constexpr uint64_t kDetHeurGateQuantumTicks = 50000;  // 5e-2 deterministic work units
+    constexpr uint64_t kDetLogQuantumTicks = 1000000;     // 1.0 deterministic work units
+    std::atomic<uint64_t> det_heur_next_tick{kDetHeurGateQuantumTicks};
     std::mutex stats_mutex;
     double last_log_time = -kLogInterval;  // ensure first log fires
     Int rins_calls = 0;
@@ -1906,17 +2325,273 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 
     // Each thread needs its own LP solver instance.
     Int requested_threads = num_threads_;
-    if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
-        requested_threads = 1;
-    }
     Int actual_threads =
         std::min(requested_threads, static_cast<Int>(std::thread::hardware_concurrency()));
     if (actual_threads < 1) actual_threads = 1;
 
-    if (verbose_) {
-        if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic && num_threads_ > 1) {
-            log_.log("Deterministic heuristic mode: forcing single worker thread\n");
+    if (parallel_mode_ == ParallelMode::Deterministic) {
+        struct DeterministicWorkerContext {
+            DualSimplexSolver lp;
+            std::vector<Real> current_lower;
+            std::vector<Real> current_upper;
+            std::vector<Index> touched_vars;
+            NodeWorkStats node_stats;
+            Int rins_calls = 0;
+            Int rins_solves = 0;
+            Int rins_found = 0;
+            Int rins_skip_no_inc = 0;
+            Int rins_skip_few_fix = 0;
+            Int rins_fixed_sum = 0;
+        };
+
+        struct DeterministicTask {
+            Int worker_id = 0;
+            Int node_num = 0;
+            BnbNode node;
+            bool branched = false;
+            std::vector<BnbNode> children;
+            Real node_obj = 0.0;
+            std::vector<Real> node_primals;
+            Int node_iters = 0;
+            double node_work = 0.0;
+            Int node_int_inf = -1;
+        };
+
+        if (verbose_) {
+            log_.log("Parallel tree search with %d threads (deterministic)\n",
+                     actual_threads);
         }
+
+        std::vector<DeterministicWorkerContext> workers(
+            static_cast<std::size_t>(actual_threads));
+        std::vector<Int> active_workers;
+        active_workers.reserve(static_cast<std::size_t>(actual_threads));
+        for (Int t = 0; t < actual_threads; ++t) {
+            auto& worker_ctx = workers[static_cast<std::size_t>(t)];
+            worker_ctx.lp.load(problem_);
+            worker_ctx.lp.setVerbose(false);
+            worker_ctx.lp.setBasis(root_lp.getBasis());
+            worker_ctx.current_lower = problem_.col_lower;
+            worker_ctx.current_upper = problem_.col_upper;
+            worker_ctx.touched_vars.reserve(
+                static_cast<std::size_t>(problem_.num_cols));
+            std::vector<Index> root_symmetry_tightened;
+            double root_symmetry_work = 0.0;
+            if (!enforceSymmetryBounds(worker_ctx.current_lower,
+                                       worker_ctx.current_upper,
+                                       &root_symmetry_tightened,
+                                       &root_symmetry_work)) {
+                continue;
+            }
+            for (Index j : root_symmetry_tightened) {
+                worker_ctx.lp.setColBounds(j,
+                                           worker_ctx.current_lower[j],
+                                           worker_ctx.current_upper[j]);
+            }
+            total_work += root_symmetry_work;
+            active_workers.push_back(t);
+        }
+        if (active_workers.empty()) return;
+
+        uint64_t det_heur_next_tick = kDetHeurGateQuantumTicks;
+        uint64_t det_log_next_tick = kDetLogQuantumTicks;
+        while (true) {
+            if (nodes_explored >= node_limit_) break;
+            if (elapsed() >= time_limit_) break;
+            if (queue.empty()) break;
+
+            if (incumbent < kInf) {
+                queue.prune(incumbent - 1e-6);
+                if (queue.empty()) break;
+            }
+            const Real best_bound = queue.bestBound();
+            if (incumbent < kInf && computeGap(incumbent, best_bound) < gap_tol_) {
+                break;
+            }
+
+            const Int remaining_nodes = std::max<Int>(0, node_limit_ - nodes_explored);
+            const Int batch_size = std::min<Int>(
+                remaining_nodes,
+                std::min<Int>(queue.size(),
+                              static_cast<Int>(active_workers.size())));
+            if (batch_size <= 0) break;
+            const Real batch_incumbent = incumbent;
+
+            std::vector<DeterministicTask> tasks(
+                static_cast<std::size_t>(batch_size));
+            for (Int i = 0; i < batch_size; ++i) {
+                auto& task = tasks[static_cast<std::size_t>(i)];
+                task.worker_id = active_workers[static_cast<std::size_t>(i)];
+                task.node_num = ++nodes_explored;
+                task.node = queue.pop();
+            }
+
+            tbb::parallel_for(Int(0), batch_size, [&](Int i) {
+                auto& task = tasks[static_cast<std::size_t>(i)];
+                auto& worker_ctx =
+                    workers[static_cast<std::size_t>(task.worker_id)];
+                task.branched = processNode(worker_ctx.lp,
+                                            task.node,
+                                            batch_incumbent,
+                                            task.children,
+                                            task.node_obj,
+                                            task.node_primals,
+                                            task.node_iters,
+                                            task.node_work,
+                                            worker_ctx.current_lower,
+                                            worker_ctx.current_upper,
+                                            worker_ctx.touched_vars,
+                                            worker_ctx.node_stats,
+                                            task.node_int_inf);
+            });
+
+            for (Int i = 0; i < batch_size; ++i) {
+                auto& task = tasks[static_cast<std::size_t>(i)];
+                auto& worker_ctx =
+                    workers[static_cast<std::size_t>(task.worker_id)];
+                total_lp_iters += task.node_iters;
+                total_work += task.node_work;
+
+                bool found_incumbent = false;
+                std::vector<Real> incumbent_values;
+                Real heur_incumbent = kInf;
+                if (incumbent < kInf && !best_solution.empty()) {
+                    heur_incumbent = incumbent;
+                    incumbent_values = best_solution;
+                } else {
+                    auto pooled = solution_pool.bestSolution();
+                    if (pooled.has_value()) {
+                        heur_incumbent = pooled->objective;
+                        incumbent_values = std::move(pooled->values);
+                    }
+                }
+
+                bool run_tree_heuristic = false;
+                double heuristic_work_view = total_work;
+                const uint64_t cur_ticks = workUnitTicks(total_work);
+                if (cur_ticks >= det_heur_next_tick) {
+                    run_tree_heuristic = true;
+                    heuristic_work_view =
+                        static_cast<double>(det_heur_next_tick) * 1e-6;
+                    det_heur_next_tick += kDetHeurGateQuantumTicks;
+                }
+
+                WorkerHeuristicOutcome heur_outcome;
+                if (run_tree_heuristic) {
+                    WorkerHeuristicContext heur_ctx{
+                        .problem = problem_,
+                        .lp = worker_ctx.lp,
+                        .primals = task.node_primals,
+                        .node_count = task.node_num,
+                        .int_inf = task.node_int_inf,
+                        .node_objective = task.node_obj,
+                        .incumbent = heur_incumbent,
+                        .incumbent_values = std::span<const Real>(
+                            incumbent_values.data(), incumbent_values.size()),
+                        .thread_id = task.worker_id,
+                        .total_work_units = heuristic_work_view,
+                    };
+                    heur_outcome = heuristic_runtime.runTreeWorker(heur_ctx);
+                }
+                if (heur_outcome.attempted) {
+                    ++worker_ctx.rins_calls;
+                    total_lp_iters += heur_outcome.lp_iterations;
+                    total_work += heur_outcome.work_units;
+                    if (heur_outcome.executed_solve) ++worker_ctx.rins_solves;
+                    if (heur_outcome.skipped_no_incumbent) {
+                        ++worker_ctx.rins_skip_no_inc;
+                    }
+                    if (heur_outcome.skipped_few_fixes) {
+                        ++worker_ctx.rins_skip_few_fix;
+                    }
+                    worker_ctx.rins_fixed_sum += heur_outcome.fixed_count;
+
+                    if (heur_outcome.improved &&
+                        heur_outcome.solution.has_value() &&
+                        heur_outcome.solution->objective < incumbent) {
+                        incumbent = heur_outcome.solution->objective;
+                        best_solution = std::move(heur_outcome.solution->values);
+                        solution_pool.submit({best_solution, incumbent},
+                                             "rins",
+                                             task.worker_id);
+                        found_incumbent = true;
+                        ++worker_ctx.rins_found;
+                    }
+                }
+
+                if (!task.branched && !task.node_primals.empty() &&
+                    task.node_int_inf == 0) {
+                    if (task.node_obj < incumbent) {
+                        incumbent = task.node_obj;
+                        best_solution = task.node_primals;
+                        solution_pool.submit({best_solution, incumbent},
+                                             "tree_integral",
+                                             task.worker_id);
+                        found_incumbent = true;
+                    }
+                }
+
+                if (!task.children.empty()) {
+                    for (auto& child : task.children) {
+                        queue.push(std::move(child));
+                    }
+                }
+
+                if (verbose_) {
+                    const uint64_t cur_ticks = workUnitTicks(total_work);
+                    bool emit_log = found_incumbent;
+                    if (!emit_log && cur_ticks >= det_log_next_tick) {
+                        emit_log = true;
+                        while (cur_ticks >= det_log_next_tick) {
+                            det_log_next_tick += kDetLogQuantumTicks;
+                        }
+                    }
+                    if (!emit_log) continue;
+                    const Real log_best_bound = queue.empty()
+                        ? (incumbent < kInf ? incumbent : root_bound)
+                        : queue.bestBound();
+                    logProgress(nodes_explored, queue.size(), total_lp_iters,
+                                incumbent, log_best_bound,
+                                static_cast<double>(cur_ticks) * 1e-6,
+                                found_incumbent, task.node_int_inf);
+                }
+            }
+        }
+
+        for (const auto& worker_ctx : workers) {
+            lp_stats_.node_bound_apply_seconds +=
+                worker_ctx.node_stats.bound_apply_seconds;
+            lp_stats_.node_basis_set_seconds +=
+                worker_ctx.node_stats.basis_set_seconds;
+            lp_stats_.node_lp_solve_seconds +=
+                worker_ctx.node_stats.lp_solve_seconds;
+            lp_stats_.nodes_solved += worker_ctx.node_stats.nodes_solved;
+            lp_stats_.warm_starts += worker_ctx.node_stats.warm_starts;
+            lp_stats_.cold_starts += worker_ctx.node_stats.cold_starts;
+            rins_calls += worker_ctx.rins_calls;
+            rins_solves += worker_ctx.rins_solves;
+            rins_found += worker_ctx.rins_found;
+            rins_skip_no_inc += worker_ctx.rins_skip_no_inc;
+            rins_skip_few_fix += worker_ctx.rins_skip_few_fix;
+            rins_fixed_sum += worker_ctx.rins_fixed_sum;
+        }
+
+        if (verbose_) {
+            if (rins_calls > 0) {
+                const double avg_fixed = static_cast<double>(rins_fixed_sum) /
+                                         static_cast<double>(rins_calls);
+                log_.log("RINS(parallel): calls=%d solves=%d found=%d avg_fixed=%.1f "
+                         "skip_no_inc=%d skip_few_fix=%d\n",
+                         rins_calls, rins_solves, rins_found, avg_fixed,
+                         rins_skip_no_inc, rins_skip_few_fix);
+            }
+            if (nodes_explored >= node_limit_) log_.log("Node limit reached.\n");
+            else if (elapsed() >= time_limit_) log_.log("Time limit reached.\n");
+        }
+        return;
+    }
+
+    if (verbose_) {
         log_.log("Parallel tree search with %d threads\n", actual_threads);
     }
 
@@ -1965,10 +2640,14 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             // Get a node from the shared queue.
             BnbNode node;
             {
+                Real inc = kInf;
+                {
+                    std::lock_guard<std::mutex> incumbent_lock(incumbent_mutex);
+                    inc = incumbent;
+                }
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 if (queue.empty()) break;
 
-                Real inc = incumbent;  // Read under potential race, but safe enough.
                 if (inc < kInf) {
                     queue.prune(inc - 1e-6);
                     if (queue.empty()) break;
@@ -2026,25 +2705,52 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
             }
 
-            WorkerHeuristicContext heur_ctx{
-                .problem = problem_,
-                .lp = local_lp,
-                .primals = node_primals,
-                .node_count = node_num,
-                .int_inf = node_int_inf,
-                .node_objective = node_obj,
-                .incumbent = heur_incumbent,
-                .incumbent_values = std::span<const Real>(incumbent_values.data(),
-                                                          incumbent_values.size()),
-                .thread_id = thread_id,
-                .total_work_units = atomic_work.units(),
-            };
-            auto heur_outcome = heuristic_runtime.runTreeWorker(heur_ctx);
+            bool run_tree_heuristic = true;
+            double heuristic_work_view = atomic_work.units();
+            if (parallel_mode_ == ParallelMode::Deterministic) {
+                run_tree_heuristic = false;
+                const uint64_t cur_ticks = workUnitTicks(heuristic_work_view);
+                uint64_t gate_tick = det_heur_next_tick.load(std::memory_order_relaxed);
+                while (cur_ticks >= gate_tick) {
+                    if (det_heur_next_tick.compare_exchange_weak(
+                            gate_tick,
+                            gate_tick + kDetHeurGateQuantumTicks,
+                            std::memory_order_relaxed)) {
+                        run_tree_heuristic = true;
+                        heuristic_work_view = static_cast<double>(gate_tick) * 1e-6;
+                        break;
+                    }
+                }
+            }
+
+            WorkerHeuristicOutcome heur_outcome;
+            if (run_tree_heuristic) {
+                WorkerHeuristicContext heur_ctx{
+                    .problem = problem_,
+                    .lp = local_lp,
+                    .primals = node_primals,
+                    .node_count = node_num,
+                    .int_inf = node_int_inf,
+                    .node_objective = node_obj,
+                    .incumbent = heur_incumbent,
+                    .incumbent_values = std::span<const Real>(incumbent_values.data(),
+                                                              incumbent_values.size()),
+                    .thread_id = thread_id,
+                    .total_work_units = heuristic_work_view,
+                };
+                heur_outcome = heuristic_runtime.runTreeWorker(heur_ctx);
+            }
             if (heur_outcome.attempted) {
                 ++local_rins_calls;
                 atomic_lp_iters.fetch_add(heur_outcome.lp_iterations,
                                           std::memory_order_relaxed);
-                atomic_work.count(workUnitTicks(heur_outcome.work_units));
+                if (parallel_mode_ == ParallelMode::Deterministic) {
+                    // Keep deterministic-mode heuristic gate cadence invariant to
+                    // sub-MIP solve variability across worker interleavings.
+                    atomic_work.count(kDetHeurGateQuantumTicks);
+                } else {
+                    atomic_work.count(workUnitTicks(heur_outcome.work_units));
+                }
 
                 if (heur_outcome.executed_solve) ++local_rins_solves;
                 if (heur_outcome.skipped_no_incumbent) ++local_rins_skip_no_inc;
@@ -2091,11 +2797,24 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             double now = elapsed();
             if (verbose_ && (found_incumbent || (now - last_log_time >= kLogInterval))) {
                 last_log_time = now;
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                logProgress(atomic_nodes.load(), queue.size(),
+                Real log_incumbent = kInf;
+                {
+                    std::lock_guard<std::mutex> lock(incumbent_mutex);
+                    log_incumbent = incumbent;
+                }
+                Int open_nodes = 0;
+                Real best_bound = root_bound;
+                {
+                    std::lock_guard<std::mutex> lock(queue_mutex);
+                    open_nodes = queue.size();
+                    best_bound = queue.empty()
+                        ? (log_incumbent < kInf ? log_incumbent : root_bound)
+                        : queue.bestBound();
+                }
+                logProgress(atomic_nodes.load(), open_nodes,
                            atomic_lp_iters.load(),
-                           incumbent,
-                           queue.empty() ? (incumbent < kInf ? incumbent : root_bound) : queue.bestBound(),
+                           log_incumbent,
+                           best_bound,
                            elapsed(), found_incumbent, node_int_inf);
             }
         }
@@ -2188,6 +2907,9 @@ MipResult MipSolver::solve() {
         auto now = std::chrono::steady_clock::now();
         return std::chrono::duration<double>(now - start_time).count();
     };
+    auto canonicalReportedWork = [&](double work_units) -> double {
+        return work_units;
+    };
 
     // Print banner before presolve (uses original problem dimensions).
     if (verbose_ && problem_.hasIntegers()) {
@@ -2252,9 +2974,9 @@ MipResult MipSolver::solve() {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
                                 "root_lp=%s ", rootPolicyName(root_lp_policy_));
         }
-        if (heuristic_mode_ != HeuristicRuntimeMode::Deterministic) {
+        if (parallel_mode_ != ParallelMode::Deterministic) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
-                                "heur_mode=opportunistic ");
+                                "parallel_mode=opportunistic ");
         }
         if (heuristic_seed_ != 1) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
@@ -2356,7 +3078,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Infeasible;
         result.nodes = 0;
         result.lp_iterations = 0;
-        result.work_units = symmetry_pre_work;
+        result.work_units = canonicalReportedWork(symmetry_pre_work);
         result.time_seconds = elapsed();
         if (verbose_) log_.log("Presolve detected infeasibility.\n");
         return result;
@@ -2370,7 +3092,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 0;
         result.lp_iterations = 0;
-        result.work_units = symmetry_pre_work;
+        result.work_units = canonicalReportedWork(symmetry_pre_work);
         result.time_seconds = elapsed();
         if (did_presolve) {
             result.solution = presolver.postsolve({});
@@ -2434,7 +3156,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 0;
         result.lp_iterations = lr.iterations;
-        result.work_units = lr.work_units + symmetry_pre_work;
+        result.work_units = canonicalReportedWork(lr.work_units + symmetry_pre_work);
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
@@ -2492,8 +3214,15 @@ MipResult MipSolver::solve() {
             available_arms.push_back(PreRootArm::LpLightFpr);
             available_arms.push_back(PreRootArm::LpLightDiving);
         }
-        pre_root_stats_.portfolio_enabled =
+        const Int hw_threads = static_cast<Int>(
+            std::max<unsigned>(1, std::thread::hardware_concurrency()));
+        const Int stage_threads = std::max<Int>(1, std::min(num_threads_, hw_threads));
+        const bool adaptive_portfolio_requested =
             pre_root_portfolio_enabled_ && available_arms.size() > 1;
+        const bool force_fixed_for_determinism =
+            (parallel_mode_ == ParallelMode::Deterministic) && (stage_threads > 1);
+        pre_root_stats_.portfolio_enabled =
+            adaptive_portfolio_requested && !force_fixed_for_determinism;
         const auto lp_light_primals = run_lp_light_arms
             ? std::span<const Real>(lp_light_guide->primals.data(), lp_light_guide->primals.size())
             : std::span<const Real>{};
@@ -2508,6 +3237,10 @@ MipResult MipSolver::solve() {
         if (verbose_ && pre_root_stats_.lp_light_available && !run_lp_light_arms) {
             log_.log("Pre-root LP-light guide solve unavailable for this model; "
                      "continuing with LP-free arms only.\n");
+        }
+        if (verbose_ && force_fixed_for_determinism && adaptive_portfolio_requested) {
+            log_.log("Pre-root adaptive portfolio disabled in deterministic multi-thread mode; "
+                     "using fixed schedule.\n");
         }
         if (!run_lp_free_arms && !run_lp_light_arms) {
             if (verbose_) {
@@ -2527,34 +3260,64 @@ MipResult MipSolver::solve() {
                 improvements_.fill(0);
             }
 
-            PreRootArm select(Int round, std::mt19937_64& rng) {
+            PreRootArm select(Int round, std::mt19937_64& rng, bool local_mip_allowed) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++epochs_;
                 if (arms_.empty()) return PreRootArm::FeasJump;
+                std::array<PreRootArm, kPreRootArmCount> eligible{};
+                std::size_t eligible_count = 0;
+                for (PreRootArm arm : arms_) {
+                    if (!local_mip_allowed && arm == PreRootArm::LocalMip) continue;
+                    eligible[eligible_count++] = arm;
+                }
+                if (eligible_count == 0) return PreRootArm::FeasJump;
                 if (!enabled_) {
                     if (mode_ == HeuristicRuntimeMode::Deterministic) {
                         const std::size_t idx =
-                            static_cast<std::size_t>(std::max<Int>(0, round)) % arms_.size();
-                        ++pulls_[preRootArmIndex(arms_[idx])];
-                        return arms_[idx];
+                            static_cast<std::size_t>(std::max<Int>(0, round)) % eligible_count;
+                        ++pulls_[preRootArmIndex(eligible[idx])];
+                        return eligible[idx];
                     }
                     const std::size_t idx = std::uniform_int_distribution<std::size_t>(
-                        0, arms_.size() - 1)(rng);
-                    ++pulls_[preRootArmIndex(arms_[idx])];
-                    return arms_[idx];
+                        0, eligible_count - 1)(rng);
+                    ++pulls_[preRootArmIndex(eligible[idx])];
+                    return eligible[idx];
                 }
 
                 // Warm-up: make one pull from each available arm before sampling.
-                for (PreRootArm arm : arms_) {
+                for (std::size_t i = 0; i < eligible_count; ++i) {
+                    const PreRootArm arm = eligible[i];
                     if (pulls_[preRootArmIndex(arm)] == 0) {
                         ++pulls_[preRootArmIndex(arm)];
                         return arm;
                     }
                 }
 
-                PreRootArm best_arm = arms_.front();
+                if (mode_ == HeuristicRuntimeMode::Deterministic) {
+                    // Deterministic adaptive choice: pick highest posterior mean with stable tie-break.
+                    PreRootArm best_arm = eligible[0];
+                    double best_score = -1.0;
+                    std::size_t best_idx = preRootArmIndex(best_arm);
+                    for (std::size_t i = 0; i < eligible_count; ++i) {
+                        const PreRootArm arm = eligible[i];
+                        const std::size_t idx = preRootArmIndex(arm);
+                        const double denom = alpha_[idx] + beta_[idx];
+                        const double score = (denom > 0.0) ? (alpha_[idx] / denom) : 0.0;
+                        if (score > best_score + 1e-12 ||
+                            (std::abs(score - best_score) <= 1e-12 && idx < best_idx)) {
+                            best_score = score;
+                            best_arm = arm;
+                            best_idx = idx;
+                        }
+                    }
+                    ++pulls_[preRootArmIndex(best_arm)];
+                    return best_arm;
+                }
+
+                PreRootArm best_arm = eligible[0];
                 double best_score = -1.0;
-                for (PreRootArm arm : arms_) {
+                for (std::size_t i = 0; i < eligible_count; ++i) {
+                    const PreRootArm arm = eligible[i];
                     const std::size_t idx = preRootArmIndex(arm);
                     const double score = sampleBeta(alpha_[idx], beta_[idx], rng);
                     if (score > best_score) {
@@ -2568,6 +3331,9 @@ MipResult MipSolver::solve() {
 
             void update(PreRootArm arm, double reward, bool improved) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (!enabled_ && mode_ == HeuristicRuntimeMode::Deterministic) {
+                    return;
+                }
                 const std::size_t idx = preRootArmIndex(arm);
                 const double clipped = std::clamp(reward, 0.0, 1.0);
                 reward_sum_[idx] += clipped;
@@ -2631,13 +3397,19 @@ MipResult MipSolver::solve() {
 
         AdaptivePortfolioState portfolio(
             pre_root_stats_.portfolio_enabled,
-            heuristic_mode_,
+            heuristicRuntimeMode(parallel_mode_),
             available_arms);
-        const Int hw_threads = static_cast<Int>(
-            std::max<unsigned>(1, std::thread::hardware_concurrency()));
-        const Int stage_threads = (heuristic_mode_ == HeuristicRuntimeMode::Deterministic)
-            ? 1
-            : std::max<Int>(1, std::min(num_threads_, hw_threads));
+        std::vector<LpProblem> stage_thread_problems;
+        if (stage_threads > 1) {
+            stage_thread_problems.reserve(static_cast<std::size_t>(stage_threads));
+            for (Int t = 0; t < stage_threads; ++t) {
+                stage_thread_problems.push_back(problem_);
+            }
+        }
+        auto stageProblemForThread = [&](Int thread_id) -> const LpProblem& {
+            if (stage_thread_problems.empty()) return problem_;
+            return stage_thread_problems[static_cast<std::size_t>(thread_id)];
+        };
         std::atomic<Int> next_round{0};
         std::atomic<bool> should_stop{false};
         std::atomic<Int> calls{0};
@@ -2650,131 +3422,253 @@ MipResult MipSolver::solve() {
         std::atomic<Int> lp_light_calls{0};
         std::atomic<Int> lp_light_fpr_calls{0};
         std::atomic<Int> lp_light_diving_calls{0};
-        std::atomic<double> stage_work{0.0};
+        AtomicWorkUnits stage_work;
         std::atomic<double> first_feasible_seconds{kInf};
+        constexpr uint64_t kNoFirstFeasibleWorkTick =
+            std::numeric_limits<uint64_t>::max();
+        std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
         SolutionPool pre_root_pool(problem_.sense);
+        Real deterministic_stage_incumbent = pre_root_pool.bestObjective();
+        std::vector<Real> deterministic_incumbent_values;
         const auto stage_start = std::chrono::steady_clock::now();
         auto stageElapsed = [&]() -> double {
             return std::chrono::duration<double>(
                        std::chrono::steady_clock::now() - stage_start).count();
         };
         auto addStageWork = [&](double add) {
-            auto old_w = stage_work.load(std::memory_order_relaxed);
-            while (!stage_work.compare_exchange_weak(old_w, old_w + add,
-                                                     std::memory_order_relaxed)) {}
+            stage_work.count(workUnitTicks(add));
+        };
+        auto roundSeed = [&](Int round) -> uint64_t {
+            uint64_t x = heuristic_seed_ ^
+                (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(std::max<Int>(0, round) + 1));
+            x += 0x9e3779b97f4a7c15ULL;
+            x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+            x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+            x = x ^ (x >> 31U);
+            return x;
         };
 
-        auto worker = [&](Int thread_id) {
-            std::mt19937_64 rng(
-                heuristic_seed_ ^
-                (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(thread_id + 1)));
-            while (!should_stop.load(std::memory_order_relaxed)) {
-                if (stage_work.load(std::memory_order_relaxed) >=
-                    portfolio.currentBudget(pre_root_lp_free_work_budget_)) {
+        auto countArmCall = [&](PreRootArm arm) {
+            switch (arm) {
+                case PreRootArm::FeasJump: ++fj_calls; break;
+                case PreRootArm::Fpr: ++fpr_calls; break;
+                case PreRootArm::LocalMip: ++local_mip_calls; break;
+                case PreRootArm::LpLightFpr:
+                    ++lp_light_calls;
+                    ++lp_light_fpr_calls;
+                    break;
+                case PreRootArm::LpLightDiving:
+                    ++lp_light_calls;
+                    ++lp_light_diving_calls;
+                    break;
+            }
+        };
+
+        struct PreRootRoundResult {
+            Int round = -1;
+            Int thread_id = 0;
+            PreRootArm arm = PreRootArm::FeasJump;
+            std::optional<HeuristicSolution> candidate;
+            double local_work = 0.0;
+        };
+
+        auto runPreRootRound =
+            [&](Int round,
+                Int thread_id,
+                std::mt19937_64& round_rng,
+                Real deterministic_incumbent_for_round,
+                std::span<const Real> deterministic_incumbent_span) -> PreRootRoundResult {
+            PreRootRoundResult out;
+            out.round = round;
+            out.thread_id = thread_id;
+            const LpProblem& round_problem = stageProblemForThread(thread_id);
+
+            const Real incumbent_for_round =
+                (parallel_mode_ == ParallelMode::Deterministic)
+                    ? deterministic_incumbent_for_round
+                    : pre_root_pool.bestObjective();
+            std::optional<HeuristicSolution> incumbent_sol;
+            std::span<const Real> incumbent_span_for_round = deterministic_incumbent_span;
+            if (parallel_mode_ != ParallelMode::Deterministic) {
+                incumbent_sol = pre_root_pool.bestSolution();
+                if (incumbent_sol.has_value()) {
+                    incumbent_span_for_round = std::span<const Real>(
+                        incumbent_sol->values.data(),
+                        incumbent_sol->values.size());
+                } else {
+                    incumbent_span_for_round = std::span<const Real>{};
+                }
+            }
+            const bool has_incumbent =
+                std::isfinite(incumbent_for_round) && incumbent_for_round < kInf &&
+                !incumbent_span_for_round.empty();
+            out.arm = portfolio.select(round, round_rng, has_incumbent);
+
+            switch (out.arm) {
+                case PreRootArm::FeasJump: {
+                    out.candidate = runLpFreeFeasJump(round_problem, discrete_vars, round_rng,
+                                                      incumbent_for_round,
+                                                      out.local_work);
                     break;
                 }
-                const Int round = next_round.fetch_add(1, std::memory_order_relaxed);
-                if (round >= pre_root_lp_free_max_rounds_) break;
-                ++calls;
-
-                const PreRootArm arm = portfolio.select(round, rng);
-
-                double local_work = 0.0;
-                std::optional<HeuristicSolution> candidate;
-                switch (arm) {
-                    case PreRootArm::FeasJump: {
-                        ++fj_calls;
-                        candidate = runLpFreeFeasJump(problem_, discrete_vars, rng,
-                                                      pre_root_pool.bestObjective(),
-                                                      local_work);
-                        break;
-                    }
-                    case PreRootArm::Fpr: {
-                        ++fpr_calls;
-                        candidate = runLpFreeFpr(problem_, discrete_vars, rng,
-                                                 pre_root_pool.bestObjective(),
-                                                 local_work);
-                        break;
-                    }
-                    case PreRootArm::LocalMip: {
-                        ++local_mip_calls;
-                        auto incumbent_sol = pre_root_pool.bestSolution();
-                        std::span<const Real> incumbent_span{};
-                        if (incumbent_sol.has_value()) {
-                            incumbent_span = std::span<const Real>(incumbent_sol->values.data(),
-                                                                   incumbent_sol->values.size());
-                        }
-                        candidate = runLpFreeLocalMip(problem_, discrete_vars, rng,
-                                                      pre_root_pool.bestObjective(),
-                                                      incumbent_span, local_work);
-                        break;
-                    }
-                    case PreRootArm::LpLightFpr: {
-                        if (!run_lp_light_arms) break;
-                        ++lp_light_calls;
-                        ++lp_light_fpr_calls;
-                        candidate = runLpLightFpr(problem_, discrete_vars,
-                                                  lp_light_primals, lp_light_reduced_costs,
-                                                  pre_root_pool.bestObjective(),
-                                                  local_work);
-                        break;
-                    }
-                    case PreRootArm::LpLightDiving: {
-                        if (!run_lp_light_arms) break;
-                        ++lp_light_calls;
-                        ++lp_light_diving_calls;
-                        candidate = runLpLightDiving(problem_, discrete_vars,
-                                                     lp_light_primals, lp_light_reduced_costs,
-                                                     pre_root_pool.bestObjective(),
-                                                     local_work);
-                        break;
-                    }
+                case PreRootArm::Fpr: {
+                    out.candidate = runLpFreeFpr(round_problem, discrete_vars, round_rng,
+                                                 incumbent_for_round,
+                                                 out.local_work);
+                    break;
                 }
-                addStageWork(local_work);
+                case PreRootArm::LocalMip: {
+                    const std::span<const Real> incumbent_span = incumbent_span_for_round;
+                    if (incumbent_span.empty()) break;
+                    out.candidate = runLpFreeLocalMip(round_problem, discrete_vars, round_rng,
+                                                      incumbent_for_round,
+                                                      incumbent_span, out.local_work);
+                    break;
+                }
+                case PreRootArm::LpLightFpr: {
+                    if (!run_lp_light_arms) break;
+                    out.candidate = runLpLightFpr(round_problem, discrete_vars,
+                                                  lp_light_primals, lp_light_reduced_costs,
+                                                  round_rng,
+                                                  incumbent_for_round,
+                                                  out.local_work);
+                    break;
+                }
+                case PreRootArm::LpLightDiving: {
+                    if (!run_lp_light_arms) break;
+                    out.candidate = runLpLightDiving(round_problem, discrete_vars,
+                                                     lp_light_primals, lp_light_reduced_costs,
+                                                     incumbent_for_round,
+                                                     out.local_work);
+                    break;
+                }
+            }
+            return out;
+        };
 
-                const Real incumbent_before = pre_root_pool.bestObjective();
-                const bool had_incumbent_before =
-                    std::isfinite(incumbent_before) && incumbent_before < kInf;
-                bool accepted = false;
-                if (candidate.has_value() &&
-                    pre_root_pool.submit(*candidate, "pre_root_stage", thread_id)) {
-                    accepted = true;
-                    ++improvements;
-                    ++feasible_found;
+        auto commitPreRootRound = [&](const PreRootRoundResult& out) {
+            ++calls;
+            countArmCall(out.arm);
+            addStageWork(out.local_work);
+
+            const Real incumbent_before = pre_root_pool.bestObjective();
+            const bool had_incumbent_before =
+                std::isfinite(incumbent_before) && incumbent_before < kInf;
+            bool accepted = false;
+            if (out.candidate.has_value() &&
+                pre_root_pool.submit(*out.candidate, "pre_root_stage", out.thread_id)) {
+                accepted = true;
+                ++improvements;
+                ++feasible_found;
+                if (parallel_mode_ == ParallelMode::Deterministic) {
+                    deterministic_stage_incumbent = out.candidate->objective;
+                    deterministic_incumbent_values = out.candidate->values;
+                    const uint64_t seen_tick = stage_work.ticks();
+                    uint64_t old_tick =
+                        first_feasible_work_tick.load(std::memory_order_relaxed);
+                    while (seen_tick < old_tick &&
+                           !first_feasible_work_tick.compare_exchange_weak(
+                               old_tick, seen_tick, std::memory_order_relaxed)) {}
+                } else {
                     const double seen = stageElapsed();
                     auto old_first = first_feasible_seconds.load(std::memory_order_relaxed);
                     while (seen < old_first &&
                            !first_feasible_seconds.compare_exchange_weak(
                                old_first, seen, std::memory_order_relaxed)) {}
-                    if (pre_root_lp_free_early_stop_) {
-                        should_stop.store(true, std::memory_order_relaxed);
-                        ++early_stops;
-                    }
                 }
-
-                double reward = 0.0;
-                if (accepted && !had_incumbent_before) reward = 1.0;
-                else if (accepted) reward = 0.8;
-                else if (candidate.has_value()) reward = 0.2;
-                portfolio.update(arm, reward, accepted);
+                if (pre_root_lp_free_early_stop_) {
+                    should_stop.store(true, std::memory_order_relaxed);
+                    ++early_stops;
+                }
             }
+
+            double reward = 0.0;
+            if (accepted && !had_incumbent_before) reward = 1.0;
+            else if (accepted) reward = 0.8;
+            else if (out.candidate.has_value()) reward = 0.2;
+            portfolio.update(out.arm, reward, accepted);
         };
 
-        std::vector<std::thread> workers;
-        workers.reserve(stage_threads);
-        for (Int t = 0; t < stage_threads; ++t) {
-            workers.emplace_back(worker, t);
+        if (parallel_mode_ == ParallelMode::Deterministic && stage_threads > 1) {
+            const uint64_t budget_ticks =
+                workUnitTicks(portfolio.currentBudget(pre_root_lp_free_work_budget_));
+            Int next_round_value = 0;
+            while (!should_stop.load(std::memory_order_relaxed)) {
+                if (next_round_value >= pre_root_lp_free_max_rounds_) break;
+                if (stage_work.ticks() >= budget_ticks) break;
+
+                const Int batch_size = std::min<Int>(
+                    stage_threads, pre_root_lp_free_max_rounds_ - next_round_value);
+                std::vector<PreRootRoundResult> batch(
+                    static_cast<std::size_t>(batch_size));
+                const Real batch_incumbent = deterministic_stage_incumbent;
+                const std::span<const Real> batch_incumbent_span(
+                    deterministic_incumbent_values.data(),
+                    deterministic_incumbent_values.size());
+                std::vector<std::thread> batch_threads;
+                batch_threads.reserve(static_cast<std::size_t>(batch_size));
+                for (Int t = 0; t < batch_size; ++t) {
+                    const Int round = next_round_value + t;
+                    batch_threads.emplace_back([&, t, round]() {
+                        std::mt19937_64 round_rng(roundSeed(round));
+                        batch[static_cast<std::size_t>(t)] =
+                            runPreRootRound(round, t, round_rng,
+                                            batch_incumbent,
+                                            batch_incumbent_span);
+                    });
+                }
+                for (auto& w : batch_threads) w.join();
+
+                next_round_value += batch_size;
+                next_round.store(next_round_value, std::memory_order_relaxed);
+
+                for (Int t = 0; t < batch_size; ++t) {
+                    commitPreRootRound(batch[static_cast<std::size_t>(t)]);
+                    if (should_stop.load(std::memory_order_relaxed)) break;
+                    if (stage_work.ticks() >= budget_ticks) break;
+                }
+            }
+        } else {
+            auto worker = [&](Int thread_id) {
+                std::mt19937_64 thread_rng(
+                    heuristic_seed_ ^
+                    (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(thread_id + 1)));
+                while (!should_stop.load(std::memory_order_relaxed)) {
+                    if (stage_work.units() >=
+                        portfolio.currentBudget(pre_root_lp_free_work_budget_)) {
+                        break;
+                    }
+                    const Int round = next_round.fetch_add(1, std::memory_order_relaxed);
+                    if (round >= pre_root_lp_free_max_rounds_) break;
+
+                    std::mt19937_64 round_rng(
+                        parallel_mode_ == ParallelMode::Deterministic
+                            ? roundSeed(round)
+                            : thread_rng());
+                    const std::span<const Real> incumbent_span(
+                        deterministic_incumbent_values.data(),
+                        deterministic_incumbent_values.size());
+                    const auto out = runPreRootRound(round, thread_id, round_rng,
+                                                     deterministic_stage_incumbent,
+                                                     incumbent_span);
+                    commitPreRootRound(out);
+                }
+            };
+
+            std::vector<std::thread> workers;
+            workers.reserve(stage_threads);
+            for (Int t = 0; t < stage_threads; ++t) {
+                workers.emplace_back(worker, t);
+            }
+            for (auto& w : workers) w.join();
         }
-        for (auto& w : workers) w.join();
 
         if (auto best = pre_root_pool.bestSolution(); best.has_value()) {
             incumbent = best->objective;
             best_solution = std::move(best->values);
         }
-        pre_root_stats_.rounds = std::min<Int>(
-            pre_root_lp_free_max_rounds_,
-            next_round.load(std::memory_order_relaxed));
         pre_root_stats_.calls = calls.load(std::memory_order_relaxed);
+        pre_root_stats_.rounds = pre_root_stats_.calls;
         pre_root_stats_.improvements = improvements.load(std::memory_order_relaxed);
         pre_root_stats_.feasible_found = feasible_found.load(std::memory_order_relaxed);
         pre_root_stats_.early_stops = early_stops.load(std::memory_order_relaxed);
@@ -2802,10 +3696,20 @@ MipResult MipSolver::solve() {
         pre_root_stats_.lp_light_fpr_reward = portfolio.rewardSum(PreRootArm::LpLightFpr);
         pre_root_stats_.lp_light_diving_reward =
             portfolio.rewardSum(PreRootArm::LpLightDiving);
-        pre_root_stats_.work_units = stage_work.load(std::memory_order_relaxed);
-        pre_root_stats_.time_seconds = stageElapsed();
-        pre_root_stats_.time_to_first_feasible =
-            first_feasible_seconds.load(std::memory_order_relaxed);
+        pre_root_stats_.work_units = stage_work.units();
+        if (parallel_mode_ == ParallelMode::Deterministic) {
+            pre_root_stats_.time_seconds = pre_root_stats_.work_units;
+            const uint64_t first_tick =
+                first_feasible_work_tick.load(std::memory_order_relaxed);
+            pre_root_stats_.time_to_first_feasible =
+                (first_tick == kNoFirstFeasibleWorkTick)
+                    ? kInf
+                    : static_cast<double>(first_tick) * 1e-6;
+        } else {
+            pre_root_stats_.time_seconds = stageElapsed();
+            pre_root_stats_.time_to_first_feasible =
+                first_feasible_seconds.load(std::memory_order_relaxed);
+        }
         pre_root_stats_.incumbent_at_root = incumbent;
         total_work += pre_root_stats_.work_units;
 
@@ -2815,7 +3719,7 @@ MipResult MipSolver::solve() {
                     "Pre-root stage (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
                     "lpfpr=%d lpdiv=%d "
                     "found=%d best=%.10e work=%.3f time=%.3fs first=%.3fs\n",
-                    heuristicModeName(heuristic_mode_),
+                    parallelModeName(parallel_mode_),
                     stage_threads,
                     stage_threads == 1 ? "" : "s",
                     pre_root_stats_.calls,
@@ -2834,7 +3738,7 @@ MipResult MipSolver::solve() {
                     "Pre-root stage (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
                     "lpfpr=%d lpdiv=%d "
                     "found=%d best=%.10e work=%.3f time=%.3fs first=n/a\n",
-                    heuristicModeName(heuristic_mode_),
+                    parallelModeName(parallel_mode_),
                     stage_threads,
                     stage_threads == 1 ? "" : "s",
                     pre_root_stats_.calls,
@@ -3018,7 +3922,7 @@ MipResult MipSolver::solve() {
         std::vector<RootCandidateResult> race_results;
         race_results.reserve(3);
 
-        if (heuristic_mode_ == HeuristicRuntimeMode::Deterministic) {
+        if (parallel_mode_ == ParallelMode::Deterministic) {
             race_results.push_back(runRootBackend(RootBackend::Dual, nullptr));
             race_results.push_back(runRootBackend(RootBackend::Barrier, nullptr));
             race_results.push_back(runRootBackend(RootBackend::Pdlp, nullptr));
@@ -3145,7 +4049,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Infeasible;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
-        result.work_units = total_work;
+        result.work_units = canonicalReportedWork(total_work);
         result.time_seconds = elapsed();
         restoreProblem();
         return result;
@@ -3157,7 +4061,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Unbounded;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
-        result.work_units = total_work;
+        result.work_units = canonicalReportedWork(total_work);
         result.time_seconds = elapsed();
         restoreProblem();
         return result;
@@ -3169,7 +4073,7 @@ MipResult MipSolver::solve() {
         result.status = Status::Error;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
-        result.work_units = total_work;
+        result.work_units = canonicalReportedWork(total_work);
         result.time_seconds = elapsed();
         restoreProblem();
         return result;
@@ -3197,7 +4101,7 @@ MipResult MipSolver::solve() {
             result.status = Status::Infeasible;
             result.nodes = 1;
             result.lp_iterations = total_lp_iters;
-            result.work_units = total_work;
+            result.work_units = canonicalReportedWork(total_work);
             result.time_seconds = elapsed();
             restoreProblem();
             return result;
@@ -3210,7 +4114,7 @@ MipResult MipSolver::solve() {
             result.status = Status::Unbounded;
             result.nodes = 1;
             result.lp_iterations = total_lp_iters;
-            result.work_units = total_work;
+            result.work_units = canonicalReportedWork(total_work);
             result.time_seconds = elapsed();
             restoreProblem();
             return result;
@@ -3223,7 +4127,7 @@ MipResult MipSolver::solve() {
             result.status = Status::Error;
             result.nodes = 1;
             result.lp_iterations = total_lp_iters;
-            result.work_units = total_work;
+            result.work_units = canonicalReportedWork(total_work);
             result.time_seconds = elapsed();
             restoreProblem();
             return result;
@@ -3423,7 +4327,7 @@ MipResult MipSolver::solve() {
         result.gap = 0.0;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;
-        result.work_units = total_work;
+        result.work_units = canonicalReportedWork(total_work);
         result.time_seconds = elapsed();
         result.solution = std::move(best_solution);
         applyPostsolve(result);
@@ -3540,7 +4444,7 @@ MipResult MipSolver::solve() {
     // Build result.
     MipResult result;
     result.lp_iterations = total_lp_iters;
-    result.work_units = total_work;
+    result.work_units = canonicalReportedWork(total_work);
     result.nodes = nodes_explored;
     result.time_seconds = elapsed();
 
@@ -3652,8 +4556,13 @@ MipResult MipSolver::solve() {
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));
         Logger::formatCount(result.lp_iterations, iter_buf, sizeof(iter_buf));
-        log_.log("\nExplored %s nodes, %s LP iterations, %.1fs\n",
-                 node_buf, iter_buf, result.time_seconds);
+        if (parallel_mode_ == ParallelMode::Deterministic) {
+            log_.log("\nExplored %s nodes, %s LP iterations, %.1f work\n",
+                     node_buf, iter_buf, result.work_units);
+        } else {
+            log_.log("\nExplored %s nodes, %s LP iterations, %.1fs\n",
+                     node_buf, iter_buf, result.time_seconds);
+        }
         if (result.status == Status::Optimal) {
             log_.log("Optimal: %.10e\n", result.objective);
         } else if (incumbent < kInf) {
