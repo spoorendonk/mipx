@@ -247,6 +247,32 @@ python3 tests/perf/check_regression.py \
   --min-common-instances 3
 ```
 
+## Dual Correctness Investigation (Step 35)
+
+Deterministic status/objective cross-check for `mipx --dual` against Netlib
+`.solu` references plus HiGHS simplex:
+
+```bash
+python3 tests/perf/run_dual_correctness_investigation.py \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir tests/data/netlib \
+  --solu-file tests/data/netlib/netlib.solu \
+  --corpus tests/perf/netlib_dual_corpus.csv \
+  --output /tmp/dual_correctness.csv \
+  --summary /tmp/dual_correctness_summary.md \
+  --time-limit 60 \
+  --threads 1 \
+  --disable-presolve
+```
+
+Output columns include:
+- `mipx_status`, `mipx_objective`, `highs_status`, `highs_objective`
+- `classification` (`ok`, `false_infeasible`, `false_unknown_or_error`,
+  `objective_mismatch`, ...)
+- `mipx_signature` (first useful error fingerprint, e.g. singular LU path)
+
+The script exits nonzero when hard mismatches remain.
+
 ## Mittelman Benchmarks
 
 Benchmark configuration matching Hans Mittelman's optimization benchmarks

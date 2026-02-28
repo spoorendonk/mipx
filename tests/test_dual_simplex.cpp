@@ -249,6 +249,11 @@ TEST_CASE("DualSimplex: netlib adlittle", "[dual_simplex][netlib]") {
     testNetlib("adlittle", 2.2549496316e+05);
 }
 
+TEST_CASE("DualSimplex: netlib larger known-optimal LPs", "[dual_simplex][netlib][large]") {
+    testNetlib("ship12l", 1.4701879193e+06, 1e-6);
+    testNetlib("sierra", 1.5394362184e+07, 1e-6);
+}
+
 // ---------------------------------------------------------------------------
 // Test 8: Solution feasibility check
 // ---------------------------------------------------------------------------
@@ -373,11 +378,38 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     DualSimplexSolver solver;
     DualSimplexOptions opts;
     opts.enable_partial_pricing = false;
+    opts.enable_bfrt = true;
+    opts.enable_adaptive_bfrt = false;
+    opts.adaptive_bfrt_max_pinf = 33;
+    opts.adaptive_bfrt_progress_window = 77;
     opts.enable_adaptive_refactorization = false;
     opts.partial_pricing_chunk_min = 8;
     opts.partial_pricing_full_scan_freq = 1;
     opts.adaptive_refactor_min_updates = 8;
     opts.adaptive_refactor_stall_pivots = 8;
+    opts.primal_feasible_adaptive_refactor_stall_pivots = 222;
+    opts.primal_feasible_adaptive_refactor_min_updates = 111;
+    opts.primal_feasible_dual_progress_window = 333;
+    opts.primal_feasible_refactor_cooldown = 444;
+    opts.primal_feasible_dual_progress_improve_rel_tol = 2e-3;
+    opts.max_solve_seconds = 12.5;
+    opts.enable_dual_perturbation = false;
+    opts.dual_perturbation_stall_pivots = 16;
+    opts.dual_perturbation_magnitude = 5e-8;
+    opts.enable_bound_perturbation = true;
+    opts.bound_perturbation_stall_pivots = 64;
+    opts.bound_perturbation_magnitude = 1e-6;
+    opts.bound_perturbation_max_activations = 3;
+    opts.enable_stall_restart = false;
+    opts.stall_restart_pivots = 1234;
+    opts.stall_restart_max_restarts = 4;
+    opts.enable_idiot_crash = true;
+    opts.idiot_crash_passes = 3;
+    opts.idiot_crash_max_flips = 128;
+    opts.idiot_crash_min_gain = 1e-7;
+    opts.enable_structural_crash = false;
+    opts.structural_crash_max_swaps = 7;
+    opts.structural_crash_min_pivot = 1e-5;
     opts.enable_simd_kernels = false;
     opts.simd_min_length = 16;
     opts.enable_sip_parallel_candidates = true;
@@ -396,7 +428,34 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
 
     const auto& applied = solver.getOptions();
     CHECK_FALSE(applied.enable_partial_pricing);
+    CHECK(applied.enable_bfrt);
+    CHECK_FALSE(applied.enable_adaptive_bfrt);
+    CHECK(applied.adaptive_bfrt_max_pinf == 33);
+    CHECK(applied.adaptive_bfrt_progress_window == 77);
     CHECK_FALSE(applied.enable_adaptive_refactorization);
+    CHECK(applied.primal_feasible_adaptive_refactor_stall_pivots == 222);
+    CHECK(applied.primal_feasible_adaptive_refactor_min_updates == 111);
+    CHECK(applied.primal_feasible_dual_progress_window == 333);
+    CHECK(applied.primal_feasible_refactor_cooldown == 444);
+    CHECK(applied.primal_feasible_dual_progress_improve_rel_tol == 2e-3);
+    CHECK(applied.max_solve_seconds == 12.5);
+    CHECK_FALSE(applied.enable_dual_perturbation);
+    CHECK(applied.dual_perturbation_stall_pivots == 16);
+    CHECK(applied.dual_perturbation_magnitude == 5e-8);
+    CHECK(applied.enable_bound_perturbation);
+    CHECK(applied.bound_perturbation_stall_pivots == 64);
+    CHECK(applied.bound_perturbation_magnitude == 1e-6);
+    CHECK(applied.bound_perturbation_max_activations == 3);
+    CHECK_FALSE(applied.enable_stall_restart);
+    CHECK(applied.stall_restart_pivots == 1234);
+    CHECK(applied.stall_restart_max_restarts == 4);
+    CHECK(applied.enable_idiot_crash);
+    CHECK(applied.idiot_crash_passes == 3);
+    CHECK(applied.idiot_crash_max_flips == 128);
+    CHECK(applied.idiot_crash_min_gain == 1e-7);
+    CHECK_FALSE(applied.enable_structural_crash);
+    CHECK(applied.structural_crash_max_swaps == 7);
+    CHECK(applied.structural_crash_min_pivot == 1e-5);
     CHECK_FALSE(applied.enable_simd_kernels);
     CHECK(applied.enable_sip_parallel_candidates);
     CHECK(applied.enable_sip_parallel_dual_scan);
@@ -416,6 +475,154 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
 
     solver.load(lp);
     auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("DualSimplex: max_solve_seconds enforces time limit", "[dual_simplex][time_limit]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts = solver.getOptions();
+    opts.max_solve_seconds = 0.0;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK(result.status == Status::TimeLimit);
+}
+
+TEST_CASE("DualSimplex: primal-feasible guardrails tolerate non-positive options",
+          "[dual_simplex][options][guardrail]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts = solver.getOptions();
+    opts.primal_feasible_adaptive_refactor_stall_pivots = -7;
+    opts.primal_feasible_adaptive_refactor_min_updates = -1;
+    opts.primal_feasible_dual_progress_window = 0;
+    opts.primal_feasible_refactor_cooldown = -9;
+    opts.primal_feasible_dual_progress_improve_rel_tol = -1e-3;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("DualSimplex: enabled primal progress gate impacts degen3 run without errors",
+          "[dual_simplex][netlib][time_limit][regression]") {
+    std::string path = testDataDir() + "/netlib/degen3.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance degen3 not downloaded");
+    }
+
+    auto lp = readMps(path);
+
+    DualSimplexSolver disabled_solver;
+    DualSimplexOptions disabled_opts = disabled_solver.getOptions();
+    disabled_opts.max_solve_seconds = 1.0;
+    disabled_opts.primal_feasible_dual_progress_window = 0;
+    disabled_opts.primal_feasible_refactor_cooldown = 0;
+    disabled_solver.setOptions(disabled_opts);
+    disabled_solver.load(lp);
+    const auto disabled_result = disabled_solver.solve();
+    REQUIRE(disabled_result.status != Status::Error);
+
+    DualSimplexSolver enabled_solver;
+    DualSimplexOptions enabled_opts = enabled_solver.getOptions();
+    enabled_opts.max_solve_seconds = 1.0;
+    enabled_opts.primal_feasible_dual_progress_window = 1;
+    enabled_opts.primal_feasible_refactor_cooldown = 0;
+    enabled_opts.primal_feasible_adaptive_refactor_stall_pivots = 1;
+    enabled_opts.primal_feasible_adaptive_refactor_min_updates = 0;
+    enabled_solver.setOptions(enabled_opts);
+    enabled_solver.load(lp);
+    const auto enabled_result = enabled_solver.solve();
+
+    REQUIRE(enabled_result.status != Status::Error);
+    CHECK((enabled_result.status == Status::TimeLimit ||
+           enabled_result.status == Status::Optimal));
+    CHECK(enabled_result.iterations > 100);
+    CHECK(disabled_result.work_units > 0.0);
+    CHECK(enabled_result.work_units > 0.0);
+    const bool gate_has_effect =
+        std::abs(enabled_result.work_units - disabled_result.work_units) > 1e-9;
+    CHECK(gate_has_effect);
+    if (enabled_result.status == Status::Optimal) {
+        constexpr Real expected_obj = -9.8729400000e+02;
+        Real denom = std::max(1.0, std::abs(expected_obj));
+        Real rel_err = std::abs(enabled_result.objective - expected_obj) / denom;
+        CHECK(rel_err < 1e-6);
+    }
+}
+
+TEST_CASE("DualSimplex: enabled primal progress gate keeps degen2 solvable",
+          "[dual_simplex][netlib][guardrail][regression]") {
+    std::string path = testDataDir() + "/netlib/degen2.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance degen2 not downloaded");
+    }
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts = solver.getOptions();
+    opts.max_solve_seconds = 15.0;
+    opts.primal_feasible_dual_progress_window = 8;
+    opts.primal_feasible_refactor_cooldown = 32;
+    opts.primal_feasible_adaptive_refactor_stall_pivots = 32;
+    opts.primal_feasible_adaptive_refactor_min_updates = 24;
+    solver.setOptions(opts);
+    solver.load(readMps(path));
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    constexpr Real expected_obj = -1.4351780000e+03;
+    Real denom = std::max(1.0, std::abs(expected_obj));
+    Real rel_err = std::abs(result.objective - expected_obj) / denom;
+    CHECK(rel_err < 1e-6);
+    CHECK(result.iterations > 0);
+}
+
+TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
+          "[dual_simplex][basis]") {
+    // Two structural columns are identical, so choosing both as basic creates a
+    // singular basis. The solver should recover by rebuilding a valid basis.
+    LpProblem lp;
+    lp.name = "singular_basis_recovery";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {1.0, -kInf};
+    lp.row_upper = {kInf, 2.0};
+    lp.row_names = {"r_ge", "r_le"};
+
+    // Row 0: x + y >= 1
+    // Row 1: x + y <= 2
+    std::vector<Real> values = {1.0, 1.0, 1.0, 1.0};
+    std::vector<Index> col_indices = {0, 1, 0, 1};
+    std::vector<Index> row_starts = {0, 2, 4};
+    lp.matrix = SparseMatrix(2, 2, values, col_indices, row_starts);
+
+    DualSimplexSolver solver;
+    solver.load(lp);
+
+    // Force a singular basis: both structural columns basic.
+    std::vector<BasisStatus> singular_basis = {
+        BasisStatus::Basic,
+        BasisStatus::Basic,
+        BasisStatus::AtLower,
+        BasisStatus::AtLower,
+    };
+    solver.setBasis(singular_basis);
+
+    const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
 }

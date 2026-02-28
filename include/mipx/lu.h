@@ -115,6 +115,7 @@ private:
     static constexpr Index kMaxUpdates = 100;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
+    static constexpr Real kFtDropTol = 1e-13;
     static constexpr Real kGrowthLimit = 1e12;
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
