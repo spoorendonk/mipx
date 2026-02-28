@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import glob
 import os
 import re
@@ -28,7 +29,7 @@ KNOWN_OPTIMA = {
 
 MIPX_BINARY = os.path.join(os.path.dirname(__file__), "..", "build", "mipx-solve")
 NETLIB_DIR = os.path.join(os.path.dirname(__file__), "data", "netlib")
-TIMEOUT = 60  # seconds
+TIMEOUT = 60  # seconds (default; override via --timeout)
 
 
 def locate_highs_binary() -> str | None:
@@ -76,25 +77,20 @@ def parse_highs_status(text: str) -> str:
     return "unknown"
 
 
-def solve_mipx(filepath: str) -> dict:
+def solve_mipx(filepath: str, timeout_s: float, disable_presolve: bool) -> dict:
     """Solve with mipx-solve, return dict with obj, iters, time, status."""
     result = {"obj": None, "iters": None, "time": None, "status": "error"}
     try:
         start = time.perf_counter()
-        proc = subprocess.run(
-            [MIPX_BINARY, filepath],
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT,
-        )
+        cmd = [MIPX_BINARY, filepath, "--dual", "--quiet"]
+        if disable_presolve:
+            cmd.append("--no-presolve")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         elapsed = time.perf_counter() - start
+        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
         result["time"] = elapsed
 
-        if proc.returncode != 0:
-            result["status"] = "error"
-            return result
-
-        for line in proc.stdout.splitlines():
+        for line in output.splitlines():
             m = re.match(r"Objective:\s*(.+)", line)
             if m:
                 result["obj"] = float(m.group(1))
@@ -108,16 +104,19 @@ def solve_mipx(filepath: str) -> dict:
             if m:
                 result["time"] = float(m.group(1))
 
+        if proc.returncode != 0 and result["status"] in {"error", "", None}:
+            result["status"] = "error"
+
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
-        result["time"] = TIMEOUT
+        result["time"] = timeout_s
     except FileNotFoundError:
         result["status"] = "binary not found"
 
     return result
 
 
-def solve_highs(filepath: str, highs_binary: str) -> dict:
+def solve_highs(filepath: str, highs_binary: str, timeout_s: float, disable_presolve: bool) -> dict:
     """Solve with HiGHS CLI, return dict with obj, iters, time, status."""
     result = {"obj": None, "iters": None, "time": None, "status": "error"}
     cmd = [
@@ -126,23 +125,17 @@ def solve_highs(filepath: str, highs_binary: str) -> dict:
         "--solver",
         "simplex",
         "--presolve",
-        "choose",
+        "off" if disable_presolve else "choose",
         "--parallel",
         "off",
         "--time_limit",
-        str(TIMEOUT),
+        str(timeout_s),
     ]
     try:
         start = time.perf_counter()
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
         elapsed = time.perf_counter() - start
         output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-
-        if proc.returncode != 0:
-            result["status"] = "error"
-            result["time"] = elapsed
-            return result
-
         result["status"] = parse_highs_status(output)
         result["obj"] = parse_first_float(r"^\s*Objective value\s*:\s*([\-+0-9.eE]+)\s*$", output)
         result["iters"] = parse_first_float(
@@ -153,10 +146,12 @@ def solve_highs(filepath: str, highs_binary: str) -> dict:
         result["time"] = parse_first_float(r"^\s*HiGHS run time\s*:\s*([\-+0-9.eE]+)\s*$", output)
         if result["time"] is None:
             result["time"] = elapsed
+        if proc.returncode != 0 and result["status"] == "unknown":
+            result["status"] = "error"
 
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
-        result["time"] = TIMEOUT
+        result["time"] = timeout_s
     except Exception as e:
         result["status"] = f"error: {e}"
 
@@ -175,21 +170,41 @@ def check_obj(name: str, obj, label: str) -> str:
     return f"err={rel_err:.2e}"
 
 
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--netlib-dir", default=NETLIB_DIR)
+    p.add_argument("--instances", default="")
+    p.add_argument("--timeout", type=float, default=TIMEOUT)
+    p.add_argument("--max-instances", type=int, default=0)
+    p.add_argument("--no-presolve", action="store_true")
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
     highs_binary = locate_highs_binary()
     if not highs_binary:
         print("HiGHS CLI not found. Set HIGHS_BINARY or add highs to PATH.")
         sys.exit(1)
 
-    if not os.path.isdir(NETLIB_DIR):
-        print(f"Netlib directory not found: {NETLIB_DIR}")
+    if not os.path.isdir(args.netlib_dir):
+        print(f"Netlib directory not found: {args.netlib_dir}")
         sys.exit(1)
 
-    files = sorted(glob.glob(os.path.join(NETLIB_DIR, "*.mps.gz")))
+    files = sorted(glob.glob(os.path.join(args.netlib_dir, "*.mps.gz")))
     if not files:
-        files = sorted(glob.glob(os.path.join(NETLIB_DIR, "*.mps")))
+        files = sorted(glob.glob(os.path.join(args.netlib_dir, "*.mps")))
     if not files:
-        print("No .mps/.mps.gz files found in", NETLIB_DIR)
+        print("No .mps/.mps.gz files found in", args.netlib_dir)
+        sys.exit(1)
+
+    if args.instances:
+        selected = {x.strip() for x in args.instances.split(",") if x.strip()}
+        files = [f for f in files if instance_name(f) in selected]
+    if args.max_instances > 0:
+        files = files[: args.max_instances]
+    if not files:
+        print("No instances selected after filtering")
         sys.exit(1)
 
     if not os.path.isfile(MIPX_BINARY):
@@ -213,8 +228,8 @@ def main():
     for filepath in files:
         name = instance_name(filepath)
 
-        mipx_res = solve_mipx(filepath)
-        highs_res = solve_highs(filepath, highs_binary)
+        mipx_res = solve_mipx(filepath, args.timeout, args.no_presolve)
+        highs_res = solve_highs(filepath, highs_binary, args.timeout, args.no_presolve)
 
         mipx_obj_s = (
             f"{mipx_res['obj']:.8e}" if mipx_res["obj"] is not None else mipx_res["status"]

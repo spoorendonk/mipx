@@ -110,8 +110,8 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     u_diag_.resize(dim_);
 
     // Track which rows/cols are still active.
-    std::vector<bool> row_active(dim_, true);
-    std::vector<bool> col_active(dim_, true);
+    std::vector<uint8_t> row_active(dim_, 1);
+    std::vector<uint8_t> col_active(dim_, 1);
 
     // Helper: remove entry from row and col lists.
     auto removeEntry = [&](Index eidx) {
@@ -740,7 +740,7 @@ void SparseLU::update(Index pivot_pos,
     // Store eta: non-pivot entries of d.
     for (Index i = 0; i < dim_; ++i) {
         if (i == pivot_pos) continue;
-        if (std::abs(d[i]) > kZeroTol) {
+        if (std::abs(d[i]) > kFtDropTol) {
             ft_index_.push_back(i);
             ft_value_.push_back(d[i]);
             max_u_entry_ = std::max(max_u_entry_, std::abs(d[i]));

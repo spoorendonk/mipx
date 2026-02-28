@@ -31,6 +31,7 @@ int main(int argc, char* argv[]) {
             "[--exact-warning-tol T] [--exact-cert-tol T] "
             "[--exact-max-rounds N] [--exact-repair-passes N] "
             "[--exact-rational-scale S] "
+            "[--dual-idiot-crash|--dual-no-idiot-crash] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -71,6 +72,7 @@ int main(int argc, char* argv[]) {
     mipx::Int exact_max_rounds = 2;
     mipx::Int exact_repair_passes = 2;
     double exact_rational_scale = 1.0e6;
+    bool dual_idiot_crash = false;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -153,6 +155,10 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--exact-rational-scale" && i + 1 < argc) {
             exact_rational_scale = std::max(1.0, std::atof(argv[++i]));
+        } else if (arg == "--dual-idiot-crash") {
+            dual_idiot_crash = true;
+        } else if (arg == "--dual-no-idiot-crash") {
+            dual_idiot_crash = false;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
         } else if (arg == "--search-default") {
@@ -329,6 +335,13 @@ int main(int argc, char* argv[]) {
                 used_gpu_backend = solver.usedGpu();
             } else {
                 mipx::DualSimplexSolver solver;
+                solver.setVerbose(verbose);
+                mipx::DualSimplexOptions dopts = solver.getOptions();
+                dopts.enable_idiot_crash = dual_idiot_crash;
+                if (time_limit >= 0.0) {
+                    dopts.max_solve_seconds = time_limit;
+                }
+                solver.setOptions(dopts);
                 solver.load(working);
                 result = solver.solve();
                 primals = solver.getPrimalValues();
@@ -372,6 +385,10 @@ int main(int argc, char* argv[]) {
                 case mipx::Status::IterLimit:
                     status_text = "Iteration limit";
                     log.log("Status: Iteration limit\n");
+                    break;
+                case mipx::Status::TimeLimit:
+                    status_text = "Time limit";
+                    log.log("Status: Time limit\n");
                     break;
                 default:
                     status_text = "Error";

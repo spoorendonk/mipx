@@ -15,7 +15,11 @@ namespace mipx {
 
 struct DualSimplexOptions {
     // Pricing controls.
-    bool enable_partial_pricing = true;
+    bool enable_partial_pricing = false;
+    bool enable_bfrt = false;
+    bool enable_adaptive_bfrt = true;
+    Int adaptive_bfrt_max_pinf = 128;
+    Int adaptive_bfrt_progress_window = 512;
     Int partial_pricing_chunk_min = 512;
     Int partial_pricing_full_scan_freq = 25;
 
@@ -24,10 +28,48 @@ struct DualSimplexOptions {
     Int adaptive_refactor_min_updates = 24;
     Int adaptive_refactor_stall_pivots = 32;
     Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
+    // Extra guardrails for primal-feasible/dual-infeasible pivot phase.
+    Int primal_feasible_adaptive_refactor_stall_pivots = 32;
+    Int primal_feasible_adaptive_refactor_min_updates = 24;
+    // Non-positive disables the dual-progress stall gate.
+    Int primal_feasible_dual_progress_window = 0;
+    Int primal_feasible_refactor_cooldown = 0;
+    Real primal_feasible_dual_progress_improve_rel_tol = 1e-3;
 
     // Runtime SIMD controls for dense vector kernels.
     bool enable_simd_kernels = true;
     Int simd_min_length = 64;
+
+    // Matrix/bound scaling.
+    bool enable_scaling = true;
+
+    // Solve time limit for stand-alone LP usage. Negative means disabled.
+    double max_solve_seconds = -1.0;
+
+    // Deterministic anti-degeneracy reduced-cost perturbation.
+    bool enable_dual_perturbation = false;
+    Int dual_perturbation_stall_pivots = 64;
+    Real dual_perturbation_magnitude = 1e-8;
+
+    // Stall-triggered primal bound perturbation (deterministic).
+    bool enable_bound_perturbation = true;
+    Int bound_perturbation_stall_pivots = 512;
+    Real bound_perturbation_magnitude = 1e-8;
+    Int bound_perturbation_max_activations = 2;
+
+    // Stall-triggered deterministic restart/re-crash.
+    bool enable_stall_restart = false;
+    Int stall_restart_pivots = 2000;
+    Int stall_restart_max_restarts = 2;
+
+    // Optional "idiot crash" style bound-flip heuristic before first factorization.
+    bool enable_idiot_crash = false;
+    Int idiot_crash_passes = 2;
+    Int idiot_crash_max_flips = 10000;
+    Real idiot_crash_min_gain = 1e-9;
+    bool enable_structural_crash = false;
+    Int structural_crash_max_swaps = 64;
+    Real structural_crash_min_pivot = 1e-7;
 
     // SIP-style parallel candidate scan (CHUZC), guarded and off by default.
     bool enable_sip_parallel_candidates = false;
@@ -197,6 +239,10 @@ private:
 
     // Deterministic work counter.
     WorkUnits work_;
+    bool bound_perturb_active_ = false;
+    Int bound_perturb_activations_ = 0;
+    std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
+    std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
     DualSimplexOptions options_{};
 };
 

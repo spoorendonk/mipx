@@ -1,0 +1,9 @@
+instance,expected_status,expected_objective,source,notes
+afiro,optimal,-4.6475314286e+02,netlib.solu,small_regression_anchor
+adlittle,optimal,2.2549496316e+05,netlib.solu,small_regression_anchor
+blend,optimal,-3.0812149846e+01,netlib.solu,small_regression_anchor
+sc50a,optimal,-6.4575077059e+01,netlib.solu,small_regression_anchor
+greenbea,optimal,-7.2555248130e+07,netlib.solu,known_large_failure_false_unknown
+pilot,optimal,-5.5740430007e+02,netlib.solu,known_large_failure_singular_basis
+ship12l,optimal,1.4701879193e+06,netlib.solu,known_large_failure_false_infeasible
+sierra,optimal,1.5394362184e+07,netlib.solu,known_large_failure_false_infeasible
