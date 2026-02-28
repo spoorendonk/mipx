@@ -3506,6 +3506,7 @@ MipResult MipSolver::solve() {
                     }
                     // Local-MIP without an incumbent is a no-op; run FPR instead.
                     if (incumbent_span.empty()) {
+                        out.arm = PreRootArm::Fpr;
                         out.candidate = runLpFreeFpr(round_problem, discrete_vars, round_rng,
                                                      incumbent_for_round,
                                                      out.local_work);
