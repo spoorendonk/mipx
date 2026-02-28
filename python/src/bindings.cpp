@@ -18,6 +18,7 @@ NB_MODULE(_core, m) {
     using mipx::MipPreRootStats;
     using mipx::MipResult;
     using mipx::MipSolver;
+    using mipx::ParallelMode;
     using mipx::RootLpPolicy;
     using mipx::SearchProfile;
     using mipx::Sense;
@@ -56,6 +57,10 @@ NB_MODULE(_core, m) {
         .value("Stable", SearchProfile::Stable)
         .value("Default", SearchProfile::Default)
         .value("Aggressive", SearchProfile::Aggressive);
+
+    nb::enum_<ParallelMode>(m, "ParallelMode")
+        .value("Deterministic", ParallelMode::Deterministic)
+        .value("Opportunistic", ParallelMode::Opportunistic);
 
     nb::enum_<HeuristicRuntimeMode>(m, "HeuristicRuntimeMode")
         .value("Deterministic", HeuristicRuntimeMode::Deterministic)
@@ -146,6 +151,7 @@ NB_MODULE(_core, m) {
         .def("set_cuts_enabled", &MipSolver::setCutsEnabled, "enabled"_a)
         .def("set_num_threads", &MipSolver::setNumThreads, "threads"_a)
         .def("set_root_lp_policy", &MipSolver::setRootLpPolicy, "policy"_a)
+        .def("set_parallel_mode", &MipSolver::setParallelMode, "mode"_a)
         .def("set_heuristic_mode", &MipSolver::setHeuristicMode, "mode"_a)
         .def("set_heuristic_seed", &MipSolver::setHeuristicSeed, "seed"_a)
         .def("set_pre_root_lpfree_enabled", &MipSolver::setPreRootLpFreeEnabled,

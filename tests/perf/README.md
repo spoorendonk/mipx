@@ -104,6 +104,8 @@ Artifacts:
 The command exits non-zero if any `(instance, profile)` is unstable.
 Use `--strict-metrics` to additionally require node/iteration/work-unit
 equality across runs.
+`time_seconds` remains in detail CSV for telemetry only and is not part of
+deterministic stability checks.
 
 ## Benchmark Matrix Runner
 
@@ -148,7 +150,7 @@ python3 tests/perf/run_param_sweep.py \
   --miplib-dir ./tests/data/miplib \
   --instances p0201,gt2,flugpl \
   --search-profiles stable,default,aggressive \
-  --heur-modes deterministic,opportunistic \
+  --parallel-modes deterministic,opportunistic \
   --cuts on,off \
   --presolve on,off \
   --threads 1 \

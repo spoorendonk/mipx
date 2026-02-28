@@ -40,6 +40,11 @@ enum class SearchProfile {
     Aggressive,
 };
 
+enum class ParallelMode {
+    Deterministic,
+    Opportunistic,
+};
+
 enum class ExactRefinementMode {
     Off,
     Auto,
@@ -242,7 +247,12 @@ public:
         pdlp_gpu_min_rows_ = std::max<Int>(0, min_rows);
         pdlp_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
     }
-    void setHeuristicMode(HeuristicRuntimeMode mode) { heuristic_mode_ = mode; }
+    void setParallelMode(ParallelMode mode) { parallel_mode_ = mode; }
+    void setHeuristicMode(HeuristicRuntimeMode mode) {
+        parallel_mode_ = (mode == HeuristicRuntimeMode::Opportunistic)
+            ? ParallelMode::Opportunistic
+            : ParallelMode::Deterministic;
+    }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
     void setPreRootLpFreeWorkBudget(double max_work_units) {
@@ -415,7 +425,7 @@ private:
     bool pdlp_use_gpu_ = true;
     Int pdlp_gpu_min_rows_ = 512;
     Int pdlp_gpu_min_nnz_ = 10000;
-    HeuristicRuntimeMode heuristic_mode_ = HeuristicRuntimeMode::Deterministic;
+    ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     bool pre_root_lp_free_enabled_ = false;
     bool pre_root_lp_free_early_stop_ = true;

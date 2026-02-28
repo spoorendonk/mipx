@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <numeric>
 
 namespace mipx {
@@ -56,6 +57,62 @@ SparseMatrix::SparseMatrix(Index rows, Index cols, std::vector<Real> values,
            static_cast<Index>(col_indices_.size()));
 }
 
+SparseMatrix::SparseMatrix(const SparseMatrix& other)
+    : rows_(other.rows_),
+      cols_(other.cols_),
+      values_(other.values_),
+      col_indices_(other.col_indices_),
+      row_starts_(other.row_starts_) {
+    // CSC cache is lazily rebuilt per matrix instance.
+    csc_valid_.store(false, std::memory_order_relaxed);
+}
+
+SparseMatrix& SparseMatrix::operator=(const SparseMatrix& other) {
+    if (this == &other) return *this;
+    std::lock_guard<std::mutex> lock(csc_mutex_);
+    rows_ = other.rows_;
+    cols_ = other.cols_;
+    values_ = other.values_;
+    col_indices_ = other.col_indices_;
+    row_starts_ = other.row_starts_;
+    csc_valid_.store(false, std::memory_order_relaxed);
+    csc_values_.clear();
+    csc_row_indices_.clear();
+    csc_col_starts_.clear();
+    return *this;
+}
+
+SparseMatrix::SparseMatrix(SparseMatrix&& other) noexcept
+    : rows_(other.rows_),
+      cols_(other.cols_),
+      values_(std::move(other.values_)),
+      col_indices_(std::move(other.col_indices_)),
+      row_starts_(std::move(other.row_starts_)),
+      csc_values_(std::move(other.csc_values_)),
+      csc_row_indices_(std::move(other.csc_row_indices_)),
+      csc_col_starts_(std::move(other.csc_col_starts_)) {
+    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed),
+                     std::memory_order_relaxed);
+    other.csc_valid_.store(false, std::memory_order_relaxed);
+}
+
+SparseMatrix& SparseMatrix::operator=(SparseMatrix&& other) noexcept {
+    if (this == &other) return *this;
+    std::lock_guard<std::mutex> lock(csc_mutex_);
+    rows_ = other.rows_;
+    cols_ = other.cols_;
+    values_ = std::move(other.values_);
+    col_indices_ = std::move(other.col_indices_);
+    row_starts_ = std::move(other.row_starts_);
+    csc_values_ = std::move(other.csc_values_);
+    csc_row_indices_ = std::move(other.csc_row_indices_);
+    csc_col_starts_ = std::move(other.csc_col_starts_);
+    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed),
+                     std::memory_order_relaxed);
+    other.csc_valid_.store(false, std::memory_order_relaxed);
+    return *this;
+}
+
 SparseVectorView SparseMatrix::row(Index i) const {
     assert(i >= 0 && i < rows_);
     Index start = row_starts_[i];
@@ -66,8 +123,12 @@ SparseVectorView SparseMatrix::row(Index i) const {
 
 SparseVectorView SparseMatrix::col(Index j) const {
     assert(j >= 0 && j < cols_);
-    if (!csc_valid_) {
-        buildCSC();
+    if (!csc_valid_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(csc_mutex_);
+        if (!csc_valid_.load(std::memory_order_relaxed)) {
+            buildCSC();
+            csc_valid_.store(true, std::memory_order_release);
+        }
     }
     Index start = csc_col_starts_[j];
     Index end = csc_col_starts_[j + 1];
@@ -254,11 +315,11 @@ void SparseMatrix::buildCSC() const {
         }
     }
 
-    csc_valid_ = true;
 }
 
 void SparseMatrix::invalidateCSC() const {
-    csc_valid_ = false;
+    std::lock_guard<std::mutex> lock(csc_mutex_);
+    csc_valid_.store(false, std::memory_order_release);
     csc_values_.clear();
     csc_row_indices_.clear();
     csc_col_starts_.clear();

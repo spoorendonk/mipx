@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 #include "mipx/sparse_matrix.h"
@@ -373,4 +375,79 @@ TEST_CASE("SparseMatrix: addRow unsorted indices", "[sparse_matrix]") {
     CHECK(r.values[0] == 3.0);
     CHECK(r.indices[1] == 2);
     CHECK(r.values[1] == 5.0);
+}
+
+TEST_CASE("SparseMatrix: copy assignment keeps independent storage", "[sparse_matrix]") {
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}};
+    SparseMatrix A(2, 3, trips);
+    (void)A.col(0);  // Build CSC cache in source matrix.
+
+    SparseMatrix B(0, 0);
+    B = A;
+    CHECK(B.numRows() == A.numRows());
+    CHECK(B.numCols() == A.numCols());
+    CHECK(B.numNonzeros() == A.numNonzeros());
+    CHECK(B.coeff(0, 0) == A.coeff(0, 0));
+    CHECK(B.coeff(0, 2) == A.coeff(0, 2));
+    CHECK(B.coeff(1, 1) == A.coeff(1, 1));
+
+    std::vector<Index> idx = {1};
+    std::vector<Real> vals = {9.0};
+    A.addRow(idx, vals);
+
+    CHECK(A.numRows() == 3);
+    CHECK(B.numRows() == 2);
+    CHECK(A.coeff(2, 1) == 9.0);
+    CHECK(B.coeff(1, 1) == 3.0);
+}
+
+TEST_CASE("SparseMatrix: concurrent read-only column access is stable",
+          "[sparse_matrix][threading]") {
+    constexpr Index rows = 64;
+    constexpr Index cols = 64;
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(rows * cols / 8));
+    for (Index i = 0; i < rows; ++i) {
+        for (Index j = 0; j < cols; ++j) {
+            if (((i + 3 * j) % 11) == 0) {
+                trips.push_back({i, j, 1.0 + static_cast<Real>((i + j) % 5)});
+            }
+        }
+    }
+    SparseMatrix A(rows, cols, std::move(trips));
+
+    constexpr int kThreads = 8;
+    constexpr int kRounds = 400;
+    std::vector<std::thread> workers;
+    std::vector<uint64_t> fingerprints(static_cast<std::size_t>(kThreads), 0);
+    std::atomic<bool> failed{false};
+
+    workers.reserve(static_cast<std::size_t>(kThreads));
+    for (int t = 0; t < kThreads; ++t) {
+        workers.emplace_back([&, t]() {
+            uint64_t fp = 0;
+            for (int r = 0; r < kRounds; ++r) {
+                for (Index j = 0; j < cols; ++j) {
+                    const auto c = A.col(j);
+                    fp += static_cast<uint64_t>(c.size()) * 1315423911ull;
+                    for (Index k = 0; k < c.size(); ++k) {
+                        if (A.coeff(c.indices[k], j) != c.values[k]) {
+                            failed.store(true, std::memory_order_relaxed);
+                            return;
+                        }
+                        fp ^= (static_cast<uint64_t>(c.indices[k]) << (k % 13));
+                    }
+                }
+            }
+            fingerprints[static_cast<std::size_t>(t)] = fp;
+        });
+    }
+    for (auto& th : workers) th.join();
+
+    CHECK_FALSE(failed.load(std::memory_order_relaxed));
+    for (int t = 1; t < kThreads; ++t) {
+        CHECK(fingerprints[static_cast<std::size_t>(t)] ==
+              fingerprints[static_cast<std::size_t>(0)]);
+    }
 }

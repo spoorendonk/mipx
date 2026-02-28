@@ -110,8 +110,7 @@ is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 | `--barrier` | off | Use barrier for LP/root LP solve |
 | `--pdlp` | off | Use PDLP for LP/root LP solve |
 | `--concurrent-root` | off | Race dual/barrier/PDLP at root (deterministic or opportunistic policy mode) |
-| `--heur-deterministic` | on | Deterministic heuristic runtime mode |
-| `--heur-opportunistic` | off | Opportunistic heuristic runtime mode (throughput-first) |
+| `--parallel-mode <deterministic|opportunistic>` | deterministic | Parallel scheduling mode (`deterministic` is reproducible; pre-root adaptive portfolio is forced to fixed schedule when `--threads > 1`) |
 | `--seed <n>` | 1 | Seed for heuristic runtime restart scheduling |
 | `--pre-root-lpfree` | off | Enable LP-free pre-root incumbent stage |
 | `--no-pre-root-lpfree` | — | Disable LP-free pre-root stage |
@@ -234,6 +233,9 @@ python3 tests/perf/run_determinism_suite.py \
   --multi-threads 4 \
   --solver-arg --quiet
 
+# Note: determinism checks use objective/nodes/LP-iterations/work-units.
+# Wall-clock Time remains telemetry-only and is excluded from stability checks.
+
 # Benchmark matrix artifacts (solver x time x threads x mode)
 python3 tests/perf/run_benchmark_matrix.py \
   --mipx-binary ./build/mipx-solve \
@@ -251,7 +253,7 @@ python3 tests/perf/run_param_sweep.py \
   --miplib-dir ./tests/data/miplib \
   --instances p0201,gt2,flugpl \
   --search-profiles stable,default,aggressive \
-  --heur-modes deterministic,opportunistic \
+  --parallel-modes deterministic,opportunistic \
   --cuts on,off \
   --presolve on,off \
   --solver-arg --quiet

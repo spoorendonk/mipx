@@ -7,6 +7,9 @@ Artifacts:
 - determinism_summary.md: pass/fail report
 
 Exit code is non-zero if any profile/instance is unstable.
+
+`time_seconds` is treated as informational telemetry and is excluded from
+deterministic pass/fail checks.
 """
 
 from __future__ import annotations
@@ -182,7 +185,8 @@ def main() -> int:
                     str(args.node_limit),
                     "--gap-tol",
                     f"{args.gap_tol:g}",
-                    "--heur-deterministic",
+                    "--parallel-mode",
+                    "deterministic",
                     "--search-stable",
                     "--no-cuts",
                     "--seed",
@@ -209,7 +213,6 @@ def main() -> int:
                     or nodes is None
                     or lp_iterations is None
                     or work_units is None
-                    or time_seconds is None
                 ):
                     error = "parse_error"
 
