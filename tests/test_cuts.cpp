@@ -292,6 +292,11 @@ TEST_CASE("Gomory: generate cuts on small MIP", "[cuts][gomory]") {
     }
 }
 
+TEST_CASE("CutFamilyConfig defaults keep Gomory enabled", "[cuts][gomory]") {
+    const CutFamilyConfig config{};
+    CHECK(config.gomory);
+}
+
 TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][families]") {
     auto problem = buildBinaryConflictMip();
     DualSimplexSolver lp;

@@ -32,10 +32,7 @@ struct CutSeparationStats {
 };
 
 struct CutFamilyConfig {
-    // Gomory/GMI separation is currently disabled by default due
-    // correctness regressions on benchmark MIPs. Re-enable once the
-    // separator is numerically hardened.
-    bool gomory = false;
+    bool gomory = true;
     bool mir = true;
     bool cover = true;
     bool implied_bound = true;
