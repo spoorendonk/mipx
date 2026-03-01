@@ -456,3 +456,54 @@ TEST_CASE("MIPLIB: p0201 objective matches .solu with pre-root heuristics",
     CHECK(stats.work_units > 0.0);
     CHECK(result.work_units >= stats.work_units);
 }
+
+TEST_CASE("MIPLIB: flugpl objective is stable across presolve modes without cuts",
+          "[benchmark][miplib][solve][presolve]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/flugpl.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("flugpl not downloaded. Run tests/data/download_miplib.sh --small");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "flugpl");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite flugpl objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    auto solve_with = [&](bool presolve) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setCutsEnabled(false);
+        solver.setNumThreads(1);
+        solver.setTimeLimit(20.0);
+        solver.setNodeLimit(200000);
+        solver.setGapTolerance(1e-6);
+        solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+        solver.setHeuristicSeed(23);
+        solver.setSearchProfile(SearchProfile::Stable);
+        solver.setPresolve(presolve);
+        solver.load(problem);
+        return solver.solve();
+    };
+
+    const auto with_presolve = solve_with(true);
+    const auto without_presolve = solve_with(false);
+
+    REQUIRE(with_presolve.status == Status::Optimal);
+    REQUIRE(without_presolve.status == Status::Optimal);
+    CHECK_THAT(with_presolve.objective,
+               WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK_THAT(without_presolve.objective,
+               WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK_THAT(with_presolve.objective,
+               WithinAbs(without_presolve.objective, 1e-9));
+}

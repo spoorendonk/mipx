@@ -1876,7 +1876,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     // In-tree cut management (serial path only): depth-gated rounds and
     // local-vs-global cut handling.
     bool tree_cut_ran = false;
-    if (cuts_enabled_ && cut_effort_mode_ != CutEffortMode::Off &&
+    if (tree_cuts_enabled_ &&
+        cuts_enabled_ && cut_effort_mode_ != CutEffortMode::Off &&
         num_threads_ <= 1 && node.depth > 0 && frac_count > 0 &&
         problem_.num_cols <= 64) {
         const bool aggressive = (node.depth <= 2);
@@ -2964,6 +2965,9 @@ MipResult MipSolver::solve() {
         if (!tree_presolve_enabled_) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_presolve=off ");
         }
+        if (!tree_cuts_enabled_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_cuts=off ");
+        }
         if (!cuts_enabled_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cuts=off ");
         if (max_cut_rounds_ != 20) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "cut_rounds=%d ", max_cut_rounds_);
         if (cut_effort_mode_ != CutEffortMode::Auto) {
@@ -3115,15 +3119,11 @@ MipResult MipSolver::solve() {
 
     auto applyPostsolve = [&](MipResult& result) {
         if (did_presolve) {
+            // LP/MIP subsolvers already report values in the transformed space
+            // including transformed obj_offset. Postsolve reconstructs primal
+            // variables only; objective/bound offsets must not be added again.
             if (result.status == Status::Optimal || !result.solution.empty()) {
-                result.objective += problem_.obj_offset;
-                result.best_bound += problem_.obj_offset;
                 result.solution = presolver.postsolve(result.solution);
-            } else {
-                result.objective += problem_.obj_offset;
-                if (result.best_bound != kInf && result.best_bound != -kInf) {
-                    result.best_bound += problem_.obj_offset;
-                }
             }
         }
     };

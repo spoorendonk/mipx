@@ -288,6 +288,38 @@ static LpProblem buildTreeCutMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: regression for presolve objective offset handling.
+// min 100*x + y
+// s.t. 2 <= y + z <= 100
+//      x fixed at 1 (binary), 0 <= y <= 10 (integer), 0 <= z <= 10 (continuous)
+// Optimal objective is 100 (x=1, y=0, z=2).
+// ---------------------------------------------------------------------------
+
+static LpProblem buildPresolveOffsetRegressionMip() {
+    LpProblem lp;
+    lp.name = "presolve_offset_regression";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {100.0, 1.0, 0.0};
+    lp.col_lower = {1.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 10.0, 10.0};
+    lp.col_type = {VarType::Binary, VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {2.0};
+    lp.row_upper = {100.0};
+    lp.row_names = {"balance"};
+
+    std::vector<Triplet> trips = {
+        {0, 1, 1.0},
+        {0, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Helper: infeasible binary model with fractional root to exercise conflict
 // learning and no-good reuse in the tree.
 // x + y = 1.5, x,y binary
@@ -1360,4 +1392,35 @@ TEST_CASE("MipSolver: in-tree presolve preserves feasible optimum", "[mip][preso
     REQUIRE(a.status == Status::Optimal);
     REQUIRE(b.status == Status::Optimal);
     CHECK_THAT(a.objective, WithinAbs(b.objective, 1e-9));
+}
+
+TEST_CASE("MipSolver: presolve does not double-count objective offset",
+          "[mip][presolve][objective]") {
+    const auto lp = buildPresolveOffsetRegressionMip();
+
+    auto solve_with = [&](bool presolve) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setCutsEnabled(false);
+        solver.setTreePresolveEnabled(false);
+        solver.setSearchProfile(SearchProfile::Stable);
+        solver.setNumThreads(1);
+        solver.setPresolve(presolve);
+        solver.load(lp);
+        return solver.solve();
+    };
+
+    const auto on = solve_with(true);
+    const auto off = solve_with(false);
+
+    REQUIRE(on.status == Status::Optimal);
+    REQUIRE(off.status == Status::Optimal);
+    REQUIRE(on.solution.size() == 3);
+    REQUIRE(off.solution.size() == 3);
+
+    CHECK_THAT(on.objective, WithinAbs(100.0, 1e-6));
+    CHECK_THAT(off.objective, WithinAbs(100.0, 1e-6));
+    CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
+    CHECK_THAT(on.solution[0], WithinAbs(1.0, 1e-9));
+    CHECK_THAT(off.solution[0], WithinAbs(1.0, 1e-9));
 }
