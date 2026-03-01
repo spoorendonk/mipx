@@ -1344,6 +1344,8 @@ LpResult DualSimplexSolver::solve() {
             // Primal ratio test: find leaving variable.
             Index leaving_row_p = -1;
             Real min_step = kInf;
+            constexpr Real kPrimalHarrisTol = 1e-10;
+            Real best_leaving_pivot_abs = 0.0;
             for (Index i = 0; i < num_rows_; ++i) {
                 Real f = pivot_col[i] * delta_dir;
                 // x_B[i]_new = x_B[i]_old - f * step
@@ -1363,9 +1365,16 @@ LpResult DualSimplexSolver::solve() {
                     step = (ub == kInf) ? kInf : (ub - xval) / (-f);
                 }
 
-                if (step >= -kPrimalTol && step < min_step) {
+                if (step < -kPrimalTol) continue;
+                const Real abs_f = std::abs(f);
+                if (step + kPrimalHarrisTol < min_step) {
                     min_step = step;
                     leaving_row_p = i;
+                    best_leaving_pivot_abs = abs_f;
+                } else if (step <= min_step + kPrimalHarrisTol &&
+                           abs_f > best_leaving_pivot_abs) {
+                    leaving_row_p = i;
+                    best_leaving_pivot_abs = abs_f;
                 }
             }
 

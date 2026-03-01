@@ -586,6 +586,39 @@ TEST_CASE("DualSimplex: enabled primal progress gate keeps degen2 solvable",
     CHECK(result.iterations > 0);
 }
 
+TEST_CASE("DualSimplex: default no-presolve handles degen2 and degen3 within time limit",
+          "[dual_simplex][netlib][regression][no_presolve]") {
+    struct NetlibCase {
+        const char* name;
+        Real expected_obj;
+    };
+    constexpr NetlibCase kCases[] = {
+        {"degen2", -1.4351780000e+03},
+        {"degen3", -9.8729400000e+02},
+    };
+
+    for (const auto& tc : kCases) {
+        std::string path = testDataDir() + "/netlib/" + tc.name + ".mps.gz";
+        if (!fs::exists(path)) {
+            SKIP(std::string("Netlib instance missing: ") + tc.name);
+        }
+
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.max_solve_seconds = 5.0;
+        solver.setOptions(opts);
+        solver.load(readMps(path));
+
+        const auto result = solver.solve();
+        INFO("instance=" << tc.name);
+        REQUIRE(result.status == Status::Optimal);
+        Real denom = std::max(1.0, std::abs(tc.expected_obj));
+        Real rel_err = std::abs(result.objective - tc.expected_obj) / denom;
+        CHECK(rel_err < 1e-6);
+        CHECK(result.work_units > 0.0);
+    }
+}
+
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
           "[dual_simplex][basis]") {
     // Two structural columns are identical, so choosing both as basic creates a
