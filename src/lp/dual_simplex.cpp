@@ -855,6 +855,15 @@ LpResult DualSimplexSolver::solve() {
     applyCostShifts();
 
     // Work vectors for the iteration.
+    std::vector<Real> base_var_lower(static_cast<std::size_t>(numVars()));
+    std::vector<Real> base_var_upper(static_cast<std::size_t>(numVars()));
+    std::copy(col_lower_.begin(), col_lower_.end(), base_var_lower.begin());
+    std::copy(col_upper_.begin(), col_upper_.end(), base_var_upper.begin());
+    std::copy(row_lower_.begin(), row_lower_.end(),
+              base_var_lower.begin() + static_cast<std::size_t>(num_cols_));
+    std::copy(row_upper_.begin(), row_upper_.end(),
+              base_var_upper.begin() + static_cast<std::size_t>(num_cols_));
+
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
     std::vector<uint8_t> pivot_row_alpha_mark(static_cast<std::size_t>(numVars()), uint8_t{0});
     std::vector<Index> pivot_row_alpha_touched;
@@ -974,8 +983,9 @@ LpResult DualSimplexSolver::solve() {
         upper_bound_perturb_.assign(static_cast<std::size_t>(n), 0.0);
 
         for (Index k = 0; k < n; ++k) {
-            const Real lb = (k < num_cols_) ? col_lower_[k] : row_lower_[k - num_cols_];
-            const Real ub = (k < num_cols_) ? col_upper_[k] : row_upper_[k - num_cols_];
+            const std::size_t ks = static_cast<std::size_t>(k);
+            const Real lb = base_var_lower[ks];
+            const Real ub = base_var_upper[ks];
             if (lb == -kInf && ub == kInf) continue;
 
             const uint32_t hash = static_cast<uint32_t>(k + 1) * 2246822519u;
@@ -1136,14 +1146,14 @@ LpResult DualSimplexSolver::solve() {
         const Real* upper_perturb =
             bound_perturb_active_ ? upper_bound_perturb_.data() : nullptr;
         auto lowerBoundFast = [&](Index k) -> Real {
-            Real lb = (k < num_cols_) ? col_lower_[k] : row_lower_[k - num_cols_];
+            Real lb = base_var_lower[static_cast<std::size_t>(k)];
             if (lower_perturb != nullptr) {
                 lb += lower_perturb[static_cast<std::size_t>(k)];
             }
             return lb;
         };
         auto upperBoundFast = [&](Index k) -> Real {
-            Real ub = (k < num_cols_) ? col_upper_[k] : row_upper_[k - num_cols_];
+            Real ub = base_var_upper[static_cast<std::size_t>(k)];
             if (upper_perturb != nullptr) {
                 ub -= upper_perturb[static_cast<std::size_t>(k)];
             }
@@ -1673,6 +1683,18 @@ LpResult DualSimplexSolver::solve() {
         bool has_flips = false;
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
+        bool adaptive_bfrt_gate = true;
+        if (options_.enable_adaptive_bfrt) {
+            const bool high_primal_infeasibility =
+                current_pinf_count > options_.adaptive_bfrt_max_pinf;
+            const bool stalled_pinf_progress =
+                options_.adaptive_bfrt_progress_window > 0 &&
+                iters_since_pinf_improve >= options_.adaptive_bfrt_progress_window;
+            adaptive_bfrt_gate = high_primal_infeasibility || stalled_pinf_progress;
+        }
+        const bool bfrt_enabled = options_.enable_bfrt || auto_bfrt_wide;
+        const bool need_bfrt_gap_scan = bfrt_enabled && adaptive_bfrt_gate;
+
         Index nnb = static_cast<Index>(nonbasic_.size());
         if (bfrt_cands.capacity() < static_cast<std::size_t>(nnb)) {
             bfrt_cands.reserve(static_cast<std::size_t>(nnb));
@@ -1682,9 +1704,12 @@ LpResult DualSimplexSolver::solve() {
             Real alpha = pivot_row_alpha[k];
             if (!isEligible(k, alpha)) return;
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
-            Real lb = lowerBoundFast(k);
-            Real ub = upperBoundFast(k);
-            Real gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+            Real gap = kInf;
+            if (need_bfrt_gap_scan) {
+                Real lb = lowerBoundFast(k);
+                Real ub = upperBoundFast(k);
+                gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+            }
             out.push_back({k, pos, ratio, alpha, gap});
         };
 
@@ -1815,26 +1840,15 @@ LpResult DualSimplexSolver::solve() {
         Index best_ci = -1;
         for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
             const auto& c = bfrt_cands[ci];
-            if (c.gap != kInf) has_finite_gap_cand = true;
+            if (need_bfrt_gap_scan && c.gap != kInf) has_finite_gap_cand = true;
             if (best_ci < 0 || cand_ratio_pos_less(c, bfrt_cands[best_ci])) {
                 best_ci = ci;
             }
         }
 
-        bool adaptive_bfrt_gate = true;
-        if (options_.enable_adaptive_bfrt) {
-            const bool high_primal_infeasibility =
-                current_pinf_count > options_.adaptive_bfrt_max_pinf;
-            const bool stalled_pinf_progress =
-                options_.adaptive_bfrt_progress_window > 0 &&
-                iters_since_pinf_improve >= options_.adaptive_bfrt_progress_window;
-            adaptive_bfrt_gate = high_primal_infeasibility || stalled_pinf_progress;
-        }
-        const bool bfrt_enabled = options_.enable_bfrt || auto_bfrt_wide;
         const bool use_bfrt =
-            has_finite_gap_cand &&
-            bfrt_enabled &&
-            adaptive_bfrt_gate;
+            need_bfrt_gap_scan &&
+            has_finite_gap_cand;
 
         if (!use_bfrt) {
             // Common LP fast path: all candidates are effectively unflippable
