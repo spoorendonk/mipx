@@ -270,13 +270,18 @@ int main(int argc, char* argv[]) {
             solver.load(lp);
             auto result = solver.solve();
 
-            switch (result.status) {
-                case mipx::Status::Optimal:    log.log("Status: Optimal\n"); break;
-                case mipx::Status::Infeasible: log.log("Status: Infeasible\n"); break;
-                case mipx::Status::Unbounded:  log.log("Status: Unbounded\n"); break;
-                case mipx::Status::NodeLimit:  log.log("Status: Node limit\n"); break;
-                case mipx::Status::TimeLimit:  log.log("Status: Time limit\n"); break;
-                default:                       log.log("Status: Error\n"); break;
+            if (result.status == mipx::Status::Optimal &&
+                result.gap_limit_reached) {
+                log.log("Status: Gap limit\n");
+            } else {
+                switch (result.status) {
+                    case mipx::Status::Optimal:    log.log("Status: Optimal\n"); break;
+                    case mipx::Status::Infeasible: log.log("Status: Infeasible\n"); break;
+                    case mipx::Status::Unbounded:  log.log("Status: Unbounded\n"); break;
+                    case mipx::Status::NodeLimit:  log.log("Status: Node limit\n"); break;
+                    case mipx::Status::TimeLimit:  log.log("Status: Time limit\n"); break;
+                    default:                       log.log("Status: Error\n"); break;
+                }
             }
             log.log("Objective: %.10e\n", result.objective);
             log.log("Nodes: %d\n", result.nodes);

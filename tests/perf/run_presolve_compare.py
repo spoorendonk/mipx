@@ -143,6 +143,7 @@ def solve_mipx(
     presolve_on: bool,
     threads: int,
     time_limit: float,
+    gap_tol: float | None,
     extra_args: list[str],
 ) -> SolveResult:
     cmd = [
@@ -154,6 +155,8 @@ def solve_mipx(
         f"{time_limit:g}",
         "--presolve" if presolve_on else "--no-presolve",
     ]
+    if mode == "mip" and gap_tol is not None:
+        cmd.extend(["--gap-tol", f"{max(0.0, gap_tol):g}"])
     if mode == "lp":
         cmd.append("--dual")
     cmd.extend(extra_args)
@@ -341,6 +344,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-instances", type=int, default=0)
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--time-limit", type=float, default=30.0)
+    parser.add_argument("--mipx-gap-tol", type=float, default=None)
     parser.add_argument("--objective-rel-tol", type=float, default=1e-7)
     parser.add_argument("--mipx-binary", default="./build/mipx-solve")
     parser.add_argument("--highs-binary", default="")
@@ -358,6 +362,8 @@ def main() -> int:
         raise SystemExit("--threads must be >= 1")
     if args.time_limit <= 0:
         raise SystemExit("--time-limit must be > 0")
+    if args.mipx_gap_tol is not None and args.mipx_gap_tol < 0:
+        raise SystemExit("--mipx-gap-tol must be >= 0")
 
     mipx_binary = Path(args.mipx_binary)
     if not mipx_binary.is_file() or not os.access(mipx_binary, os.X_OK):
@@ -368,6 +374,11 @@ def main() -> int:
         raise SystemExit("HiGHS binary not found. Set --highs-binary or HIGHS_BINARY.")
 
     instances = collect_instances(instances_dir, args.instances, args.max_instances)
+    mipx_gap_tol = (
+        max(0.0, args.mipx_gap_tol)
+        if args.mipx_gap_tol is not None
+        else (0.0 if args.mode == "mip" else None)
+    )
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +397,7 @@ def main() -> int:
                 presolve_on=presolve_on,
                 threads=args.threads,
                 time_limit=args.time_limit,
+                gap_tol=mipx_gap_tol,
                 extra_args=args.mipx_arg,
             )
             highs_res = solve_highs(

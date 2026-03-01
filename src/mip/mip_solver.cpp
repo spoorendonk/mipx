@@ -4470,8 +4470,9 @@ MipResult MipSolver::solve() {
         Real final_bound = queue.empty() ? incumbent : queue.bestBound();
         result.best_bound = final_bound;
         result.gap = computeGap(incumbent, final_bound);
+        result.gap_limit_reached = !queue.empty() && result.gap < gap_tol_;
 
-        if (queue.empty() || result.gap < gap_tol_) {
+        if (queue.empty() || result.gap_limit_reached) {
             result.status = Status::Optimal;
         } else if (nodes_explored >= node_limit_) {
             result.status = Status::NodeLimit;
@@ -4580,7 +4581,12 @@ MipResult MipSolver::solve() {
                      node_buf, iter_buf, result.time_seconds);
         }
         if (result.status == Status::Optimal) {
-            log_.log("Optimal: %.10e\n", result.objective);
+            if (result.gap_limit_reached) {
+                log_.log("Gap-limited: %.10e (gap %.2f%%)\n",
+                         result.objective, result.gap * 100.0);
+            } else {
+                log_.log("Optimal: %.10e\n", result.objective);
+            }
         } else if (incumbent < kInf) {
             log_.log("Best solution: %.10e (gap %.2f%%)\n",
                      result.objective, result.gap * 100.0);

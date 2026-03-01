@@ -189,6 +189,7 @@ struct MipResult {
     Real objective = 0.0;
     Real best_bound = -kInf;
     Real gap = kInf;
+    bool gap_limit_reached = false;
     Int nodes = 0;
     Int lp_iterations = 0;
     double work_units = 0.0;   // deterministic work measure
