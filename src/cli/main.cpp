@@ -21,6 +21,9 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
+            "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
+            "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
+            "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
             "[--parallel-mode deterministic|opportunistic] [--seed N] "
             "[--heur-deterministic|--heur-opportunistic] "
             "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
@@ -47,6 +50,9 @@ int main(int argc, char* argv[]) {
     double gap_tol = 1e-4;
     bool verbose = true;
     bool presolve = true;
+    bool presolve_forcing_rows = true;
+    bool presolve_dual_fixing = true;
+    bool presolve_coefficient_tightening = false;
     bool cuts_enabled = true;
     enum class LpMode { Dual, Barrier, Pdlp, Concurrent };
     LpMode lp_mode = LpMode::Dual;
@@ -93,6 +99,18 @@ int main(int argc, char* argv[]) {
             presolve = false;
         } else if (arg == "--presolve") {
             presolve = true;
+        } else if (arg == "--presolve-forcing-rows") {
+            presolve_forcing_rows = true;
+        } else if (arg == "--no-presolve-forcing-rows") {
+            presolve_forcing_rows = false;
+        } else if (arg == "--presolve-dual-fixing") {
+            presolve_dual_fixing = true;
+        } else if (arg == "--no-presolve-dual-fixing") {
+            presolve_dual_fixing = false;
+        } else if (arg == "--presolve-coeff-tightening") {
+            presolve_coefficient_tightening = true;
+        } else if (arg == "--no-presolve-coeff-tightening") {
+            presolve_coefficient_tightening = false;
         } else if (arg == "--verbose") {
             verbose = true;
         } else if (arg == "--quiet") {
@@ -202,6 +220,11 @@ int main(int argc, char* argv[]) {
             for (auto& t : lp.col_type) t = mipx::VarType::Continuous;
         }
         mipx::Logger log;
+        mipx::PresolveOptions presolve_opts;
+        presolve_opts.enable_forcing_rows = presolve_forcing_rows;
+        presolve_opts.enable_dual_fixing = presolve_dual_fixing;
+        presolve_opts.enable_coefficient_tightening =
+            presolve_coefficient_tightening;
 
         if (lp.hasIntegers()) {
             // MIP solve — MipSolver prints its own banner.
@@ -212,6 +235,7 @@ int main(int argc, char* argv[]) {
             solver.setGapTolerance(gap_tol);
             solver.setVerbose(verbose);
             solver.setPresolve(presolve);
+            solver.setRootPresolveOptions(presolve_opts);
             solver.setCutsEnabled(cuts_enabled);
             if (lp_mode == LpMode::Barrier) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::BarrierRoot);
@@ -283,6 +307,7 @@ int main(int argc, char* argv[]) {
 
             // Presolve.
             mipx::Presolver presolver;
+            presolver.setOptions(presolve_opts);
             auto working = lp;
             bool did_presolve = false;
             if (presolve) {
@@ -305,14 +330,17 @@ int main(int argc, char* argv[]) {
                 const auto& stats = presolver.stats();
                 log.log("Presolve: %d vars removed, %d rows removed, "
                          "%d bounds tightened, %d rounds (%d changed), %.3fs "
-                         "[rules: implied=%d abt=%d dual=%d empty_col=%d dup_row=%d] "
+                         "[rules: forcing=%d implied=%d abt=%d dual=%d coeff=%d "
+                         "empty_col=%d dup_row=%d] "
                          "[examined: %d rows, %d cols]\n\n",
                          stats.vars_removed, stats.rows_removed,
                          stats.bounds_tightened, stats.rounds,
                          stats.rounds_with_changes, stats.time_seconds,
+                         stats.forcing_row_changes,
                          stats.implied_equation_changes,
                          stats.activity_bound_tightening_changes,
                          stats.dual_fixing_changes,
+                         stats.coeff_tightening_changes,
                          stats.empty_col_changes,
                          stats.duplicate_row_changes,
                          stats.rows_examined, stats.cols_examined);

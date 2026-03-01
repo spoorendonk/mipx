@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 #include <cstdint>
@@ -120,6 +121,12 @@ struct PresolveStats {
     Real time_seconds = 0.0;
 };
 
+struct PresolveOptions {
+    bool enable_forcing_rows = true;
+    bool enable_dual_fixing = true;
+    bool enable_coefficient_tightening = false;
+};
+
 // ---- Presolver --------------------------------------------------------------
 
 class Presolver {
@@ -146,6 +153,9 @@ public:
 
     /// Set maximum number of presolve rounds.
     void setMaxRounds(Index rounds) { max_rounds_ = rounds; }
+
+    void setOptions(const PresolveOptions& options) { options_ = options; }
+    [[nodiscard]] const PresolveOptions& options() const { return options_; }
 
 private:
     // Individual reductions. Return number of changes made.
@@ -227,8 +237,10 @@ private:
     std::vector<Index> col_mapping_;   // presolved col -> original col
     Index orig_num_cols_ = 0;
     PresolveStats stats_;
+    PresolveOptions options_{};
     Index max_rounds_ = 20;
     bool infeasible_ = false;
+    std::unordered_map<uint64_t, Real> coeff_overrides_{};
 
     static constexpr Real kTol = 1e-8;
 };

@@ -654,6 +654,9 @@ TEST_CASE("Presolve: implied equation detection", "[presolve]") {
     auto lp = buildImpliedEquationProblem();
 
     Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    presolver.setOptions(opts);
     (void)presolver.presolve(lp);
 
     CHECK(presolver.stats().implied_equation_changes >= 1);
