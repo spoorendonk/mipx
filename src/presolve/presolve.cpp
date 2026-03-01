@@ -52,8 +52,17 @@ inline uint64_t coeffKey(Index row, Index col) {
            static_cast<uint32_t>(col);
 }
 
+inline Real effectiveCoeff(
+    const std::unordered_map<uint64_t, Real>& coeff_overrides,
+    Index row, Index col, Real matrix_value) {
+    if (coeff_overrides.empty()) return matrix_value;
+    const auto it = coeff_overrides.find(coeffKey(row, col));
+    return (it != coeff_overrides.end()) ? it->second : matrix_value;
+}
+
 inline uint64_t rowPatternHash(const LpProblem& lp, Index row,
-                               const std::vector<bool>& col_removed) {
+                               const std::vector<bool>& col_removed,
+                               const std::unordered_map<uint64_t, Real>& coeff_overrides) {
     auto rv = lp.matrix.row(row);
     uint64_t h = 1469598103934665603ULL;
     Index active = 0;
@@ -61,7 +70,8 @@ inline uint64_t rowPatternHash(const LpProblem& lp, Index row,
         Index col = rv.indices[k];
         if (col_removed[col]) continue;
         h = mixHash(h, static_cast<uint64_t>(col));
-        h = mixHash(h, coeffBits(rv.values[k]));
+        h = mixHash(h, coeffBits(effectiveCoeff(
+            coeff_overrides, row, col, rv.values[k])));
         ++active;
     }
     return mixHash(h, static_cast<uint64_t>(active));
@@ -69,6 +79,7 @@ inline uint64_t rowPatternHash(const LpProblem& lp, Index row,
 
 inline bool rowsHaveSamePattern(const LpProblem& lp, Index r1, Index r2,
                                 const std::vector<bool>& col_removed,
+                                const std::unordered_map<uint64_t, Real>& coeff_overrides,
                                 Real tol) {
     auto a = lp.matrix.row(r1);
     auto b = lp.matrix.row(r2);
@@ -81,7 +92,10 @@ inline bool rowsHaveSamePattern(const LpProblem& lp, Index r1, Index r2,
         bool done_j = (j >= b.size());
         if (done_i || done_j) return done_i && done_j;
         if (a.indices[i] != b.indices[j]) return false;
-        if (std::abs(a.values[i] - b.values[j]) > tol) return false;
+        const Index col = a.indices[i];
+        const Real ai = effectiveCoeff(coeff_overrides, r1, col, a.values[i]);
+        const Real bj = effectiveCoeff(coeff_overrides, r2, col, b.values[j]);
+        if (std::abs(ai - bj) > tol) return false;
         ++i;
         ++j;
     }
@@ -260,7 +274,7 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
         for (Index k = 0; k < cv.size(); ++k) {
             Index row = cv.indices[k];
             if (row_removed[row]) continue;
-            Real a = cv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, row, j, cv.values[k]);
             Real shift = a * value;
             if (!std::isinf(lp.row_lower[row])) lp.row_lower[row] -= shift;
             if (!std::isinf(lp.row_upper[row])) lp.row_upper[row] -= shift;
@@ -314,7 +328,8 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
         for (Index k = 0; k < rv.size(); ++k) {
             if (!col_removed[rv.indices[k]]) {
                 singleton_col = rv.indices[k];
-                singleton_coeff = rv.values[k];
+                singleton_coeff = effectiveCoeff(
+                    coeff_overrides_, i, singleton_col, rv.values[k]);
                 break;
             }
         }
@@ -405,7 +420,8 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
         for (Index k = 0; k < cv.size(); ++k) {
             if (!row_removed[cv.indices[k]]) {
                 singleton_row = cv.indices[k];
-                singleton_coeff = cv.values[k];
+                singleton_coeff = effectiveCoeff(
+                    coeff_overrides_, singleton_row, j, cv.values[k]);
                 break;
             }
         }
@@ -553,7 +569,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
 
-            Real a = rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             Real lb = lp.col_lower[j];
             Real ub = lp.col_upper[j];
 
@@ -598,7 +614,8 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             for (Index k = 0; k < rv.size(); ++k) {
                 const Index j = rv.indices[k];
                 if (col_removed[j]) continue;
-                const Real a = rv.values[k];
+                const Real a = effectiveCoeff(
+                    coeff_overrides_, i, j, rv.values[k]);
                 if (std::abs(a) <= kTol) continue;
                 const Real min_fix = (a > 0.0) ? lp.col_lower[j] : lp.col_upper[j];
                 const Real max_fix = (a > 0.0) ? lp.col_upper[j] : lp.col_lower[j];
@@ -620,7 +637,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
         for (Index k = 0; k < rv.size(); ++k) {
             const Index j = rv.indices[k];
             if (col_removed[j]) continue;
-            const Real a = rv.values[k];
+            const Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             if (std::abs(a) <= kTol) continue;
 
             const Real fix_value = force_to_min
@@ -647,7 +664,9 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             for (Index kk = 0; kk < cv.size(); ++kk) {
                 Index other_row = cv.indices[kk];
                 if (row_removed[other_row] || other_row == i) continue;
-                Real shift = cv.values[kk] * fix_value;
+                const Real a = effectiveCoeff(
+                    coeff_overrides_, other_row, j, cv.values[kk]);
+                Real shift = a * fix_value;
                 if (!std::isinf(lp.row_lower[other_row])) {
                     lp.row_lower[other_row] -= shift;
                 }
@@ -696,7 +715,7 @@ Index Presolver::removeDominatedRows(LpProblem& lp, std::vector<bool>& col_remov
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
 
-            Real a = rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             Real lb = lp.col_lower[j];
             Real ub = lp.col_upper[j];
 
@@ -753,7 +772,7 @@ Index Presolver::detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_re
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
 
-            Real a = rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             Real lb = lp.col_lower[j];
             Real ub = lp.col_upper[j];
             if (a > 0) {
@@ -809,7 +828,7 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
         for (Index k = 0; k < rv.size(); ++k) {
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
-            Real a = rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
 
             Real contrib_min = (a > 0) ? a * lp.col_lower[j] : a * lp.col_upper[j];
             Real contrib_max = (a > 0) ? a * lp.col_upper[j] : a * lp.col_lower[j];
@@ -831,7 +850,7 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
         for (Index k = 0; k < rv.size(); ++k) {
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
-            Real a = rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
 
             bool res_min_finite = false;
             bool res_max_finite = false;
@@ -929,7 +948,7 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
         for (Index k = 0; k < cv.size(); ++k) {
             Index row = cv.indices[k];
             if (row_removed[row]) continue;
-            Real a = cv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, row, j, cv.values[k]);
             bool has_upper = !std::isinf(lp.row_upper[row]);
             bool has_lower = !std::isinf(lp.row_lower[row]);
 
@@ -971,7 +990,9 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
         for (Index kk = 0; kk < cv.size(); ++kk) {
             Index row = cv.indices[kk];
             if (row_removed[row]) continue;
-            Real shift = cv.values[kk] * fix_value;
+            const Real a = effectiveCoeff(
+                coeff_overrides_, row, j, cv.values[kk]);
+            Real shift = a * fix_value;
             if (!std::isinf(lp.row_lower[row])) lp.row_lower[row] -= shift;
             if (!std::isinf(lp.row_upper[row])) lp.row_upper[row] -= shift;
             next_dirty_rows[row] = 1;
@@ -1058,7 +1079,7 @@ Index Presolver::removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_remov
     for (Index i : dirty_rows) {
         if (row_removed[i]) continue;
         ++stats_.rows_examined;
-        uint64_t h = rowPatternHash(lp, i, col_removed);
+        uint64_t h = rowPatternHash(lp, i, col_removed, coeff_overrides_);
         buckets[h].push_back(i);
     }
 
@@ -1072,7 +1093,8 @@ Index Presolver::removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_remov
             for (size_t b = a + 1; b < rows.size(); ++b) {
                 Index j = rows[b];
                 if (row_removed[j]) continue;
-                if (!rowsHaveSamePattern(lp, i, j, col_removed, kTol)) continue;
+                if (!rowsHaveSamePattern(lp, i, j, col_removed,
+                                         coeff_overrides_, kTol)) continue;
 
                 bool i_subsumes_j = rowIntervalSubsumes(lp.row_lower[i], lp.row_upper[i],
                                                         lp.row_lower[j], lp.row_upper[j], kTol);
@@ -1108,7 +1130,9 @@ Index Presolver::removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_remov
 }
 
 Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
-                                      std::vector<bool>& row_removed) {
+                                      std::vector<bool>& row_removed,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
     for (Index i = 0; i < lp.num_rows; ++i) {
@@ -1132,11 +1156,7 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
             Index j = rv.indices[k];
             if (col_removed[j]) continue;
 
-            const uint64_t key = coeffKey(i, j);
-            const auto coeff_it = coeff_overrides_.find(key);
-            Real a = (coeff_it != coeff_overrides_.end())
-                ? coeff_it->second
-                : rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             Real lb = lp.col_lower[j];
             Real ub = lp.col_upper[j];
 
@@ -1158,10 +1178,7 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
             if (lp.col_type[j] == VarType::Continuous) continue;
 
             const uint64_t key = coeffKey(i, j);
-            const auto coeff_it = coeff_overrides_.find(key);
-            Real a = (coeff_it != coeff_overrides_.end())
-                ? coeff_it->second
-                : rv.values[k];
+            Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
             if (a <= 0) continue;  // Only positive coefficients for now.
 
             Real ub = lp.col_upper[j];
@@ -1187,6 +1204,9 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                 rhs = new_rhs;
                 lp.row_upper[i] = new_rhs;
                 coeff_overrides_[key] = new_a;
+                // Coefficient changes must be visible to later passes.
+                markRowsTouchingCol(lp, j, row_removed, next_dirty_rows);
+                markColsInRow(lp, i, col_removed, next_dirty_cols);
                 ++changes;
                 ++stats_.coeffs_tightened;
             }
@@ -1310,7 +1330,8 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         total_changes += ch;
 
         if (options_.enable_coefficient_tightening) {
-            ch = tightenCoefficients(lp, col_removed, row_removed);
+            ch = tightenCoefficients(lp, col_removed, row_removed,
+                                     next_dirty_rows, next_dirty_cols);
             stats_.coeff_tightening_changes += ch;
             total_changes += ch;
         }
@@ -1442,11 +1463,8 @@ LpProblem Presolver::buildReducedProblem(const LpProblem& lp,
         for (Index k = 0; k < rv.size(); ++k) {
             Index orig_col = rv.indices[k];
             if (col_removed[orig_col]) continue;
-            const uint64_t key = coeffKey(orig_row, orig_col);
-            const auto coeff_it = coeff_overrides_.find(key);
-            const Real value = (coeff_it != coeff_overrides_.end())
-                ? coeff_it->second
-                : rv.values[k];
+            const Real value = effectiveCoeff(
+                coeff_overrides_, orig_row, orig_col, rv.values[k]);
             triplets.push_back({ii, orig_to_new[orig_col], value});
         }
     }

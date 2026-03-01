@@ -329,6 +329,37 @@ static LpProblem buildDuplicateRowProblem() {
     return lp;
 }
 
+/// Build a problem where coefficient tightening creates duplicate rows.
+/// Row1: 7x + y <= 8  -> tightens to 6x + y <= 8 (x integer, 0<=x<=2, -100<=y<=2)
+/// Row2: 6x + y <= 8
+/// Plus a fixed singleton column z to force a second presolve round.
+/// Duplicate-row removal should then remove one row in that later round.
+static LpProblem buildCoeffTighteningDuplicateProblem() {
+    LpProblem lp;
+    lp.name = "coeff_tight_dup";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, -100.0, 0.0};
+    lp.col_upper = {2.0, 2.0, 0.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 4;
+    lp.row_lower = {-kInf, -kInf, -kInf, -kInf};
+    lp.row_upper = {8.0, 8.0, 0.0, 100.0};
+    lp.row_names = {"r1", "r2", "r3", "r4"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 7.0}, {0, 1, 1.0},
+        {1, 0, 6.0}, {1, 1, 1.0},
+        {2, 2, 1.0},
+        {3, 0, 1.0}, {3, 1, -1.0},
+    };
+    lp.matrix = SparseMatrix(4, 3, std::move(trips));
+    return lp;
+}
+
 // =============================================================================
 // Tests: Fixed variable removal
 // =============================================================================
@@ -728,6 +759,44 @@ TEST_CASE("Presolve: duplicate row removal", "[presolve]") {
 
     CHECK(presolver.stats().duplicate_row_changes >= 1);
     CHECK(reduced.num_rows == 1);
+}
+
+TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[presolve]") {
+    auto lp = buildCoeffTighteningDuplicateProblem();
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_coefficient_tightening = true;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().coeff_tightening_changes >= 1);
+    CHECK(presolver.stats().duplicate_row_changes >= 1);
+    CHECK(reduced.num_rows == 2);
+
+    REQUIRE(reduced.num_cols == 2);
+    REQUIRE(reduced.num_rows == 2);
+
+    bool found_tightened_row = false;
+    for (Index i = 0; i < reduced.num_rows; ++i) {
+        auto rv = reduced.matrix.row(i);
+        Real ax = 0.0;
+        Real ay = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            if (rv.indices[k] == 0) ax = rv.values[k];
+            if (rv.indices[k] == 1) ay = rv.values[k];
+        }
+        if (ay > 0.0) {
+            CHECK_THAT(ax, WithinAbs(6.0, 1e-8));
+            CHECK_THAT(ay, WithinAbs(1.0, 1e-8));
+            found_tightened_row = true;
+            break;
+        }
+    }
+    CHECK(found_tightened_row);
 }
 
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {

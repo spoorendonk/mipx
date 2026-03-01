@@ -226,7 +226,9 @@ private:
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed);
+                               std::vector<bool>& row_removed,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
 
     // Build the reduced problem from the original with removed rows/cols.
     LpProblem buildReducedProblem(const LpProblem& lp,
