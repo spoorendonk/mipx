@@ -756,12 +756,12 @@ LpResult DualSimplexSolver::solve() {
             // rows to cap FT apply traffic.
             const Real avg_nnz_per_row =
                 static_cast<Real>(matrix_.numNonzeros()) / static_cast<Real>(num_rows_);
-            lu_update_limit = (avg_nnz_per_row <= 15.0) ? 200 : 120;
+            lu_update_limit = (avg_nnz_per_row <= 15.0) ? 120 : 100;
         } else if (num_rows_ >= 1000 &&
                    num_rows_ < 2000 &&
                    num_cols_ >= 2 * num_rows_ &&
                    num_cols_ <= 3 * num_rows_) {
-            lu_update_limit = 120;
+            lu_update_limit = 100;
         }
     }
     lu_.setMaxUpdates(lu_update_limit);

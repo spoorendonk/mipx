@@ -17,7 +17,7 @@ namespace mipx {
 
 void SparseLU::factorize(const SparseMatrix& matrix,
                          std::span<const Index> basis_cols) {
-    static constexpr Index kFastPivotMinDim = 1500;
+    static constexpr Index kFastPivotMinDim = 700;
     dim_ = static_cast<Index>(basis_cols.size());
     num_updates_ = 0;
     max_u_entry_ = 0.0;
