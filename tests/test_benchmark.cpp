@@ -507,3 +507,54 @@ TEST_CASE("MIPLIB: flugpl objective is stable across presolve modes without cuts
     CHECK_THAT(with_presolve.objective,
                WithinAbs(without_presolve.objective, 1e-9));
 }
+
+TEST_CASE("MIPLIB: flugpl objective matches .solu with cuts enabled",
+          "[benchmark][miplib][solve][cuts]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/flugpl.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("flugpl not downloaded. Run tests/data/download_miplib.sh --small");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "flugpl");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite flugpl objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    auto solve_with = [&](bool cuts_enabled) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setCutsEnabled(cuts_enabled);
+        solver.setNumThreads(1);
+        solver.setTimeLimit(20.0);
+        solver.setNodeLimit(200000);
+        solver.setGapTolerance(1e-6);
+        solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+        solver.setHeuristicSeed(29);
+        solver.setSearchProfile(SearchProfile::Stable);
+        solver.setPresolve(true);
+        solver.load(problem);
+        return solver.solve();
+    };
+
+    const auto with_cuts = solve_with(true);
+    const auto without_cuts = solve_with(false);
+
+    REQUIRE(with_cuts.status == Status::Optimal);
+    REQUIRE(without_cuts.status == Status::Optimal);
+    CHECK_THAT(with_cuts.objective,
+               WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK_THAT(without_cuts.objective,
+               WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK_THAT(with_cuts.objective,
+               WithinAbs(without_cuts.objective, 1e-9));
+}
