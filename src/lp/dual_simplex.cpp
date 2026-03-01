@@ -751,7 +751,12 @@ LpResult DualSimplexSolver::solve() {
         lu_update_limit = 100;
         if (num_rows_ >= 500 &&
             num_cols_ >= 4 * num_rows_) {
-            lu_update_limit = 80;
+            // Wide LPs benefit from larger update windows when rows are sparse
+            // (fewer expensive reinversions) but need tighter windows on denser
+            // rows to cap FT apply traffic.
+            const Real avg_nnz_per_row =
+                static_cast<Real>(matrix_.numNonzeros()) / static_cast<Real>(num_rows_);
+            lu_update_limit = (avg_nnz_per_row <= 15.0) ? 200 : 120;
         } else if (num_rows_ >= 1000 &&
                    num_rows_ < 2000 &&
                    num_cols_ >= 2 * num_rows_ &&
