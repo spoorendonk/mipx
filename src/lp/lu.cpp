@@ -28,6 +28,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     ft_value_.clear();
     ft_pivot_pos_.clear();
     ft_pivot_val_.clear();
+    ft_is_dense_.clear();
+    ft_dense_offset_.clear();
+    ft_dense_value_.clear();
+    ft_dense_nnz_ = 0;
 
     // Build dense-ish active submatrix from selected columns.
     // active[i][j] = value at (original_row i, basis_position j).
@@ -478,11 +482,19 @@ void SparseLU::applyFT(std::span<Real> x) const {
     // E^{-1} * x: x'[p] = x[p] / d[p], x'[i] = x[i] - d[i] * x'[p] for i != p.
     for (Index u = 0; u < num_updates_; ++u) {
         Index pos = ft_pivot_pos_[u];
-        Index start = ft_start_[u];
-        Index end = ft_start_[u + 1];
-
         x[pos] /= ft_pivot_val_[u];
         Real xp = x[pos];
+        if (xp == 0.0) continue;
+        if (!ft_is_dense_.empty() && ft_is_dense_[u] != 0) {
+            Index dense_off = ft_dense_offset_[u];
+            const Real* dense = ft_dense_value_.data() + dense_off;
+            for (Index i = 0; i < dim_; ++i) {
+                x[i] -= dense[i] * xp;
+            }
+            continue;
+        }
+        Index start = ft_start_[u];
+        Index end = ft_start_[u + 1];
         for (Index k = start; k < end; ++k) {
             x[ft_index_[k]] -= ft_value_[k] * xp;
         }
@@ -494,12 +506,19 @@ void SparseLU::applyFTTranspose(std::span<Real> x) const {
     // (E^{-1})^T: x'[i] stays for i != p, x'[p] = (x[p] - sum d[i]*x[i]) / d[p].
     for (Index u = num_updates_ - 1; u >= 0; --u) {
         Index pos = ft_pivot_pos_[u];
-        Index start = ft_start_[u];
-        Index end = ft_start_[u + 1];
-
         Real sum = 0.0;
-        for (Index k = start; k < end; ++k) {
-            sum += ft_value_[k] * x[ft_index_[k]];
+        if (!ft_is_dense_.empty() && ft_is_dense_[u] != 0) {
+            Index dense_off = ft_dense_offset_[u];
+            const Real* dense = ft_dense_value_.data() + dense_off;
+            for (Index i = 0; i < dim_; ++i) {
+                sum += dense[i] * x[i];
+            }
+        } else {
+            Index start = ft_start_[u];
+            Index end = ft_start_[u + 1];
+            for (Index k = start; k < end; ++k) {
+                sum += ft_value_[k] * x[ft_index_[k]];
+            }
         }
         x[pos] = (x[pos] - sum) / ft_pivot_val_[u];
     }
@@ -540,6 +559,7 @@ void SparseLU::ftran(std::span<Real> rhs) const {
     work_.count(static_cast<uint64_t>(eta_index_.size()) +
                 static_cast<uint64_t>(u_col_.size()) +
                 static_cast<uint64_t>(ft_index_.size()) +
+                ft_dense_nnz_ +
                 static_cast<uint64_t>(dim_) * 2);
 
     // B = P^T * L * U * Q^T, so B^{-1} = Q * U^{-1} * L^{-1} * P.
@@ -629,6 +649,7 @@ void SparseLU::btran(std::span<Real> rhs) const {
     work_.count(static_cast<uint64_t>(eta_index_.size()) +
                 static_cast<uint64_t>(u_col_.size()) +
                 static_cast<uint64_t>(ft_index_.size()) +
+                ft_dense_nnz_ +
                 static_cast<uint64_t>(dim_) * 2);
 
     // B'^{-T} = B^{-T} * E_1^{-T} * ... * E_n^{-T}.
@@ -761,14 +782,46 @@ void SparseLU::updateFromFtranColumn(
     if (std::abs(pivot_val) < kZeroTol) {
         pivot_val = (pivot_val >= 0.0) ? kZeroTol : -kZeroTol;
     }
+    const Real drop_tol = ft_drop_tol_;
 
-    // Store eta: non-pivot entries of d.
+    Index update_nnz = 0;
     for (Index i = 0; i < dim_; ++i) {
         if (i == pivot_pos) continue;
-        if (std::abs(transformed_col[i]) > kFtDropTol) {
-            ft_index_.push_back(i);
-            ft_value_.push_back(transformed_col[i]);
-            max_u_entry_ = std::max(max_u_entry_, std::abs(transformed_col[i]));
+        if (std::abs(transformed_col[i]) > drop_tol) {
+            ++update_nnz;
+        }
+    }
+
+    const bool use_dense_store =
+        dim_ >= kFtDenseMinDim &&
+        update_nnz >= static_cast<Index>(kFtDenseThreshold * static_cast<Real>(dim_));
+
+    if (use_dense_store) {
+        Index dense_off = static_cast<Index>(ft_dense_value_.size());
+        ft_dense_offset_.push_back(dense_off);
+        ft_is_dense_.push_back(1);
+        ft_dense_value_.resize(static_cast<std::size_t>(dense_off + dim_), 0.0);
+        for (Index i = 0; i < dim_; ++i) {
+            if (i == pivot_pos) continue;
+            const Real v =
+                (std::abs(transformed_col[i]) > drop_tol) ? transformed_col[i] : 0.0;
+            ft_dense_value_[static_cast<std::size_t>(dense_off + i)] = v;
+            if (v != 0.0) {
+                max_u_entry_ = std::max(max_u_entry_, std::abs(v));
+            }
+        }
+        ft_dense_nnz_ += static_cast<uint64_t>(update_nnz);
+    } else {
+        ft_dense_offset_.push_back(-1);
+        ft_is_dense_.push_back(0);
+        // Store eta: non-pivot entries of d.
+        for (Index i = 0; i < dim_; ++i) {
+            if (i == pivot_pos) continue;
+            if (std::abs(transformed_col[i]) > drop_tol) {
+                ft_index_.push_back(i);
+                ft_value_.push_back(transformed_col[i]);
+                max_u_entry_ = std::max(max_u_entry_, std::abs(transformed_col[i]));
+            }
         }
     }
 

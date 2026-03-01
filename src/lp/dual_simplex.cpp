@@ -749,13 +749,22 @@ LpResult DualSimplexSolver::solve() {
     Int lu_update_limit = options_.lu_update_limit;
     if (lu_update_limit <= 0) {
         lu_update_limit = 100;
-        if (num_rows_ >= 1000 &&
-            num_rows_ < 2000 &&
-            num_cols_ <= 3 * num_rows_) {
-            lu_update_limit = 200;
+        if (num_rows_ >= 500 &&
+            num_cols_ >= 4 * num_rows_) {
+            lu_update_limit = 80;
+        } else if (num_rows_ >= 1000 &&
+                   num_rows_ < 2000 &&
+                   num_cols_ >= 2 * num_rows_ &&
+                   num_cols_ <= 3 * num_rows_) {
+            lu_update_limit = 120;
         }
     }
     lu_.setMaxUpdates(lu_update_limit);
+    Real lu_ft_drop_tol = options_.lu_ft_drop_tolerance;
+    if (lu_ft_drop_tol <= 0.0) {
+        lu_ft_drop_tol = 1e-13;
+    }
+    lu_.setFtDropTolerance(lu_ft_drop_tol);
 
     if (!has_basis_) {
         // Cold start: set up crash basis (all-slack + optional crash passes).
@@ -884,6 +893,14 @@ LpResult DualSimplexSolver::solve() {
         std::max<Int>(0, options_.primal_feasible_refactor_cooldown);
     const Real primal_feasible_progress_rel_tol =
         std::max<Real>(0.0, options_.primal_feasible_dual_progress_improve_rel_tol);
+    const Int auto_bfrt_min_cols = std::max<Int>(0, options_.auto_bfrt_min_cols);
+    const Real auto_bfrt_min_ratio =
+        std::max<Real>(1.0, options_.auto_bfrt_min_col_row_ratio);
+    const bool auto_bfrt_wide =
+        options_.enable_auto_bfrt_wide &&
+        num_rows_ > 0 &&
+        num_cols_ >= auto_bfrt_min_cols &&
+        static_cast<Real>(num_cols_) >= auto_bfrt_min_ratio * static_cast<Real>(num_rows_);
     const bool primal_progress_gate_enabled = primal_feasible_progress_window > 0;
     Real primal_feasible_dual_progress_reference = kInf;
     Int primal_feasible_dual_stall_pivots = 0;
@@ -1803,9 +1820,10 @@ LpResult DualSimplexSolver::solve() {
                 iters_since_pinf_improve >= options_.adaptive_bfrt_progress_window;
             adaptive_bfrt_gate = high_primal_infeasibility || stalled_pinf_progress;
         }
+        const bool bfrt_enabled = options_.enable_bfrt || auto_bfrt_wide;
         const bool use_bfrt =
             has_finite_gap_cand &&
-            options_.enable_bfrt &&
+            bfrt_enabled &&
             adaptive_bfrt_gate;
 
         if (!use_bfrt) {

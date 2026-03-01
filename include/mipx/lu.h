@@ -48,6 +48,8 @@ public:
     [[nodiscard]] Index dimension() const { return dim_; }
     void setMaxUpdates(Index limit) { max_updates_ = std::max<Index>(1, limit); }
     [[nodiscard]] Index maxUpdates() const { return max_updates_; }
+    void setFtDropTolerance(Real tol) { ft_drop_tol_ = std::max<Real>(0.0, tol); }
+    [[nodiscard]] Real ftDropTolerance() const { return ft_drop_tol_; }
 
     /// Access work unit counter.
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -110,6 +112,10 @@ private:
     std::vector<Real> ft_value_;
     std::vector<Index> ft_pivot_pos_;  // column position in elimination order
     std::vector<Real> ft_pivot_val_;   // new diagonal value
+    std::vector<uint8_t> ft_is_dense_;
+    std::vector<Index> ft_dense_offset_;
+    std::vector<Real> ft_dense_value_;
+    uint64_t ft_dense_nnz_ = 0;
 
     Index num_updates_ = 0;
 
@@ -122,12 +128,14 @@ private:
     Index max_updates_ = 500;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
-    static constexpr Real kFtDropTol = 1e-13;
     static constexpr Real kGrowthLimit = 1e12;
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
+    static constexpr Index kFtDenseMinDim = 512;
+    static constexpr Real kFtDenseThreshold = 0.75;
 
     Real max_u_entry_ = 0.0;  // track growth
+    Real ft_drop_tol_ = 1e-13;
 
     // Deterministic work counter.
     mutable WorkUnits work_;
