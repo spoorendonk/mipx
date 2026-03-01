@@ -257,6 +257,23 @@ python3 tests/perf/run_param_sweep.py \
   --cuts on,off \
   --presolve on,off \
   --solver-arg --quiet
+
+# Presolve consistency/perf matrix (light smoke profile)
+python3 tests/perf/run_presolve_matrix.py \
+  --profile ci-smoke \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_smoke
+
+# Broader internal presolve profile (optimization loops)
+python3 tests/perf/run_presolve_matrix.py \
+  --profile internal \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_internal \
+  --mipx-arg=--quiet
 ```
 
 Example comparison against stored HiGHS LP baseline

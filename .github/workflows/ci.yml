@@ -2,6 +2,12 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      run_presolve_smoke:
+        description: "Run optional presolve smoke benchmark matrix"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   cpp-build-test:
@@ -32,3 +38,42 @@ jobs:
           python -m pip install .[test]
       - name: Run Python tests
         run: pytest -q python/tests
+
+  presolve-smoke:
+    if: ${{ inputs.run_presolve_smoke == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build zlib1g-dev libtbb-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install highspy
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install highspy
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j2
+      - name: Download small benchmark sets
+        run: |
+          ./tests/data/download_netlib.sh --small
+          ./tests/data/download_miplib.sh --small
+      - name: Run presolve smoke matrix
+        run: |
+          python3 tests/perf/run_presolve_matrix.py \
+            --profile ci-smoke \
+            --mipx-binary ./build/mipx-solve \
+            --highs-binary ./tests/perf/highs_highspy_cli.py \
+            --netlib-dir ./tests/data/netlib \
+            --miplib-dir ./tests/data/miplib \
+            --out-dir /tmp/presolve-smoke \
+            --mipx-arg=--quiet
+      - name: Upload presolve smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: presolve-smoke-artifacts
+          path: /tmp/presolve-smoke

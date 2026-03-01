@@ -17,6 +17,46 @@ python3 tests/perf/run_full_gate.py \
   --solver-arg --quiet
 ```
 
+## Presolve Matrix (Light CI + Internal)
+
+Run presolve correctness/performance comparisons against HiGHS across a matrix
+of LP/MIP solver settings. This uses `run_presolve_compare.py` under the hood
+and emits:
+- `presolve_matrix_detail.csv`
+- `presolve_matrix_summary.csv`
+- `presolve_matrix_summary.md`
+
+Lightweight smoke profile (suitable for optional CI checks):
+
+```bash
+python3 tests/perf/run_presolve_matrix.py \
+  --profile ci-smoke \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_smoke
+```
+
+Broader internal profile (for optimization loops):
+
+```bash
+python3 tests/perf/run_presolve_matrix.py \
+  --profile internal \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_internal \
+  --mipx-arg=--quiet
+```
+
+Notes:
+- MIP comparisons run with exact gap checks by default (`--mipx-gap-tol 0` in
+  `run_presolve_compare.py`) so objective mismatches are correctness-significant.
+- `ci-smoke` is intentionally small; use `internal` for broader coverage.
+- Shell wrapper: `./tests/perf/run_presolve_matrix.sh`.
+- If no `highs` CLI is installed, use the included highspy wrapper:
+  `--highs-binary ./tests/perf/highs_highspy_cli.py`.
+
 Generate and store HiGHS CLI + mipx wall-clock baselines:
 
 ```bash
