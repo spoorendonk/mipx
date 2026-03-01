@@ -292,6 +292,7 @@ public:
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
     }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
     void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
         tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
         tree_presolve_min_frac_ = std::max<Int>(1, min_frac);
@@ -440,10 +441,15 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
-    bool tree_presolve_enabled_ = true;
+    // Serial in-tree presolve is disabled by default while correctness hardening
+    // is in progress for benchmark regressions.
+    bool tree_presolve_enabled_ = false;
     Int tree_presolve_max_depth_ = 24;
     Int tree_presolve_min_frac_ = 4;
     Int tree_presolve_depth_frequency_ = 3;
+    // Serial in-tree cuts are disabled by default while correctness hardening
+    // is in progress for benchmark regressions.
+    bool tree_cuts_enabled_ = false;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     MipConflictStats conflict_stats_{};

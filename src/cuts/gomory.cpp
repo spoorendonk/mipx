@@ -9,6 +9,14 @@
 
 namespace mipx {
 
+namespace {
+
+bool isIntegralValue(Real v, Real tol) {
+    return std::abs(v - std::round(v)) <= tol;
+}
+
+}  // namespace
+
 /// Generate Gomory mixed-integer rounding cuts from the simplex tableau.
 ///
 /// Works in external (unscaled) space. The tableau row from getTableauRow
@@ -77,6 +85,52 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
         Real f0 = b - std::floor(b);
         if (f0 < kIntTol || f0 > 1.0 - kIntTol) continue;
 
+        // Safety filter:
+        // Generate Gomory cuts only from rows whose nonbasic terms are all
+        // structural variables at finite active bounds. We intentionally skip
+        // rows with slack nonbasics to avoid invalid substitutions when the LP
+        // already contains dynamically added rows/cuts.
+        bool supported_row = true;
+        for (Index k = 0; k < total_vars; ++k) {
+            if (basis[k] == BasisStatus::Basic) continue;
+            const Real alpha = tab_row[k];
+            if (std::abs(alpha) < kCoeffTol) continue;
+
+            const BasisStatus st = basis[k];
+            if (k >= num_cols) {
+                supported_row = false;
+                break;
+            }
+
+            const Real lb = problem.col_lower[k];
+            const Real ub = problem.col_upper[k];
+            if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
+                if (!std::isfinite(lb)) {
+                    supported_row = false;
+                    break;
+                }
+                if (problem.col_type[k] != VarType::Continuous &&
+                    !isIntegralValue(lb, kIntTol)) {
+                    supported_row = false;
+                    break;
+                }
+            } else if (st == BasisStatus::AtUpper) {
+                if (!std::isfinite(ub)) {
+                    supported_row = false;
+                    break;
+                }
+                if (problem.col_type[k] != VarType::Continuous &&
+                    !isIntegralValue(ub, kIntTol)) {
+                    supported_row = false;
+                    break;
+                }
+            } else {
+                supported_row = false;
+                break;
+            }
+        }
+        if (!supported_row) continue;
+
         // Build the cut in external space: sum_j cut_coeff[j] * x_j >= cut_rhs
         std::vector<Real> cut_coeff(static_cast<std::size_t>(num_cols), 0.0);
         Real cut_rhs = 1.0;
@@ -142,42 +196,13 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                     break;
                 }
             } else {
-                // Slack variable for row (k - num_cols).
-                Index row_idx = k - num_cols;
-
-                // Skip slacks for rows added by cuts (not in original problem).
-                if (row_idx >= problem.num_rows) continue;
-
-                // Slack s_i = a_i^T x, with bounds [row_lower[i], row_upper[i]].
-                Real sl = problem.row_lower[row_idx];
-                Real su = problem.row_upper[row_idx];
-
-                // Substitute: delta_s = s - sl (at lower) or su - s (at upper)
-                // s = sum_j A[i][j] * x_j
-                auto rv = problem.matrix.row(row_idx);
-
-                if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
-                    if (sl <= -kInf) { valid = false; break; }
-                    // delta = s - sl = sum A_ij x_j - sl
-                    for (Index p = 0; p < rv.size(); ++p) {
-                        cut_coeff[rv.indices[p]] += gmi_coeff * rv.values[p];
-                    }
-                    cut_rhs += gmi_coeff * sl;
-                } else if (st == BasisStatus::AtUpper) {
-                    if (su >= kInf) { valid = false; break; }
-                    // delta = su - s = su - sum A_ij x_j
-                    for (Index p = 0; p < rv.size(); ++p) {
-                        cut_coeff[rv.indices[p]] -= gmi_coeff * rv.values[p];
-                    }
-                    cut_rhs -= gmi_coeff * su;
-                } else {
-                    valid = false;
-                    break;
-                }
+                // Guarded by supported_row filter above.
+                valid = false;
+                break;
             }
         }
 
-        if (!valid) continue;
+        if (!valid || !std::isfinite(cut_rhs)) continue;
 
         // Build sparse cut.
         Cut cut;
