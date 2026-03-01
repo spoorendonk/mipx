@@ -844,6 +844,30 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
+    const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
+    // Static entering-score normalization for primal-feasible/dual-infeasible phase:
+    // score(k) = rc(k)^2 / col_norm_sq(k), where slacks have norm 1.
+    std::vector<Real> dual_phase_col_norm_sq;
+    if (use_dual_phase_norm_weight) {
+        dual_phase_col_norm_sq.assign(static_cast<std::size_t>(numVars()), 1.0);
+        std::fill(dual_phase_col_norm_sq.begin(),
+                  dual_phase_col_norm_sq.begin() + static_cast<std::size_t>(num_cols_), 0.0);
+        for (Index i = 0; i < num_rows_; ++i) {
+            auto rv = matrix_.row(i);
+            for (Index p = 0; p < rv.size(); ++p) {
+                const Index j = rv.indices[p];
+                const Real a = rv.values[p];
+                dual_phase_col_norm_sq[static_cast<std::size_t>(j)] += a * a;
+            }
+        }
+        for (Index j = 0; j < num_cols_; ++j) {
+            if (dual_phase_col_norm_sq[static_cast<std::size_t>(j)] <= kZeroTol) {
+                dual_phase_col_norm_sq[static_cast<std::size_t>(j)] = 1.0;
+            }
+            dual_phase_col_norm_sq[static_cast<std::size_t>(j)] =
+                std::sqrt(dual_phase_col_norm_sq[static_cast<std::size_t>(j)]);
+        }
+    }
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
     Int empty_candidate_retry_streak = 0;
@@ -1221,13 +1245,13 @@ LpResult DualSimplexSolver::solve() {
                     Index var = -1;
                     Index pos = -1;
                     Real rc = 0.0;
-                    Real abs_rc = 0.0;
+                    Real score = 0.0;
                 };
                 auto better = [](const DualScanBest& a, const DualScanBest& b) {
                     if (a.var < 0) return false;
                     if (b.var < 0) return true;
-                    if (a.abs_rc > b.abs_rc) return true;
-                    if (a.abs_rc < b.abs_rc) return false;
+                    if (a.score > b.score) return true;
+                    if (a.score < b.score) return false;
                     return a.pos < b.pos;  // deterministic tie-break
                 };
 
@@ -1245,7 +1269,10 @@ LpResult DualSimplexSolver::solve() {
                             (st == BasisStatus::AtUpper && rc > kDualTol) ||
                             (st == BasisStatus::Free && std::abs(rc) > kDualTol);
                         if (!dual_inf) continue;
-                        DualScanBest cand{k, pos, rc, std::abs(rc)};
+                        const Real score = use_dual_phase_norm_weight
+                            ? (rc * rc) / dual_phase_col_norm_sq[static_cast<std::size_t>(k)]
+                            : std::abs(rc);
+                        DualScanBest cand{k, pos, rc, score};
                         if (better(cand, local)) {
                             local = cand;
                         }
@@ -1271,6 +1298,7 @@ LpResult DualSimplexSolver::solve() {
             } else
 #endif
             {
+                Real best_entering_score = -1.0;
                 for (Index k : nonbasic_) {
                     Real rc = reducedCostForPricing(k);
                     BasisStatus st = var_status_[k];
@@ -1278,7 +1306,12 @@ LpResult DualSimplexSolver::solve() {
                         (st == BasisStatus::AtLower && rc < -kDualTol) ||
                         (st == BasisStatus::AtUpper && rc > kDualTol) ||
                         (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                    if (dual_inf && std::abs(rc) > std::abs(worst_rc)) {
+                    if (!dual_inf) continue;
+                    const Real score = use_dual_phase_norm_weight
+                        ? (rc * rc) / dual_phase_col_norm_sq[static_cast<std::size_t>(k)]
+                        : std::abs(rc);
+                    if (score > best_entering_score) {
+                        best_entering_score = score;
                         worst_rc = rc;
                         entering_p = k;
                     }
