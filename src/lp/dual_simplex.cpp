@@ -856,6 +856,9 @@ LpResult DualSimplexSolver::solve() {
 
     // Work vectors for the iteration.
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
+    std::vector<uint8_t> pivot_row_alpha_mark(static_cast<std::size_t>(numVars()), uint8_t{0});
+    std::vector<Index> pivot_row_alpha_touched;
+    pivot_row_alpha_touched.reserve(static_cast<std::size_t>(std::max<Index>(1024, num_rows_)));
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
     const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
@@ -914,6 +917,35 @@ LpResult DualSimplexSolver::solve() {
     auto saturatingIncrement = [](Int& value) {
         if (value < std::numeric_limits<Int>::max()) {
             ++value;
+        }
+    };
+    auto clearPivotRowAlpha = [&]() {
+        for (Index k : pivot_row_alpha_touched) {
+            pivot_row_alpha[static_cast<std::size_t>(k)] = 0.0;
+            pivot_row_alpha_mark[static_cast<std::size_t>(k)] = uint8_t{0};
+        }
+        pivot_row_alpha_touched.clear();
+    };
+    auto buildPivotRowAlphaFromWork = [&]() {
+        clearPivotRowAlpha();
+        for (Index i = 0; i < num_rows_; ++i) {
+            const Real rho_i = work[i];
+            if (std::abs(rho_i) < kZeroTol) continue;
+            auto rv = matrix_.row(i);
+            for (Index p = 0; p < rv.size(); ++p) {
+                const Index j = rv.indices[p];
+                if (pivot_row_alpha_mark[static_cast<std::size_t>(j)] == 0) {
+                    pivot_row_alpha_mark[static_cast<std::size_t>(j)] = uint8_t{1};
+                    pivot_row_alpha_touched.push_back(j);
+                }
+                pivot_row_alpha[static_cast<std::size_t>(j)] += rho_i * rv.values[p];
+            }
+            const Index slack = num_cols_ + i;
+            if (pivot_row_alpha_mark[static_cast<std::size_t>(slack)] == 0) {
+                pivot_row_alpha_mark[static_cast<std::size_t>(slack)] = uint8_t{1};
+                pivot_row_alpha_touched.push_back(slack);
+            }
+            pivot_row_alpha[static_cast<std::size_t>(slack)] = -rho_i;
         }
     };
     auto resetPrimalFeasibleProgress = [&]() {
@@ -1490,20 +1522,7 @@ LpResult DualSimplexSolver::solve() {
 
             // Compute pivot row alphas (row-wise).
             work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-            std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
-            for (Index i = 0; i < num_rows_; ++i) {
-                Real rho_i = work[i];
-                if (std::abs(rho_i) < kZeroTol) continue;
-                auto rv = matrix_.row(i);
-                for (Index pp = 0; pp < rv.size(); ++pp) {
-                    pivot_row_alpha[rv.indices[pp]] += rho_i * rv.values[pp];
-                }
-            }
-            negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
-                                       static_cast<std::size_t>(num_rows_)),
-                       std::span<const Real>(work.data(),
-                                             static_cast<std::size_t>(num_rows_)),
-                       options_);
+            buildPivotRowAlphaFromWork();
 
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
@@ -1619,21 +1638,7 @@ LpResult DualSimplexSolver::solve() {
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
         // This is much faster than column-wise when rho is sparse.
         work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-        std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
-        for (Index i = 0; i < num_rows_; ++i) {
-            Real rho_i = work[i];
-            if (std::abs(rho_i) < kZeroTol) continue;
-            auto rv = matrix_.row(i);
-            for (Index p = 0; p < rv.size(); ++p) {
-                pivot_row_alpha[rv.indices[p]] += rho_i * rv.values[p];
-            }
-        }
-        // Slack alpha values: alpha_{n+i} = rho^T * (-e_i) = -rho[i].
-        negateCopy(std::span<Real>(pivot_row_alpha.data() + num_cols_,
-                                   static_cast<std::size_t>(num_rows_)),
-                   std::span<const Real>(work.data(),
-                                         static_cast<std::size_t>(num_rows_)),
-                   options_);
+        buildPivotRowAlphaFromWork();
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
