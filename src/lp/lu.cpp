@@ -17,6 +17,7 @@ namespace mipx {
 
 void SparseLU::factorize(const SparseMatrix& matrix,
                          std::span<const Index> basis_cols) {
+    static constexpr Index kFastPivotMinDim = 1500;
     dim_ = static_cast<Index>(basis_cols.size());
     num_updates_ = 0;
     max_u_entry_ = 0.0;
@@ -245,7 +246,38 @@ void SparseLU::factorize(const SparseMatrix& matrix,
 
         // General search if no singletons found.
         if (best_markowitz > 0) {
+            const bool use_fast_large_pivot = dim_ >= kFastPivotMinDim;
             for (Index j : active_cols) {
+                if (use_fast_large_pivot) {
+                    // Large-dimension fast path: one pass per column.
+                    // Select only the largest-magnitude candidate in this column and
+                    // rank columns by Markowitz score.
+                    Index best_col_entry = -1;
+                    Real col_max = 0.0;
+                    for (Index eidx = col_head[j]; eidx >= 0;
+                         eidx = entries[eidx].next_in_col) {
+                        if (entries[eidx].alive) {
+                            const Real absval = std::abs(entries[eidx].val);
+                            if (absval > col_max) {
+                                col_max = absval;
+                                best_col_entry = eidx;
+                            }
+                        }
+                    }
+                    if (best_col_entry >= 0 && col_max > kZeroTol) {
+                        Index ri = entries[best_col_entry].row;
+                        long long m = static_cast<long long>(row_count[ri] - 1) *
+                                      static_cast<long long>(col_count[j] - 1);
+                        if (m < best_markowitz ||
+                            (m == best_markowitz && col_max > best_abs)) {
+                            best_markowitz = m;
+                            best_entry = best_col_entry;
+                            best_abs = col_max;
+                        }
+                    }
+                    if (best_markowitz <= 1) break;
+                    continue;
+                }
 
                 // Find max in this column for threshold.
                 Real col_max = 0.0;
