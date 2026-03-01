@@ -12,30 +12,32 @@
 namespace mipx {
 
 struct PdlpOptions {
-    Int max_iter = 20000;
+    Int max_iter = 100000;
     Real optimality_tol = 1e-6;
     Real primal_tol = 1e-6;
     Real dual_tol = 1e-6;
-    Int major_iteration = 64;
 
-    // Adaptive step-size update.
-    Real initial_step_size_scaling = 0.95;
-    Real step_growth = 1.03;
-    Real step_reduction = 0.7;
-    Real min_step_size = 1e-6;
-    Real max_step_size = 1e2;
+    // Adaptive step size (movement/interaction, Applegate et al. 2021).
+    Real initial_step_size = 0.95;
+    Real min_step_size = 1e-8;
+    Real max_step_size = 1e4;
+    Real step_size_reduction_exponent = 0.3;
+    Real step_size_growth_exponent = 0.6;
 
-    // Primal/dual balancing and restart.
+    // Primal/dual balancing.
     Real primal_weight = 1.0;
     Real primal_weight_update_smoothing = 0.5;
-    Real restart_sufficient_reduction = 0.2;
-    Real restart_necessary_reduction = 0.85;
-    Real extrapolation_factor = 1.0;
     bool update_primal_weight = true;
+    Real extrapolation_factor = 1.0;
+
+    // KKT restart (cuPDLP-C style).
+    Real restart_sufficient_decay = 0.2;
+    Real restart_necessary_decay = 0.8;
+    Real restart_artificial_fraction = 0.36;
 
     // Scaling/preconditioning.
     bool do_ruiz_scaling = true;
-    Int ruiz_iterations = 8;
+    Int ruiz_iterations = 10;
     bool do_pock_chambolle_scaling = true;
     Real default_alpha_pock_chambolle_rescaling = 1.0;
 
@@ -45,6 +47,10 @@ struct PdlpOptions {
     Int gpu_min_nnz = 10000;
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
+
+    // GPU-resident solver: use fully GPU-resident PDLP with reflected PD,
+    // adaptive step size, KKT restart, and CUDA Graphs when available.
+    bool use_gpu_resident = true;
 };
 
 class PdlpSolver : public LpSolver {

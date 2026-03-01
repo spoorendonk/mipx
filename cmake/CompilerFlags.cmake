@@ -68,7 +68,9 @@ function(mipx_set_simd_flags target)
     endif()
 
     if(simd_flags)
-        target_compile_options(${target} PRIVATE ${simd_flags})
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${simd_flags}>
+        )
     endif()
 
     if(NOT DEFINED MIPX_SIMD_STATUS_PRINTED)
@@ -80,15 +82,16 @@ endfunction()
 function(mipx_set_compiler_flags target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>
         )
         if(MIPX_STRICT_WARNINGS)
-            target_compile_options(${target} PRIVATE -Werror)
+            target_compile_options(${target} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+            )
         endif()
         if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             target_compile_options(${target} PRIVATE
-                -fsanitize=address,undefined
-                -fno-omit-frame-pointer
+                $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined -fno-omit-frame-pointer>
             )
             target_link_options(${target} PRIVATE
                 -fsanitize=address,undefined

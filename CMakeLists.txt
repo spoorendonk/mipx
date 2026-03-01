@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.25)
 project(mipx LANGUAGES CXX)
 
+# CUDA language is enabled conditionally in src/CMakeLists.txt after the option
+# is resolved, so the project declaration stays CXX-only here.
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -16,7 +19,7 @@ find_package(CUDAToolkit QUIET)
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
-option(MIPX_USE_CUDA "Enable CUDA acceleration in barrier solver" ${CUDAToolkit_FOUND})
+option(MIPX_USE_CUDA "Enable CUDA acceleration (barrier + PDLP GPU-resident solver)" ${CUDAToolkit_FOUND})
 option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
        "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
        ON)

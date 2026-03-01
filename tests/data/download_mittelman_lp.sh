@@ -31,34 +31,50 @@ MESZAROS_BASE="https://www.sztaki.hu/~meszaros/public_ftp/lptestset"
 # Instances from Mittelman's lptestset (plato.asu.edu/ftp/lptestset/)
 # These are .mps.bz2 files hosted directly by Mittelman.
 # Note: pds-* instances live in the pds/ subdirectory (see MITTELMAN_PDS_INSTANCES).
+# Note: some files are .mps.bz2, others are just .bz2 (no .mps).
+# The download_instance function tries both patterns.
 MITTELMAN_INSTANCES=(
-    buildingenergy
-    cont1
-    cont4
-    cont11
-    datt256
+    a2864
+    bdry2
+    bharat
+    brazil3
+    chromaticindex1024-7
+    datt256_lp
+    dlr1
+    dlr2
+    Dual2_5000
     ex10
-    fome13
+    fhnw-binschedule1
     graph40-40
-    irish-e
+    irish-electricity
     L1_sixm250obs
+    L1_sixm1000obs
+    L2CTA3D
     Linf_520c
-    neos
-    neos3
-    nug08-3rd
+    neos-3025225
+    neos-5052403-cygnet
+    neos-5251015
+    physiciansched3-3
+    Primal2_1000
     qap15
     rmine15
+    s82
     s100
     s250r10
     savsched1
     scpm1
+    set-cover-model
     square41
-    support10
+    supportcase10
+    supportcase19
+    thk_48
+    thk_63
+    tpl-tub-ws1617
+    woodlands09
 )
 
 # Instances available as rail/ subdirectory at Mittelman's site
 MITTELMAN_RAIL_INSTANCES=(
-    rail02
     rail4284
     rail507
     rail516
@@ -69,46 +85,55 @@ MITTELMAN_RAIL_INSTANCES=(
 # Instances from Mittelman's pds/ subdirectory
 MITTELMAN_PDS_INSTANCES=(
     pds-20
+    pds-30
     pds-40
     pds-50
+    pds-60
+    pds-70
     pds-80
+    pds-90
     pds-100
 )
 
-# LP relaxations from MIPLIB (used by Mittelman for LP benchmarks)
+# Instances from Mittelman's fome/ subdirectory
+MITTELMAN_FOME_INSTANCES=(
+    fome11
+    fome12
+    fome13
+    fome21
+)
+
+# Instances from Mittelman's nug/ subdirectory
+MITTELMAN_NUG_INSTANCES=(
+    nug08-3rd
+    nug20
+    nug30
+)
+
+# LP relaxations from MIPLIB (not on Mittelman's server)
 MIPLIB_LP_INSTANCES=(
-    a2864
     fhnw-binschedule0
-    fhnw-binschedule1
-    neos-3025225-shelon
-    neos-5052403-cygnet
-    neos-5251015-ogosta
     ns1644855
     ns1687037
     ns1688926
     nug15
 )
 
-# Instances from Meszaros collection
+# Instances from Meszaros collection (not on Mittelman's server)
 MESZAROS_INSTANCES=(
-    bdry2
-    dlr1
-    s82
     dbic1
 )
 
 # Curated subset: smaller/medium instances that can solve in < 5 minutes.
 # Good for CI and development testing.
 SMALL_SET=(
-    cont1
-    datt256
+    datt256_lp
     ex10
     fome13
-    irish-e
+    irish-electricity
     L1_sixm250obs
     Linf_520c
-    neos
-    neos3
+    neos-3025225
     nug08-3rd
     pds-100
     qap15
@@ -120,6 +145,8 @@ SMALL_SET=(
     ns1687037
     nug15
     bdry2
+    s82
+    dlr1
 )
 
 usage() {
@@ -154,8 +181,15 @@ download_instance() {
     local tmpfile
     tmpfile=$(mktemp)
 
-    # Try .mps.bz2 first (Mittelman format), then .mps.gz, then .mps
+    # Try .mps.bz2 first (most Mittelman files), then .bz2 (some use this without
+    # .mps in filename), then .mps.gz, then .mps
     if curl -sS -f -o "${tmpfile}" "${url}.mps.bz2" 2>/dev/null; then
+        bunzip2 -c "${tmpfile}" | gzip -c > "${outfile}"
+        rm -f "${tmpfile}"
+        echo " ok (mps.bz2)"
+        ((TOTAL++)) || true
+        return 0
+    elif curl -sS -f -o "${tmpfile}" "${url}.bz2" 2>/dev/null; then
         bunzip2 -c "${tmpfile}" | gzip -c > "${outfile}"
         rm -f "${tmpfile}"
         echo " ok (bz2)"
@@ -193,6 +227,16 @@ download_from_mittelman_rail() {
 download_from_mittelman_pds() {
     local name="$1"
     download_instance "${name}" "${MITTELMAN_BASE}/pds/${name}"
+}
+
+download_from_mittelman_fome() {
+    local name="$1"
+    download_instance "${name}" "${MITTELMAN_BASE}/fome/${name}"
+}
+
+download_from_mittelman_nug() {
+    local name="$1"
+    download_instance "${name}" "${MITTELMAN_BASE}/nug/${name}"
 }
 
 download_from_miplib() {
@@ -270,6 +314,16 @@ if [[ "${FULL_MODE}" == "true" ]]; then
         download_from_mittelman_pds "${name}"
     done
 
+    echo "--- Mittelman fome instances ---"
+    for name in "${MITTELMAN_FOME_INSTANCES[@]}"; do
+        download_from_mittelman_fome "${name}"
+    done
+
+    echo "--- Mittelman nug instances ---"
+    for name in "${MITTELMAN_NUG_INSTANCES[@]}"; do
+        download_from_mittelman_nug "${name}"
+    done
+
     echo "--- MIPLIB LP relaxations ---"
     for name in "${MIPLIB_LP_INSTANCES[@]}"; do
         download_from_miplib "${name}"
@@ -283,13 +337,17 @@ else
     echo "Downloading Mittelman LP curated subset (${#SMALL_SET[@]} instances) to ${DEST_DIR}/"
 
     for name in "${SMALL_SET[@]}"; do
-        # Try Mittelman first, then MIPLIB, then Meszaros
+        # Try Mittelman first (root, rail, pds, fome, nug), then MIPLIB, then Meszaros
         if printf '%s\n' "${MITTELMAN_INSTANCES[@]}" | grep -qx "${name}"; then
             download_from_mittelman "${name}"
         elif printf '%s\n' "${MITTELMAN_RAIL_INSTANCES[@]}" | grep -qx "${name}"; then
             download_from_mittelman_rail "${name}"
         elif printf '%s\n' "${MITTELMAN_PDS_INSTANCES[@]}" | grep -qx "${name}"; then
             download_from_mittelman_pds "${name}"
+        elif printf '%s\n' "${MITTELMAN_FOME_INSTANCES[@]}" | grep -qx "${name}"; then
+            download_from_mittelman_fome "${name}"
+        elif printf '%s\n' "${MITTELMAN_NUG_INSTANCES[@]}" | grep -qx "${name}"; then
+            download_from_mittelman_nug "${name}"
         elif printf '%s\n' "${MIPLIB_LP_INSTANCES[@]}" | grep -qx "${name}"; then
             download_from_miplib "${name}"
         elif printf '%s\n' "${MESZAROS_INSTANCES[@]}" | grep -qx "${name}"; then

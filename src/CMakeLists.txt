@@ -46,6 +46,24 @@ if(MIPX_USE_TBB)
 endif()
 
 if(MIPX_USE_CUDA)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "CUDA architectures to compile for")
+
+    target_sources(mipx PRIVATE
+        lp/pdlp_kernels.cu
+        lp/pdlp_gpu.cu
+    )
+    # NVCC doesn't support C++23, so set the CUDA standard to 20 (highest
+    # supported) at target level. CXX sources are unaffected — they still
+    # compile with the project-wide CXX_STANDARD 23.
+    set_target_properties(mipx PROPERTIES
+        CUDA_STANDARD 20
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}"
+    )
+    target_compile_options(mipx PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3 --use_fast_math>
+    )
     target_link_libraries(mipx PUBLIC CUDA::cudart CUDA::cusparse)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDA)
 endif()
