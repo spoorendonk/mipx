@@ -20,7 +20,7 @@ NETLIB_DIR = ROOT_DIR / "tests" / "data" / "netlib"
 MIPLIB_DIR = ROOT_DIR / "tests" / "data" / "miplib"
 BIN = ROOT_DIR / "build" / "mipx-solve"
 
-HIGHS_RUNNER = ROOT_DIR / "tests" / "perf" / "run_highspy_bench.py"
+HIGHS_RUNNER = ROOT_DIR / "tests" / "perf" / "run_highs_bench.py"
 MIPX_LP_RUNNER = ROOT_DIR / "tests" / "perf" / "run_mittelman_lp_bench.sh"
 MIPX_MIP_RUNNER = ROOT_DIR / "tests" / "perf" / "run_mittelman_mip_bench.sh"
 
@@ -72,7 +72,7 @@ def resolve_highs_bin() -> str:
 def run_highs_part(highs_bin: str) -> None:
     print("=== Generating HiGHS Mittelman LP baseline ===")
 
-    highs_lp_out = OUT_DIR / "highspy_lp_mittelman.csv"
+    highs_lp_out = OUT_DIR / "highs_lp_mittelman.csv"
     run_maybe(
         [
             sys.executable,
@@ -101,7 +101,7 @@ def run_highs_part(highs_bin: str) -> None:
         "HiGHS LP Mittelman baseline skipped (instances may be missing)",
     )
 
-    highs_lp_netlib = OUT_DIR / "highspy_lp_netlib_full.csv"
+    highs_lp_netlib = OUT_DIR / "highs_lp_netlib_full.csv"
     if NETLIB_DIR.is_dir() and list(NETLIB_DIR.glob("*.mps.gz")):
         run_maybe(
             [
@@ -132,7 +132,7 @@ def run_highs_part(highs_bin: str) -> None:
         )
 
     print("=== Generating HiGHS Mittelman MIP baseline ===")
-    highs_mip_out = OUT_DIR / "highspy_mip_mittelman.csv"
+    highs_mip_out = OUT_DIR / "highs_mip_mittelman.csv"
     run_maybe(
         [
             sys.executable,
@@ -163,7 +163,7 @@ def run_highs_part(highs_bin: str) -> None:
         "HiGHS MIP Mittelman baseline skipped (instances may be missing)",
     )
 
-    highs_meta = OUT_DIR / "highspy_mittelman_meta.json"
+    highs_meta = OUT_DIR / "highs_mittelman_meta.json"
     meta = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "python": sys.version.split()[0],

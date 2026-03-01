@@ -49,10 +49,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install highspy
+      - name: Check HiGHS CLI
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install highspy
+          command -v highs >/dev/null
+          highs --version
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -66,7 +66,7 @@ jobs:
           python3 tests/perf/run_presolve_matrix.py \
             --profile ci-smoke \
             --mipx-binary ./build/mipx-solve \
-            --highs-binary ./tests/perf/highs_highspy_cli.py \
+            --highs-binary highs \
             --netlib-dir ./tests/data/netlib \
             --miplib-dir ./tests/data/miplib \
             --out-dir /tmp/presolve-smoke \

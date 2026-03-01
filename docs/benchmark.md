@@ -133,7 +133,7 @@ Conclusion from larger runs: current `mipx` LP results are **not yet correctness
 - `fome13` and `rail4284` show parser failures in HiGHS and/or cuOpt CLI on this setup.
 - Cross-solver objective agreement is inconsistent on `s100` (`mipx` reports `0`, cuOpt reports around `-0.171`), so objective-validation checks should be added before drawing performance conclusions.
 - On larger Netlib instances (`greenbea`, `pilot`, `ship12l`, `sierra`), `mipx` barrier/PDLP return infeasible or unknown while references are optimal; this must be treated as a correctness blocker.
-- `tests/perf/run_highspy_bench.py` currently treats nonzero exit as `solve_error`, which hides useful `time_limit` results from HiGHS.
+- `tests/perf/run_highs_bench.py` currently treats nonzero exit as `solve_error`, which hides useful `time_limit` results from HiGHS.
 - `tests/data/download_mittelman_lp.sh` needs updates for current Mittelman URL/file naming (many files are `.bz2` or moved to subdirectories).
 
 ## Versioned `tests/perf` Review
@@ -145,13 +145,13 @@ Tracked files (`git ls-files tests/perf`) currently include:
 - Regression checker: `check_regression.py`.
 - Docs: `tests/perf/README.md`, `tests/perf/baselines/README.md`.
 - Versioned baselines currently present:
-  - `highspy_lp_netlib_small.csv`
-  - `highspy_mip_miplib_small.csv`
+  - `highs_lp_netlib_small.csv`
+  - `highs_mip_miplib_small.csv`
   - `mipx_lp_netlib_small.csv`
   - `mipx_mip_miplib_small.csv`
   - `barrier_lp_compare_netlib.csv`
   - `barrier_lp_compare_netlib_forced_gpu.csv`
-  - metadata JSON files for highspy/mipx/barrier
+  - metadata JSON files for HiGHS/mipx/barrier
 
 Mismatch observed:
 

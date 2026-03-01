@@ -54,21 +54,20 @@ Notes:
   `run_presolve_compare.py`) so objective mismatches are correctness-significant.
 - `ci-smoke` is intentionally small; use `internal` for broader coverage.
 - Shell wrapper: `./tests/perf/run_presolve_matrix.sh`.
-- If no `highs` CLI is installed, use the included highspy wrapper:
-  `--highs-binary ./tests/perf/highs_highspy_cli.py`.
+- Requires HiGHS CLI (`highs`) on `PATH` or `--highs-binary <path>`.
 
 Generate and store HiGHS CLI + mipx wall-clock baselines:
 
 ```bash
-python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
 
 This writes:
-- `tests/perf/baselines/highspy_lp_netlib_small.csv`
-- `tests/perf/baselines/highspy_mip_miplib_small.csv`
+- `tests/perf/baselines/highs_lp_netlib_small.csv`
+- `tests/perf/baselines/highs_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
@@ -78,7 +77,6 @@ This writes:
 
 The MIP HiGHS baseline uses the stable small trio:
 `p0201,gt2,flugpl`.
-Legacy output filenames keep the `highspy_` prefix for compatibility.
 Shell wrapper entrypoints remain available under `tests/perf/generate_*.sh`.
 
 LP example (Netlib, gate on `work_units`):
@@ -282,7 +280,7 @@ python3 tests/perf/run_miplib_mip_bench.py \
   --solver-arg --quiet
 
 python3 tests/perf/check_regression.py \
-  --baseline tests/perf/baselines/highspy_mip_miplib_small.csv \
+  --baseline tests/perf/baselines/highs_mip_miplib_small.csv \
   --candidate /tmp/mipx_mip_candidate_highsset.csv \
   --metric time_seconds \
   --max-regression-pct 100000 \
@@ -393,8 +391,8 @@ Compare against HiGHS (informational, time_seconds):
 ```bash
 python3 tests/perf/run_mittelman_gate.py \
   --candidate-binary ./build/mipx-solve \
-  --baseline-lp-csv tests/perf/baselines/highspy_lp_mittelman.csv \
-  --baseline-mip-csv tests/perf/baselines/highspy_mip_mittelman.csv \
+  --baseline-lp-csv tests/perf/baselines/highs_lp_mittelman.csv \
+  --baseline-mip-csv tests/perf/baselines/highs_mip_mittelman.csv \
   --metric time_seconds \
   --max-regression-pct 100000
 ```
@@ -419,7 +417,7 @@ All `tests/perf/run_*.sh` scripts are compatibility wrappers that forward to
 the Python entrypoints shown above.
 
 This writes:
-- `tests/perf/baselines/highspy_lp_mittelman.csv`
-- `tests/perf/baselines/highspy_mip_mittelman.csv`
+- `tests/perf/baselines/highs_lp_mittelman.csv`
+- `tests/perf/baselines/highs_mip_mittelman.csv`
 - `tests/perf/baselines/mipx_lp_mittelman.csv`
 - `tests/perf/baselines/mipx_mip_mittelman.csv`

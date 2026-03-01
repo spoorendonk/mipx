@@ -1029,7 +1029,7 @@ CSV/Markdown outputs (`run_param_sweep.py`), while preserving strict default
 - Determinism test suite (single-thread and configured multi-thread deterministic mode)
 - Full benchmark matrix runner (`solver x time x threads x mode`) and summary artifact generation
 - Parameter sweep tooling with structured CSV/Markdown outputs
-- Baselines stored/versioned for mipx and external references (HiGHS/highspy)
+- Baselines stored/versioned for mipx and external references (HiGHS CLI)
 
 **Test criteria:**
 - Repeated runs at fixed seed produce stable metrics in deterministic mode

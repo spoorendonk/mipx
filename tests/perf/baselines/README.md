@@ -4,9 +4,9 @@ This directory stores versioned wall-clock baseline CSVs generated with
 HiGHS CLI and mipx for quick comparisons.
 
 Files:
-- `highspy_lp_netlib_small.csv`: Netlib small LP set.
-- `highspy_mip_miplib_small.csv`: MIPLIB small trio (`p0201,gt2,flugpl`).
-- `highspy_baseline_meta.json`: generation metadata (timestamp, HiGHS version,
+- `highs_lp_netlib_small.csv`: Netlib small LP set.
+- `highs_mip_miplib_small.csv`: MIPLIB small trio (`p0201,gt2,flugpl`).
+- `highs_baseline_meta.json`: generation metadata (timestamp, HiGHS version,
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
@@ -25,23 +25,22 @@ Files:
 Regenerate with (canonical Python entrypoints):
 
 ```bash
-python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
 
 Shell wrappers remain available under `tests/perf/generate_*.sh`.
-Legacy HiGHS baseline CSV filenames keep the `highspy_` prefix for compatibility.
 
 ## Mittelman Baselines
 
 Baselines matching Hans Mittelman's benchmark configuration
 (https://plato.asu.edu/bench.html):
 
-- `highspy_lp_mittelman.csv`: HiGHS LP baseline on Mittelman LPopt instances.
-- `highspy_mip_mittelman.csv`: HiGHS MIP baseline on MIPLIB 2017 benchmark set.
-- `highspy_mittelman_meta.json`: generation metadata.
+- `highs_lp_mittelman.csv`: HiGHS LP baseline on Mittelman LPopt instances.
+- `highs_mip_mittelman.csv`: HiGHS MIP baseline on MIPLIB 2017 benchmark set.
+- `highs_mittelman_meta.json`: generation metadata.
 - `mipx_lp_mittelman.csv`: mipx LP baseline on Mittelman LPopt instances.
 - `mipx_mip_mittelman.csv`: mipx MIP baseline on MIPLIB 2017 benchmark set.
 - `mipx_mittelman_meta.json`: generation metadata.
