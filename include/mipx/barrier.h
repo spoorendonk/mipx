@@ -12,14 +12,28 @@ namespace mipx {
 
 struct BarrierOptions {
     Int max_iter = 100;
-    Int max_cg_iter = 500;
     Real primal_dual_tol = 1e-8;
-    Real cg_rel_tol = 1e-10;
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
+
+    // GPU / Cholesky options.
     bool use_gpu = true;
     Int gpu_min_rows = 512;
     Int gpu_min_nnz = 10000;
+
+    // Ruiz equilibration iterations.
+    Int ruiz_iterations = 10;
+
+    // Dense column threshold (fraction of m).
+    Real dense_col_fraction = 0.1;
+
+    // Iterative-refinement steps after each direct solve.
+    Int ir_steps = 2;
+
+    // CG fallback options (used when CUDA is unavailable).
+    Int max_cg_iter = 500;
+    Real cg_rel_tol = 1e-10;
+
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
 };
@@ -67,8 +81,21 @@ private:
     bool buildStandardForm();
     bool solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
                            std::vector<Real>& s, Int& iters);
+    bool solveStandardFormGpu(std::vector<Real>& z, std::vector<Real>& y,
+                              std::vector<Real>& s, Int& iters);
+    bool solveStandardFormCpu(std::vector<Real>& z, std::vector<Real>& y,
+                              std::vector<Real>& s, Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
+
+    // Ruiz scaling.
+    void computeRuizScaling();
+    void applyScaling();
+    void unscaleResult(std::vector<Real>& z, std::vector<Real>& y,
+                       std::vector<Real>& s);
+
+    // Dense column detection.
+    void detectDenseColumns();
 
     BarrierOptions options_{};
     LpProblem original_;
@@ -82,6 +109,14 @@ private:
     std::vector<OriginalColExpr> col_expr_;
     Real std_obj_offset_ = 0.0;
 
+    // Ruiz scaling factors.
+    std::vector<Real> row_scale_;
+    std::vector<Real> col_scale_;
+    bool scaling_applied_ = false;
+
+    // Dense column indices.
+    std::vector<Index> dense_cols_;
+
     std::vector<Real> primal_orig_;
     std::vector<Real> dual_eq_;
     std::vector<Real> reduced_costs_std_;
@@ -89,6 +124,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+
 };
 
 }  // namespace mipx
