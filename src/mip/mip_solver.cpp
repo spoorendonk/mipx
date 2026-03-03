@@ -3043,7 +3043,7 @@ MipResult MipSolver::solve() {
                 log_.log("Presolve: %d vars removed, %d rows removed, "
                          "%d bounds tightened, %d rounds (%d changed), %.3fs "
                          "[rules: forcing=%d implied=%d abt=%d dual=%d coeff=%d "
-                         "empty_col=%d dup_row=%d] "
+                         "doubleton=%d empty_col=%d dup_row=%d par_row=%d] "
                          "[examined: %d rows, %d cols]\n\n",
                          stats.vars_removed, stats.rows_removed,
                          stats.bounds_tightened, stats.rounds,
@@ -3053,8 +3053,10 @@ MipResult MipSolver::solve() {
                          stats.activity_bound_tightening_changes,
                          stats.dual_fixing_changes,
                          stats.coeff_tightening_changes,
+                         stats.doubleton_eq_changes,
                          stats.empty_col_changes,
                          stats.duplicate_row_changes,
+                         stats.parallel_row_changes,
                          stats.rows_examined, stats.cols_examined);
             }
         } else {

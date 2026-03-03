@@ -62,13 +62,25 @@ struct PostsolveCoeffTightening {
     Real new_rhs;
 };
 
+/// A doubleton equality row was used to substitute out a variable.
+struct PostsolveDoubletonEquality {
+    Index eliminated_col;
+    Index kept_col;
+    Real a_eliminated;
+    Real a_kept;
+    Real rhs;
+    Real eliminated_lower;
+    Real eliminated_upper;
+};
+
 using PostsolveOp = std::variant<
     PostsolveFixVariable,
     PostsolveSingletonRow,
     PostsolveSingletonCol,
     PostsolveForcingRow,
     PostsolveDominatedRow,
-    PostsolveCoeffTightening
+    PostsolveCoeffTightening,
+    PostsolveDoubletonEquality
 >;
 
 // ---- PostsolveStack ---------------------------------------------------------
@@ -114,6 +126,8 @@ struct PresolveStats {
     Index dual_fixing_changes = 0;
     Index empty_col_changes = 0;
     Index duplicate_row_changes = 0;
+    Index parallel_row_changes = 0;
+    Index doubleton_eq_changes = 0;
     Index rounds = 0;
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
@@ -125,6 +139,8 @@ struct PresolveOptions {
     bool enable_forcing_rows = true;
     bool enable_dual_fixing = true;
     bool enable_coefficient_tightening = false;
+    bool enable_doubleton_aggregation = true;
+    bool enable_parallel_rows = true;
 };
 
 // ---- Presolver --------------------------------------------------------------
@@ -225,6 +241,20 @@ private:
                                const std::vector<Index>& dirty_rows,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
+    Index removeParallelRows(LpProblem& lp, std::vector<bool>& col_removed,
+                              std::vector<bool>& row_removed,
+                              std::vector<Index>& row_active_nnz,
+                              std::vector<Index>& col_active_nnz,
+                              const std::vector<Index>& dirty_rows,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
+    Index aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& col_removed,
+                                        std::vector<bool>& row_removed,
+                                        std::vector<Index>& row_active_nnz,
+                                        std::vector<Index>& col_active_nnz,
+                                        const std::vector<Index>& dirty_rows,
+                                        std::vector<uint8_t>& next_dirty_rows,
+                                        std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
                                std::vector<uint8_t>& next_dirty_rows,
