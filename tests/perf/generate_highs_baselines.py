@@ -16,11 +16,11 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 OUT_DIR = ROOT_DIR / "tests" / "perf" / "baselines"
 NETLIB_DIR = ROOT_DIR / "tests" / "data" / "netlib"
 MIPLIB_DIR = ROOT_DIR / "tests" / "data" / "miplib"
-RUNNER = ROOT_DIR / "tests" / "perf" / "run_highspy_bench.py"
+RUNNER = ROOT_DIR / "tests" / "perf" / "run_highs_bench.py"
 
-LP_OUT = OUT_DIR / "highspy_lp_netlib_small.csv"
-MIP_OUT = OUT_DIR / "highspy_mip_miplib_small.csv"
-META_JSON = OUT_DIR / "highspy_baseline_meta.json"
+LP_OUT = OUT_DIR / "highs_lp_netlib_small.csv"
+MIP_OUT = OUT_DIR / "highs_mip_miplib_small.csv"
+META_JSON = OUT_DIR / "highs_baseline_meta.json"
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:

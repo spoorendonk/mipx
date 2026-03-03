@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
 RUN_MIPLIB = PERF_DIR / "run_miplib_mip_bench.py"
-RUN_HIGHS = PERF_DIR / "run_highspy_bench.py"
+RUN_HIGHS = PERF_DIR / "run_highs_bench.py"
 
 
 def parse_csv_tokens(raw: str) -> list[str]:

@@ -3,7 +3,7 @@
 
 Examples:
   LP:
-    python3 tests/perf/run_highspy_bench.py \
+    python3 tests/perf/run_highs_bench.py \
       --mode lp \
       --instances-dir tests/data/netlib \
       --output /tmp/highs_lp.csv \
@@ -11,7 +11,7 @@ Examples:
       --threads 1
 
   MIP:
-    python3 tests/perf/run_highspy_bench.py \
+    python3 tests/perf/run_highs_bench.py \
       --mode mip \
       --instances-dir tests/data/miplib \
       --instances p0201,pk1,gt2 \

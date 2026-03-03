@@ -2962,6 +2962,18 @@ MipResult MipSolver::solve() {
         if (gap_tol_ != 1e-4) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "gap=%.2f%% ", gap_tol_ * 100.0);
         if (node_limit_ != 1000000) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "nodes=%d ", node_limit_);
         if (!presolve_) sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "presolve=off ");
+        if (presolve_options_.enable_forcing_rows) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "presolve_forcing=on ");
+        }
+        if (presolve_options_.enable_dual_fixing) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "presolve_dual_fixing=on ");
+        }
+        if (presolve_options_.enable_coefficient_tightening) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "presolve_coeff_tightening=on ");
+        }
         if (!tree_presolve_enabled_) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_presolve=off ");
         }
@@ -3016,6 +3028,7 @@ MipResult MipSolver::solve() {
 
     // Presolve.
     Presolver presolver;
+    presolver.setOptions(presolve_options_);
     LpProblem working_problem;
     bool did_presolve = false;
     double symmetry_pre_work = 0.0;
@@ -3029,16 +3042,21 @@ MipResult MipSolver::solve() {
             if (verbose_) {
                 log_.log("Presolve: %d vars removed, %d rows removed, "
                          "%d bounds tightened, %d rounds (%d changed), %.3fs "
-                         "[rules: implied=%d abt=%d dual=%d empty_col=%d dup_row=%d] "
+                         "[rules: forcing=%d implied=%d abt=%d dual=%d coeff=%d "
+                         "doubleton=%d empty_col=%d dup_row=%d par_row=%d] "
                          "[examined: %d rows, %d cols]\n\n",
                          stats.vars_removed, stats.rows_removed,
                          stats.bounds_tightened, stats.rounds,
                          stats.rounds_with_changes, stats.time_seconds,
+                         stats.forcing_row_changes,
                          stats.implied_equation_changes,
                          stats.activity_bound_tightening_changes,
                          stats.dual_fixing_changes,
+                         stats.coeff_tightening_changes,
+                         stats.doubleton_eq_changes,
                          stats.empty_col_changes,
                          stats.duplicate_row_changes,
+                         stats.parallel_row_changes,
                          stats.rows_examined, stats.cols_examined);
             }
         } else {
@@ -4454,8 +4472,9 @@ MipResult MipSolver::solve() {
         Real final_bound = queue.empty() ? incumbent : queue.bestBound();
         result.best_bound = final_bound;
         result.gap = computeGap(incumbent, final_bound);
+        result.gap_limit_reached = !queue.empty() && result.gap < gap_tol_;
 
-        if (queue.empty() || result.gap < gap_tol_) {
+        if (queue.empty() || result.gap_limit_reached) {
             result.status = Status::Optimal;
         } else if (nodes_explored >= node_limit_) {
             result.status = Status::NodeLimit;
@@ -4564,7 +4583,12 @@ MipResult MipSolver::solve() {
                      node_buf, iter_buf, result.time_seconds);
         }
         if (result.status == Status::Optimal) {
-            log_.log("Optimal: %.10e\n", result.objective);
+            if (result.gap_limit_reached) {
+                log_.log("Gap-limited: %.10e (gap %.2f%%)\n",
+                         result.objective, result.gap * 100.0);
+            } else {
+                log_.log("Optimal: %.10e\n", result.objective);
+            }
         } else if (incumbent < kInf) {
             log_.log("Best solution: %.10e (gap %.2f%%)\n",
                      result.objective, result.gap * 100.0);

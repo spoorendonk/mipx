@@ -189,6 +189,7 @@ struct MipResult {
     Real objective = 0.0;
     Real best_bound = -kInf;
     Real gap = kInf;
+    bool gap_limit_reached = false;
     Int nodes = 0;
     Int lp_iterations = 0;
     double work_units = 0.0;   // deterministic work measure
@@ -209,6 +210,12 @@ public:
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
     void setVerbose(bool v) { verbose_ = v; log_.setEnabled(v); }
     void setPresolve(bool p) { presolve_ = p; }
+    void setRootPresolveOptions(const PresolveOptions& options) {
+        presolve_options_ = options;
+    }
+    [[nodiscard]] const PresolveOptions& getRootPresolveOptions() const {
+        return presolve_options_;
+    }
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
@@ -408,6 +415,7 @@ private:
     Real gap_tol_ = 1e-4;
     bool verbose_ = true;
     bool presolve_ = true;
+    PresolveOptions presolve_options_{};
     Int num_threads_ = 1;
 
     // Cutting plane parameters.

@@ -329,6 +329,155 @@ static LpProblem buildDuplicateRowProblem() {
     return lp;
 }
 
+/// Build a problem where one row is anti-parallel to another and weaker.
+/// Row1:  x + y <= 5
+/// Row2: -2x -2y >= -12   <=> x + y <= 6 (weaker than Row1)
+/// With infinite upper bounds, generic dominated-row activity test cannot
+/// conclude, so scale-aware parallel-row logic should remove Row2.
+static LpProblem buildParallelRowProblem() {
+    LpProblem lp;
+    lp.name = "parallel_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -12.0};
+    lp.row_upper = {5.0, kInf};
+    lp.row_names = {"tight", "weak_antiparallel"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, -2.0}, {1, 1, -2.0},
+    };
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+/// Build a problem where coefficient tightening creates duplicate rows.
+/// Row1: 7x + y <= 8  -> tightens to 6x + y <= 8 (x integer, 0<=x<=2, -100<=y<=2)
+/// Row2: 6x + y <= 8
+/// Plus a fixed singleton column z to force a second presolve round.
+/// Duplicate-row removal should then remove one row in that later round.
+static LpProblem buildCoeffTighteningDuplicateProblem() {
+    LpProblem lp;
+    lp.name = "coeff_tight_dup";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, -100.0, 0.0};
+    lp.col_upper = {2.0, 2.0, 0.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 4;
+    lp.row_lower = {-kInf, -kInf, -kInf, -kInf};
+    lp.row_upper = {8.0, 8.0, 0.0, 100.0};
+    lp.row_names = {"r1", "r2", "r3", "r4"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 7.0}, {0, 1, 1.0},
+        {1, 0, 6.0}, {1, 1, 1.0},
+        {2, 2, 1.0},
+        {3, 0, 1.0}, {3, 1, -1.0},
+    };
+    lp.matrix = SparseMatrix(4, 3, std::move(trips));
+    return lp;
+}
+
+/// Build a >= row case where transformed-side coefficient tightening should fire.
+/// Row1: -7x + y >= -6  -> tightens to -6x + y >= -6
+/// Row2: -6x + y >= -6 (duplicate after tightening)
+/// x is integer in [0,2], y continuous in [0,2].
+static LpProblem buildCoeffTighteningLowerSideProblem() {
+    LpProblem lp;
+    lp.name = "coeff_tight_lower";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {2.0, 2.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-6.0, -6.0};
+    lp.row_upper = {kInf, kInf};
+    lp.row_names = {"r1", "r2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, -7.0}, {0, 1, 1.0},
+        {1, 0, -6.0}, {1, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+/// Build an LP where a doubleton equality can safely eliminate x.
+/// min x + 2y
+/// s.t. x + y = 5
+///      2x + y + z <= 12
+///      -x + 2y <= 4
+///      0 <= x <= 4, 0 <= y <= 6, 0 <= z <= 10
+/// Every non-equality row containing x also contains y, so overlap-only
+/// substitution is fill-safe.
+static LpProblem buildDoubletonAggregationProblem() {
+    LpProblem lp;
+    lp.name = "doubleton_eq";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {1.0, 2.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {4.0, 6.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {5.0, -kInf, -kInf};
+    lp.row_upper = {5.0, 12.0, 4.0};
+    lp.row_names = {"eq", "c1", "c2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 2.0}, {1, 1, 1.0}, {1, 2, 1.0},
+        {2, 0, -1.0}, {2, 1, 2.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
+/// Build a doubleton equality where any elimination would create fill-in.
+/// x + y = 1, x + z <= 2, y + z <= 2.
+/// Overlap-only aggregation must skip this row.
+static LpProblem buildDoubletonNoFillProblem() {
+    LpProblem lp;
+    lp.name = "doubleton_no_fill";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {10.0, 10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {1.0, -kInf, -kInf};
+    lp.row_upper = {1.0, 2.0, 2.0};
+    lp.row_names = {"eq", "r1", "r2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
 // =============================================================================
 // Tests: Fixed variable removal
 // =============================================================================
@@ -654,6 +803,9 @@ TEST_CASE("Presolve: implied equation detection", "[presolve]") {
     auto lp = buildImpliedEquationProblem();
 
     Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    presolver.setOptions(opts);
     (void)presolver.presolve(lp);
 
     CHECK(presolver.stats().implied_equation_changes >= 1);
@@ -725,6 +877,137 @@ TEST_CASE("Presolve: duplicate row removal", "[presolve]") {
 
     CHECK(presolver.stats().duplicate_row_changes >= 1);
     CHECK(reduced.num_rows == 1);
+}
+
+TEST_CASE("Presolve: parallel/antiparallel row removal", "[presolve]") {
+    auto lp = buildParallelRowProblem();
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().parallel_row_changes >= 1);
+    CHECK(reduced.num_rows == 1);
+}
+
+TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[presolve]") {
+    auto lp = buildCoeffTighteningDuplicateProblem();
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_coefficient_tightening = true;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().coeff_tightening_changes >= 1);
+    CHECK(presolver.stats().duplicate_row_changes >= 1);
+    CHECK(reduced.num_rows == 2);
+
+    REQUIRE(reduced.num_cols == 2);
+    REQUIRE(reduced.num_rows == 2);
+
+    bool found_tightened_row = false;
+    for (Index i = 0; i < reduced.num_rows; ++i) {
+        auto rv = reduced.matrix.row(i);
+        Real ax = 0.0;
+        Real ay = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            if (rv.indices[k] == 0) ax = rv.values[k];
+            if (rv.indices[k] == 1) ay = rv.values[k];
+        }
+        if (ay > 0.0) {
+            CHECK_THAT(ax, WithinAbs(6.0, 1e-8));
+            CHECK_THAT(ay, WithinAbs(1.0, 1e-8));
+            found_tightened_row = true;
+            break;
+        }
+    }
+    CHECK(found_tightened_row);
+}
+
+TEST_CASE("Presolve: coefficient tightening handles one-sided >= rows", "[presolve]") {
+    auto lp = buildCoeffTighteningLowerSideProblem();
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_coefficient_tightening = true;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().coeff_tightening_changes >= 1);
+    CHECK(presolver.stats().rows_removed >= 1);
+    CHECK(reduced.num_rows <= 1);
+}
+
+TEST_CASE("Presolve: doubleton equality aggregation preserves LP objective", "[presolve]") {
+    auto lp = buildDoubletonAggregationProblem();
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().doubleton_eq_changes >= 1);
+    CHECK(reduced.num_cols < lp.num_cols);
+
+    bool x_removed = true;
+    Index y_reduced_col = -1;
+    const auto& mapping = presolver.colMapping();
+    for (Index jj = 0; jj < static_cast<Index>(mapping.size()); ++jj) {
+        if (mapping[jj] == 0) x_removed = false;
+        if (mapping[jj] == 1) y_reduced_col = jj;
+    }
+    CHECK(x_removed);
+    if (y_reduced_col >= 0) {
+        CHECK(reduced.col_lower[y_reduced_col] >= 1.0 - 1e-8);
+        CHECK(reduced.col_upper[y_reduced_col] <= 5.0 + 1e-8);
+    }
+
+    MipSolver direct_solver;
+    direct_solver.setVerbose(false);
+    direct_solver.setPresolve(false);
+    direct_solver.load(lp);
+    const auto direct = direct_solver.solve();
+    REQUIRE(direct.status == Status::Optimal);
+
+    MipSolver reduced_solver;
+    reduced_solver.setVerbose(false);
+    reduced_solver.setPresolve(false);
+    reduced_solver.load(reduced);
+    const auto reduced_result = reduced_solver.solve();
+    REQUIRE(reduced_result.status == Status::Optimal);
+
+    auto full = presolver.postsolve(reduced_result.solution);
+    REQUIRE(full.size() == static_cast<size_t>(lp.num_cols));
+
+    Real full_obj = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) full_obj += lp.obj[j] * full[j];
+    CHECK_THAT(full_obj, WithinAbs(direct.objective, 1e-6));
+    CHECK_THAT(full[0] + full[1], WithinAbs(5.0, 1e-6));
+}
+
+TEST_CASE("Presolve: doubleton equality skips fill-creating substitutions", "[presolve]") {
+    auto lp = buildDoubletonNoFillProblem();
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().doubleton_eq_changes == 0);
+    CHECK(reduced.num_cols == lp.num_cols);
 }
 
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {

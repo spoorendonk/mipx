@@ -211,13 +211,13 @@ python3 tests/perf/check_regression.py \
 Generate reproducible HiGHS CLI and mipx wall-clock baselines:
 
 ```bash
-python3 tests/perf/generate_highspy_baselines.py
+python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
 ```
 
 Baselines are stored in `tests/perf/baselines/`.
 Shell wrappers remain available for compatibility:
-`./tests/perf/generate_highspy_baselines.sh` and
+`./tests/perf/generate_highs_baselines.sh` and
 `./tests/perf/generate_mipx_baselines.sh`.
 
 Step-29 reproducibility/tuning tooling:
@@ -257,10 +257,26 @@ python3 tests/perf/run_param_sweep.py \
   --cuts on,off \
   --presolve on,off \
   --solver-arg --quiet
+
+# Presolve consistency/perf matrix (light smoke profile)
+python3 tests/perf/run_presolve_matrix.py \
+  --profile ci-smoke \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_smoke
+
+# Broader internal presolve profile (optimization loops)
+python3 tests/perf/run_presolve_matrix.py \
+  --profile internal \
+  --mipx-binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --out-dir /tmp/mipx_presolve_internal \
+  --mipx-arg=--quiet
 ```
 
-Example comparison against stored HiGHS LP baseline
-(legacy filename prefix `highspy_`):
+Example comparison against stored HiGHS LP baseline:
 
 ```bash
 python3 tests/perf/run_netlib_lp_bench.py \
@@ -271,7 +287,7 @@ python3 tests/perf/run_netlib_lp_bench.py \
   --solver-arg --quiet
 
 python3 tests/perf/check_regression.py \
-  --baseline tests/perf/baselines/highspy_lp_netlib_small.csv \
+  --baseline tests/perf/baselines/highs_lp_netlib_small.csv \
   --candidate /tmp/netlib_candidate.csv \
   --metric time_seconds \
   --max-regression-pct 100000
