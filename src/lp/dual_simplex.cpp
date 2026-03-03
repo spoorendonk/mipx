@@ -755,7 +755,7 @@ LpResult DualSimplexSolver::solve() {
     lu_.setMaxUpdates(lu_update_limit);
     Real lu_ft_drop_tol = options_.lu_ft_drop_tolerance;
     if (lu_ft_drop_tol <= 0.0) {
-        lu_ft_drop_tol = 1e-13;
+        lu_ft_drop_tol = 1e-12;
     }
     lu_.setFtDropTolerance(lu_ft_drop_tol);
 

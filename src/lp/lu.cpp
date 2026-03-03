@@ -109,82 +109,124 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     // For the active submatrix we track: row indices, column indices,
     // values, and counts for Markowitz.
 
-    struct Entry {
-        Index row;
-        Index col;
-        Real val;
-        Index next_in_row;  // linked list in same row
-        Index next_in_col;  // linked list in same col
-        Index prev_in_row;
-        Index prev_in_col;
-        bool alive;
-    };
-
-    std::vector<Entry> entries;
     const Index nnz_hint = std::max<Index>(dim_ * 4, matrix.numNonzeros());
-    entries.reserve(static_cast<std::size_t>(std::max<Index>(0, nnz_hint)));
+    const std::size_t reserve_nnz =
+        static_cast<std::size_t>(std::max<Index>(0, nnz_hint));
+    static thread_local std::vector<Index> tl_e_row;
+    static thread_local std::vector<Index> tl_e_col;
+    static thread_local std::vector<Real> tl_e_val;
+    static thread_local std::vector<Index> tl_e_next_row;
+    static thread_local std::vector<Index> tl_e_next_col;
+    static thread_local std::vector<Index> tl_e_prev_row;
+    static thread_local std::vector<Index> tl_e_prev_col;
+    static thread_local std::vector<uint8_t> tl_e_alive;
+    auto& e_row = tl_e_row;
+    auto& e_col = tl_e_col;
+    auto& e_val = tl_e_val;
+    auto& e_next_row = tl_e_next_row;
+    auto& e_next_col = tl_e_next_col;
+    auto& e_prev_row = tl_e_prev_row;
+    auto& e_prev_col = tl_e_prev_col;
+    auto& e_alive = tl_e_alive;
+    e_row.clear();
+    e_col.clear();
+    e_val.clear();
+    e_next_row.clear();
+    e_next_col.clear();
+    e_prev_row.clear();
+    e_prev_col.clear();
+    e_alive.clear();
+    e_row.reserve(reserve_nnz);
+    e_col.reserve(reserve_nnz);
+    e_val.reserve(reserve_nnz);
+    e_next_row.reserve(reserve_nnz);
+    e_next_col.reserve(reserve_nnz);
+    e_prev_row.reserve(reserve_nnz);
+    e_prev_col.reserve(reserve_nnz);
+    e_alive.reserve(reserve_nnz);
 
     // Head of linked list for each row/col (-1 = empty).
-    std::vector<Index> row_head(dim_, -1);
-    std::vector<Index> col_head(dim_, -1);
-    std::vector<Index> row_count(dim_, 0);
-    std::vector<Index> col_count(dim_, 0);
+    static thread_local std::vector<Index> tl_row_head;
+    static thread_local std::vector<Index> tl_col_head;
+    static thread_local std::vector<Index> tl_row_count;
+    static thread_local std::vector<Index> tl_col_count;
+    static thread_local std::vector<uint8_t> tl_row_active;
+    static thread_local std::vector<uint8_t> tl_col_active;
+    auto& row_head = tl_row_head;
+    auto& col_head = tl_col_head;
+    auto& row_count = tl_row_count;
+    auto& col_count = tl_col_count;
+    auto& row_active = tl_row_active;
+    auto& col_active = tl_col_active;
+    row_head.assign(static_cast<std::size_t>(dim_), -1);
+    col_head.assign(static_cast<std::size_t>(dim_), -1);
+    row_count.assign(static_cast<std::size_t>(dim_), 0);
+    col_count.assign(static_cast<std::size_t>(dim_), 0);
+    row_active.assign(static_cast<std::size_t>(dim_), uint8_t{1});
+    col_active.assign(static_cast<std::size_t>(dim_), uint8_t{1});
 
-    std::vector<Index> active_rows(static_cast<std::size_t>(dim_));
-    std::vector<Index> active_cols(static_cast<std::size_t>(dim_));
-    std::vector<Index> row_pos(static_cast<std::size_t>(dim_));
-    std::vector<Index> col_pos(static_cast<std::size_t>(dim_));
-    std::iota(active_rows.begin(), active_rows.end(), 0);
-    std::iota(active_cols.begin(), active_cols.end(), 0);
-    for (Index i = 0; i < dim_; ++i) {
-        row_pos[static_cast<std::size_t>(i)] = i;
-        col_pos[static_cast<std::size_t>(i)] = i;
-    }
+    // HFactor-style count buckets: intrusive lists keyed by count.
+    static thread_local std::vector<Index> tl_row_bucket_head;
+    static thread_local std::vector<Index> tl_col_bucket_head;
+    static thread_local std::vector<Index> tl_row_bucket_prev;
+    static thread_local std::vector<Index> tl_row_bucket_next;
+    static thread_local std::vector<Index> tl_col_bucket_prev;
+    static thread_local std::vector<Index> tl_col_bucket_next;
+    auto& row_bucket_head = tl_row_bucket_head;
+    auto& col_bucket_head = tl_col_bucket_head;
+    auto& row_bucket_prev = tl_row_bucket_prev;
+    auto& row_bucket_next = tl_row_bucket_next;
+    auto& col_bucket_prev = tl_col_bucket_prev;
+    auto& col_bucket_next = tl_col_bucket_next;
+    row_bucket_head.assign(static_cast<std::size_t>(dim_ + 1), -1);
+    col_bucket_head.assign(static_cast<std::size_t>(dim_ + 1), -1);
+    row_bucket_prev.assign(static_cast<std::size_t>(dim_), -1);
+    row_bucket_next.assign(static_cast<std::size_t>(dim_), -1);
+    col_bucket_prev.assign(static_cast<std::size_t>(dim_), -1);
+    col_bucket_next.assign(static_cast<std::size_t>(dim_), -1);
 
-    // HFactor-style count buckets: quickly target sparse rows/cols for pivot search.
-    std::vector<std::vector<Index>> row_count_bucket(
-        static_cast<std::size_t>(dim_ + 1));
-    std::vector<std::vector<Index>> col_count_bucket(
-        static_cast<std::size_t>(dim_ + 1));
-    std::vector<Index> row_bucket_slot(dim_, -1);
-    std::vector<Index> col_bucket_slot(dim_, -1);
-
-    auto bucketAdd = [](std::vector<std::vector<Index>>& buckets,
-                        std::vector<Index>& slot,
+    auto bucketAdd = [](std::vector<Index>& head,
+                        std::vector<Index>& prev,
+                        std::vector<Index>& next,
                         Index count,
                         Index id) {
         if (count <= 0) return;
-        auto& b = buckets[static_cast<std::size_t>(count)];
-        slot[static_cast<std::size_t>(id)] =
-            static_cast<Index>(b.size());
-        b.push_back(id);
+        const std::size_t cs = static_cast<std::size_t>(count);
+        const std::size_t ids = static_cast<std::size_t>(id);
+        const Index first = head[cs];
+        prev[ids] = -1;
+        next[ids] = first;
+        if (first >= 0) {
+            prev[static_cast<std::size_t>(first)] = id;
+        }
+        head[cs] = id;
     };
 
-    auto bucketRemove = [](std::vector<std::vector<Index>>& buckets,
-                           std::vector<Index>& slot,
+    auto bucketRemove = [](std::vector<Index>& head,
+                           std::vector<Index>& prev,
+                           std::vector<Index>& next,
                            Index count,
                            Index id) {
         if (count <= 0) return;
-        auto& b = buckets[static_cast<std::size_t>(count)];
-        const Index pos = slot[static_cast<std::size_t>(id)];
-        if (pos < 0) return;
-        const Index last = b.back();
-        b[static_cast<std::size_t>(pos)] = last;
-        slot[static_cast<std::size_t>(last)] = pos;
-        b.pop_back();
-        slot[static_cast<std::size_t>(id)] = -1;
+        const std::size_t cs = static_cast<std::size_t>(count);
+        const std::size_t ids = static_cast<std::size_t>(id);
+        const Index p = prev[ids];
+        const Index n = next[ids];
+        if (p < 0 && n < 0 && head[cs] != id) return;
+        if (p >= 0) {
+            next[static_cast<std::size_t>(p)] = n;
+        } else {
+            head[cs] = n;
+        }
+        if (n >= 0) {
+            prev[static_cast<std::size_t>(n)] = p;
+        }
+        prev[ids] = -1;
+        next[ids] = -1;
     };
 
-    auto deactivate = [](std::vector<Index>& active,
-                         std::vector<Index>& pos,
-                         Index idx) {
-        Index p = pos[static_cast<std::size_t>(idx)];
-        if (p < 0) return;
-        Index last = active.back();
-        active[static_cast<std::size_t>(p)] = last;
-        pos[static_cast<std::size_t>(last)] = p;
-        active.pop_back();
-        pos[static_cast<std::size_t>(idx)] = -1;
+    auto deactivate = [](std::vector<uint8_t>& active, Index idx) {
+        active[static_cast<std::size_t>(idx)] = uint8_t{0};
     };
 
     // Populate from matrix columns.
@@ -196,20 +238,26 @@ void SparseLU::factorize(const SparseMatrix& matrix,
             if (std::abs(val) < kZeroTol) continue;
             if (row >= dim_) continue;  // skip rows outside basis dimension
 
-            Index eidx = static_cast<Index>(entries.size());
-            entries.push_back({row, j, val, row_head[row], col_head[j],
-                               -1, -1, true});
+            Index eidx = static_cast<Index>(e_row.size());
+            e_row.push_back(row);
+            e_col.push_back(j);
+            e_val.push_back(val);
+            e_next_row.push_back(row_head[row]);
+            e_next_col.push_back(col_head[j]);
+            e_prev_row.push_back(-1);
+            e_prev_col.push_back(-1);
+            e_alive.push_back(uint8_t{1});
 
             // Update row linked list.
             if (row_head[row] >= 0) {
-                entries[row_head[row]].prev_in_row = eidx;
+                e_prev_row[static_cast<std::size_t>(row_head[row])] = eidx;
             }
             row_head[row] = eidx;
             ++row_count[row];
 
             // Update col linked list.
             if (col_head[j] >= 0) {
-                entries[col_head[j]].prev_in_col = eidx;
+                e_prev_col[static_cast<std::size_t>(col_head[j])] = eidx;
             }
             col_head[j] = eidx;
             ++col_count[j];
@@ -217,10 +265,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     }
 
     for (Index i = 0; i < dim_; ++i) {
-        bucketAdd(row_count_bucket, row_bucket_slot, row_count[i], i);
+        bucketAdd(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[i], i);
     }
     for (Index j = 0; j < dim_; ++j) {
-        bucketAdd(col_count_bucket, col_bucket_slot, col_count[j], j);
+        bucketAdd(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[j], j);
     }
 
     // Permutation arrays.
@@ -249,91 +297,110 @@ void SparseLU::factorize(const SparseMatrix& matrix,
 
     // Helper: remove entry from row and col lists.
     auto removeEntry = [&](Index eidx) {
-        Entry& e = entries[eidx];
-        e.alive = false;
+        if (e_alive[static_cast<std::size_t>(eidx)] == 0) return;
+        e_alive[static_cast<std::size_t>(eidx)] = uint8_t{0};
+        const Index row = e_row[static_cast<std::size_t>(eidx)];
+        const Index col = e_col[static_cast<std::size_t>(eidx)];
+        const Index prev_in_row = e_prev_row[static_cast<std::size_t>(eidx)];
+        const Index next_in_row = e_next_row[static_cast<std::size_t>(eidx)];
+        const Index prev_in_col = e_prev_col[static_cast<std::size_t>(eidx)];
+        const Index next_in_col = e_next_col[static_cast<std::size_t>(eidx)];
 
         // Remove from row list.
-        if (e.prev_in_row >= 0) {
-            entries[e.prev_in_row].next_in_row = e.next_in_row;
+        if (prev_in_row >= 0) {
+            e_next_row[static_cast<std::size_t>(prev_in_row)] = next_in_row;
         } else {
-            row_head[e.row] = e.next_in_row;
+            row_head[row] = next_in_row;
         }
-        if (e.next_in_row >= 0) {
-            entries[e.next_in_row].prev_in_row = e.prev_in_row;
+        if (next_in_row >= 0) {
+            e_prev_row[static_cast<std::size_t>(next_in_row)] = prev_in_row;
         }
-        if (row_pos[static_cast<std::size_t>(e.row)] >= 0) {
-            const Index old_count = row_count[e.row];
-            bucketRemove(row_count_bucket, row_bucket_slot, old_count, e.row);
-            --row_count[e.row];
-            bucketAdd(row_count_bucket, row_bucket_slot, row_count[e.row], e.row);
+        if (row_active[static_cast<std::size_t>(row)] != 0) {
+            const Index old_count = row_count[row];
+            bucketRemove(row_bucket_head, row_bucket_prev, row_bucket_next, old_count, row);
+            --row_count[row];
+            bucketAdd(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[row], row);
         } else {
-            --row_count[e.row];
+            --row_count[row];
         }
 
         // Remove from col list.
-        if (e.prev_in_col >= 0) {
-            entries[e.prev_in_col].next_in_col = e.next_in_col;
+        if (prev_in_col >= 0) {
+            e_next_col[static_cast<std::size_t>(prev_in_col)] = next_in_col;
         } else {
-            col_head[e.col] = e.next_in_col;
+            col_head[col] = next_in_col;
         }
-        if (e.next_in_col >= 0) {
-            entries[e.next_in_col].prev_in_col = e.prev_in_col;
+        if (next_in_col >= 0) {
+            e_prev_col[static_cast<std::size_t>(next_in_col)] = prev_in_col;
         }
-        if (col_pos[static_cast<std::size_t>(e.col)] >= 0) {
-            const Index old_count = col_count[e.col];
-            bucketRemove(col_count_bucket, col_bucket_slot, old_count, e.col);
-            --col_count[e.col];
-            bucketAdd(col_count_bucket, col_bucket_slot, col_count[e.col], e.col);
+        if (col_active[static_cast<std::size_t>(col)] != 0) {
+            const Index old_count = col_count[col];
+            bucketRemove(col_bucket_head, col_bucket_prev, col_bucket_next, old_count, col);
+            --col_count[col];
+            bucketAdd(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[col], col);
         } else {
-            --col_count[e.col];
+            --col_count[col];
         }
     };
 
     // Helper: add entry to row and col lists.
     auto addEntry = [&](Index row, Index col, Real val) -> Index {
-        Index eidx = static_cast<Index>(entries.size());
-        entries.push_back({row, col, val, row_head[row], col_head[col],
-                           -1, -1, true});
+        Index eidx = static_cast<Index>(e_row.size());
+        e_row.push_back(row);
+        e_col.push_back(col);
+        e_val.push_back(val);
+        e_next_row.push_back(row_head[row]);
+        e_next_col.push_back(col_head[col]);
+        e_prev_row.push_back(-1);
+        e_prev_col.push_back(-1);
+        e_alive.push_back(uint8_t{1});
         if (row_head[row] >= 0) {
-            entries[row_head[row]].prev_in_row = eidx;
+            e_prev_row[static_cast<std::size_t>(row_head[row])] = eidx;
         }
         row_head[row] = eidx;
-        if (row_pos[static_cast<std::size_t>(row)] >= 0) {
+        if (row_active[static_cast<std::size_t>(row)] != 0) {
             const Index old_count = row_count[row];
-            bucketRemove(row_count_bucket, row_bucket_slot, old_count, row);
+            bucketRemove(row_bucket_head, row_bucket_prev, row_bucket_next, old_count, row);
             ++row_count[row];
-            bucketAdd(row_count_bucket, row_bucket_slot, row_count[row], row);
+            bucketAdd(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[row], row);
         } else {
             ++row_count[row];
         }
 
         if (col_head[col] >= 0) {
-            entries[col_head[col]].prev_in_col = eidx;
+            e_prev_col[static_cast<std::size_t>(col_head[col])] = eidx;
         }
         col_head[col] = eidx;
-        if (col_pos[static_cast<std::size_t>(col)] >= 0) {
+        if (col_active[static_cast<std::size_t>(col)] != 0) {
             const Index old_count = col_count[col];
-            bucketRemove(col_count_bucket, col_bucket_slot, old_count, col);
+            bucketRemove(col_bucket_head, col_bucket_prev, col_bucket_next, old_count, col);
             ++col_count[col];
-            bucketAdd(col_count_bucket, col_bucket_slot, col_count[col], col);
+            bucketAdd(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[col], col);
         } else {
             ++col_count[col];
         }
         return eidx;
     };
 
-    // Work vector for gathering a column during elimination.
-    std::vector<Real> work(dim_, 0.0);
-    std::vector<Index> work_indices;
-    work_indices.reserve(dim_);
-
-    // Reusable row update scratch to avoid per-row heap allocations.
-    std::vector<Index> row_entry_for_col(dim_, -1);
-    std::vector<Index> row_touched_cols;
-    row_touched_cols.reserve(dim_);
-
-    std::vector<std::pair<Index, Real>> rows_to_update;
-    rows_to_update.reserve(dim_);
+    // Work vectors reused across reinversions to reduce allocator traffic.
+    static thread_local std::vector<Real> tl_work;
+    static thread_local std::vector<Index> tl_work_indices;
+    static thread_local std::vector<Index> tl_row_entry_for_col;
+    static thread_local std::vector<Index> tl_row_touched_cols;
+    static thread_local std::vector<std::pair<Index, Real>> tl_rows_to_update;
+    auto& work = tl_work;
+    auto& work_indices = tl_work_indices;
+    auto& row_entry_for_col = tl_row_entry_for_col;
+    auto& row_touched_cols = tl_row_touched_cols;
+    auto& rows_to_update = tl_rows_to_update;
+    work.assign(static_cast<std::size_t>(dim_), 0.0);
+    work_indices.clear();
+    work_indices.reserve(static_cast<std::size_t>(dim_));
+    row_entry_for_col.assign(static_cast<std::size_t>(dim_), -1);
+    row_touched_cols.clear();
+    row_touched_cols.reserve(static_cast<std::size_t>(dim_));
+    rows_to_update.clear();
+    rows_to_update.reserve(static_cast<std::size_t>(dim_));
 
     for (Index step = 0; step < dim_; ++step) {
         // ---- Markowitz pivot selection ----
@@ -345,14 +412,15 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         Real best_abs = 0.0;
 
         // First check singleton columns from count buckets (Markowitz = 0).
-        for (Index j : col_count_bucket[1]) {
-            if (col_pos[static_cast<std::size_t>(j)] < 0 || col_count[j] != 1) continue;
+        for (Index j = col_bucket_head[1]; j >= 0;
+             j = col_bucket_next[static_cast<std::size_t>(j)]) {
+            if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != 1) continue;
             const Index eidx = col_head[j];
-            if (eidx < 0 || !entries[eidx].alive) continue;
-            const Real absval = std::abs(entries[eidx].val);
+            if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
             if (absval <= kZeroTol) continue;
             const long long m =
-                static_cast<long long>(row_count[entries[eidx].row] - 1) *
+                static_cast<long long>(row_count[e_row[static_cast<std::size_t>(eidx)]] - 1) *
                 static_cast<long long>(col_count[j] - 1);
             if (m < best_markowitz || (m == best_markowitz && absval > best_abs)) {
                 best_markowitz = m;
@@ -363,11 +431,12 @@ void SparseLU::factorize(const SparseMatrix& matrix,
 
         // Check singleton rows from count buckets.
         if (best_markowitz > 0) {
-            for (Index i : row_count_bucket[1]) {
-                if (row_pos[static_cast<std::size_t>(i)] < 0 || row_count[i] != 1) continue;
+            for (Index i = row_bucket_head[1]; i >= 0;
+                 i = row_bucket_next[static_cast<std::size_t>(i)]) {
+                if (row_active[static_cast<std::size_t>(i)] == 0 || row_count[i] != 1) continue;
                 const Index eidx = row_head[i];
-                if (eidx < 0 || !entries[eidx].alive) continue;
-                const Real absval = std::abs(entries[eidx].val);
+                if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
                 if (absval > kZeroTol) {
                     best_markowitz = 0;
                     best_entry = eidx;
@@ -381,30 +450,30 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         if (best_markowitz > 0) {
             const bool use_fast_large_pivot = dim_ >= kFastPivotMinDim;
             for (Index nnz = 2; nnz <= dim_; ++nnz) {
-                const auto& bucket = col_count_bucket[static_cast<std::size_t>(nnz)];
-                if (bucket.empty()) continue;
+                if (col_bucket_head[static_cast<std::size_t>(nnz)] < 0) continue;
 
                 const long long col_factor = static_cast<long long>(nnz - 1);
                 // If even the best possible row-factor (=1) is already worse, stop.
                 if (col_factor > best_markowitz) break;
 
-                for (Index j : bucket) {
-                    if (col_pos[static_cast<std::size_t>(j)] < 0 || col_count[j] != nnz) continue;
+                for (Index j = col_bucket_head[static_cast<std::size_t>(nnz)];
+                     j >= 0; j = col_bucket_next[static_cast<std::size_t>(j)]) {
+                    if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != nnz) continue;
                     if (use_fast_large_pivot) {
                         // Large-dimension fast path: evaluate one strongest candidate per column.
                         Index best_col_entry = -1;
                         Real col_max = 0.0;
                         for (Index eidx = col_head[j]; eidx >= 0;
-                             eidx = entries[eidx].next_in_col) {
-                            if (!entries[eidx].alive) continue;
-                            const Real absval = std::abs(entries[eidx].val);
+                             eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
+                            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                            const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
                             if (absval > col_max) {
                                 col_max = absval;
                                 best_col_entry = eidx;
                             }
                         }
                         if (best_col_entry >= 0 && col_max > kZeroTol) {
-                            const Index ri = entries[best_col_entry].row;
+                            const Index ri = e_row[static_cast<std::size_t>(best_col_entry)];
                             const long long m =
                                 static_cast<long long>(row_count[ri] - 1) * col_factor;
                             if (m < best_markowitz ||
@@ -420,19 +489,19 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                     // Two-pass thresholded Markowitz scan for this column.
                     Real col_max = 0.0;
                     for (Index eidx = col_head[j]; eidx >= 0;
-                         eidx = entries[eidx].next_in_col) {
-                        if (entries[eidx].alive) {
-                            col_max = std::max(col_max, std::abs(entries[eidx].val));
+                         eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
+                        if (e_alive[static_cast<std::size_t>(eidx)] != 0) {
+                            col_max = std::max(col_max, std::abs(e_val[static_cast<std::size_t>(eidx)]));
                         }
                     }
                     const Real threshold = kPivotTol * col_max;
                     for (Index eidx = col_head[j]; eidx >= 0;
-                         eidx = entries[eidx].next_in_col) {
-                        if (!entries[eidx].alive) continue;
-                        const Real absval = std::abs(entries[eidx].val);
+                         eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
+                        if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                        const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
                         if (absval < threshold) continue;
 
-                        const Index ri = entries[eidx].row;
+                        const Index ri = e_row[static_cast<std::size_t>(eidx)];
                         const long long row_factor = static_cast<long long>(row_count[ri] - 1);
                         if (row_factor > (best_markowitz / col_factor)) continue;
                         const long long m = row_factor * col_factor;
@@ -454,9 +523,9 @@ void SparseLU::factorize(const SparseMatrix& matrix,
             throw std::runtime_error("SparseLU::factorize: singular basis matrix");
         }
 
-        Index pivot_row = entries[best_entry].row;
-        Index pivot_col = entries[best_entry].col;
-        Real pivot_val = entries[best_entry].val;
+        Index pivot_row = e_row[static_cast<std::size_t>(best_entry)];
+        Index pivot_col = e_col[static_cast<std::size_t>(best_entry)];
+        Real pivot_val = e_val[static_cast<std::size_t>(best_entry)];
 
         // Record permutations.
         row_perm_[step] = pivot_row;
@@ -467,13 +536,14 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // ---- Extract pivot row into U ----
         // Gather all entries in the pivot row.
         for (Index eidx = row_head[pivot_row]; eidx >= 0;
-             eidx = entries[eidx].next_in_row) {
-            if (!entries[eidx].alive) continue;
-            Index c = entries[eidx].col;
+             eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            Index c = e_col[static_cast<std::size_t>(eidx)];
             if (c != pivot_col) {
                 u_col_.push_back(c);  // will remap to elimination order later
-                u_val_.push_back(entries[eidx].val);
-                max_u_entry_ = std::max(max_u_entry_, std::abs(entries[eidx].val));
+                const Real v = e_val[static_cast<std::size_t>(eidx)];
+                u_val_.push_back(v);
+                max_u_entry_ = std::max(max_u_entry_, std::abs(v));
             }
         }
         u_diag_[step] = pivot_val;
@@ -488,11 +558,11 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // Gather pivot row values into work vector.
         work_indices.clear();
         for (Index eidx = row_head[pivot_row]; eidx >= 0;
-             eidx = entries[eidx].next_in_row) {
-            if (!entries[eidx].alive) continue;
-            Index c = entries[eidx].col;
+             eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            Index c = e_col[static_cast<std::size_t>(eidx)];
             if (c != pivot_col) {
-                work[c] = entries[eidx].val;
+                work[c] = e_val[static_cast<std::size_t>(eidx)];
                 work_indices.push_back(c);
             }
         }
@@ -500,11 +570,12 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // Collect rows to update (from pivot column, excluding pivot row).
         rows_to_update.clear();
         for (Index eidx = col_head[pivot_col]; eidx >= 0;
-             eidx = entries[eidx].next_in_col) {
-            if (!entries[eidx].alive) continue;
-            if (entries[eidx].row == pivot_row) continue;
-            rows_to_update.emplace_back(entries[eidx].row,
-                                        entries[eidx].val / pivot_val);
+             eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            const Index row = e_row[static_cast<std::size_t>(eidx)];
+            if (row == pivot_row) continue;
+            rows_to_update.emplace_back(row,
+                                        e_val[static_cast<std::size_t>(eidx)] / pivot_val);
         }
 
         // Store L eta vector.
@@ -520,9 +591,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
             // Build a temporary col->entry index map for this row, reused across rows.
             row_touched_cols.clear();
             for (Index eidx = row_head[ri]; eidx >= 0;
-                 eidx = entries[eidx].next_in_row) {
-                if (!entries[eidx].alive || entries[eidx].col == pivot_col) continue;
-                Index c = entries[eidx].col;
+                 eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
+                if (e_alive[static_cast<std::size_t>(eidx)] == 0 ||
+                    e_col[static_cast<std::size_t>(eidx)] == pivot_col) continue;
+                Index c = e_col[static_cast<std::size_t>(eidx)];
                 row_entry_for_col[c] = eidx;
                 row_touched_cols.push_back(c);
             }
@@ -531,12 +603,12 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                 Real update_val = mult * work[c];
                 Index row_entry = row_entry_for_col[c];
                 if (row_entry >= 0) {
-                    Real new_val = entries[row_entry].val - update_val;
+                    Real new_val = e_val[static_cast<std::size_t>(row_entry)] - update_val;
                     if (std::abs(new_val) < kZeroTol) {
                         // Remove entry.
                         removeEntry(row_entry);
                     } else {
-                        entries[row_entry].val = new_val;
+                        e_val[static_cast<std::size_t>(row_entry)] = new_val;
                     }
                 } else {
                     Real new_val = -update_val;
@@ -556,8 +628,8 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         {
             Index eidx = row_head[pivot_row];
             while (eidx >= 0) {
-                Index next = entries[eidx].next_in_row;
-                if (entries[eidx].alive) {
+                Index next = e_next_row[static_cast<std::size_t>(eidx)];
+                if (e_alive[static_cast<std::size_t>(eidx)] != 0) {
                     removeEntry(eidx);
                 }
                 eidx = next;
@@ -567,8 +639,8 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         {
             Index eidx = col_head[pivot_col];
             while (eidx >= 0) {
-                Index next = entries[eidx].next_in_col;
-                if (entries[eidx].alive) {
+                Index next = e_next_col[static_cast<std::size_t>(eidx)];
+                if (e_alive[static_cast<std::size_t>(eidx)] != 0) {
                     removeEntry(eidx);
                 }
                 eidx = next;
@@ -576,15 +648,15 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         }
 
         if (row_count[pivot_row] > 0) {
-            bucketRemove(row_count_bucket, row_bucket_slot,
+            bucketRemove(row_bucket_head, row_bucket_prev, row_bucket_next,
                          row_count[pivot_row], pivot_row);
         }
         if (col_count[pivot_col] > 0) {
-            bucketRemove(col_count_bucket, col_bucket_slot,
+            bucketRemove(col_bucket_head, col_bucket_prev, col_bucket_next,
                          col_count[pivot_col], pivot_col);
         }
-        deactivate(active_rows, row_pos, pivot_row);
-        deactivate(active_cols, col_pos, pivot_col);
+        deactivate(row_active, pivot_row);
+        deactivate(col_active, pivot_col);
 
         // Clean up work vector.
         for (Index c : work_indices) {
