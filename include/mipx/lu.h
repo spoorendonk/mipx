@@ -104,6 +104,7 @@ private:
     std::vector<Index> u_col_;
     std::vector<Real> u_val_;
     std::vector<Real> u_diag_;  // u_diag_[k] = U(k,k)
+    std::vector<Real> u_diag_inv_;
 
     // Forrest-Tomlin update etas.
     // Each update stores an eta vector and the position of the replaced column.
@@ -112,6 +113,7 @@ private:
     std::vector<Real> ft_value_;
     std::vector<Index> ft_pivot_pos_;  // column position in elimination order
     std::vector<Real> ft_pivot_val_;   // new diagonal value
+    std::vector<Real> ft_pivot_inv_;
     std::vector<uint8_t> ft_is_dense_;
     std::vector<Index> ft_dense_offset_;
     std::vector<Real> ft_dense_value_;
@@ -122,8 +124,10 @@ private:
     // Reusable dense scratch buffers for hot-path solves/updates.
     mutable std::vector<Real> solve_work_;
     std::vector<Real> update_work_;
+    std::vector<Index> update_touched_;
     mutable std::vector<Index> sparse_steps_;
-    mutable std::vector<uint8_t> sparse_mark_;
+    mutable std::vector<uint32_t> sparse_epoch_;
+    mutable uint32_t sparse_epoch_id_ = 1;
 
     Index max_updates_ = 500;
     static constexpr Real kPivotTol = 0.1;
@@ -132,7 +136,7 @@ private:
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
     static constexpr Index kFtDenseMinDim = 512;
-    static constexpr Real kFtDenseThreshold = 0.75;
+    static constexpr Real kFtDenseThreshold = 0.85;
 
     Real max_u_entry_ = 0.0;  // track growth
     Real ft_drop_tol_ = 1e-13;

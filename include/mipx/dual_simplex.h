@@ -40,11 +40,11 @@ struct DualSimplexOptions {
     Int adaptive_refactor_stall_pivots = 32;
     Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
     // Extra guardrails for primal-feasible/dual-infeasible pivot phase.
-    Int primal_feasible_adaptive_refactor_stall_pivots = 32;
-    Int primal_feasible_adaptive_refactor_min_updates = 24;
+    Int primal_feasible_adaptive_refactor_stall_pivots = 16;
+    Int primal_feasible_adaptive_refactor_min_updates = 8;
     // Non-positive disables the dual-progress stall gate.
-    Int primal_feasible_dual_progress_window = 0;
-    Int primal_feasible_refactor_cooldown = 0;
+    Int primal_feasible_dual_progress_window = 8;
+    Int primal_feasible_refactor_cooldown = 16;
     Real primal_feasible_dual_progress_improve_rel_tol = 1e-3;
 
     // Runtime SIMD controls for dense vector kernels.

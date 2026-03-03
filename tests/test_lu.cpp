@@ -342,6 +342,83 @@ TEST_CASE("SparseLU: multiple updates", "[lu]") {
     }
 }
 
+TEST_CASE("SparseLU: sparse entering-column updates stay consistent across repeated calls",
+          "[lu][regression]") {
+    // Initial basis columns (0..3) form a nonsingular, coupled matrix so that
+    // B^{-1} * a_q can become dense even when a_q is sparse.
+    //
+    // Extra columns 4..6 are singleton (very sparse) entering columns.
+    std::vector<Triplet> trips = {
+        // col 0: [2, 1, 0, 0]
+        {0, 0, 2.0}, {1, 0, 1.0},
+        // col 1: [0, 3, 1, 0]
+        {1, 1, 3.0}, {2, 1, 1.0},
+        // col 2: [1, 0, 2, 1]
+        {0, 2, 1.0}, {2, 2, 2.0}, {3, 2, 1.0},
+        // col 3: [0, 1, 0, 2]
+        {1, 3, 1.0}, {3, 3, 2.0},
+        // col 4: e0
+        {0, 4, 1.0},
+        // col 5: e3
+        {3, 5, 1.0},
+        // col 6: e2
+        {2, 6, 1.0},
+    };
+    SparseMatrix A(4, 7, trips);
+
+    SparseLU lu;
+    lu.setMaxUpdates(100);
+    std::vector<Index> basis = {0, 1, 2, 3};
+    lu.factorize(A, basis);
+
+    auto verify_round_trip = [&](const std::vector<Index>& cur_basis) {
+        std::vector<Real> b = {1.0, -2.0, 0.5, 3.0};
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, cur_basis, x);
+        for (Index i = 0; i < 4; ++i) {
+            CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-9));
+        }
+
+        std::vector<Real> c = {-1.0, 2.5, 1.25, -0.75};
+        std::vector<Real> y = c;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, cur_basis, y);
+        for (Index i = 0; i < 4; ++i) {
+            CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-9));
+        }
+    };
+
+    verify_round_trip(basis);
+
+    // Repeated updates with sparse entering columns.
+    // This is a regression guard for stale dense-update buffer state.
+    {
+        auto c = A.col(4);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(2, idx, val);
+        basis[2] = 4;
+        verify_round_trip(basis);
+    }
+    {
+        auto c = A.col(5);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(0, idx, val);
+        basis[0] = 5;
+        verify_round_trip(basis);
+    }
+    {
+        auto c = A.col(6);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(1, idx, val);
+        basis[1] = 6;
+        verify_round_trip(basis);
+    }
+}
+
 TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     // Simple 2x2 identity.
     std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0},
