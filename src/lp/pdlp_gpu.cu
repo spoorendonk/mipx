@@ -135,7 +135,9 @@ public:
         cu_ok(cudaMalloc(reinterpret_cast<void**>(&d_movement_), sizeof(double)));
         cu_ok(cudaMalloc(reinterpret_cast<void**>(&d_interaction_), sizeof(double)));
 
-        if (!d_metrics_ || !d_movement_ || !d_interaction_) return false;
+        cu_ok(cudaMalloc(reinterpret_cast<void**>(&d_fp_result_), sizeof(double) * 2));
+
+        if (!d_metrics_ || !d_movement_ || !d_interaction_ || !d_fp_result_) return false;
 
         ok_ = true;
         return true;
@@ -144,20 +146,21 @@ public:
     bool initialized() const { return ok_; }
 
     // -----------------------------------------------------------------------
-    // Reflected primal-dual iteration
+    // Halpern PDHG iteration
     // -----------------------------------------------------------------------
 
-    void primalReflectedStep(double step, double primal_weight) {
+    void primalHalpernStep(double step, double primal_weight, double lambda) {
         double step_over_pw = step / primal_weight;
-        gpu::launchPrimalReflectedStep(d_z_, d_z_prev_, d_z_reflected_,
-                                       d_c_, d_at_y_, d_tau_,
-                                       step_over_pw, n_, stream_);
+        gpu::launchPrimalHalpernStep(d_z_, d_z_prev_, d_z_refl_,
+                                     d_z0_, d_c_, d_at_y_, d_tau_,
+                                     step_over_pw, lambda, n_, stream_);
     }
 
-    void dualStepReflected(double step, double primal_weight) {
+    void dualHalpernStep(double step, double primal_weight, double lambda) {
         double step_pw = step * primal_weight;
-        gpu::launchDualStepReflected(d_y_, d_az_bar_, d_b_, d_sigma_,
-                                     step_pw, m_, stream_);
+        gpu::launchDualHalpernStep(d_y_, d_y_prev_, d_y0_,
+                                   d_az_refl_, d_b_, d_sigma_,
+                                   step_pw, lambda, m_, stream_);
     }
 
     // -----------------------------------------------------------------------
@@ -175,9 +178,9 @@ public:
     }
 
     bool computeAzReflected() {
-        // A * z_reflected: input=z_reflected, output=az_bar (reused)
-        cusparseDnVecSetValues(vec_x_a_, d_z_reflected_);
-        cusparseDnVecSetValues(vec_y_a_, d_az_bar_);
+        // A * z_refl: input=z_refl, output=az_refl
+        cusparseDnVecSetValues(vec_x_a_, d_z_refl_);
+        cusparseDnVecSetValues(vec_y_a_, d_az_refl_);
         const double alpha = 1.0, beta = 0.0;
         return cs_ok(cusparseSpMV(handle_, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                   &alpha, mat_a_, vec_x_a_, &beta, vec_y_a_,
@@ -216,10 +219,6 @@ public:
     // Adaptive step size
     // -----------------------------------------------------------------------
 
-    void saveYPrev() {
-        gpu::launchCopyVector(d_y_prev_, d_y_, m_, stream_);
-    }
-
     void saveATyPrev() {
         gpu::launchCopyVector(d_at_y_prev_, d_at_y_, n_, stream_);
     }
@@ -241,33 +240,24 @@ public:
     }
 
     // -----------------------------------------------------------------------
-    // Weighted averages for KKT restart
+    // Halpern restart / fixed-point error
     // -----------------------------------------------------------------------
 
-    void accumulateAverage(double weight) {
-        gpu::launchAccumulateAverage(d_z_sum_, d_z_, weight, n_, stream_);
-        gpu::launchAccumulateAverage(d_y_sum_, d_y_, weight, m_, stream_);
+    void restartAnchor() {
+        // z0 = z, y0 = y
+        gpu::launchCopyVector(d_z0_, d_z_, n_, stream_);
+        gpu::launchCopyVector(d_y0_, d_y_, m_, stream_);
     }
 
-    void computeAverage(double total_weight) {
-        double inv = 1.0 / total_weight;
-        gpu::launchComputeAverage(d_z_avg_, d_z_sum_, inv, n_, stream_);
-        gpu::launchComputeAverage(d_y_avg_, d_y_sum_, inv, m_, stream_);
-    }
-
-    void resetAverages() {
-        gpu::launchZeroVector(d_z_sum_, n_, stream_);
-        gpu::launchZeroVector(d_y_sum_, m_, stream_);
-    }
-
-    void restartFromCurrent() {
-        gpu::launchCopyVector(d_z_bar_, d_z_, n_, stream_);
-    }
-
-    void restartFromAverage() {
-        gpu::launchCopyVector(d_z_, d_z_avg_, n_, stream_);
-        gpu::launchCopyVector(d_y_, d_y_avg_, m_, stream_);
-        gpu::launchCopyVector(d_z_bar_, d_z_avg_, n_, stream_);
+    bool computeFixedPointError(double& primal_dist_sq, double& dual_dist_sq) {
+        gpu::launchFixedPointError(d_fp_result_, d_z_, d_z0_,
+                                    d_y_, d_y0_, n_, m_, stream_);
+        cu_ok(cudaStreamSynchronize(stream_));
+        double results[2];
+        if (!deviceDownload(results, d_fp_result_, 2)) return false;
+        primal_dist_sq = results[0];
+        dual_dist_sq = results[1];
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -283,31 +273,17 @@ public:
         return deviceDownload(&metrics, d_metrics_, 1);
     }
 
-    bool computeConvergenceOnAverage(double inv_b, double inv_c,
-                                     double obj_offset,
-                                     gpu::ConvergenceMetrics& metrics) {
-        // A*z_avg → d_az_ (reuse)
-        if (!computeAx(d_z_avg_, d_az_)) return false;
-        // A^T*y_avg → d_at_y_prev_ (scratch)
-        if (!computeATx(d_y_avg_, d_at_y_prev_)) return false;
-
-        gpu::launchConvergence(d_metrics_, d_az_, d_b_,
-                               d_z_avg_, d_at_y_prev_, d_c_, d_y_avg_,
-                               inv_b, inv_c, obj_offset, m_, n_, stream_);
-        cu_ok(cudaStreamSynchronize(stream_));
-        return deviceDownload(&metrics, d_metrics_, 1);
-    }
 
     // -----------------------------------------------------------------------
     // Solution download
     // -----------------------------------------------------------------------
 
     bool downloadSolution(std::span<Real> z_out, std::span<Real> y_out) {
-        gpu::launchUnscale(d_z_bar_, d_z_, d_col_scale_, n_, stream_);
-        gpu::launchUnscale(d_az_bar_, d_y_, d_row_scale_, m_, stream_);
+        gpu::launchUnscale(d_z_refl_, d_z_, d_col_scale_, n_, stream_);
+        gpu::launchUnscale(d_az_refl_, d_y_, d_row_scale_, m_, stream_);
         cu_ok(cudaStreamSynchronize(stream_));
-        if (!deviceDownload(z_out.data(), d_z_bar_, n_)) return false;
-        if (!deviceDownload(y_out.data(), d_az_bar_, m_)) return false;
+        if (!deviceDownload(z_out.data(), d_z_refl_, n_)) return false;
+        if (!deviceDownload(y_out.data(), d_az_refl_, m_)) return false;
         return true;
     }
 
@@ -338,6 +314,7 @@ private:
         if (d_metrics_) cudaFree(d_metrics_);
         if (d_movement_) cudaFree(d_movement_);
         if (d_interaction_) cudaFree(d_interaction_);
+        if (d_fp_result_) cudaFree(d_fp_result_);
         if (h_scalars_) cudaFreeHost(h_scalars_);
 
         if (handle_) cusparseDestroy(handle_);
@@ -429,12 +406,12 @@ private:
     // Single arena allocation for all iteration vectors.
     // Layout: [primal-sized vectors (n)] [dual-sized vectors (m)] [constants]
     bool allocateArena() {
-        // Primal-sized: z, z_prev, z_bar, z_reflected, at_y, at_y_prev,
-        //               c, tau, col_scale, z_sum, z_avg = 11 vectors of size n
-        // Dual-sized:   y, y_prev, az_bar, az, b, sigma, row_scale,
-        //               y_sum, y_avg = 9 vectors of size m
-        int num_primal = 11;
-        int num_dual = 9;
+        // Primal-sized: z, z_prev, z_refl, z0, at_y, at_y_prev,
+        //               c, tau, col_scale = 9 vectors of size n
+        // Dual-sized:   y, y_prev, az_refl, az, y0, b, sigma,
+        //               row_scale = 8 vectors of size m
+        int num_primal = 9;
+        int num_dual = 8;
         size_t primal_bytes = sizeof(double) * static_cast<size_t>(n_) * num_primal;
         size_t dual_bytes = sizeof(double) * static_cast<size_t>(m_) * num_dual;
         arena_bytes_ = primal_bytes + dual_bytes;
@@ -448,26 +425,23 @@ private:
         // Primal-sized (length n each)
         d_z_ = base + off; off += n_;
         d_z_prev_ = base + off; off += n_;
-        d_z_bar_ = base + off; off += n_;
-        d_z_reflected_ = base + off; off += n_;
+        d_z_refl_ = base + off; off += n_;
+        d_z0_ = base + off; off += n_;
         d_at_y_ = base + off; off += n_;
         d_at_y_prev_ = base + off; off += n_;
         d_c_ = base + off; off += n_;
         d_tau_ = base + off; off += n_;
         d_col_scale_ = base + off; off += n_;
-        d_z_sum_ = base + off; off += n_;
-        d_z_avg_ = base + off; off += n_;
 
         // Dual-sized (length m each)
         d_y_ = base + off; off += m_;
         d_y_prev_ = base + off; off += m_;
-        d_az_bar_ = base + off; off += m_;
+        d_az_refl_ = base + off; off += m_;
         d_az_ = base + off; off += m_;
+        d_y0_ = base + off; off += m_;
         d_b_ = base + off; off += m_;
         d_sigma_ = base + off; off += m_;
         d_row_scale_ = base + off; off += m_;
-        d_y_sum_ = base + off; off += m_;
-        d_y_avg_ = base + off; off += m_;
 
         return true;
     }
@@ -512,31 +486,29 @@ private:
     // Pointers into arena — primal-sized (length n)
     double* d_z_ = nullptr;
     double* d_z_prev_ = nullptr;
-    double* d_z_bar_ = nullptr;
-    double* d_z_reflected_ = nullptr;
+    double* d_z_refl_ = nullptr;
+    double* d_z0_ = nullptr;
     double* d_at_y_ = nullptr;
     double* d_at_y_prev_ = nullptr;
     double* d_c_ = nullptr;
     double* d_tau_ = nullptr;
     double* d_col_scale_ = nullptr;
-    double* d_z_sum_ = nullptr;
-    double* d_z_avg_ = nullptr;
 
     // Pointers into arena — dual-sized (length m)
     double* d_y_ = nullptr;
     double* d_y_prev_ = nullptr;
-    double* d_az_bar_ = nullptr;
+    double* d_az_refl_ = nullptr;
     double* d_az_ = nullptr;
+    double* d_y0_ = nullptr;
     double* d_b_ = nullptr;
     double* d_sigma_ = nullptr;
     double* d_row_scale_ = nullptr;
-    double* d_y_sum_ = nullptr;
-    double* d_y_avg_ = nullptr;
 
     // Device scalars (separate allocations)
     gpu::ConvergenceMetrics* d_metrics_ = nullptr;
     double* d_movement_ = nullptr;
     double* d_interaction_ = nullptr;
+    double* d_fp_result_ = nullptr;
 
     // Pinned host memory for scalar downloads
     double* h_scalars_ = nullptr;
@@ -590,13 +562,17 @@ bool solveStandardFormGpu(
         if (nb > 1e-12 && nc > 1e-12) primal_weight = std::clamp(nc / nb, 1e-3, 1e3);
     }
 
-    // KKT restart state
-    Real restart_score = std::numeric_limits<Real>::infinity();
-    Real candidate_score = std::numeric_limits<Real>::infinity();
+    // Halpern PDHG state
+    Int inner_count = 0;
+
+    // Fixed-point restart state
+    Real restart_fp = std::numeric_limits<Real>::infinity();
+    Real candidate_fp = std::numeric_limits<Real>::infinity();
     Int last_restart_iter = 0;
-    Real sum_weight = 0.0;
     Int step_size_updates = 0;
-    gpu.resetAverages();
+
+    // PID primal weight state
+    Real pw_error_sum = 0.0;
 
     // Exponential convergence check intervals
     auto isMajorIter = [](Int iter) -> bool {
@@ -613,30 +589,29 @@ bool solveStandardFormGpu(
             return false;
         }
 
-        // --- Reflected Primal-Dual iteration (2 SpMV) ---
+        // --- Halpern PDHG iteration (2 SpMV) ---
+        double lambda = (inner_count > 0)
+            ? static_cast<double>(inner_count) / static_cast<double>(inner_count + 1)
+            : 0.0;
+
         // 1. ATy = A^T * y
         if (!gpu.computeATy()) return false;
 
-        // 2. Primal step + reflection (saves z_prev internally)
-        gpu.primalReflectedStep(step, primal_weight);
+        // 2. Primal: project + reflect + Halpern blend (saves z_prev internally)
+        gpu.primalHalpernStep(step, primal_weight, lambda);
 
-        // 3. A * z_reflected
+        // 3. A * z_refl (SpMV on reflected point, NOT Halpern-blended z)
         if (!gpu.computeAzReflected()) return false;
 
-        // 4. Dual step (save y_prev first)
-        gpu.saveYPrev();
-        gpu.dualStepReflected(step, primal_weight);
+        // 4. Dual: step + reflect + Halpern blend (saves y_prev internally)
+        gpu.dualHalpernStep(step, primal_weight, lambda);
 
-        // --- Adaptive step size (movement/interaction, PDLP formula) ---
-        // Need A^T y_{k+1} to compute A^T Δy_k correctly.
-        // at_y currently = A^T y_k. Compute A^T y_{k+1} → at_y_prev (scratch).
+        ++inner_count;
+
+        // --- Adaptive step size (movement/interaction) ---
         if (iter > 0 && iter % 4 == 0) {
-            // Save current at_y (= A^T y_k) into at_y_prev
             gpu.saveATyPrev();
-            // Compute A^T y_{k+1} into at_y (overwrite)
             if (!gpu.computeATy()) {};
-            // Now: at_y = A^T y_{k+1}, at_y_prev = A^T y_k
-            // movement/interaction kernel: z vs z_prev, at_y vs at_y_prev, y vs y_prev
             double movement = 0.0, interaction = 0.0;
             if (gpu.computeMovementInteraction(primal_weight, movement, interaction)) {
                 if (interaction > 1e-30) {
@@ -653,16 +628,10 @@ bool solveStandardFormGpu(
             }
         }
 
-        // Accumulate weighted average
-        Real iter_weight = step;
-        gpu.accumulateAverage(iter_weight);
-        sum_weight += iter_weight;
-
         // --- Convergence check at major iterations ---
         bool is_major = isMajorIter(iter + 1);
 
         if (is_major && iter > 0) {
-            // A*z for convergence (extra SpMV only at major iterations)
             if (!gpu.computeAz()) return false;
 
             gpu::ConvergenceMetrics metrics{};
@@ -683,7 +652,6 @@ bool solveStandardFormGpu(
                     iter + 1, pobj, primal_inf, dual_inf, gap, step);
             }
 
-            // Check convergence on current iterate
             if (primal_inf <= options.primal_tol &&
                 dual_inf <= options.dual_tol &&
                 gap <= options.optimality_tol) {
@@ -694,59 +662,21 @@ bool solveStandardFormGpu(
                 return true;
             }
 
-            // Check convergence on average iterate
-            Real avg_pinf_val = 0, avg_dinf_val = 0, avg_gap_val = 0;
-            bool have_avg_metrics = false;
-            if (sum_weight > 1e-12) {
-                gpu.computeAverage(sum_weight);
-                gpu::ConvergenceMetrics avg_metrics{};
-                if (gpu.computeConvergenceOnAverage(inv_b, inv_c, std_obj_offset,
-                                                    avg_metrics)) {
-                    avg_pinf_val = avg_metrics.primal_inf * inv_b;
-                    avg_dinf_val = avg_metrics.dual_inf * inv_c;
-                    Real avg_pobj = std_obj_offset + avg_metrics.pobj;
-                    Real avg_dobj = std_obj_offset + avg_metrics.dobj;
-                    avg_gap_val = std::abs(avg_pobj - avg_dobj) /
-                                  (1.0 + std::abs(avg_pobj) + std::abs(avg_dobj));
-                    have_avg_metrics = true;
+            // --- Fixed-point restart decision ---
+            double primal_dist_sq = 0.0, dual_dist_sq = 0.0;
+            if (!gpu.computeFixedPointError(primal_dist_sq, dual_dist_sq))
+                return false;
 
-                    if (avg_pinf_val <= options.primal_tol &&
-                        avg_dinf_val <= options.dual_tol &&
-                        avg_gap_val <= options.optimality_tol) {
-                        gpu.restartFromAverage();
-                        iters = iter + 1;
-                        z_unscaled.resize(static_cast<size_t>(n));
-                        y_unscaled.resize(static_cast<size_t>(m));
-                        gpu.downloadSolution(z_unscaled, y_unscaled);
-                        return true;
-                    }
-                }
-            }
+            Real fp_error = primal_weight * primal_dist_sq +
+                            dual_dist_sq / primal_weight;
 
-            // --- KKT restart decision ---
-            Real kkt_score = std::sqrt(
-                primal_weight * primal_inf * primal_inf +
-                dual_inf * dual_inf / primal_weight +
-                gap * gap);
-
-            Real avg_kkt_score = std::numeric_limits<Real>::infinity();
-            if (sum_weight > 1e-12 && have_avg_metrics) {
-                // Reuse average metrics already computed above
-                avg_kkt_score = std::sqrt(
-                    primal_weight * avg_pinf_val * avg_pinf_val +
-                    avg_dinf_val * avg_dinf_val / primal_weight +
-                    avg_gap_val * avg_gap_val);
-            }
-
-            bool use_average = (avg_kkt_score < kkt_score);
-            Real best_score = use_average ? avg_kkt_score : kkt_score;
-            if (!std::isfinite(restart_score)) restart_score = best_score;
+            if (!std::isfinite(restart_fp)) restart_fp = fp_error;
 
             bool do_restart = false;
-            if (best_score < options.restart_sufficient_decay * restart_score) {
+            if (fp_error < options.restart_sufficient_decay * restart_fp) {
                 do_restart = true;
-            } else if (best_score < options.restart_necessary_decay * restart_score &&
-                       best_score > candidate_score) {
+            } else if (fp_error < options.restart_necessary_decay * restart_fp &&
+                       fp_error > candidate_fp) {
                 do_restart = true;
             } else if (iter - last_restart_iter >
                        static_cast<Int>(options.restart_artificial_fraction *
@@ -754,28 +684,27 @@ bool solveStandardFormGpu(
                 do_restart = true;
             }
 
-            candidate_score = best_score;
+            candidate_fp = fp_error;
 
             if (do_restart) {
-                if (use_average) {
-                    gpu.restartFromAverage();
-                } else {
-                    gpu.restartFromCurrent();
-                }
+                gpu.restartAnchor();
+                inner_count = 0;
 
-                restart_score = best_score;
+                restart_fp = fp_error;
                 last_restart_iter = iter;
-                gpu.resetAverages();
-                sum_weight = 0.0;
 
-                // Update primal weight
-                if (options.update_primal_weight) {
-                    Real eps = std::max(options.optimality_tol * 0.1, 1e-10);
-                    Real ratio = std::sqrt(
-                        std::max(primal_inf, eps) / std::max(dual_inf, eps));
-                    ratio = std::clamp(ratio, 0.5, 2.0);
-                    primal_weight *= std::pow(ratio, options.primal_weight_update_smoothing);
-                    primal_weight = std::clamp(primal_weight, 1e-4, 1e4);
+                // PID primal weight update
+                if (options.update_primal_weight &&
+                    primal_dist_sq > 1e-20 && dual_dist_sq > 1e-20) {
+                    Real error = 0.5 * (std::log(dual_dist_sq) -
+                                        std::log(primal_dist_sq)) -
+                                 std::log(primal_weight);
+                    pw_error_sum = options.pid_i_smooth * pw_error_sum +
+                                   (1.0 - options.pid_i_smooth) * error;
+                    Real log_pw = std::log(primal_weight) +
+                                  options.pid_kp * error +
+                                  options.pid_ki * pw_error_sum;
+                    primal_weight = std::clamp(std::exp(log_pw), 1e-4, 1e4);
                 }
             }
         }

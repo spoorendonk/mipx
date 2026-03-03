@@ -24,15 +24,16 @@ struct PdlpOptions {
     Real step_size_reduction_exponent = 0.3;
     Real step_size_growth_exponent = 0.6;
 
-    // Primal/dual balancing.
+    // Primal/dual balancing (PID controller on restart).
     Real primal_weight = 1.0;
-    Real primal_weight_update_smoothing = 0.5;
     bool update_primal_weight = true;
-    Real extrapolation_factor = 1.0;
+    Real pid_kp = 0.99;
+    Real pid_ki = 0.01;
+    Real pid_i_smooth = 0.3;
 
     // KKT restart (cuPDLP-C style).
     Real restart_sufficient_decay = 0.2;
-    Real restart_necessary_decay = 0.8;
+    Real restart_necessary_decay = 0.5;
     Real restart_artificial_fraction = 0.36;
 
     // Scaling/preconditioning.
@@ -48,8 +49,8 @@ struct PdlpOptions {
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
 
-    // GPU-resident solver: use fully GPU-resident PDLP with reflected PD,
-    // adaptive step size, KKT restart, and CUDA Graphs when available.
+    // GPU-resident solver: use fully GPU-resident PDLP with Halpern PDHG,
+    // adaptive step size, fixed-point restart, and CUDA Graphs when available.
     bool use_gpu_resident = true;
 };
 

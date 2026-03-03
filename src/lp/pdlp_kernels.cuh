@@ -83,6 +83,38 @@ void launchCopyVector(double* dst, const double* src, int len,
 void launchZeroVector(double* dst, int len, cudaStream_t stream);
 
 // ---------------------------------------------------------------------------
+// Phase 5: Halpern PDHG kernels
+// ---------------------------------------------------------------------------
+
+// Primal Halpern step: project + reflect + blend with anchor
+//   z_prev[j] = z[j]  (saved before update)
+//   z_proj = max(0, z[j] - step_over_pw * tau[j] * (c[j] + at_y[j]))
+//   z_refl[j] = 2 * z_proj - z[j]
+//   z[j] = lambda * z_refl[j] + (1-lambda) * z0[j]
+void launchPrimalHalpernStep(double* z, double* z_prev, double* z_refl,
+                              const double* z0, const double* c,
+                              const double* at_y, const double* tau,
+                              double step_over_pw, double lambda, int n,
+                              cudaStream_t stream);
+
+// Dual Halpern step: step + reflect + blend with anchor
+//   y_prev[i] = y[i]  (saved before update)
+//   y_new = y[i] + step_pw * sigma[i] * (az_refl[i] - b[i])
+//   y_refl = 2 * y_new - y[i]
+//   y[i] = lambda * y_refl + (1-lambda) * y0[i]
+void launchDualHalpernStep(double* y, double* y_prev, const double* y0,
+                            const double* az_refl, const double* b,
+                            const double* sigma, double step_pw,
+                            double lambda, int m, cudaStream_t stream);
+
+// Fixed-point error: primal/dual distance squared from anchor
+//   d_result[0] = ||z - z0||^2
+//   d_result[1] = ||y - y0||^2
+void launchFixedPointError(double* d_result, const double* z, const double* z0,
+                            const double* y, const double* y0,
+                            int n, int m, cudaStream_t stream);
+
+// ---------------------------------------------------------------------------
 // Convergence kernel
 // ---------------------------------------------------------------------------
 

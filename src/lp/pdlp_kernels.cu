@@ -119,6 +119,115 @@ void launchDualStepReflected(double* y, const double* az_refl, const double* b,
 }
 
 // ============================================================================
+// Phase 5: Halpern PDHG kernels
+// ============================================================================
+
+__global__ void primalHalpernStepKernel(double* z, double* z_prev, double* z_refl,
+                                         const double* z0, const double* c,
+                                         const double* at_y, const double* tau,
+                                         double step_over_pw, double lambda, int n) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < n) {
+        double zold = z[j];
+        z_prev[j] = zold;
+        double grad = c[j] + at_y[j];
+        double z_proj = zold - step_over_pw * tau[j] * grad;
+        z_proj = (z_proj > 0.0) ? z_proj : 0.0;
+        double zr = 2.0 * z_proj - zold;
+        z_refl[j] = zr;
+        z[j] = lambda * zr + (1.0 - lambda) * z0[j];
+    }
+}
+
+void launchPrimalHalpernStep(double* z, double* z_prev, double* z_refl,
+                              const double* z0, const double* c,
+                              const double* at_y, const double* tau,
+                              double step_over_pw, double lambda, int n,
+                              cudaStream_t stream) {
+    if (n <= 0) return;
+    primalHalpernStepKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
+        z, z_prev, z_refl, z0, c, at_y, tau, step_over_pw, lambda, n);
+}
+
+__global__ void dualHalpernStepKernel(double* y, double* y_prev,
+                                       const double* y0, const double* az_refl,
+                                       const double* b, const double* sigma,
+                                       double step_pw, double lambda, int m) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < m) {
+        double yold = y[i];
+        y_prev[i] = yold;
+        double y_new = yold + step_pw * sigma[i] * (az_refl[i] - b[i]);
+        double y_refl = 2.0 * y_new - yold;
+        y[i] = lambda * y_refl + (1.0 - lambda) * y0[i];
+    }
+}
+
+void launchDualHalpernStep(double* y, double* y_prev, const double* y0,
+                            const double* az_refl, const double* b,
+                            const double* sigma, double step_pw,
+                            double lambda, int m, cudaStream_t stream) {
+    if (m <= 0) return;
+    dualHalpernStepKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
+        y, y_prev, y0, az_refl, b, sigma, step_pw, lambda, m);
+}
+
+__global__ void fixedPointErrorKernel(double* d_result,
+                                       const double* z, const double* z0,
+                                       const double* y, const double* y0,
+                                       int n, int m) {
+    __shared__ double s_primal[kBlockSize];
+    __shared__ double s_dual[kBlockSize];
+
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + tid;
+
+    double local_p = 0.0;
+    double local_d = 0.0;
+
+    int max_dim = (n > m) ? n : m;
+    for (int idx = gid; idx < max_dim; idx += gridDim.x * blockDim.x) {
+        if (idx < n) {
+            double dz = z[idx] - z0[idx];
+            local_p += dz * dz;
+        }
+        if (idx < m) {
+            double dy = y[idx] - y0[idx];
+            local_d += dy * dy;
+        }
+    }
+
+    s_primal[tid] = local_p;
+    s_dual[tid] = local_d;
+    __syncthreads();
+
+    for (int s = kBlockSize / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_primal[tid] += s_primal[tid + s];
+            s_dual[tid] += s_dual[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicAdd(&d_result[0], s_primal[0]);
+        atomicAdd(&d_result[1], s_dual[0]);
+    }
+}
+
+void launchFixedPointError(double* d_result, const double* z, const double* z0,
+                            const double* y, const double* y0,
+                            int n, int m, cudaStream_t stream) {
+    cudaMemsetAsync(d_result, 0, sizeof(double) * 2, stream);
+    int max_dim = (n > m) ? n : m;
+    if (max_dim <= 0) return;
+    int grid = gridSize(max_dim);
+    if (grid > 1024) grid = 1024;
+    fixedPointErrorKernel<<<grid, kBlockSize, 0, stream>>>(
+        d_result, z, z0, y, y0, n, m);
+}
+
+// ============================================================================
 // Phase 3: Movement/interaction reduction
 // ============================================================================
 
@@ -256,7 +365,7 @@ void launchZeroVector(double* dst, int len, cudaStream_t stream) {
 // Primal infeasibility: ||Az - b||_inf * inv_b    (indices [0, m))
 // Dual infeasibility: max_j |projected_rc_j| * inv_c  (indices [0, n))
 // pobj: sum c[j]*z[j]  (indices [0, n))
-// dobj: sum b[i]*y[i]  (indices [0, m))
+// dobj: -sum b[i]*y[i]  (indices [0, m)) — PDLP sign convention
 
 __global__ void convergenceKernel(ConvergenceMetrics* out,
                                   const double* az, const double* b,
@@ -286,7 +395,7 @@ __global__ void convergenceKernel(ConvergenceMetrics* out,
             double resid = az[idx] - b[idx];
             double a = fabs(resid);
             if (a > local_pinf) local_pinf = a;
-            local_dobj += b[idx] * y[idx];
+            local_dobj -= b[idx] * y[idx];
         }
         if (idx < n) {
             double rc = c[idx] + at_y[idx];

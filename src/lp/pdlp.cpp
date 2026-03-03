@@ -748,21 +748,17 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
 
     // --- Iteration vectors ---
     std::vector<Real> z(static_cast<size_t>(n), 0.0);
-    std::vector<Real> z_prev(static_cast<size_t>(n), 0.0);
-    std::vector<Real> z_bar(static_cast<size_t>(n), 0.0);
+    std::vector<Real> z0(static_cast<size_t>(n), 0.0);   // Halpern anchor
+    std::vector<Real> z_refl(static_cast<size_t>(n), 0.0);
+    std::vector<Real> z_prev(static_cast<size_t>(n), 0.0); // for adaptive step size
     std::vector<Real> y(static_cast<size_t>(m), 0.0);
-    std::vector<Real> y_prev(static_cast<size_t>(m), 0.0);
+    std::vector<Real> y0(static_cast<size_t>(m), 0.0);   // Halpern anchor
+    std::vector<Real> y_prev(static_cast<size_t>(m), 0.0); // for adaptive step size
 
-    std::vector<Real> az_bar(static_cast<size_t>(m), 0.0);
+    std::vector<Real> az_refl(static_cast<size_t>(m), 0.0);
     std::vector<Real> az(static_cast<size_t>(m), 0.0);
     std::vector<Real> at_y(static_cast<size_t>(n), 0.0);
     std::vector<Real> at_y_prev(static_cast<size_t>(n), 0.0);
-
-    // Weighted average tracking for KKT restart
-    std::vector<Real> z_sum(static_cast<size_t>(n), 0.0);
-    std::vector<Real> y_sum(static_cast<size_t>(m), 0.0);
-    std::vector<Real> z_avg(static_cast<size_t>(n), 0.0);
-    std::vector<Real> y_avg(static_cast<size_t>(m), 0.0);
 
     const Real inv_b = 1.0 / (1.0 + infNorm(bscaled_));
     const Real inv_c = 1.0 / (1.0 + infNorm(cscaled_));
@@ -777,12 +773,17 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
         if (nb > 1e-12 && nc > 1e-12) primal_weight = std::clamp(nc / nb, 1e-3, 1e3);
     }
 
-    // KKT restart state
-    Real restart_score = std::numeric_limits<Real>::infinity();
-    Real candidate_score = std::numeric_limits<Real>::infinity();
+    // Halpern PDHG state
+    Int inner_count = 0;
+
+    // Fixed-point restart state
+    Real restart_fp = std::numeric_limits<Real>::infinity();
+    Real candidate_fp = std::numeric_limits<Real>::infinity();
     Int last_restart_iter = 0;
-    Real sum_weight = 0.0;
     Int step_size_updates = 0;
+
+    // PID primal weight state
+    Real pw_error_sum = 0.0;
 
     // Phase 5: exponential convergence check intervals
     auto isMajorIter = [](Int iter) -> bool {
@@ -811,7 +812,7 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
         dual_inf *= inv_c;
 
         pobj = std_obj_offset_ + dot(cscaled_, zv);
-        dobj = std_obj_offset_ + dot(bscaled_, yv);
+        dobj = std_obj_offset_ - dot(bscaled_, yv);
         gap = std::abs(pobj - dobj) /
               (1.0 + std::abs(pobj) + std::abs(dobj));
     };
@@ -823,39 +824,41 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
             return false;
         }
 
-        // --- Reflected primal-dual iteration (2 SpMV) ---
+        // --- Halpern PDHG iteration (2 SpMV) ---
+        Real lambda = (inner_count > 0)
+            ? static_cast<Real>(inner_count) / static_cast<Real>(inner_count + 1)
+            : 0.0;
 
         // 1. ATy = A^T * y
         if (!backend->multiplyTranspose(y, at_y)) return false;
 
-        // 2. Primal step + reflection
+        // 2. Primal: project, reflect, Halpern blend
         z_prev = z;
         for (Index j = 0; j < n; ++j) {
             Real tau = step * tau_base_[j] / primal_weight;
             Real grad = cscaled_[j] + at_y[j];
-            Real zn = z[j] - tau * grad;
-            z[j] = (zn > 0.0) ? zn : 0.0;
-            // Reflected point: z_bar = 2*z_next - z_prev
-            z_bar[j] = 2.0 * z[j] - z_prev[j];
+            Real z_proj = z[j] - tau * grad;
+            z_proj = (z_proj > 0.0) ? z_proj : 0.0;
+            z_refl[j] = 2.0 * z_proj - z[j];
+            z[j] = lambda * z_refl[j] + (1.0 - lambda) * z0[j];
         }
 
-        // 3. A*z_bar (= A * z_reflected)
-        if (!backend->multiply(z_bar, az_bar)) return false;
+        // 3. A * z_refl (SpMV on reflected point, NOT Halpern-blended z)
+        if (!backend->multiply(z_refl, az_refl)) return false;
 
-        // 4. Dual step (equality constraints, no projection)
+        // 4. Dual: step, reflect, Halpern blend
         y_prev = y;
         for (Index i = 0; i < m; ++i) {
-            y[i] += step * primal_weight * sigma_base_[i] * (az_bar[i] - bscaled_[i]);
+            Real y_new = y[i] + step * primal_weight * sigma_base_[i] *
+                         (az_refl[i] - bscaled_[i]);
+            Real y_r = 2.0 * y_new - y[i];
+            y[i] = lambda * y_r + (1.0 - lambda) * y0[i];
         }
 
+        ++inner_count;
+
         // --- Movement/interaction adaptive step size ---
-        // Compute every iter but only update step every 4 iterations.
-        // movement_k = pw * ||Δz_k||² + (1/pw) * ||Δy_k||²
-        // interaction_k = 2|<Δz_k, A^T Δy_k>|
-        // We need A^T y_{k+1} to get A^T Δy_k = A^T y_{k+1} - A^T y_k.
-        // at_y currently holds A^T y_k. Compute A^T y_{k+1} on check iters.
         if (iter > 0 && iter % 4 == 0) {
-            // Compute A^T y_{k+1} into at_y_prev (scratch)
             if (!backend->multiplyTranspose(y, at_y_prev)) return false;
 
             Real movement = 0.0;
@@ -863,7 +866,6 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
             for (Index j = 0; j < n; ++j) {
                 Real dz = z[j] - z_prev[j];
                 movement += primal_weight * dz * dz;
-                // A^T Δy = at_y_prev (= A^T y_{k+1}) - at_y (= A^T y_k)
                 interaction_raw += dz * (at_y_prev[j] - at_y[j]);
             }
             for (Index i = 0; i < m; ++i) {
@@ -875,8 +877,6 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
             if (interaction > 1e-30) {
                 Real step_limit = movement / interaction;
                 ++step_size_updates;
-                // cuPDLP-C uses (nStepSizeIter + 1) where nStepSizeIter is
-                // pre-incremented, effectively starting k at 2.
                 Real k = static_cast<Real>(step_size_updates + 1);
                 Real first_term = (1.0 - std::pow(k, -options_.step_size_reduction_exponent))
                                   * step_limit;
@@ -887,17 +887,10 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
             }
         }
 
-        // --- Accumulate weighted average ---
-        Real iter_weight = step;
-        for (Index j = 0; j < n; ++j) z_sum[j] += iter_weight * z[j];
-        for (Index i = 0; i < m; ++i) y_sum[i] += iter_weight * y[i];
-        sum_weight += iter_weight;
-
         // --- Convergence check at major iterations only ---
         bool is_major = isMajorIter(iter + 1);
 
         if (is_major && iter > 0) {
-            // Need A*z for residuals (extra SpMV only at major iterations)
             if (!backend->multiply(z, az)) return false;
 
             Real primal_inf, dual_inf, pobj, dobj, gap;
@@ -921,96 +914,57 @@ bool PdlpSolver::solveStandardForm(std::vector<Real>& z_unscaled,
                 return true;
             }
 
-            // Check convergence on weighted average (also used for KKT restart)
-            Real avg_pinf_val = 0, avg_dinf_val = 0, avg_gap_val = 0;
-            bool have_avg = false;
-            if (sum_weight > 1e-12) {
-                Real inv_w = 1.0 / sum_weight;
-                for (Index j = 0; j < n; ++j) z_avg[j] = z_sum[j] * inv_w;
-                for (Index i = 0; i < m; ++i) y_avg[i] = y_sum[i] * inv_w;
-
-                std::vector<Real> az_avg(static_cast<size_t>(m));
-                std::vector<Real> aty_avg(static_cast<size_t>(n));
-                if (!backend->multiply(z_avg, az_avg)) return false;
-                if (!backend->multiplyTranspose(y_avg, aty_avg)) return false;
-
-                Real apobj, adobj;
-                computeResiduals(z_avg, y_avg, az_avg, aty_avg,
-                                 avg_pinf_val, avg_dinf_val, apobj, adobj,
-                                 avg_gap_val);
-                have_avg = true;
-
-                if (avg_pinf_val <= options_.primal_tol &&
-                    avg_dinf_val <= options_.dual_tol &&
-                    avg_gap_val <= options_.optimality_tol) {
-                    iters = iter + 1;
-                    z_unscaled.assign(static_cast<size_t>(n), 0.0);
-                    y_unscaled.assign(static_cast<size_t>(m), 0.0);
-                    for (Index j = 0; j < n; ++j) z_unscaled[j] = z_avg[j] * col_scale_[j];
-                    for (Index i = 0; i < m; ++i) y_unscaled[i] = y_avg[i] * row_scale_[i];
-                    return true;
-                }
+            // --- Fixed-point restart decision ---
+            Real primal_dist_sq = 0.0;
+            Real dual_dist_sq = 0.0;
+            for (Index j = 0; j < n; ++j) {
+                Real d = z[j] - z0[j];
+                primal_dist_sq += d * d;
             }
-
-            // --- KKT restart decision ---
-            Real kkt_score = std::sqrt(
-                primal_weight * primal_inf * primal_inf +
-                dual_inf * dual_inf / primal_weight +
-                gap * gap);
-
-            // Score on average (reuse metrics computed above)
-            Real avg_kkt_score = std::numeric_limits<Real>::infinity();
-            if (have_avg) {
-                avg_kkt_score = std::sqrt(
-                    primal_weight * avg_pinf_val * avg_pinf_val +
-                    avg_dinf_val * avg_dinf_val / primal_weight +
-                    avg_gap_val * avg_gap_val);
+            for (Index i = 0; i < m; ++i) {
+                Real d = y[i] - y0[i];
+                dual_dist_sq += d * d;
             }
+            Real fp_error = primal_weight * primal_dist_sq +
+                            dual_dist_sq / primal_weight;
 
-            bool use_average = (avg_kkt_score < kkt_score);
-            Real best_score = use_average ? avg_kkt_score : kkt_score;
-            if (!std::isfinite(restart_score)) restart_score = best_score;
+            if (!std::isfinite(restart_fp)) restart_fp = fp_error;
 
             bool do_restart = false;
-            // Sufficient decay
-            if (best_score < options_.restart_sufficient_decay * restart_score) {
+            if (fp_error < options_.restart_sufficient_decay * restart_fp) {
                 do_restart = true;
-            }
-            // Necessary decay + stalling
-            else if (best_score < options_.restart_necessary_decay * restart_score &&
-                     best_score > candidate_score) {
+            } else if (fp_error < options_.restart_necessary_decay * restart_fp &&
+                       fp_error > candidate_fp) {
                 do_restart = true;
-            }
-            // Artificial restart: no progress for too long
-            else if (iter - last_restart_iter >
-                     static_cast<Int>(options_.restart_artificial_fraction *
-                                      static_cast<Real>(iter + 1))) {
+            } else if (iter - last_restart_iter >
+                       static_cast<Int>(options_.restart_artificial_fraction *
+                                        static_cast<Real>(iter + 1))) {
                 do_restart = true;
             }
 
-            candidate_score = best_score;
+            candidate_fp = fp_error;
 
             if (do_restart) {
-                if (use_average) {
-                    z = z_avg; y = y_avg; z_bar = z_avg;
-                } else {
-                    z_bar = z;
-                }
-                restart_score = best_score;
-                last_restart_iter = iter;
-                std::fill(z_sum.begin(), z_sum.end(), 0.0);
-                std::fill(y_sum.begin(), y_sum.end(), 0.0);
-                sum_weight = 0.0;
+                // Reset anchor to current iterate
+                z0 = z;
+                y0 = y;
+                inner_count = 0;
 
-                // Update primal weight based on distance traveled
-                if (options_.update_primal_weight) {
-                    Real eps = std::max(options_.optimality_tol * 0.1, 1e-10);
-                    Real ratio = std::sqrt(
-                        std::max(primal_inf, eps) / std::max(dual_inf, eps));
-                    ratio = std::clamp(ratio, 0.5, 2.0);
-                    primal_weight *= std::pow(ratio,
-                                             options_.primal_weight_update_smoothing);
-                    primal_weight = std::clamp(primal_weight, 1e-4, 1e4);
+                restart_fp = fp_error;
+                last_restart_iter = iter;
+
+                // PID primal weight update
+                if (options_.update_primal_weight &&
+                    primal_dist_sq > 1e-20 && dual_dist_sq > 1e-20) {
+                    Real error = 0.5 * (std::log(dual_dist_sq) -
+                                        std::log(primal_dist_sq)) -
+                                 std::log(primal_weight);
+                    pw_error_sum = options_.pid_i_smooth * pw_error_sum +
+                                   (1.0 - options_.pid_i_smooth) * error;
+                    Real log_pw = std::log(primal_weight) +
+                                  options_.pid_kp * error +
+                                  options_.pid_ki * pw_error_sum;
+                    primal_weight = std::clamp(std::exp(log_pw), 1e-4, 1e4);
                 }
             }
         }
