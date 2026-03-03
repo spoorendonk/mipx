@@ -31,6 +31,23 @@ if(MIPX_USE_CUDA AND NOT CUDAToolkit_FOUND)
     message(FATAL_ERROR "MIPX_USE_CUDA=ON but CUDAToolkit was not found")
 endif()
 
+if(MIPX_USE_CUDA)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    # Find cuDSS (system-installed).
+    find_library(CUDSS_LIBRARY cudss)
+    find_path(CUDSS_INCLUDE_DIR cudss.h)
+    if(CUDSS_LIBRARY AND CUDSS_INCLUDE_DIR)
+        set(MIPX_HAS_CUDSS ON)
+        message(STATUS "Found cuDSS: ${CUDSS_LIBRARY}")
+    else()
+        message(WARNING "cuDSS not found — GPU barrier backends disabled")
+        set(MIPX_HAS_CUDSS OFF)
+    endif()
+endif()
+
 # SIMD codegen policy:
 # - default is native for maximum local performance
 # - avx2/off remain available for standardized distribution builds

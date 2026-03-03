@@ -229,6 +229,98 @@ TEST_CASE("BarrierSolver Auto: objectives match across backends", "[barrier][aut
 }
 
 // ============================================================================
+// GPU Cholesky backend
+// ============================================================================
+
+#ifdef MIPX_HAS_CUDSS
+
+TEST_CASE("BarrierSolver GPU Cholesky: simple LP", "[barrier][gpu-cholesky]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::GpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
+}
+
+TEST_CASE("BarrierSolver GPU Cholesky: triangle LP", "[barrier][gpu-cholesky]") {
+    auto lp = buildTriangleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::GpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+// ============================================================================
+// GPU Augmented backend
+// ============================================================================
+
+TEST_CASE("BarrierSolver GPU Augmented: simple LP", "[barrier][gpu-augmented]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::GpuAugmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
+}
+
+TEST_CASE("BarrierSolver GPU Augmented: triangle LP", "[barrier][gpu-augmented]") {
+    auto lp = buildTriangleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::GpuAugmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+TEST_CASE("BarrierSolver GPU vs CPU: objectives match", "[barrier][gpu-cross]") {
+    auto lp = buildTriangleLp();
+
+    BarrierSolver cpu_solver;
+    BarrierOptions copts;
+    copts.verbose = false;
+    copts.algorithm = BarrierAlgorithm::CpuCholesky;
+    cpu_solver.setOptions(copts);
+    cpu_solver.load(lp);
+    auto cpu_result = cpu_solver.solve();
+
+    BarrierSolver gpu_solver;
+    BarrierOptions gopts;
+    gopts.verbose = false;
+    gopts.algorithm = BarrierAlgorithm::GpuCholesky;
+    gpu_solver.setOptions(gopts);
+    gpu_solver.load(lp);
+    auto gpu_result = gpu_solver.solve();
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-6));
+}
+
+#endif  // MIPX_HAS_CUDSS
+
+// ============================================================================
 // MIP integration (barrier root policy)
 // ============================================================================
 

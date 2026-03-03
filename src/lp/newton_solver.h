@@ -40,4 +40,10 @@ public:
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
+// GPU backends (available when compiled with MIPX_HAS_CUDSS).
+#ifdef MIPX_HAS_CUDSS
+std::unique_ptr<NewtonSolver> createGpuCholeskySolver();
+std::unique_ptr<NewtonSolver> createGpuAugmentedSolver();
+#endif
+
 }  // namespace mipx

@@ -610,9 +610,13 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     auto algo = options_.algorithm;
 
     if (algo == BarrierAlgorithm::Auto) {
-        // No GPU on this path (GPU would be dispatched separately).
+#ifdef MIPX_HAS_CUDSS
+        algo = use_augmented ? BarrierAlgorithm::GpuAugmented
+                             : BarrierAlgorithm::GpuCholesky;
+#else
         algo = use_augmented ? BarrierAlgorithm::CpuAugmented
                              : BarrierAlgorithm::CpuCholesky;
+#endif
     }
 
     switch (algo) {
@@ -623,10 +627,30 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         solver = createCpuAugmentedSolver();
         break;
     case BarrierAlgorithm::GpuCholesky:
-    case BarrierAlgorithm::GpuAugmented:
-        // GPU not available — fall back to CPU.
+#ifdef MIPX_HAS_CUDSS
+        solver = createGpuCholeskySolver();
+        if (!solver->setup(aeq_, m, n, options_)) {
+            // GPU Cholesky setup failed (e.g. NE too dense) — fall back.
+            solver = use_augmented ? createCpuAugmentedSolver()
+                                   : createCpuCholeskySolver();
+        } else {
+            used_gpu_ = true;
+            return runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
+                                  std_obj_offset_, z, y, s, iters);
+        }
+#else
         solver = use_augmented ? createCpuAugmentedSolver()
                                : createCpuCholeskySolver();
+#endif
+        break;
+    case BarrierAlgorithm::GpuAugmented:
+#ifdef MIPX_HAS_CUDSS
+        solver = createGpuAugmentedSolver();
+        used_gpu_ = true;
+#else
+        solver = use_augmented ? createCpuAugmentedSolver()
+                               : createCpuCholeskySolver();
+#endif
         break;
     default:
         solver = createCpuCholeskySolver();
