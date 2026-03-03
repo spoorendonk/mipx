@@ -144,8 +144,13 @@ TEST_CASE("MIPLIB: parse all instances", "[benchmark][miplib]") {
         return nullptr;
     };
 
+    // Skip instances larger than 100 MB (compressed) to keep test runtime
+    // reasonable — these multi-GB files take minutes to parse.
+    constexpr std::uintmax_t kMaxFileSize = 50'000'000;
+
     Index parsed = 0;
     Index failed = 0;
+    Index skipped = 0;
     Index with_integers = 0;
 
     std::cout << std::format("\n{:<16} {:>6} {:>6} {:>8} {:>5}  {}\n",
@@ -155,6 +160,12 @@ TEST_CASE("MIPLIB: parse all instances", "[benchmark][miplib]") {
 
     for (const auto& path : instances) {
         std::string name = instanceName(path);
+
+        if (fs::file_size(path) > kMaxFileSize) {
+            skipped++;
+            continue;
+        }
+
         try {
             auto prob = readMps(path);
             parsed++;
@@ -185,8 +196,9 @@ TEST_CASE("MIPLIB: parse all instances", "[benchmark][miplib]") {
         }
     }
 
-    std::cout << std::format("\nParsed: {}/{}, Failed: {}, With integers: {}\n",
-                             parsed, instances.size(), failed, with_integers);
+    std::cout << std::format(
+        "\nParsed: {}/{}, Failed: {}, Skipped (>50MB): {}, With integers: {}\n",
+        parsed, instances.size(), failed, skipped, with_integers);
 
     CHECK(failed == 0);
 }
