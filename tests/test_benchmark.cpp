@@ -144,7 +144,7 @@ TEST_CASE("MIPLIB: parse all instances", "[benchmark][miplib]") {
         return nullptr;
     };
 
-    // Skip instances larger than 100 MB (compressed) to keep test runtime
+    // Skip instances larger than 50 MB (compressed) to keep test runtime
     // reasonable — these multi-GB files take minutes to parse.
     constexpr std::uintmax_t kMaxFileSize = 50'000'000;
 

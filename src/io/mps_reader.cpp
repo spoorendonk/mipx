@@ -100,7 +100,7 @@ Real parseReal(const std::string& s) {
     if (begin < end && *begin == '+') ++begin;
     Real val = 0.0;
     auto [ptr, ec] = std::from_chars(begin, end, val);
-    if (ec != std::errc{}) {
+    if (ec != std::errc{} || ptr != end) {
         throw std::runtime_error("Invalid number: " + s);
     }
     return val;
