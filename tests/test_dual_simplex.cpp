@@ -382,7 +382,12 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.enable_adaptive_bfrt = false;
     opts.adaptive_bfrt_max_pinf = 33;
     opts.adaptive_bfrt_progress_window = 77;
+    opts.enable_auto_bfrt_wide = false;
+    opts.auto_bfrt_min_cols = 1234;
+    opts.auto_bfrt_min_col_row_ratio = 5.5;
     opts.enable_adaptive_refactorization = false;
+    opts.lu_update_limit = 321;
+    opts.lu_ft_drop_tolerance = 1e-9;
     opts.partial_pricing_chunk_min = 8;
     opts.partial_pricing_full_scan_freq = 1;
     opts.adaptive_refactor_min_updates = 8;
@@ -432,7 +437,12 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     CHECK_FALSE(applied.enable_adaptive_bfrt);
     CHECK(applied.adaptive_bfrt_max_pinf == 33);
     CHECK(applied.adaptive_bfrt_progress_window == 77);
+    CHECK_FALSE(applied.enable_auto_bfrt_wide);
+    CHECK(applied.auto_bfrt_min_cols == 1234);
+    CHECK(applied.auto_bfrt_min_col_row_ratio == 5.5);
     CHECK_FALSE(applied.enable_adaptive_refactorization);
+    CHECK(applied.lu_update_limit == 321);
+    CHECK(applied.lu_ft_drop_tolerance == 1e-9);
     CHECK(applied.primal_feasible_adaptive_refactor_stall_pivots == 222);
     CHECK(applied.primal_feasible_adaptive_refactor_min_updates == 111);
     CHECK(applied.primal_feasible_dual_progress_window == 333);
@@ -503,6 +513,9 @@ TEST_CASE("DualSimplex: primal-feasible guardrails tolerate non-positive options
     opts.primal_feasible_dual_progress_window = 0;
     opts.primal_feasible_refactor_cooldown = -9;
     opts.primal_feasible_dual_progress_improve_rel_tol = -1e-3;
+    opts.lu_ft_drop_tolerance = -1.0;
+    opts.auto_bfrt_min_cols = -123;
+    opts.auto_bfrt_min_col_row_ratio = -5.0;
     solver.setOptions(opts);
     solver.load(lp);
 
@@ -582,6 +595,39 @@ TEST_CASE("DualSimplex: enabled primal progress gate keeps degen2 solvable",
     Real rel_err = std::abs(result.objective - expected_obj) / denom;
     CHECK(rel_err < 1e-6);
     CHECK(result.iterations > 0);
+}
+
+TEST_CASE("DualSimplex: default no-presolve handles degen2 and degen3 within time limit",
+          "[dual_simplex][netlib][regression][no_presolve]") {
+    struct NetlibCase {
+        const char* name;
+        Real expected_obj;
+    };
+    constexpr NetlibCase kCases[] = {
+        {"degen2", -1.4351780000e+03},
+        {"degen3", -9.8729400000e+02},
+    };
+
+    for (const auto& tc : kCases) {
+        std::string path = testDataDir() + "/netlib/" + tc.name + ".mps.gz";
+        if (!fs::exists(path)) {
+            SKIP(std::string("Netlib instance missing: ") + tc.name);
+        }
+
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.max_solve_seconds = 5.0;
+        solver.setOptions(opts);
+        solver.load(readMps(path));
+
+        const auto result = solver.solve();
+        INFO("instance=" << tc.name);
+        REQUIRE(result.status == Status::Optimal);
+        Real denom = std::max(1.0, std::abs(tc.expected_obj));
+        Real rel_err = std::abs(result.objective - tc.expected_obj) / denom;
+        CHECK(rel_err < 1e-6);
+        CHECK(result.work_units > 0.0);
+    }
 }
 
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
