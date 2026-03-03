@@ -1099,9 +1099,7 @@ LpResult DualSimplexSolver::solve() {
             options_.enable_dual_perturbation &&
             options_.dual_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.dual_perturbation_stall_pivots;
-        bool pricing_cache_ready = false;
-        auto buildPricingReducedCostCache = [&]() {
-            if (!use_dual_perturbation || pricing_cache_ready) return;
+        if (use_dual_perturbation) {
             for (Index k : nonbasic_) {
                 Real rc = reduced_cost_[k];
                 const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
@@ -1113,14 +1111,10 @@ LpResult DualSimplexSolver::solve() {
                 else if (st == BasisStatus::Free) rc += ((k & 1) ? eps : -eps);
                 pricing_reduced_cost[static_cast<std::size_t>(k)] = rc;
             }
-            pricing_cache_ready = true;
-        };
+        }
         auto reducedCostForPricing = [&](Index k) -> Real {
             if (!use_dual_perturbation) {
                 return reduced_cost_[k];
-            }
-            if (!pricing_cache_ready) {
-                buildPricingReducedCostCache();
             }
             return pricing_reduced_cost[static_cast<std::size_t>(k)];
         };

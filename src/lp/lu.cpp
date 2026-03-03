@@ -100,6 +100,9 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     ft_dense_value_.clear();
     ft_dense_nnz_ = 0;
     update_touched_.clear();
+    // Reset update workspace so the first update after a refactorization
+    // cannot read stale values when using sparse touch clearing.
+    update_work_.clear();
 
     // Build dense-ish active submatrix from selected columns.
     // active[i][j] = value at (original_row i, basis_position j).
@@ -109,9 +112,13 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     // For the active submatrix we track: row indices, column indices,
     // values, and counts for Markowitz.
 
-    const Index nnz_hint = std::max<Index>(dim_ * 4, matrix.numNonzeros());
+    const std::size_t dim_hint = static_cast<std::size_t>(std::max<Index>(0, dim_));
+    std::size_t basis_nnz_hint = 0;
+    for (Index j = 0; j < dim_; ++j) {
+        basis_nnz_hint += static_cast<std::size_t>(matrix.col(basis_cols[j]).size());
+    }
     const std::size_t reserve_nnz =
-        static_cast<std::size_t>(std::max<Index>(0, nnz_hint));
+        std::max(dim_hint * static_cast<std::size_t>(4), basis_nnz_hint);
     static thread_local std::vector<Index> tl_e_row;
     static thread_local std::vector<Index> tl_e_col;
     static thread_local std::vector<Real> tl_e_val;

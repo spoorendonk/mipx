@@ -187,12 +187,26 @@ extract_named_set() {
         fi
         echo -n "  ${name}..."
         local entry="${ZIP_ENTRY_BY_NAME[${name}]:-}"
-        if [[ -n "${entry}" ]] && unzip -p "${ZIP_FILE}" "${entry}" > "${outfile}"; then
-            echo " ok"
-        elif unzip -j -o "${ZIP_FILE}" "${name}.mps.gz" -d "${DEST_DIR}/" >/dev/null 2>&1; then
+        local extracted=0
+        if [[ -n "${entry}" ]]; then
+            local tmpfile
+            tmpfile=$(mktemp "${DEST_DIR}/.${name}.mps.gz.tmp.XXXXXX")
+            if unzip -p "${ZIP_FILE}" "${entry}" > "${tmpfile}" && [[ -s "${tmpfile}" ]]; then
+                mv -f "${tmpfile}" "${outfile}"
+                extracted=1
+            else
+                rm -f "${tmpfile}"
+            fi
+        fi
+        if [[ ${extracted} -eq 0 ]] &&
+           unzip -j -o "${ZIP_FILE}" "${name}.mps.gz" -d "${DEST_DIR}/" >/dev/null 2>&1; then
             # Fallback for legacy flat archives.
+            extracted=1
+        fi
+        if [[ ${extracted} -eq 1 ]]; then
             echo " ok"
         else
+            rm -f "${outfile}"
             echo " not found"
             ((missing++)) || true
         fi

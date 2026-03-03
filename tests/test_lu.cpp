@@ -467,6 +467,65 @@ TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     CHECK(lu.needsRefactorization());
 }
 
+TEST_CASE("SparseLU: update workspace resets across refactorization", "[lu][regression]") {
+    // Basis columns 0..3 form a coupled nonsingular matrix.
+    // Extra sparse columns are used for updates before/after refactorization.
+    std::vector<Triplet> trips = {
+        {0, 0, 2.0}, {1, 0, 1.0},
+        {1, 1, 3.0}, {2, 1, 1.0},
+        {0, 2, 1.0}, {2, 2, 2.0}, {3, 2, 1.0},
+        {1, 3, 1.0}, {3, 3, 2.0},
+        {0, 4, 1.0},  // sparse entering col
+        {3, 5, 1.0},
+        {2, 6, 1.0}};  // sparse entering col
+    SparseMatrix A(4, 7, trips);
+    std::vector<Index> basis = {0, 1, 2, 3};
+
+    auto make_col = [&](Index col) {
+        auto c = A.col(col);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        return std::pair<std::vector<Index>, std::vector<Real>>{std::move(idx), std::move(val)};
+    };
+
+    auto [idx4, val4] = make_col(4);
+    auto [idx6, val6] = make_col(6);
+
+    SparseLU lu_reuse;
+    lu_reuse.setMaxUpdates(100);
+    lu_reuse.factorize(A, basis);
+    // Populate update workspace/touch list, then refactorize.
+    lu_reuse.update(2, idx4, val4);
+    lu_reuse.factorize(A, basis);
+    lu_reuse.update(1, idx6, val6);
+
+    SparseLU lu_fresh;
+    lu_fresh.setMaxUpdates(100);
+    lu_fresh.factorize(A, basis);
+    lu_fresh.update(1, idx6, val6);
+
+    CHECK(lu_reuse.numUpdates() == 1);
+    CHECK(lu_fresh.numUpdates() == 1);
+
+    std::vector<Real> rhs = {1.0, -2.0, 0.5, 3.0};
+    std::vector<Real> x_reuse = rhs;
+    std::vector<Real> x_fresh = rhs;
+    lu_reuse.ftran(x_reuse);
+    lu_fresh.ftran(x_fresh);
+    for (Index i = 0; i < 4; ++i) {
+        CHECK_THAT(x_reuse[i], WithinAbs(x_fresh[i], 1e-10));
+    }
+
+    std::vector<Real> cost = {-1.0, 2.5, 1.25, -0.75};
+    std::vector<Real> y_reuse = cost;
+    std::vector<Real> y_fresh = cost;
+    lu_reuse.btran(y_reuse);
+    lu_fresh.btran(y_fresh);
+    for (Index i = 0; i < 4; ++i) {
+        CHECK_THAT(y_reuse[i], WithinAbs(y_fresh[i], 1e-10));
+    }
+}
+
 TEST_CASE("SparseLU: configurable update limit", "[lu]") {
     std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0},
                                   {0, 2, 2.0}, {1, 2, 3.0}};
