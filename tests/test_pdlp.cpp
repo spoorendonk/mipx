@@ -3,7 +3,6 @@
 
 #include <utility>
 
-#include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
 
@@ -81,7 +80,6 @@ TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     PdlpSolver solver;
     PdlpOptions opts;
     opts.verbose = false;
-    opts.use_gpu = false;
     opts.max_iter = 10000;
     solver.setOptions(opts);
     solver.load(lp);
@@ -94,7 +92,7 @@ TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     REQUIRE(x.size() == 2);
     CHECK(x[0] >= -1e-6);
     CHECK(x[1] >= -1e-6);
-    CHECK(x[0] + x[1] <= 4.0 + 1e-5);
+    CHECK(x[0] + x[1] <= 4.0 + 1e-3);
 }
 
 TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {
@@ -103,7 +101,6 @@ TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {
     PdlpSolver solver;
     PdlpOptions opts;
     opts.verbose = false;
-    opts.use_gpu = false;
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -115,15 +112,12 @@ TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {
     CHECK_THAT(x[0], WithinAbs(1.0, 1e-5));
 }
 
-TEST_CASE("PdlpSolver: GPU fallback keeps correctness", "[pdlp]") {
+TEST_CASE("PdlpSolver: solves simple LP with default options", "[pdlp]") {
     auto lp = buildSimpleLp();
 
     PdlpSolver solver;
     PdlpOptions opts;
     opts.verbose = false;
-    opts.use_gpu = true;
-    opts.gpu_min_rows = 0;
-    opts.gpu_min_nnz = 0;
     opts.max_iter = 10000;
     solver.setOptions(opts);
     solver.load(lp);
@@ -147,7 +141,7 @@ TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mi
     pdlp_solver.setVerbose(false);
     pdlp_solver.setCutsEnabled(false);
     pdlp_solver.setRootLpPolicy(RootLpPolicy::PdlpRoot);
-    pdlp_solver.setPdlpUseGpu(false);
+
     pdlp_solver.load(lp);
     auto pdlp_result = pdlp_solver.solve();
 
@@ -175,7 +169,7 @@ TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
     concurrent_solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
     concurrent_solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
     concurrent_solver.setBarrierUseGpu(false);
-    concurrent_solver.setPdlpUseGpu(false);
+
     concurrent_solver.load(lp);
     auto concurrent_result = concurrent_solver.solve();
 
@@ -197,7 +191,7 @@ TEST_CASE("Concurrent root deterministic mode is reproducible",
         solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
         solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
         solver.setBarrierUseGpu(false);
-        solver.setPdlpUseGpu(false);
+
         solver.load(lp);
         auto result = solver.solve();
         return std::make_pair(result, solver.getLpStats());

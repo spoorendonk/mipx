@@ -248,8 +248,6 @@ int main(int argc, char* argv[]) {
             }
             solver.setBarrierUseGpu(barrier_gpu);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
-            solver.setPdlpUseGpu(barrier_gpu);
-            solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
@@ -373,14 +371,10 @@ int main(int argc, char* argv[]) {
                 mipx::PdlpSolver solver;
                 mipx::PdlpOptions popts;
                 popts.verbose = verbose;
-                popts.use_gpu = barrier_gpu;
-                popts.gpu_min_rows = barrier_gpu_min_rows;
-                popts.gpu_min_nnz = barrier_gpu_min_nnz;
                 solver.setOptions(popts);
                 solver.load(working);
                 result = solver.solve();
                 primals = solver.getPrimalValues();
-                used_gpu_backend = solver.usedGpu();
             } else {
                 mipx::DualSimplexSolver solver;
                 solver.setVerbose(verbose);
@@ -401,7 +395,7 @@ int main(int argc, char* argv[]) {
                 log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
             if (lp_mode == LpMode::Pdlp && verbose) {
-                log.log("PDLP backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
+                log.log("PDLP backend: CPU\n");
             }
 
             // Postsolve if needed.
