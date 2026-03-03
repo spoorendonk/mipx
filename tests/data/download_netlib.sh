@@ -11,7 +11,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="${SCRIPT_DIR}/netlib"
 
 # Standard MPS files from SkyLiu0/NETLIB GitHub repo.
-NETLIB_BASE_URL="https://raw.githubusercontent.com/SkyLiu0/NETLIB/master/feasible"
+NETLIB_BASE_URLS=(
+    "https://raw.githubusercontent.com/SkyLiu0/NETLIB/master/feasible"
+    "https://www.netlib.org/lp/data"
+)
+
+# Canonical instance names -> upstream filename variants.
+declare -A SOURCE_NAME_BY_INSTANCE=(
+    [pilot-ja]="pilot.ja"
+    [vtp-base]="vtp.base"
+)
 
 # Curated small subset — representative, fast to solve.
 SMALL_SET=(
@@ -123,14 +132,17 @@ FULL_SET=(
 )
 
 usage() {
-    echo "Usage: $0 [--small]"
+    echo "Usage: $0 [--small|--all]"
     echo "  --small   Download only a small subset suitable for CI"
+    echo "  --all     Download full Netlib set (same as default)"
     exit 1
 }
 
 INSTANCES=("${FULL_SET[@]}")
 if [[ "${1:-}" == "--small" ]]; then
     INSTANCES=("${SMALL_SET[@]}")
+elif [[ "${1:-}" == "--all" ]]; then
+    INSTANCES=("${FULL_SET[@]}")
 elif [[ -n "${1:-}" ]]; then
     usage
 fi
@@ -150,14 +162,26 @@ for name in "${INSTANCES[@]}"; do
     if [[ -f "${outfile}" ]]; then
         continue
     fi
+    source_name="${SOURCE_NAME_BY_INSTANCE[${name}]:-${name}}"
     echo -n "  ${name}..."
     tmpfile=$(mktemp)
-    if curl -sS -f -o "${tmpfile}" "${NETLIB_BASE_URL}/${name}.mps" 2>/dev/null; then
-        gzip -c "${tmpfile}" > "${outfile}"
-        rm -f "${tmpfile}"
+    downloaded=false
+    for base_url in "${NETLIB_BASE_URLS[@]}"; do
+        for suffix in ".mps" ".MPS" ""; do
+            if curl -sS -f -L -o "${tmpfile}" "${base_url}/${source_name}${suffix}" 2>/dev/null; then
+                gzip -c "${tmpfile}" > "${outfile}"
+                downloaded=true
+                break
+            fi
+        done
+        if [[ "${downloaded}" == "true" ]]; then
+            break
+        fi
+    done
+    rm -f "${tmpfile}"
+    if [[ "${downloaded}" == "true" ]]; then
         echo " ok"
     else
-        rm -f "${tmpfile}"
         echo " FAILED"
         ((FAILED++)) || true
     fi

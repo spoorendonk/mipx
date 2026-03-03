@@ -4,6 +4,7 @@
 #   ./tests/data/download_test_instances.sh               # small sets (default)
 #   ./tests/data/download_test_instances.sh --full         # full Netlib + full MIPLIB
 #   ./tests/data/download_test_instances.sh --mittelman    # Mittelman LP + MIPLIB benchmark set
+#   ./tests/data/download_test_instances.sh --all          # all available LP/MIP corpora
 
 set -euo pipefail
 
@@ -14,8 +15,10 @@ if [[ "${1:-}" == "--full" ]]; then
     MODE="full"
 elif [[ "${1:-}" == "--mittelman" ]]; then
     MODE="mittelman"
+elif [[ "${1:-}" == "--all" ]]; then
+    MODE="all"
 elif [[ -n "${1:-}" ]]; then
-    echo "Usage: $0 [--full|--mittelman]"
+    echo "Usage: $0 [--full|--mittelman|--all]"
     exit 1
 fi
 
@@ -43,6 +46,16 @@ case "${MODE}" in
 
         echo "Downloading MIPLIB 2017 benchmark set (Mittelman MILP)..."
         "${SCRIPT_DIR}/download_miplib.sh" --mittelman
+        ;;
+    all)
+        echo "Downloading full Netlib set..."
+        "${SCRIPT_DIR}/download_netlib.sh" --all
+
+        echo "Downloading full MIPLIB collection..."
+        "${SCRIPT_DIR}/download_miplib.sh" --all
+
+        echo "Downloading full Mittelman LP set..."
+        "${SCRIPT_DIR}/download_mittelman_lp.sh" --all
         ;;
 esac
 

@@ -14,6 +14,7 @@ DEST_DIR="${SCRIPT_DIR}/miplib"
 
 COLLECTION_URL="https://miplib.zib.de/downloads/collection.zip"
 SOLU_URL="https://miplib.zib.de/downloads/miplib2017-v23.solu"
+BENCHMARK_TAG_URL="https://miplib.zib.de/tag_benchmark.html"
 
 # Curated small subset — instances in the MIPLIB 2017 collection, small/fast.
 SMALL_SET=(
@@ -31,9 +32,9 @@ SMALL_SET=(
     stein9inf
 )
 
-# MIPLIB 2017 benchmark set used by Mittelman and others.
-# Source: https://miplib.zib.de/tag_benchmark.html
-# ~240 benchmark-tagged instances (exact count depends on MIPLIB version).
+# Fallback benchmark set used when dynamic benchmark discovery fails.
+# Source: https://miplib.zib.de/tag_benchmark.html (older snapshot).
+# The dynamic list parsed from MIPLIB webpage is preferred.
 BENCHMARK_SET=(
     10teams 30n20b8 a1c1s1 aflow30a aflow40b
     air04 air05 app1-2 arki001 ash608gpia-3col
@@ -119,11 +120,12 @@ MITTELMAN_SMALL=(
 )
 
 usage() {
-    echo "Usage: $0 [--small|--mittelman|--mittelman-small]"
+    echo "Usage: $0 [--small|--mittelman|--mittelman-small|--all]"
     echo "  --small             Download only a small subset suitable for CI (12 instances)"
     echo "  --mittelman         Download the MIPLIB 2017 benchmark set (Mittelman MILP)"
     echo "  --mittelman-small   Download ~50 Mittelman-set instances solvable by HiGHS in <30min"
-    echo "  (default)           Download full MIPLIB 2017 collection (~1065 instances)"
+    echo "  --all               Download full MIPLIB 2017 collection (~1065 instances)"
+    echo "  (default)           Same as --all"
     exit 1
 }
 
@@ -134,6 +136,8 @@ elif [[ "${1:-}" == "--mittelman" ]]; then
     MODE="mittelman"
 elif [[ "${1:-}" == "--mittelman-small" ]]; then
     MODE="mittelman-small"
+elif [[ "${1:-}" == "--all" ]]; then
+    MODE="full"
 elif [[ -n "${1:-}" ]]; then
     usage
 fi
@@ -160,8 +164,21 @@ if [[ ! -f "${ZIP_FILE}" ]]; then
     }
 fi
 
+# Build zip index by instance basename -> zip entry path so named extraction works
+# regardless of archive folder layout.
+declare -A ZIP_ENTRY_BY_NAME
+while IFS= read -r entry; do
+    [[ "${entry}" == *.mps.gz ]] || continue
+    base="$(basename "${entry}")"
+    name="${base%.mps.gz}"
+    if [[ -z "${ZIP_ENTRY_BY_NAME[${name}]:-}" ]]; then
+        ZIP_ENTRY_BY_NAME["${name}"]="${entry}"
+    fi
+done < <(unzip -Z1 "${ZIP_FILE}")
+
 extract_named_set() {
     local -n set_ref=$1
+    local missing=0
     echo "Extracting ${#set_ref[@]} instances to ${DEST_DIR}/"
     for name in "${set_ref[@]}"; do
         outfile="${DEST_DIR}/${name}.mps.gz"
@@ -169,12 +186,39 @@ extract_named_set() {
             continue
         fi
         echo -n "  ${name}..."
-        if unzip -j -o "${ZIP_FILE}" "${name}.mps.gz" -d "${DEST_DIR}/" >/dev/null 2>&1; then
+        local entry="${ZIP_ENTRY_BY_NAME[${name}]:-}"
+        if [[ -n "${entry}" ]] && unzip -p "${ZIP_FILE}" "${entry}" > "${outfile}"; then
+            echo " ok"
+        elif unzip -j -o "${ZIP_FILE}" "${name}.mps.gz" -d "${DEST_DIR}/" >/dev/null 2>&1; then
+            # Fallback for legacy flat archives.
             echo " ok"
         else
             echo " not found"
+            ((missing++)) || true
         fi
     done
+    if [[ ${missing} -gt 0 ]]; then
+        echo "Warning: ${missing} requested instances were not found in collection.zip"
+    fi
+}
+
+load_dynamic_benchmark_set() {
+    local tmpfile
+    tmpfile=$(mktemp)
+    local -n out_ref=$1
+    out_ref=()
+    if ! curl -sS -f -L -o "${tmpfile}" "${BENCHMARK_TAG_URL}" 2>/dev/null; then
+        rm -f "${tmpfile}"
+        return 1
+    fi
+
+    mapfile -t out_ref < <(
+        grep -oE 'instance_details_[A-Za-z0-9._+-]+\.html' "${tmpfile}" \
+            | sed 's/^instance_details_//; s/\.html$//' \
+            | sort -u
+    )
+    rm -f "${tmpfile}"
+    [[ ${#out_ref[@]} -gt 0 ]]
 }
 
 case "${MODE}" in
@@ -182,7 +226,14 @@ case "${MODE}" in
         extract_named_set SMALL_SET
         ;;
     mittelman)
-        extract_named_set BENCHMARK_SET
+        dynamic_set=()
+        if load_dynamic_benchmark_set dynamic_set; then
+            echo "Using dynamic benchmark list from ${BENCHMARK_TAG_URL} (${#dynamic_set[@]} instances)"
+            extract_named_set dynamic_set
+        else
+            echo "Warning: failed to fetch dynamic benchmark list; using fallback list (${#BENCHMARK_SET[@]} instances)"
+            extract_named_set BENCHMARK_SET
+        fi
         ;;
     mittelman-small)
         extract_named_set MITTELMAN_SMALL
