@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mipx/barrier.h"
 #include "mipx/bnb_node.h"
 #include "mipx/branching.h"
 #include "mipx/core.h"
@@ -244,10 +245,13 @@ public:
     }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
-    void setBarrierUseGpu(bool use_gpu) { barrier_use_gpu_ = use_gpu; }
-    void setBarrierGpuThresholds(Int min_rows, Int min_nnz) {
-        barrier_gpu_min_rows_ = std::max<Int>(0, min_rows);
-        barrier_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
+    void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
+    void setBarrierUseGpu(bool use_gpu) {
+        barrier_algorithm_ = use_gpu ? BarrierAlgorithm::Auto
+                                     : BarrierAlgorithm::CpuCholesky;
+    }
+    void setBarrierGpuThresholds(Int, Int) {
+        // Legacy — thresholds now controlled via BarrierAlgorithm dispatch.
     }
     void setPdlpUseGpu(bool use_gpu) { pdlp_use_gpu_ = use_gpu; }
     void setPdlpGpuThresholds(Int min_rows, Int min_nnz) {
@@ -428,9 +432,7 @@ private:
     double cut_per_round_work_budget_ = 5.0e4;
     double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
-    bool barrier_use_gpu_ = true;
-    Int barrier_gpu_min_rows_ = 512;
-    Int barrier_gpu_min_nnz_ = 10000;
+    BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     bool pdlp_use_gpu_ = true;
     Int pdlp_gpu_min_rows_ = 512;
     Int pdlp_gpu_min_nnz_ = 10000;

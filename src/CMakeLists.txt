@@ -7,6 +7,7 @@ add_library(mipx STATIC
     lp/dual_simplex.cpp
     lp/exact_refinement.cpp
     lp/barrier.cpp
+    lp/barrier_cpu.cpp
     lp/pdlp.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp

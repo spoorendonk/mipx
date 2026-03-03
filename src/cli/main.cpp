@@ -246,8 +246,8 @@ int main(int argc, char* argv[]) {
             } else {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::DualDefault);
             }
-            solver.setBarrierUseGpu(barrier_gpu);
-            solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
+            solver.setBarrierAlgorithm(barrier_gpu ? mipx::BarrierAlgorithm::Auto
+                                                    : mipx::BarrierAlgorithm::CpuCholesky);
             solver.setPdlpUseGpu(barrier_gpu);
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
@@ -361,9 +361,8 @@ int main(int argc, char* argv[]) {
                 mipx::BarrierSolver solver;
                 mipx::BarrierOptions bopts;
                 bopts.verbose = verbose;
-                bopts.use_gpu = barrier_gpu;
-                bopts.gpu_min_rows = barrier_gpu_min_rows;
-                bopts.gpu_min_nnz = barrier_gpu_min_nnz;
+                bopts.algorithm = barrier_gpu ? mipx::BarrierAlgorithm::Auto
+                                              : mipx::BarrierAlgorithm::CpuCholesky;
                 solver.setOptions(bopts);
                 solver.load(working);
                 result = solver.solve();

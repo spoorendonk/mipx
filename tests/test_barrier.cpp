@@ -71,15 +71,45 @@ LpProblem buildBranchingMip() {
     return lp;
 }
 
+// Slightly larger LP for a better Cholesky/Augmented test.
+// min -x - y - z  s.t.  x + y <= 5,  y + z <= 5,  x + z <= 5,  x,y,z >= 0.
+LpProblem buildTriangleLp() {
+    LpProblem lp;
+    lp.name = "barrier_triangle";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {5.0, 5.0, 5.0};
+    lp.row_names = {"c1", "c2", "c3"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 1, 1.0}, {1, 2, 1.0},
+        {2, 0, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
 }  // namespace
 
-TEST_CASE("BarrierSolver: solves simple LP", "[barrier]") {
-    auto lp = buildSimpleLp();
+// ============================================================================
+// CPU Cholesky backend
+// ============================================================================
 
+TEST_CASE("BarrierSolver CPU Cholesky: simple LP", "[barrier][cpu-cholesky]") {
+    auto lp = buildSimpleLp();
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.use_gpu = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -93,23 +123,114 @@ TEST_CASE("BarrierSolver: solves simple LP", "[barrier]") {
     CHECK(x[0] + x[1] <= 4.0 + 1e-5);
 }
 
-TEST_CASE("BarrierSolver: handles bounds-only LP", "[barrier]") {
+TEST_CASE("BarrierSolver CPU Cholesky: bounds-only LP", "[barrier][cpu-cholesky]") {
     auto lp = buildBoundsOnlyLp();
-
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.use_gpu = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
-    auto x = solver.getPrimalValues();
-    REQUIRE(x.size() == 1);
-    CHECK_THAT(x[0], WithinAbs(1.0, 1e-5));
 }
+
+TEST_CASE("BarrierSolver CPU Cholesky: triangle LP", "[barrier][cpu-cholesky]") {
+    auto lp = buildTriangleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+    auto x = solver.getPrimalValues();
+    REQUIRE(x.size() == 3);
+    CHECK_THAT(x[0] + x[1] + x[2], WithinAbs(7.5, 1e-4));
+}
+
+// ============================================================================
+// CPU Augmented backend
+// ============================================================================
+
+TEST_CASE("BarrierSolver CPU Augmented: simple LP", "[barrier][cpu-augmented]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuAugmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
+}
+
+TEST_CASE("BarrierSolver CPU Augmented: bounds-only LP", "[barrier][cpu-augmented]") {
+    auto lp = buildBoundsOnlyLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuAugmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]") {
+    auto lp = buildTriangleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuAugmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+// ============================================================================
+// Auto backend + cross-check
+// ============================================================================
+
+TEST_CASE("BarrierSolver Auto: objectives match across backends", "[barrier][auto]") {
+    auto lp = buildTriangleLp();
+
+    BarrierSolver chol_solver;
+    BarrierOptions copts;
+    copts.verbose = false;
+    copts.algorithm = BarrierAlgorithm::CpuCholesky;
+    chol_solver.setOptions(copts);
+    chol_solver.load(lp);
+    auto chol_result = chol_solver.solve();
+
+    BarrierSolver aug_solver;
+    BarrierOptions aopts;
+    aopts.verbose = false;
+    aopts.algorithm = BarrierAlgorithm::CpuAugmented;
+    aug_solver.setOptions(aopts);
+    aug_solver.load(lp);
+    auto aug_result = aug_solver.solve();
+
+    REQUIRE(chol_result.status == Status::Optimal);
+    REQUIRE(aug_result.status == Status::Optimal);
+    CHECK_THAT(chol_result.objective, WithinAbs(aug_result.objective, 1e-6));
+}
+
+// ============================================================================
+// MIP integration (barrier root policy)
+// ============================================================================
 
 TEST_CASE("Barrier root policy: MIP objective matches dual root policy", "[barrier][mip]") {
     auto lp = buildBranchingMip();

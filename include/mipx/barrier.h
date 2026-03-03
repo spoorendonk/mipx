@@ -10,16 +10,23 @@
 
 namespace mipx {
 
+enum class BarrierAlgorithm {
+    Auto,
+    CpuCholesky,
+    CpuAugmented,
+    GpuCholesky,
+    GpuAugmented,
+};
+
 struct BarrierOptions {
     Int max_iter = 100;
-    Int max_cg_iter = 500;
     Real primal_dual_tol = 1e-8;
-    Real cg_rel_tol = 1e-10;
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
-    bool use_gpu = true;
-    Int gpu_min_rows = 512;
-    Int gpu_min_nnz = 10000;
+    BarrierAlgorithm algorithm = BarrierAlgorithm::Auto;
+    Real dense_col_fraction = 0.1;
+    Int ir_steps = 2;
+    Int ruiz_iterations = 10;
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
 };
@@ -81,6 +88,10 @@ private:
     std::vector<Real> cstd_;
     std::vector<OriginalColExpr> col_expr_;
     Real std_obj_offset_ = 0.0;
+
+    // Ruiz scaling factors.
+    std::vector<Real> row_scale_;
+    std::vector<Real> col_scale_;
 
     std::vector<Real> primal_orig_;
     std::vector<Real> dual_eq_;
