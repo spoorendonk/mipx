@@ -36,15 +36,15 @@ struct DualSimplexOptions {
     // Drop tolerance for non-pivot FT update entries (absolute magnitude).
     // Non-positive enables auto sizing from basis dimension.
     Real lu_ft_drop_tolerance = 0.0;
-    Int adaptive_refactor_min_updates = 24;
-    Int adaptive_refactor_stall_pivots = 32;
+    Int adaptive_refactor_min_updates = 32;
+    Int adaptive_refactor_stall_pivots = 64;
     Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
     // Extra guardrails for primal-feasible/dual-infeasible pivot phase.
-    Int primal_feasible_adaptive_refactor_stall_pivots = 16;
-    Int primal_feasible_adaptive_refactor_min_updates = 8;
+    Int primal_feasible_adaptive_refactor_stall_pivots = 24;
+    Int primal_feasible_adaptive_refactor_min_updates = 16;
     // Non-positive disables the dual-progress stall gate.
     Int primal_feasible_dual_progress_window = 8;
-    Int primal_feasible_refactor_cooldown = 16;
+    Int primal_feasible_refactor_cooldown = 32;
     Real primal_feasible_dual_progress_improve_rel_tol = 1e-3;
 
     // Runtime SIMD controls for dense vector kernels.

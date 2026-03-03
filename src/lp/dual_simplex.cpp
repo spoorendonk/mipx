@@ -748,19 +748,9 @@ LpResult DualSimplexSolver::solve() {
     // full reinversions and update-drift stalls.
     Int lu_update_limit = options_.lu_update_limit;
     if (lu_update_limit <= 0) {
-        lu_update_limit = 100;
-        if (num_rows_ >= 500 &&
-            num_cols_ >= 4 * num_rows_) {
-            // Wide LPs benefit from larger update windows when rows are sparse
-            // (fewer expensive reinversions) but excessive FT tails can dominate
-            // no-presolve dual simplex wall time, so keep a tighter cap.
-            lu_update_limit = 100;
-        } else if (num_rows_ >= 1000 &&
-                   num_rows_ < 2000 &&
-                   num_cols_ >= 2 * num_rows_ &&
-                   num_cols_ <= 3 * num_rows_) {
-            lu_update_limit = 100;
-        }
+        // Wall-clock tuned default for no-presolve dual simplex:
+        // keep FT updates longer before reinversion.
+        lu_update_limit = 150;
     }
     lu_.setMaxUpdates(lu_update_limit);
     Real lu_ft_drop_tol = options_.lu_ft_drop_tolerance;
@@ -863,11 +853,9 @@ LpResult DualSimplexSolver::solve() {
               base_var_upper.begin() + static_cast<std::size_t>(num_cols_));
 
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
-    std::vector<uint8_t> pivot_row_alpha_mark(static_cast<std::size_t>(numVars()), uint8_t{0});
-    std::vector<Index> pivot_row_alpha_touched;
-    pivot_row_alpha_touched.reserve(static_cast<std::size_t>(std::max<Index>(1024, num_rows_)));
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
+    std::vector<Real> pricing_reduced_cost(numVars(), 0.0);
     const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
     // Static entering-score normalization for primal-feasible/dual-infeasible phase:
     // score(k) = rc(k)^2 / col_norm_sq(k), where slacks have norm 1.
@@ -926,32 +914,17 @@ LpResult DualSimplexSolver::solve() {
             ++value;
         }
     };
-    auto clearPivotRowAlpha = [&]() {
-        for (Index k : pivot_row_alpha_touched) {
-            pivot_row_alpha[static_cast<std::size_t>(k)] = 0.0;
-            pivot_row_alpha_mark[static_cast<std::size_t>(k)] = uint8_t{0};
-        }
-        pivot_row_alpha_touched.clear();
-    };
     auto buildPivotRowAlphaFromWork = [&]() {
-        clearPivotRowAlpha();
+        std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
         for (Index i = 0; i < num_rows_; ++i) {
             const Real rho_i = work[i];
             if (std::abs(rho_i) < kZeroTol) continue;
             auto rv = matrix_.row(i);
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
-                if (pivot_row_alpha_mark[static_cast<std::size_t>(j)] == 0) {
-                    pivot_row_alpha_mark[static_cast<std::size_t>(j)] = uint8_t{1};
-                    pivot_row_alpha_touched.push_back(j);
-                }
                 pivot_row_alpha[static_cast<std::size_t>(j)] += rho_i * rv.values[p];
             }
             const Index slack = num_cols_ + i;
-            if (pivot_row_alpha_mark[static_cast<std::size_t>(slack)] == 0) {
-                pivot_row_alpha_mark[static_cast<std::size_t>(slack)] = uint8_t{1};
-                pivot_row_alpha_touched.push_back(slack);
-            }
             pivot_row_alpha[static_cast<std::size_t>(slack)] = -rho_i;
         }
     };
@@ -1126,18 +1099,30 @@ LpResult DualSimplexSolver::solve() {
             options_.enable_dual_perturbation &&
             options_.dual_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.dual_perturbation_stall_pivots;
+        bool pricing_cache_ready = false;
+        auto buildPricingReducedCostCache = [&]() {
+            if (!use_dual_perturbation || pricing_cache_ready) return;
+            for (Index k : nonbasic_) {
+                Real rc = reduced_cost_[k];
+                const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
+                const Real weight = 1.0 + static_cast<Real>((hash >> 22) & 0x3ff) / 1024.0;
+                const Real eps = options_.dual_perturbation_magnitude * weight;
+                const BasisStatus st = var_status_[k];
+                if (st == BasisStatus::AtLower) rc += eps;
+                else if (st == BasisStatus::AtUpper) rc -= eps;
+                else if (st == BasisStatus::Free) rc += ((k & 1) ? eps : -eps);
+                pricing_reduced_cost[static_cast<std::size_t>(k)] = rc;
+            }
+            pricing_cache_ready = true;
+        };
         auto reducedCostForPricing = [&](Index k) -> Real {
-            Real rc = reduced_cost_[k];
-            if (!use_dual_perturbation) return rc;
-
-            const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
-            const Real weight = 1.0 + static_cast<Real>((hash >> 22) & 0x3ff) / 1024.0;
-            const Real eps = options_.dual_perturbation_magnitude * weight;
-            const BasisStatus st = var_status_[k];
-            if (st == BasisStatus::AtLower) return rc + eps;
-            if (st == BasisStatus::AtUpper) return rc - eps;
-            if (st == BasisStatus::Free) return rc + ((k & 1) ? eps : -eps);
-            return rc;
+            if (!use_dual_perturbation) {
+                return reduced_cost_[k];
+            }
+            if (!pricing_cache_ready) {
+                buildPricingReducedCostCache();
+            }
+            return pricing_reduced_cost[static_cast<std::size_t>(k)];
         };
         const Real* lower_perturb =
             bound_perturb_active_ ? lower_bound_perturb_.data() : nullptr;
