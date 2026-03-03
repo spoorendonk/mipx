@@ -241,6 +241,8 @@ def solve_highs(
         ]
         if time_limit > 0:
             cmd.extend(["--time_limit", f"{time_limit:g}"])
+        if mode == "mip":
+            cmd.extend(["--mip_rel_gap", "0"])
         cmd.extend(extra_args)
 
         timeout_s = max(5.0, time_limit * 1.5) if time_limit > 0 else 300.0

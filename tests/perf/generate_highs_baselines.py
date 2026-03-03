@@ -36,7 +36,7 @@ def capture(cmd: list[str]) -> str:
 
 
 def resolve_highs_bin() -> str:
-    return os.environ.get("HIGHS_BIN") or os.environ.get("HIGHS_BINARY") or "highs"
+    return os.environ.get("HIGHS_BINARY") or "highs"
 
 
 def main() -> int:

@@ -890,6 +890,74 @@ TEST_CASE("Presolve: parallel/antiparallel row removal", "[presolve]") {
     CHECK(reduced.num_rows == 1);
 }
 
+TEST_CASE("Presolve: positive-scale parallel row removal", "[presolve]") {
+    // Row1: x + y <= 5 (tighter)
+    // Row2: 2x + 2y <= 12  <=> x + y <= 6 (weaker, positive scale)
+    LpProblem lp;
+    lp.name = "parallel_positive_scale";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {5.0, 12.0};
+    lp.row_names = {"tight", "weak_parallel"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 2.0}, {1, 1, 2.0},
+    };
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().parallel_row_changes >= 1);
+    CHECK(reduced.num_rows == 1);
+}
+
+TEST_CASE("Presolve: negative coefficient is not tightened", "[presolve]") {
+    // Row: -3x + y <= 4, x integer in [0,2], y in [0,10]
+    // Only positive coefficients on integer vars should be tightened.
+    LpProblem lp;
+    lp.name = "coeff_tight_neg_skip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {2.0, 10.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {4.0};
+    lp.row_names = {"r1"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, -3.0}, {0, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_coefficient_tightening = true;
+    presolver.setOptions(opts);
+    auto reduced = presolver.presolve(lp);
+
+    CHECK_FALSE(presolver.isInfeasible());
+    // Negative coefficient should NOT be tightened.
+    CHECK(presolver.stats().coeff_tightening_changes == 0);
+}
+
 TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[presolve]") {
     auto lp = buildCoeffTighteningDuplicateProblem();
 
@@ -993,6 +1061,35 @@ TEST_CASE("Presolve: doubleton equality aggregation preserves LP objective", "[p
     for (Index j = 0; j < lp.num_cols; ++j) full_obj += lp.obj[j] * full[j];
     CHECK_THAT(full_obj, WithinAbs(direct.objective, 1e-6));
     CHECK_THAT(full[0] + full[1], WithinAbs(5.0, 1e-6));
+}
+
+TEST_CASE("Presolve: doubleton aggregation detects infeasibility from bound projection", "[presolve]") {
+    // x + y = 10, x in [0,3], y in [0,3]
+    // Projected: y = 10 - x, y in [7,10] but y <= 3 -> infeasible.
+    LpProblem lp;
+    lp.name = "doubleton_infeasible";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {3.0, 3.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {10.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"eq"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+
+    Presolver presolver;
+    PresolveOptions opts = presolver.options();
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    presolver.setOptions(opts);
+    (void)presolver.presolve(lp);
+
+    CHECK(presolver.isInfeasible());
 }
 
 TEST_CASE("Presolve: doubleton equality skips fill-creating substitutions", "[presolve]") {
