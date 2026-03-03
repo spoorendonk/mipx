@@ -1,6 +1,7 @@
 #include "mipx/presolve.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -154,7 +155,7 @@ inline bool rowsHaveScaledPattern(const LpProblem& lp, Index r1, Index r2,
             have_scale = true;
         } else {
             const Real expected = scale * ai;
-            if (std::abs(expected - bj) > tol * (1.0 + std::abs(bj))) {
+            if (std::abs(expected - bj) > tol * (1.0 + std::max(std::abs(expected), std::abs(bj)))) {
                 return false;
             }
         }
@@ -232,6 +233,8 @@ std::vector<Real> PostsolveStack::postsolve(
     const std::vector<Index>& col_mapping,
     Index orig_num_cols) const {
 
+    constexpr Real kTol = 1e-8;
+
     // Start with a full-size solution initialized to zero.
     std::vector<Real> full(orig_num_cols, 0.0);
 
@@ -301,7 +304,7 @@ std::vector<Real> PostsolveStack::postsolve(
             }
             else if constexpr (std::is_same_v<T, PostsolveDoubletonEquality>) {
                 const Real denom = op.a_eliminated;
-                if (std::abs(denom) <= 1e-16) return;
+                if (std::abs(denom) <= kTol) return;
                 const Real x_keep = full[op.kept_col];
                 Real x_elim = (op.rhs - op.a_kept * x_keep) / denom;
                 if (!std::isinf(op.eliminated_lower)) {
@@ -645,8 +648,8 @@ Index Presolver::aggregateDoubletonEqualities(
         if (std::abs(lp.row_upper[i] - lp.row_lower[i]) > kTol) continue;
 
         auto rv = lp.matrix.row(i);
-        Index row_cols[2] = {-1, -1};
-        Real row_coeffs[2] = {0.0, 0.0};
+        std::array<Index, 2> row_cols = {-1, -1};
+        std::array<Real, 2> row_coeffs = {0.0, 0.0};
         Index n_active = 0;
         for (Index k = 0; k < rv.size(); ++k) {
             const Index col = rv.indices[k];
@@ -686,11 +689,10 @@ Index Presolver::aggregateDoubletonEqualities(
                 const Real a_row_elim =
                     effectiveCoeff(coeff_overrides_, row, elim_col, cv.values[k]);
                 Real a_row_keep = 0.0;
-                Real matrix_keep = 0.0;
+                [[maybe_unused]] Real matrix_keep = 0.0;
                 if (!findRowCoeff(row, keep_col, a_row_keep, matrix_keep)) {
                     return false;  // Would create fill-in.
                 }
-                (void)matrix_keep;
                 if (std::abs(a_row_keep) <= kTol) return false;
                 const Real new_keep = a_row_keep - a_row_elim * ratio;
                 if (std::abs(new_keep) <= 10.0 * kTol) return false;
@@ -845,6 +847,12 @@ Index Presolver::aggregateDoubletonEqualities(
                            col_active_nnz, next_dirty_rows, next_dirty_cols);
         removeActiveRow(lp, i, col_removed, row_removed, row_active_nnz,
                         col_active_nnz, next_dirty_rows, next_dirty_cols);
+
+        // Clean up stale coeff_overrides_ entries for the eliminated column.
+        std::erase_if(coeff_overrides_, [best_elim](const auto& entry) {
+            return static_cast<Index>(entry.first & 0xFFFFFFFF) == best_elim;
+        });
+
         ++stats_.vars_removed;
         ++stats_.rows_removed;
         ++changes;
@@ -1395,8 +1403,8 @@ Index Presolver::removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_remov
         buckets[h].push_back(i);
     }
 
-    for (const auto& [h, rows] : buckets) {
-        (void)h;
+    for (const auto& bucket : buckets) {
+        const auto& rows = bucket.second;
         if (rows.size() < 2) continue;
 
         for (size_t a = 0; a < rows.size(); ++a) {
@@ -1464,8 +1472,8 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
         return {upper * scale, lower * scale};
     };
 
-    for (const auto& [h, rows] : buckets) {
-        (void)h;
+    for (const auto& bucket : buckets) {
+        const auto& rows = bucket.second;
         if (rows.size() < 2) continue;
         for (size_t a = 0; a < rows.size(); ++a) {
             const Index i = rows[a];
@@ -1521,11 +1529,12 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
 
 Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                       std::vector<bool>& row_removed,
+                                      const std::vector<Index>& dirty_rows,
                                       std::vector<uint8_t>& next_dirty_rows,
                                       std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
-    for (Index i = 0; i < lp.num_rows; ++i) {
+    for (Index i : dirty_rows) {
         if (row_removed[i]) continue;
         auto rv = lp.matrix.row(i);
 
@@ -1744,7 +1753,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
         if (options_.enable_coefficient_tightening) {
             ch = tightenCoefficients(lp, col_removed, row_removed,
-                                     next_dirty_rows, next_dirty_cols);
+                                     dirty_row_list, next_dirty_rows, next_dirty_cols);
             stats_.coeff_tightening_changes += ch;
             total_changes += ch;
         }

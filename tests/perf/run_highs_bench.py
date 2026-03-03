@@ -179,8 +179,20 @@ def run_highs_once(
     if time_limit > 0:
         cmd.extend(["--time_limit", f"{time_limit:g}"])
 
+    timeout_s = max(5.0, time_limit * 1.5) if time_limit > 0 else 300.0
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        elapsed = time.perf_counter() - t0
+        return SolveResult(
+            status="time_limit",
+            time_seconds=elapsed,
+            simplex_iterations=None,
+            nodes=None,
+            objective=None,
+            ok=False,
+        )
     elapsed = time.perf_counter() - t0
     output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
 
@@ -224,7 +236,7 @@ def collect_instances(
 ) -> list[Path]:
     all_instances = sorted(instances_dir.glob("*.mps.gz")) + sorted(instances_dir.glob("*.mps"))
     if not all_instances:
-        raise ValueError(f"no .mps/.mps.gz instances found in {instances_dir}")
+        raise SystemExit(f"no .mps/.mps.gz instances found in {instances_dir}")
 
     if instance_filter:
         names = {name.strip() for name in instance_filter.split(",") if name.strip()}
@@ -235,7 +247,7 @@ def collect_instances(
     if max_instances > 0:
         selected = selected[:max_instances]
     if not selected:
-        raise ValueError("no instances selected")
+        raise SystemExit("no instances selected")
     return selected
 
 
@@ -333,8 +345,8 @@ def main() -> int:
 
                 status = statuses[0] if len(set(statuses)) == 1 else "mixed_status"
                 med_time = median(times)
-                med_simplex = median(simplex_iters) if simplex_iters else float("nan")
-                med_obj = median(objectives) if objectives else float("nan")
+                med_simplex = median(simplex_iters) if simplex_iters else None
+                med_obj = median(objectives) if objectives else None
 
                 if args.mode == "lp":
                     writer.writerow(
@@ -347,7 +359,7 @@ def main() -> int:
                         ]
                     )
                 else:
-                    med_nodes = median(nodes) if nodes else float("nan")
+                    med_nodes = median(nodes) if nodes else None
                     writer.writerow(
                         [
                             name,

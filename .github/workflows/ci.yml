@@ -49,6 +49,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install HiGHS
+        run: python3 -m pip install highspy
       - name: Check HiGHS CLI
         run: |
           command -v highs >/dev/null
