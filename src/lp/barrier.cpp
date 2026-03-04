@@ -619,50 +619,51 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 #endif
     }
 
-    switch (algo) {
-    case BarrierAlgorithm::CpuCholesky:
-        solver = createCpuCholeskySolver();
-        break;
-    case BarrierAlgorithm::CpuAugmented:
-        solver = createCpuAugmentedSolver();
-        break;
-    case BarrierAlgorithm::GpuCholesky:
+    bool ok = false;
+
 #ifdef MIPX_HAS_CUDSS
-        solver = createGpuCholeskySolver();
-        if (!solver->setup(aeq_, m, n, options_)) {
-            // GPU Cholesky setup failed (e.g. NE too dense) — fall back.
+    // GPU device-resident path: handles NE/Augmented internally with auto-switching.
+    if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
+        bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
+        ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_,
+                             std_obj_offset_, prefer_aug, z, y, s, iters);
+        if (ok) {
+            used_gpu_ = true;
+        } else {
+            // GPU failed — fall back to CPU.
             solver = use_augmented ? createCpuAugmentedSolver()
                                    : createCpuCholeskySolver();
-        } else {
-            used_gpu_ = true;
-            return runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
-                                  std_obj_offset_, z, y, s, iters);
         }
+    }
 #else
-        solver = use_augmented ? createCpuAugmentedSolver()
-                               : createCpuCholeskySolver();
+    if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
+        // No CUDA — use CPU.
+        algo = use_augmented ? BarrierAlgorithm::CpuAugmented
+                             : BarrierAlgorithm::CpuCholesky;
+    }
 #endif
-        break;
-    case BarrierAlgorithm::GpuAugmented:
-#ifdef MIPX_HAS_CUDSS
-        solver = createGpuAugmentedSolver();
-        used_gpu_ = true;
-#else
-        solver = use_augmented ? createCpuAugmentedSolver()
-                               : createCpuCholeskySolver();
-#endif
-        break;
-    default:
-        solver = createCpuCholeskySolver();
-        break;
+
+    if (!ok && !solver) {
+        switch (algo) {
+        case BarrierAlgorithm::CpuCholesky:
+            solver = createCpuCholeskySolver();
+            break;
+        case BarrierAlgorithm::CpuAugmented:
+            solver = createCpuAugmentedSolver();
+            break;
+        default:
+            solver = createCpuCholeskySolver();
+            break;
+        }
     }
 
-    if (!solver->setup(aeq_, m, n, options_)) {
-        return false;
-    }
-
-    bool ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
+    if (solver) {
+        if (!solver->setup(aeq_, m, n, options_)) {
+            return false;
+        }
+        ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
                              std_obj_offset_, z, y, s, iters);
+    }
 
     // Unscale solution.
     if (!col_scale_.empty()) {

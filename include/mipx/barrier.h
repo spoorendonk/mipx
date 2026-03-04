@@ -102,4 +102,14 @@ private:
     bool used_gpu_ = false;
 };
 
+// GPU device-resident barrier solver (available when compiled with MIPX_HAS_CUDSS).
+#ifdef MIPX_HAS_CUDSS
+bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
+                     std::span<const Real> b, std::span<const Real> c,
+                     const BarrierOptions& opts, Real obj_offset,
+                     bool prefer_augmented,
+                     std::vector<Real>& z, std::vector<Real>& y,
+                     std::vector<Real>& s, Int& iters);
+#endif
+
 }  // namespace mipx
