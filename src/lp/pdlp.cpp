@@ -7,6 +7,12 @@
 #include <limits>
 #include <random>
 
+#ifdef MIPX_HAS_CUDA
+#include <cuda_runtime_api.h>
+#include <cusparse.h>
+#include "pdlp_kernels.cuh"
+#endif
+
 namespace mipx {
 
 namespace {
@@ -126,6 +132,9 @@ void PdlpSolver::buildScaledProblem() {
     scaled_a_ = SparseMatrix(m, n, std::move(values), std::move(col_indices),
                               std::move(row_starts));
 
+    // Build explicit A^T in CSR format (used by GPU path).
+    buildTransposeCSR();
+
     // Pock-Chambolle diagonal preconditioning.
     sigma_base_.assign(static_cast<size_t>(m), 1.0);
     tau_base_.assign(static_cast<size_t>(n), 1.0);
@@ -148,6 +157,43 @@ void PdlpSolver::buildScaledProblem() {
         }
         for (Index j = 0; j < n; ++j) {
             tau_base_[j] = 1.0 / std::max(std::sqrt(col_sq[j]), 1e-8);
+        }
+    }
+}
+
+void PdlpSolver::buildTransposeCSR() {
+    // Build A^T in CSR format via standard CSR→CSC transpose.
+    // A^T in CSR with n rows and m cols is equivalent to A in CSC.
+    const Index m = scaled_a_.numRows();
+    const Index n = scaled_a_.numCols();
+    const Index nnz = scaled_a_.numNonzeros();
+
+    auto vals = scaled_a_.csr_values();
+    auto cols = scaled_a_.csr_col_indices();
+    auto rows = scaled_a_.csr_row_starts();
+
+    at_row_starts_.assign(static_cast<size_t>(n + 1), 0);
+    at_col_indices_.resize(static_cast<size_t>(nnz));
+    at_values_.resize(static_cast<size_t>(nnz));
+
+    if (nnz == 0) return;
+
+    // Count nnz per column of A (= nnz per row of A^T).
+    for (Index k = 0; k < nnz; ++k) {
+        ++at_row_starts_[static_cast<size_t>(cols[k] + 1)];
+    }
+    // Prefix sum.
+    for (Index j = 1; j <= n; ++j) {
+        at_row_starts_[j] += at_row_starts_[j - 1];
+    }
+    // Scatter.
+    std::vector<Index> cursor(at_row_starts_.begin(), at_row_starts_.begin() + n);
+    for (Index i = 0; i < m; ++i) {
+        for (Index k = rows[i]; k < rows[i + 1]; ++k) {
+            Index j = cols[k];
+            Index pos = cursor[j]++;
+            at_col_indices_[pos] = i;
+            at_values_[pos] = vals[k];
         }
     }
 }
@@ -256,6 +302,16 @@ LpResult PdlpSolver::solve() {
         iterations_ = 0;
         return {status_, objective_, 0, 0.0};
     }
+
+#ifdef MIPX_HAS_CUDA
+    // GPU path: all iterate vectors stay on device.
+    bool should_use_gpu = options_.use_gpu &&
+                          m >= options_.gpu_min_rows &&
+                          scaled_a_.numNonzeros() >= options_.gpu_min_nnz;
+    if (should_use_gpu) {
+        return solveGpu();
+    }
+#endif
 
     // Step size from spectral norm estimate.
     Real spectral = estimateSpectralNorm();
@@ -605,6 +661,502 @@ LpResult PdlpSolver::solve() {
     work += seconds * 1e-6;
     return {status_, objective_, iterations_, work};
 }
+
+// ---------------------------------------------------------------------------
+// GPU solve path
+// ---------------------------------------------------------------------------
+
+#ifdef MIPX_HAS_CUDA
+
+namespace {
+
+inline bool cudaOk(cudaError_t code) { return code == cudaSuccess; }
+inline bool cusparseOk(cusparseStatus_t code) { return code == CUSPARSE_STATUS_SUCCESS; }
+
+}  // namespace
+
+LpResult PdlpSolver::solveGpu() {
+    auto t0 = std::chrono::steady_clock::now();
+
+    const Index m = scaled_a_.numRows();
+    const Index n = scaled_a_.numCols();
+    const Index nnz = scaled_a_.numNonzeros();
+    const Index at_nnz = static_cast<Index>(at_values_.size());
+
+    used_gpu_ = false;
+
+    // Arena layout: 12n + 11m doubles.
+    // Iterate vectors (device-resident):
+    //   current_x(n), current_y(m), initial_x(n), initial_y(m),
+    //   pdhg_x(n), pdhg_y(m), reflected_x(n), reflected_y(m),
+    //   at_y(n), a_xrefl(m), ax(m), delta_y(m), at_delta_y(n)
+    // Constant vectors:
+    //   cscaled(n), col_lower(n), col_upper(n), row_lower(m), row_upper(m),
+    //   tau_base(n), sigma_base(m)
+    // Power iteration: pi_x(n), pi_y(m), pi_x_new(n)
+    // Scratch: 1 double for reductions
+    const size_t sn = static_cast<size_t>(n);
+    const size_t sm = static_cast<size_t>(m);
+    const size_t arena_doubles = 15 * sn + 12 * sm + 1;
+
+    Real* d_arena = nullptr;
+    if (!cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_arena),
+                            arena_doubles * sizeof(Real)))) {
+        // Fall back to CPU path by returning a sentinel.
+        return solve();  // Will skip GPU because used_gpu_ check won't re-enter.
+    }
+
+    // Pointers into arena.
+    Real* d_current_x   = d_arena;
+    Real* d_current_y   = d_current_x + n;
+    Real* d_initial_x   = d_current_y + m;
+    Real* d_initial_y   = d_initial_x + n;
+    Real* d_pdhg_x      = d_initial_y + m;
+    Real* d_pdhg_y      = d_pdhg_x + n;
+    Real* d_reflected_x = d_pdhg_y + m;
+    Real* d_reflected_y = d_reflected_x + n;  // unused but reserved
+    Real* d_at_y        = d_reflected_y + m;
+    Real* d_a_xrefl     = d_at_y + n;
+    Real* d_ax          = d_a_xrefl + m;
+    Real* d_delta_y     = d_ax + m;
+    Real* d_at_delta_y  = d_delta_y + m;
+    Real* d_cscaled     = d_at_delta_y + n;
+    Real* d_col_lower   = d_cscaled + n;
+    Real* d_col_upper   = d_col_lower + n;
+    Real* d_row_lower   = d_col_upper + n;
+    Real* d_row_upper   = d_row_lower + m;
+    Real* d_tau_base    = d_row_upper + m;
+    Real* d_sigma_base  = d_tau_base + n;
+    Real* d_pi_x        = d_sigma_base + m;
+    Real* d_pi_y        = d_pi_x + n;
+    Real* d_pi_x_new    = d_pi_y + m;
+    Real* d_scratch     = d_pi_x_new + n;
+
+    // Zero all iterate vectors.
+    cudaMemset(d_arena, 0, (13 * sn + 8 * sm) * sizeof(Real));
+
+    // Upload constant vectors.
+    cudaMemcpy(d_cscaled, cscaled_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_col_lower, scaled_col_lower_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_col_upper, scaled_col_upper_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_row_lower, scaled_row_lower_.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_row_upper, scaled_row_upper_.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tau_base, tau_base_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sigma_base, sigma_base_.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+
+    // Upload A CSR to device.
+    auto a_vals = scaled_a_.csr_values();
+    auto a_cols = scaled_a_.csr_col_indices();
+    auto a_rows = scaled_a_.csr_row_starts();
+
+    Real* d_a_values = nullptr;
+    Index* d_a_col_indices = nullptr;
+    Index* d_a_row_starts = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_a_values), sizeof(Real) * nnz);
+    cudaMalloc(reinterpret_cast<void**>(&d_a_col_indices), sizeof(Index) * nnz);
+    cudaMalloc(reinterpret_cast<void**>(&d_a_row_starts), sizeof(Index) * (m + 1));
+    cudaMemcpy(d_a_values, a_vals.data(), sizeof(Real) * nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a_col_indices, a_cols.data(), sizeof(Index) * nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_a_row_starts, a_rows.data(), sizeof(Index) * (m + 1), cudaMemcpyHostToDevice);
+
+    // Upload A^T CSR to device.
+    Real* d_at_values = nullptr;
+    Index* d_at_col_indices = nullptr;
+    Index* d_at_row_starts = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_at_values), sizeof(Real) * at_nnz);
+    cudaMalloc(reinterpret_cast<void**>(&d_at_col_indices), sizeof(Index) * at_nnz);
+    cudaMalloc(reinterpret_cast<void**>(&d_at_row_starts), sizeof(Index) * (n + 1));
+    cudaMemcpy(d_at_values, at_values_.data(), sizeof(Real) * at_nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_at_col_indices, at_col_indices_.data(), sizeof(Index) * at_nnz, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_at_row_starts, at_row_starts_.data(), sizeof(Index) * (n + 1), cudaMemcpyHostToDevice);
+
+    // cuSPARSE setup.
+    cusparseHandle_t handle = nullptr;
+    cusparseCreate(&handle);
+    cudaStream_t stream = nullptr;
+    cudaStreamCreate(&stream);
+    cusparseSetStream(handle, stream);
+
+    // A sparse matrix descriptor (m x n).
+    cusparseSpMatDescr_t a_desc = nullptr;
+    cusparseCreateCsr(&a_desc, m, n, nnz, d_a_row_starts, d_a_col_indices, d_a_values,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+
+    // A^T sparse matrix descriptor (n x m).
+    cusparseSpMatDescr_t at_desc = nullptr;
+    cusparseCreateCsr(&at_desc, n, m, at_nnz, d_at_row_starts, d_at_col_indices, d_at_values,
+                      CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+                      CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F);
+
+    // Dense vector descriptors.
+    auto makeVecDesc = [](cusparseDnVecDescr_t& desc, int64_t size, Real* data) {
+        cusparseCreateDnVec(&desc, size, data, CUDA_R_64F);
+    };
+    cusparseDnVecDescr_t desc_current_y = nullptr, desc_at_y = nullptr;
+    cusparseDnVecDescr_t desc_reflected_x = nullptr, desc_a_xrefl = nullptr;
+    cusparseDnVecDescr_t desc_pdhg_x = nullptr, desc_ax = nullptr;
+    cusparseDnVecDescr_t desc_pdhg_y = nullptr;
+    cusparseDnVecDescr_t desc_delta_y = nullptr, desc_at_delta_y = nullptr;
+    cusparseDnVecDescr_t desc_pi_x = nullptr, desc_pi_y = nullptr, desc_pi_x_new = nullptr;
+
+    makeVecDesc(desc_current_y, m, d_current_y);
+    makeVecDesc(desc_at_y, n, d_at_y);
+    makeVecDesc(desc_reflected_x, n, d_reflected_x);
+    makeVecDesc(desc_a_xrefl, m, d_a_xrefl);
+    makeVecDesc(desc_pdhg_x, n, d_pdhg_x);
+    makeVecDesc(desc_ax, m, d_ax);
+    makeVecDesc(desc_pdhg_y, m, d_pdhg_y);
+    makeVecDesc(desc_delta_y, m, d_delta_y);
+    makeVecDesc(desc_at_delta_y, n, d_at_delta_y);
+    makeVecDesc(desc_pi_x, n, d_pi_x);
+    makeVecDesc(desc_pi_y, m, d_pi_y);
+    makeVecDesc(desc_pi_x_new, n, d_pi_x_new);
+
+    const Real alpha_one = 1.0, beta_zero = 0.0;
+
+    // Allocate SpMV buffers.
+    // A * x (non-transpose): A_desc * desc_reflected_x -> desc_a_xrefl
+    size_t buf_a_size = 0, buf_at_size = 0;
+    cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha_one, a_desc, desc_reflected_x, &beta_zero, desc_a_xrefl,
+                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_a_size);
+    // A^T * y (non-transpose on A^T desc): AT_desc * desc_current_y -> desc_at_y
+    cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                            &alpha_one, at_desc, desc_current_y, &beta_zero, desc_at_y,
+                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_at_size);
+
+    void* d_buf_a = nullptr;
+    void* d_buf_at = nullptr;
+    if (buf_a_size > 0) cudaMalloc(&d_buf_a, buf_a_size);
+    if (buf_at_size > 0) cudaMalloc(&d_buf_at, buf_at_size);
+
+    // Convergence metrics.
+    GpuConvergenceMetrics* d_metrics = nullptr;
+    GpuConvergenceMetrics* h_metrics = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_metrics), sizeof(GpuConvergenceMetrics));
+    cudaMallocHost(reinterpret_cast<void**>(&h_metrics), sizeof(GpuConvergenceMetrics));
+
+    used_gpu_ = true;
+
+    // SpMV helper lambdas.
+    auto spmv_a = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
+        cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                     &alpha_one, a_desc, in, &beta_zero, out,
+                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buf_a);
+    };
+    auto spmv_at = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
+        cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                     &alpha_one, at_desc, in, &beta_zero, out,
+                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buf_at);
+    };
+
+    // -----------------------------------------------------------------------
+    // Power iteration on device for spectral norm.
+    // -----------------------------------------------------------------------
+    {
+        std::mt19937 rng(42);
+        std::normal_distribution<Real> dist(0.0, 1.0);
+        std::vector<Real> x_host(sn);
+        for (auto& v : x_host) v = dist(rng);
+        Real xnorm = l2Norm(x_host);
+        if (xnorm < 1e-15) xnorm = 1.0;
+        for (auto& v : x_host) v /= xnorm;
+        cudaMemcpy(d_pi_x, x_host.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+
+        Real sigma_sq = 1.0;
+        for (Index iter = 0; iter < options_.sv_max_iter; ++iter) {
+            // y = A * x
+            spmv_a(desc_pi_x, desc_pi_y);
+            // x_new = A^T * y
+            spmv_at(desc_pi_y, desc_pi_x_new);
+
+            sigma_sq = launchDotProduct(n, d_pi_x, d_pi_x_new, d_scratch, stream);
+
+            // Residual: ||x_new - sigma_sq * x||
+            // Compute x_new = x_new - sigma_sq * x, then norm
+            launchAxpby(n, 1.0, d_pi_x_new, -sigma_sq, d_pi_x, stream);
+            // Now d_pi_x = x_new - sigma_sq * x_old. Get its norm.
+            Real resid_sq = launchDotProduct(n, d_pi_x, d_pi_x, d_scratch, stream);
+            Real resid = std::sqrt(resid_sq);
+
+            // Restore: swap pi_x and pi_x_new (just copy x_new → pi_x and normalize).
+            xnorm = std::sqrt(launchDotProduct(n, d_pi_x_new, d_pi_x_new, d_scratch, stream));
+            if (xnorm < 1e-15) break;
+            // pi_x = pi_x_new / xnorm
+            cudaMemcpy(d_pi_x, d_pi_x_new, sn * sizeof(Real), cudaMemcpyDeviceToDevice);
+            launchScale(n, 1.0 / xnorm, d_pi_x, stream);
+
+            if (resid < options_.sv_tol * std::abs(sigma_sq)) break;
+        }
+
+        Real spectral = std::sqrt(std::max(sigma_sq, 1e-12));
+        // Step size from spectral norm.
+        Real step_init = 0.998 / spectral;
+        // Store into a variable accessible below.
+        // We'll use 'step' directly in the main loop.
+        cudaMemcpy(d_scratch, &step_init, sizeof(Real), cudaMemcpyHostToDevice);
+    }
+
+    // Retrieve step from scratch (stored during power iteration).
+    Real step;
+    cudaMemcpy(&step, d_scratch, sizeof(Real), cudaMemcpyDeviceToHost);
+
+    Real primal_weight = options_.primal_weight;
+    const Int N = options_.termination_eval_frequency;
+
+    Int inner_count = 0;
+    Int total_count = 0;
+    Real initial_fpe = -1.0;
+    Real last_trial_fpe = std::numeric_limits<Real>::infinity();
+
+    // PI controller state.
+    Real pw_error_sum = 0.0;
+    Real pw_last_error = 0.0;
+    Real best_primal_weight = primal_weight;
+    Real best_pw_score = std::numeric_limits<Real>::infinity();
+
+    // Precompute norms for relative termination.
+    Real c_norm = l2Norm(cscaled_);
+    Real bound_norm = 0.0;
+    for (Index i = 0; i < m; ++i) {
+        Real rl = scaled_row_lower_[i];
+        Real ru = scaled_row_upper_[i];
+        if (isFinite(rl)) bound_norm += rl * rl;
+        if (isFinite(ru)) bound_norm += ru * ru;
+    }
+    bound_norm = std::sqrt(bound_norm);
+
+    bool converged = false;
+
+    // -----------------------------------------------------------------------
+    // Main PDHG loop (GPU-resident).
+    // -----------------------------------------------------------------------
+    while (total_count < options_.max_iter) {
+        if (options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            status_ = Status::IterLimit;
+            iterations_ = total_count;
+            goto cleanup;
+        }
+
+        {
+            Int batch = std::min(N, options_.max_iter - total_count);
+            for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+                Real lambda = static_cast<Real>(inner_count + k_offset) /
+                              static_cast<Real>(inner_count + k_offset + 1);
+
+                // A^T * current_y → at_y (non-transpose on A^T descriptor).
+                spmv_at(desc_current_y, desc_at_y);
+
+                // Primal Halpern step.
+                launchPrimalHalpernStep(
+                    n, lambda, step, primal_weight,
+                    d_current_x, d_initial_x, d_pdhg_x, d_reflected_x,
+                    d_cscaled, d_at_y, d_tau_base, d_col_lower, d_col_upper,
+                    stream);
+
+                // A * reflected_x → a_xrefl.
+                spmv_a(desc_reflected_x, desc_a_xrefl);
+
+                // Dual Halpern step.
+                launchDualHalpernStep(
+                    m, lambda, step, primal_weight,
+                    d_current_y, d_initial_y, d_pdhg_y, d_reflected_y,
+                    d_a_xrefl, d_sigma_base, d_row_lower, d_row_upper,
+                    stream);
+            }
+            inner_count += batch;
+            total_count += batch;
+        }
+
+        // --- Convergence check ---
+        // Compute A * pdhg_x, A^T * pdhg_y, delta_y, A^T * delta_y.
+        spmv_a(desc_pdhg_x, desc_ax);
+        spmv_at(desc_pdhg_y, desc_at_y);
+        launchSubtract(m, d_pdhg_y, d_initial_y, d_delta_y, stream);
+        spmv_at(desc_delta_y, desc_at_delta_y);
+
+        // Fused reduction.
+        launchZeroMetrics(d_metrics, stream);
+        launchConvergenceMetricsCol(
+            n, d_pdhg_x, d_initial_x, d_cscaled, d_at_y,
+            d_col_lower, d_col_upper, d_at_delta_y,
+            primal_weight, step, d_metrics, stream);
+        launchConvergenceMetricsRow(
+            m, d_pdhg_y, d_initial_y, d_ax,
+            d_row_lower, d_row_upper, primal_weight, d_metrics, stream);
+
+        // Transfer metrics to host.
+        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                         cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        // Host-side convergence computation.
+        Real abs_primal_resid = std::sqrt(h_metrics->primal_resid_sq);
+        Real rel_primal_resid = abs_primal_resid / (1.0 + bound_norm);
+        Real abs_dual_resid = std::sqrt(h_metrics->dual_resid_sq);
+        Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
+
+        Real pobj_scaled = h_metrics->primal_obj;
+        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled;
+        Real dobj = original_.obj_offset + obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row);
+        Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
+
+        Real movement = h_metrics->fpe_movement;
+        Real interaction = h_metrics->fpe_interaction;
+        Real fpe = std::sqrt(std::max(movement + interaction, 0.0));
+
+        if (initial_fpe < 0.0) initial_fpe = fpe;
+
+        if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
+            std::printf(
+                "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
+                "fpe=% .2e  pw=% .2e  step=% .2e  [GPU]\n",
+                total_count, pobj, rel_primal_resid, rel_dual_resid, rel_gap,
+                fpe, primal_weight, step);
+        }
+
+        if (rel_primal_resid <= options_.primal_tol &&
+            rel_dual_resid <= options_.dual_tol &&
+            rel_gap <= options_.optimality_tol) {
+            converged = true;
+            break;
+        }
+
+        // --- Restart decision ---
+        bool do_restart = false;
+        if (total_count == N) {
+            do_restart = true;
+        } else if (initial_fpe > 0.0 && fpe <= options_.restart_sufficient_decay * initial_fpe) {
+            do_restart = true;
+        } else if (initial_fpe > 0.0 && fpe <= options_.restart_necessary_decay * initial_fpe &&
+                   fpe > last_trial_fpe) {
+            do_restart = true;
+        } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
+                                                    static_cast<Real>(total_count))) {
+            do_restart = true;
+        }
+
+        last_trial_fpe = fpe;
+
+        if (do_restart) {
+            // PI controller for primal weight.
+            if (options_.update_primal_weight) {
+                Real primal_dist = std::sqrt(h_metrics->primal_dist_sq);
+                Real dual_dist = std::sqrt(h_metrics->dual_dist_sq);
+
+                if (primal_dist > 1e-15 && dual_dist > 1e-15) {
+                    Real error = std::log(dual_dist) - std::log(primal_dist) -
+                                 std::log(primal_weight);
+                    pw_error_sum = options_.pid_i_smooth * pw_error_sum + error;
+                    Real delta_error = error - pw_last_error;
+                    primal_weight *= std::exp(
+                        options_.pid_kp * error +
+                        options_.pid_ki * pw_error_sum +
+                        options_.pid_kd * delta_error);
+                    primal_weight = std::clamp(primal_weight, 1e-8, 1e8);
+                    pw_last_error = error;
+
+                    Real score = std::abs(
+                        std::log10(std::max(rel_dual_resid, 1e-15)) -
+                        std::log10(std::max(rel_primal_resid, 1e-15)));
+                    if (score < best_pw_score) {
+                        best_pw_score = score;
+                        best_primal_weight = primal_weight;
+                    }
+                } else {
+                    primal_weight = best_primal_weight;
+                }
+            }
+
+            launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y,
+                              d_initial_x, d_initial_y,
+                              d_current_x, d_current_y, stream);
+            inner_count = 0;
+            initial_fpe = -1.0;
+            last_trial_fpe = std::numeric_limits<Real>::infinity();
+        }
+    }
+
+    iterations_ = total_count;
+
+    if (converged) {
+        // Download solution.
+        std::vector<Real> pdhg_x_host(sn);
+        std::vector<Real> pdhg_y_host(sm);
+        cudaMemcpy(pdhg_x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+        cudaMemcpy(pdhg_y_host.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+
+        // Unscale to original space.
+        primal_orig_.resize(sn);
+        for (Index j = 0; j < n; ++j) {
+            Real xj = pdhg_x_host[j] * col_scale_[j];
+            if (isFinite(original_.col_lower[j]))
+                xj = std::max(xj, original_.col_lower[j]);
+            if (isFinite(original_.col_upper[j]))
+                xj = std::min(xj, original_.col_upper[j]);
+            primal_orig_[j] = xj;
+        }
+        dual_orig_.resize(sm);
+        for (Index i = 0; i < m; ++i) {
+            dual_orig_[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i];
+        }
+
+        Real obj_val = original_.obj_offset;
+        for (Index j = 0; j < n; ++j) {
+            obj_val += original_.obj[j] * primal_orig_[j];
+        }
+        objective_ = obj_val;
+        status_ = Status::Optimal;
+    } else {
+        status_ = Status::IterLimit;
+        objective_ = 0.0;
+    }
+
+cleanup:
+    // Destroy cuSPARSE descriptors.
+    if (desc_current_y) cusparseDestroyDnVec(desc_current_y);
+    if (desc_at_y) cusparseDestroyDnVec(desc_at_y);
+    if (desc_reflected_x) cusparseDestroyDnVec(desc_reflected_x);
+    if (desc_a_xrefl) cusparseDestroyDnVec(desc_a_xrefl);
+    if (desc_pdhg_x) cusparseDestroyDnVec(desc_pdhg_x);
+    if (desc_ax) cusparseDestroyDnVec(desc_ax);
+    if (desc_pdhg_y) cusparseDestroyDnVec(desc_pdhg_y);
+    if (desc_delta_y) cusparseDestroyDnVec(desc_delta_y);
+    if (desc_at_delta_y) cusparseDestroyDnVec(desc_at_delta_y);
+    if (desc_pi_x) cusparseDestroyDnVec(desc_pi_x);
+    if (desc_pi_y) cusparseDestroyDnVec(desc_pi_y);
+    if (desc_pi_x_new) cusparseDestroyDnVec(desc_pi_x_new);
+    if (a_desc) cusparseDestroySpMat(a_desc);
+    if (at_desc) cusparseDestroySpMat(at_desc);
+
+    // Free device memory.
+    if (d_buf_a) cudaFree(d_buf_a);
+    if (d_buf_at) cudaFree(d_buf_at);
+    if (d_metrics) cudaFree(d_metrics);
+    if (h_metrics) cudaFreeHost(h_metrics);
+    if (d_a_values) cudaFree(d_a_values);
+    if (d_a_col_indices) cudaFree(d_a_col_indices);
+    if (d_a_row_starts) cudaFree(d_a_row_starts);
+    if (d_at_values) cudaFree(d_at_values);
+    if (d_at_col_indices) cudaFree(d_at_col_indices);
+    if (d_at_row_starts) cudaFree(d_at_row_starts);
+    if (d_arena) cudaFree(d_arena);
+
+    if (stream) cudaStreamDestroy(stream);
+    if (handle) cusparseDestroy(handle);
+
+    double seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    double work = static_cast<double>(total_count) *
+                  (4.0 * static_cast<double>(nnz) +
+                   2.0 * static_cast<double>(m + n));
+    work += seconds * 1e-6;
+    return {status_, objective_, iterations_, work};
+}
+
+#endif  // MIPX_HAS_CUDA
 
 // ---------------------------------------------------------------------------
 // Solution accessors

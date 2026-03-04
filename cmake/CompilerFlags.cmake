@@ -78,26 +78,32 @@ function(mipx_set_simd_flags target)
 endfunction()
 
 function(mipx_set_compiler_flags target)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # Use generator expressions so GCC/Clang flags only apply to CXX sources,
+    # not CUDA sources compiled by nvcc.
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>>
+    )
+    if(MIPX_STRICT_WARNINGS)
         target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic
+            $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:GNU,Clang>:-Werror>>
+        )
+    endif()
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:$<$<CXX_COMPILER_ID:GNU,Clang>:-fsanitize=address,undefined -fno-omit-frame-pointer>>
+        )
+        target_link_options(${target} PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-fsanitize=address,undefined>
+        )
+    endif()
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:/W4 /utf-8>
         )
         if(MIPX_STRICT_WARNINGS)
-            target_compile_options(${target} PRIVATE -Werror)
-        endif()
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
             target_compile_options(${target} PRIVATE
-                -fsanitize=address,undefined
-                -fno-omit-frame-pointer
+                $<$<COMPILE_LANGUAGE:CXX>:/WX>
             )
-            target_link_options(${target} PRIVATE
-                -fsanitize=address,undefined
-            )
-        endif()
-    elseif(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /utf-8)
-        if(MIPX_STRICT_WARNINGS)
-            target_compile_options(${target} PRIVATE /WX)
         endif()
     endif()
 

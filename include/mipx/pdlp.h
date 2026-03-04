@@ -40,6 +40,11 @@ struct PdlpOptions {
     Int ruiz_iterations = 10;
     bool do_pock_chambolle_scaling = true;
 
+    // GPU acceleration.
+    bool use_gpu = true;
+    Int gpu_min_rows = 512;
+    Int gpu_min_nnz = 10000;
+
     // Execution.
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
@@ -74,10 +79,15 @@ public:
 
     void setOptions(const PdlpOptions& options) { options_ = options; }
     [[nodiscard]] const PdlpOptions& options() const { return options_; }
+    [[nodiscard]] bool usedGpu() const { return used_gpu_; }
 
 private:
     void buildScaledProblem();
+    void buildTransposeCSR();
     Real estimateSpectralNorm() const;
+#ifdef MIPX_HAS_CUDA
+    LpResult solveGpu();
+#endif
 
     PdlpOptions options_{};
     LpProblem original_;
@@ -91,11 +101,17 @@ private:
     std::vector<Real> row_scale_, col_scale_;
     std::vector<Real> sigma_base_, tau_base_;
 
+    // Explicit A^T CSR storage (for GPU path).
+    std::vector<Real> at_values_;
+    std::vector<Index> at_col_indices_;
+    std::vector<Index> at_row_starts_;
+
     std::vector<Real> primal_orig_;
     std::vector<Real> dual_orig_;
     Status status_ = Status::Error;
     Real objective_ = 0.0;
     Int iterations_ = 0;
+    bool used_gpu_ = false;
 };
 
 }  // namespace mipx

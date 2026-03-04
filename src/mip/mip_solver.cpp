@@ -3888,11 +3888,15 @@ MipResult MipSolver::solve() {
             PdlpSolver solver;
             PdlpOptions opts;
             opts.verbose = false;
+            opts.use_gpu = barrier_use_gpu_;
+            opts.gpu_min_rows = barrier_gpu_min_rows_;
+            opts.gpu_min_nnz = barrier_gpu_min_nnz_;
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
+            out.used_gpu = solver.usedGpu();
         }
         out.seconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
@@ -3928,7 +3932,7 @@ MipResult MipSolver::solve() {
         root_lp_work_total = root_result.work_units;
         root_backend_used = "pdlp";
         if (verbose_) {
-            log_.log("Root PDLP mode.\n");
+            log_.log("Root PDLP mode%s.\n", result.used_gpu ? " (GPU backend)" : "");
         }
     } else if (root_lp_policy_ == RootLpPolicy::ConcurrentRootExperimental) {
         root_used_dual = false;
