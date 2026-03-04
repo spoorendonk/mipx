@@ -403,7 +403,6 @@ TEST_CASE("MIPLIB: p0201 objective matches .solu across root LP policies",
         solver.setSearchProfile(SearchProfile::Stable);
         solver.setRootLpPolicy(root_case.policy);
         solver.setBarrierUseGpu(false);
-        solver.setPdlpUseGpu(false);
         solver.load(problem);
 
         INFO(std::format("root_policy={}", root_case.name));
