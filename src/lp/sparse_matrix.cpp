@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
-#include <numeric>
 
 namespace mipx {
 
@@ -12,33 +11,62 @@ SparseMatrix::SparseMatrix(Index rows, Index cols)
 
 SparseMatrix::SparseMatrix(Index rows, Index cols, std::vector<Triplet> triplets)
     : rows_(rows), cols_(cols) {
-    // Sort by (row, col).
-    std::ranges::sort(triplets, [](const Triplet& a, const Triplet& b) {
-        return a.row < b.row || (a.row == b.row && a.col < b.col);
-    });
+    const Index nnz = static_cast<Index>(triplets.size());
 
-    // Sum duplicates and build CSR.
-    row_starts_.resize(rows + 1, 0);
-    values_.reserve(triplets.size());
-    col_indices_.reserve(triplets.size());
+    // Counting sort by row — O(N+R) instead of O(N log N).
+    // 1. Count entries per row.
+    row_starts_.assign(rows + 1, 0);
+    for (Index k = 0; k < nnz; ++k) {
+        ++row_starts_[triplets[k].row + 1];
+    }
 
-    for (Index k = 0; k < static_cast<Index>(triplets.size());) {
-        Index r = triplets[k].row;
-        Index c = triplets[k].col;
-        Real v = 0.0;
-        while (k < static_cast<Index>(triplets.size()) &&
-               triplets[k].row == r && triplets[k].col == c) {
-            v += triplets[k].val;
-            ++k;
-        }
-        if (v != 0.0) {
-            values_.push_back(v);
-            col_indices_.push_back(c);
-            ++row_starts_[r + 1];
+    // 2. Prefix sum.
+    for (Index i = 0; i < rows; ++i) {
+        row_starts_[i + 1] += row_starts_[i];
+    }
+
+    // 3. Distribute into row-bucketed arrays.
+    std::vector<Triplet> sorted(nnz);
+    std::vector<Index> pos(row_starts_.begin(), row_starts_.end());
+    for (Index k = 0; k < nnz; ++k) {
+        sorted[pos[triplets[k].row]++] = triplets[k];
+    }
+
+    // 4. Sort within each row by column + sum duplicates.
+    values_.reserve(nnz);
+    col_indices_.reserve(nnz);
+
+    // Reset row_starts_ to rebuild with deduplication.
+    row_starts_.assign(rows + 1, 0);
+
+    for (Index i = 0; i < rows; ++i) {
+        Index rstart = (i == 0) ? 0 : pos[i - 1];
+        // pos[i] was advanced past row i's entries; use original prefix sum.
+        // Actually, after distribution pos[i] == original row_starts_[i+1].
+        // We need original bounds. Recompute from sorted array.
+        Index rend = pos[i];
+        // Sort this row's entries by column.
+        std::sort(sorted.begin() + rstart, sorted.begin() + rend,
+                  [](const Triplet& a, const Triplet& b) {
+                      return a.col < b.col;
+                  });
+        // Sum duplicates.
+        for (Index k = rstart; k < rend;) {
+            Index c = sorted[k].col;
+            Real v = 0.0;
+            while (k < rend && sorted[k].col == c) {
+                v += sorted[k].val;
+                ++k;
+            }
+            if (v != 0.0) {
+                values_.push_back(v);
+                col_indices_.push_back(c);
+                ++row_starts_[i + 1];
+            }
         }
     }
 
-    // Prefix sum to get row_starts_.
+    // Final prefix sum.
     for (Index i = 0; i < rows; ++i) {
         row_starts_[i + 1] += row_starts_[i];
     }

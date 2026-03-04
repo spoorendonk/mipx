@@ -8,7 +8,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEST_DIR="${SCRIPT_DIR}/netlib"
+EMPS_SCRIPT="${REPO_ROOT}/scripts/emps_to_mps.sh"
 
 # Standard MPS files from SkyLiu0/NETLIB GitHub repo.
 NETLIB_BASE_URLS=(
@@ -169,9 +171,21 @@ for name in "${INSTANCES[@]}"; do
     for base_url in "${NETLIB_BASE_URLS[@]}"; do
         for suffix in ".mps" ".MPS" ""; do
             if curl -sS -f -L -o "${tmpfile}" "${base_url}/${source_name}${suffix}" 2>/dev/null; then
-                gzip -c "${tmpfile}" > "${outfile}"
-                downloaded=true
-                break
+                # Detect MPC-compressed files (netlib.org raw format).
+                # MPC files do not start with standard MPS section headers.
+                first_word=$(head -c 80 "${tmpfile}" | awk 'NR==1{print $1}')
+                if [[ "${first_word}" != "NAME" && "${first_word}" != "ROWS" && \
+                      "${base_url}" == *"netlib.org"* && -x "${EMPS_SCRIPT}" ]]; then
+                    # Pipe through emps to convert MPC -> standard MPS.
+                    if "${EMPS_SCRIPT}" < "${tmpfile}" 2>/dev/null | gzip -c > "${outfile}"; then
+                        downloaded=true
+                        break
+                    fi
+                else
+                    gzip -c "${tmpfile}" > "${outfile}"
+                    downloaded=true
+                    break
+                fi
             fi
         done
         if [[ "${downloaded}" == "true" ]]; then
