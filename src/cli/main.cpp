@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <cmath>
+#include <limits>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -36,6 +38,9 @@ int main(int argc, char* argv[]) {
             "[--exact-max-rounds N] [--exact-repair-passes N] "
             "[--exact-rational-scale S] "
             "[--dual-idiot-crash|--dual-no-idiot-crash] "
+            "[--dual-bfrt|--dual-no-bfrt] "
+            "[--dual-lu-update-limit N] "
+            "[--dual-lu-ft-drop-tol T] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -79,6 +84,10 @@ int main(int argc, char* argv[]) {
     mipx::Int exact_repair_passes = 2;
     double exact_rational_scale = 1.0e6;
     bool dual_idiot_crash = false;
+    int dual_bfrt_override = -1;
+    mipx::Int dual_lu_update_limit = std::numeric_limits<mipx::Int>::min();
+    mipx::Real dual_lu_ft_drop_tolerance =
+        std::numeric_limits<mipx::Real>::quiet_NaN();
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -190,6 +199,14 @@ int main(int argc, char* argv[]) {
             dual_idiot_crash = true;
         } else if (arg == "--dual-no-idiot-crash") {
             dual_idiot_crash = false;
+        } else if (arg == "--dual-bfrt") {
+            dual_bfrt_override = 1;
+        } else if (arg == "--dual-no-bfrt") {
+            dual_bfrt_override = 0;
+        } else if (arg == "--dual-lu-update-limit" && i + 1 < argc) {
+            dual_lu_update_limit = static_cast<mipx::Int>(std::atoll(argv[++i]));
+        } else if (arg == "--dual-lu-ft-drop-tol" && i + 1 < argc) {
+            dual_lu_ft_drop_tolerance = std::atof(argv[++i]);
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
         } else if (arg == "--search-default") {
@@ -385,6 +402,20 @@ int main(int argc, char* argv[]) {
                 solver.setVerbose(verbose);
                 mipx::DualSimplexOptions dopts = solver.getOptions();
                 dopts.enable_idiot_crash = dual_idiot_crash;
+                if (dual_bfrt_override >= 0) {
+                    if (dual_bfrt_override != 0) {
+                        dopts.enable_bfrt = true;
+                    } else {
+                        dopts.enable_bfrt = false;
+                        dopts.enable_auto_bfrt_wide = false;
+                    }
+                }
+                if (dual_lu_update_limit != std::numeric_limits<mipx::Int>::min()) {
+                    dopts.lu_update_limit = dual_lu_update_limit;
+                }
+                if (!std::isnan(dual_lu_ft_drop_tolerance)) {
+                    dopts.lu_ft_drop_tolerance = dual_lu_ft_drop_tolerance;
+                }
                 if (time_limit >= 0.0) {
                     dopts.max_solve_seconds = time_limit;
                 }
