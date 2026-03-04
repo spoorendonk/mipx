@@ -259,6 +259,82 @@ LpProblem buildMediumLp() {
 
 }  // namespace
 
+TEST_CASE("PdlpSolver: handles empty problem (no variables)", "[pdlp]") {
+    LpProblem lp;
+    lp.name = "pdlp_empty";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 0;
+    lp.num_rows = 0;
+    lp.obj_offset = 42.0;
+    lp.matrix = SparseMatrix(0, 0, std::vector<Triplet>{});
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(42.0, 1e-9));
+    CHECK(result.iterations == 0);
+}
+
+TEST_CASE("PdlpSolver: detects unbounded bounds-only LP", "[pdlp]") {
+    // min -x  s.t. x >= 0, no upper bound, no constraints → unbounded
+    LpProblem lp;
+    lp.name = "pdlp_unbounded";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {kInf};
+    lp.col_type = {VarType::Continuous};
+    lp.num_rows = 0;
+    lp.matrix = SparseMatrix(0, 1, std::vector<Triplet>{});
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Unbounded);
+}
+
+TEST_CASE("PdlpSolver: infeasible LP hits iteration limit", "[pdlp]") {
+    // min x  s.t. x <= -1, x >= 1 → infeasible
+    // PDLP is a first-order method; it won't certify infeasibility but will
+    // fail to converge and hit the iteration limit.
+    LpProblem lp;
+    lp.name = "pdlp_infeasible";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {1.0};
+    lp.col_lower = {1.0};
+    lp.col_upper = {kInf};
+    lp.col_type = {VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {-1.0};  // x <= -1
+    lp.row_names = {"c1"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}};
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.max_iter = 1000;  // low limit so test is fast
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    CHECK(result.status == Status::IterLimit);
+}
+
 TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") {
     auto lp = buildMediumLp();
 

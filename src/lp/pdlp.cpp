@@ -685,21 +685,20 @@ LpResult PdlpSolver::solveGpu() {
 
     used_gpu_ = false;
 
-    // Arena layout: 15n + 12m + 5 doubles.
-    // Iterate vectors (device-resident):
+    // Arena layout: 12n + 11m + 5 doubles.
+    // Iterate vectors (8n + 7m):
     //   current_x(n), current_y(m), initial_x(n), initial_y(m),
     //   pdhg_x(n), pdhg_y(m), reflected_x(n), reflected_y(m),
     //   at_y(n), a_xrefl(m), ax(m), delta_y(m), at_delta_y(n)
-    // Constant vectors:
-    //   cscaled(n), col_lower(n), col_upper(n), row_lower(m), row_upper(m),
-    //   tau_base(n), sigma_base(m)
-    // Power iteration: pi_x(n), pi_y(m), pi_x_new(n)
-    // Scratch: 1 double for reductions, 1 double for lambda
-    // Plus 1 Int for inner_count (rounded up to 1 double for alignment)
-    // Plus 1 double for step, 1 double for primal_weight (device-resident)
+    // Constant vectors (4n + 4m):
+    //   cscaled(n), col_lower(n), col_upper(n), tau_base(n),
+    //   row_lower(m), row_upper(m), sigma_base(m)
+    // Power iteration (2n + m): pi_x(n), pi_y(m), pi_x_new(n)
+    // Scalars (5): scratch(1), lambda(1), inner_count(1 Int, 1-double slot),
+    //              step(1), primal_weight(1)
     const size_t sn = static_cast<size_t>(n);
     const size_t sm = static_cast<size_t>(m);
-    const size_t arena_doubles = 15 * sn + 12 * sm + 5;
+    const size_t arena_doubles = 12 * sn + 11 * sm + 5;
 
     Real* d_arena = nullptr;
     if (!cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_arena),
@@ -740,8 +739,8 @@ LpResult PdlpSolver::solveGpu() {
     Real* d_step         = d_lambda + 2;  // skip lambda(1) + inner_count_slot(1)
     Real* d_primal_weight = d_step + 1;
 
-    // Zero all iterate vectors.
-    cudaMemset(d_arena, 0, (13 * sn + 8 * sm) * sizeof(Real));
+    // Zero all iterate vectors (constants are overwritten by uploads below).
+    cudaMemset(d_arena, 0, arena_doubles * sizeof(Real));
 
     // Upload constant vectors.
     cudaMemcpy(d_cscaled, cscaled_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
