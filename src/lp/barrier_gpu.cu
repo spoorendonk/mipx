@@ -14,7 +14,6 @@
 #include <vector>
 
 #include <cuda_runtime.h>
-#include <cublas_v2.h>
 #include <cudss.h>
 #include <cusparse.h>
 
@@ -32,7 +31,7 @@ namespace gpu_detail {
 
 static bool cudaOk(cudaError_t e) { return e == cudaSuccess; }
 static bool cusparseOk(cusparseStatus_t e) { return e == CUSPARSE_STATUS_SUCCESS; }
-static bool cublasOk(cublasStatus_t e) { return e == CUBLAS_STATUS_SUCCESS; }
+
 static bool cudssOk(cudssStatus_t e) { return e == CUDSS_STATUS_SUCCESS; }
 
 // ---------------------------------------------------------------------------
@@ -47,19 +46,78 @@ static __host__ int gridSize(int n) {
 
 // --- Residual / iterate kernels ---
 
-__global__ void kernelResidualPrimal(int m, const double* b, const double* az,
-                                     double* rp) {
+// Fused residual + inf-norm: computes rp[i] = b[i] - az[i] and reduces
+// ||rp||_inf into *norm_out via atomic max (warp-shuffle final reduction).
+__global__ void kernelResidualPrimalNorm(int m, const double* b, const double* az,
+                                         double* rp, double* norm_out) {
+    __shared__ double sdata[kBlockSize];
+    double mx = 0.0;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < m;
          i += gridDim.x * blockDim.x) {
-        rp[i] = b[i] - az[i];
+        double v = b[i] - az[i];
+        rp[i] = v;
+        mx = fmax(mx, fabs(v));
+    }
+    sdata[threadIdx.x] = mx;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (threadIdx.x < s)
+            sdata[threadIdx.x] = fmax(sdata[threadIdx.x], sdata[threadIdx.x + s]);
+        __syncthreads();
+    }
+    if (threadIdx.x < 32) {
+        double val = fmax(sdata[threadIdx.x], sdata[threadIdx.x + 32]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmax(val, __shfl_down_sync(0xffffffff, val, offset));
+        if (threadIdx.x == 0) {
+            unsigned long long int* addr = (unsigned long long int*)norm_out;
+            unsigned long long int old = *addr;
+            unsigned long long int assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                double new_val = fmax(old_val, val);
+                old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
+            } while (assumed != old);
+        }
     }
 }
 
-__global__ void kernelResidualDual(int n, const double* c, const double* aty,
-                                   const double* s, double* rd) {
+// Fused residual + inf-norm: computes rd[j] = c[j] - aty[j] - s[j] and
+// reduces ||rd||_inf into *norm_out via atomic max.
+__global__ void kernelResidualDualNorm(int n, const double* c, const double* aty,
+                                       const double* s, double* rd,
+                                       double* norm_out) {
+    __shared__ double sdata[kBlockSize];
+    double mx = 0.0;
     for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < n;
          j += gridDim.x * blockDim.x) {
-        rd[j] = c[j] - aty[j] - s[j];
+        double v = c[j] - aty[j] - s[j];
+        rd[j] = v;
+        mx = fmax(mx, fabs(v));
+    }
+    sdata[threadIdx.x] = mx;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
+        if (threadIdx.x < s)
+            sdata[threadIdx.x] = fmax(sdata[threadIdx.x], sdata[threadIdx.x + s]);
+        __syncthreads();
+    }
+    if (threadIdx.x < 32) {
+        double val = fmax(sdata[threadIdx.x], sdata[threadIdx.x + 32]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmax(val, __shfl_down_sync(0xffffffff, val, offset));
+        if (threadIdx.x == 0) {
+            unsigned long long int* addr = (unsigned long long int*)norm_out;
+            unsigned long long int old = *addr;
+            unsigned long long int assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                double new_val = fmax(old_val, val);
+                old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
+            } while (assumed != old);
+        }
     }
 }
 
@@ -292,14 +350,6 @@ __global__ void kernelAddCorrection(int m, const double* dx, double* x) {
     }
 }
 
-__global__ void kernelElemMul(int n, const double* a, const double* b,
-                              double* out) {
-    for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < n;
-         j += gridDim.x * blockDim.x) {
-        out[j] = a[j] * b[j];
-    }
-}
-
 // --- Reduction kernels ---
 
 __global__ void kernelDot(int n, const double* a, const double* b,
@@ -312,11 +362,16 @@ __global__ void kernelDot(int n, const double* a, const double* b,
     }
     sdata[threadIdx.x] = sum;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
         __syncthreads();
     }
-    if (threadIdx.x == 0) atomicAdd(result, sdata[0]);
+    if (threadIdx.x < 32) {
+        double val = sdata[threadIdx.x] + sdata[threadIdx.x + 32];
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        if (threadIdx.x == 0) atomicAdd(result, val);
+    }
 }
 
 __global__ void kernelInfNorm(int n, const double* v, double* result) {
@@ -328,21 +383,26 @@ __global__ void kernelInfNorm(int n, const double* v, double* result) {
     }
     sdata[threadIdx.x] = mx;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (threadIdx.x < s)
             sdata[threadIdx.x] = fmax(sdata[threadIdx.x], sdata[threadIdx.x + s]);
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        unsigned long long int* addr = (unsigned long long int*)result;
-        unsigned long long int old = *addr;
-        unsigned long long int assumed;
-        do {
-            assumed = old;
-            double old_val = __longlong_as_double(assumed);
-            double new_val = fmax(old_val, sdata[0]);
-            old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
-        } while (assumed != old);
+    if (threadIdx.x < 32) {
+        double val = fmax(sdata[threadIdx.x], sdata[threadIdx.x + 32]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmax(val, __shfl_down_sync(0xffffffff, val, offset));
+        if (threadIdx.x == 0) {
+            unsigned long long int* addr = (unsigned long long int*)result;
+            unsigned long long int old = *addr;
+            unsigned long long int assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                double new_val = fmax(old_val, val);
+                old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
+            } while (assumed != old);
+        }
     }
 }
 
@@ -358,21 +418,26 @@ __global__ void kernelMaxStep(int n, const double* x, const double* dx,
     }
     sdata[threadIdx.x] = alpha;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (threadIdx.x < s)
             sdata[threadIdx.x] = fmin(sdata[threadIdx.x], sdata[threadIdx.x + s]);
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        unsigned long long int* addr = (unsigned long long int*)result;
-        unsigned long long int old = *addr;
-        unsigned long long int assumed;
-        do {
-            assumed = old;
-            double old_val = __longlong_as_double(assumed);
-            double new_val = fmin(old_val, sdata[0]);
-            old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
-        } while (assumed != old);
+    if (threadIdx.x < 32) {
+        double val = fmin(sdata[threadIdx.x], sdata[threadIdx.x + 32]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmin(val, __shfl_down_sync(0xffffffff, val, offset));
+        if (threadIdx.x == 0) {
+            unsigned long long int* addr = (unsigned long long int*)result;
+            unsigned long long int old = *addr;
+            unsigned long long int assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                double new_val = fmin(old_val, val);
+                old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
+            } while (assumed != old);
+        }
     }
 }
 
@@ -385,11 +450,16 @@ __global__ void kernelSum(int n, const double* v, double* result) {
     }
     sdata[threadIdx.x] = sum;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
         __syncthreads();
     }
-    if (threadIdx.x == 0) atomicAdd(result, sdata[0]);
+    if (threadIdx.x < 32) {
+        double val = sdata[threadIdx.x] + sdata[threadIdx.x + 32];
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        if (threadIdx.x == 0) atomicAdd(result, val);
+    }
 }
 
 __global__ void kernelMin(int n, const double* v, double* result) {
@@ -401,21 +471,26 @@ __global__ void kernelMin(int n, const double* v, double* result) {
     }
     sdata[threadIdx.x] = mn;
     __syncthreads();
-    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+    for (int s = blockDim.x / 2; s > 32; s >>= 1) {
         if (threadIdx.x < s)
             sdata[threadIdx.x] = fmin(sdata[threadIdx.x], sdata[threadIdx.x + s]);
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        unsigned long long int* addr = (unsigned long long int*)result;
-        unsigned long long int old = *addr;
-        unsigned long long int assumed;
-        do {
-            assumed = old;
-            double old_val = __longlong_as_double(assumed);
-            double new_val = fmin(old_val, sdata[0]);
-            old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
-        } while (assumed != old);
+    if (threadIdx.x < 32) {
+        double val = fmin(sdata[threadIdx.x], sdata[threadIdx.x + 32]);
+        for (int offset = 16; offset > 0; offset >>= 1)
+            val = fmin(val, __shfl_down_sync(0xffffffff, val, offset));
+        if (threadIdx.x == 0) {
+            unsigned long long int* addr = (unsigned long long int*)result;
+            unsigned long long int old = *addr;
+            unsigned long long int assumed;
+            do {
+                assumed = old;
+                double old_val = __longlong_as_double(assumed);
+                double new_val = fmin(old_val, val);
+                old = atomicCAS(addr, assumed, __double_as_longlong(new_val));
+            } while (assumed != old);
+        }
     }
 }
 
@@ -446,7 +521,7 @@ __global__ void kernelMuAffParts(int n, const double* z, const double* s,
     sdata[2][threadIdx.x] = s2;
     sdata[3][threadIdx.x] = s3;
     __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    for (int stride = blockDim.x / 2; stride > 32; stride >>= 1) {
         if (threadIdx.x < stride) {
             sdata[0][threadIdx.x] += sdata[0][threadIdx.x + stride];
             sdata[1][threadIdx.x] += sdata[1][threadIdx.x + stride];
@@ -455,11 +530,49 @@ __global__ void kernelMuAffParts(int n, const double* z, const double* s,
         }
         __syncthreads();
     }
-    if (threadIdx.x == 0) {
-        atomicAdd(out4 + 0, sdata[0][0]);
-        atomicAdd(out4 + 1, sdata[1][0]);
-        atomicAdd(out4 + 2, sdata[2][0]);
-        atomicAdd(out4 + 3, sdata[3][0]);
+    if (threadIdx.x < 32) {
+        double v0 = sdata[0][threadIdx.x] + sdata[0][threadIdx.x + 32];
+        double v1 = sdata[1][threadIdx.x] + sdata[1][threadIdx.x + 32];
+        double v2 = sdata[2][threadIdx.x] + sdata[2][threadIdx.x + 32];
+        double v3 = sdata[3][threadIdx.x] + sdata[3][threadIdx.x + 32];
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            v0 += __shfl_down_sync(0xffffffff, v0, offset);
+            v1 += __shfl_down_sync(0xffffffff, v1, offset);
+            v2 += __shfl_down_sync(0xffffffff, v2, offset);
+            v3 += __shfl_down_sync(0xffffffff, v3, offset);
+        }
+        if (threadIdx.x == 0) {
+            atomicAdd(out4 + 0, v0);
+            atomicAdd(out4 + 1, v1);
+            atomicAdd(out4 + 2, v2);
+            atomicAdd(out4 + 3, v3);
+        }
+    }
+}
+
+// --- Vector arithmetic kernels (replacing cublasDaxpy for small ops) ---
+
+// y[i] += alpha * x[i]
+__global__ void kernelAxpy(int n, double alpha, const double* x, double* y) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        y[i] += alpha * x[i];
+    }
+}
+
+// y[i] = x[i] - z[i]
+__global__ void kernelVecSub(int n, const double* x, const double* z, double* y) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        y[i] = x[i] - z[i];
+    }
+}
+
+// y[i] += scalar
+__global__ void kernelAddScalar(int n, double scalar, double* y) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        y[i] += scalar;
     }
 }
 
@@ -486,7 +599,6 @@ __global__ void kernelCastF32toF64(int n, const float* src, double* dst) {
 struct GpuContext {
     int m = 0, n = 0, nnz = 0;
     cudaStream_t stream = nullptr;
-    cublasHandle_t cublas_handle = nullptr;
     cusparseHandle_t cusparse_handle = nullptr;
 
     // A in CSR on device.
@@ -539,8 +651,9 @@ struct GpuContext {
     // Augmented system work vectors.
     double* d_aug_rhs = nullptr;
     double* d_aug_sol = nullptr;
-    double* d_aug_ir_rhs = nullptr;  // IR scratch for augmented system
-    double* d_aug_ir_sol = nullptr;  // IR scratch for augmented system
+    double* d_aug_ir_rhs = nullptr;  // IR scratch for augmented system (lazy alloc)
+    double* d_aug_ir_sol = nullptr;  // IR scratch for augmented system (lazy alloc)
+    double* d_aug_ir_pool = nullptr; // Separate allocation for aug IR buffers
 
     // IR scratch (m-sized, shared with NE/Aug solvers).
     double* d_ir_residual = nullptr;
@@ -565,9 +678,7 @@ struct GpuContext {
         nnz = nnz_in;
 
         if (!cudaOk(cudaStreamCreate(&stream))) return false;
-        if (!cublasOk(cublasCreate(&cublas_handle))) return false;
         if (!cusparseOk(cusparseCreate(&cusparse_handle))) return false;
-        cublasSetStream(cublas_handle, stream);
         cusparseSetStream(cusparse_handle, stream);
 
         // Upload A.
@@ -588,9 +699,10 @@ struct GpuContext {
                 CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F)))
             return false;
 
-        // Allocate pool: n-sized * 15 + m-sized * 11 + max(m,n) + 16 + 4*(n+m)
+        // Allocate pool: n-sized * 15 + m-sized * 11 + max(m,n) + 16 + 2*(n+m)
+        // Augmented IR buffers (2*(n+m)) are allocated lazily on first use.
         int mn = std::max(m, n);
-        size_t pool_size = static_cast<size_t>(15 * n + 11 * m + mn + 16 + 4 * (n + m));
+        size_t pool_size = static_cast<size_t>(15 * n + 11 * m + mn + 16 + 2 * (n + m));
         if (!cudaOk(cudaMalloc(&d_pool, sizeof(double) * pool_size))) return false;
 
         double* p = d_pool;
@@ -618,8 +730,6 @@ struct GpuContext {
 
         d_aug_rhs = take_nm();
         d_aug_sol = take_nm();
-        d_aug_ir_rhs = take_nm();
-        d_aug_ir_sol = take_nm();
 
         // Upload b, c.
         cudaMemcpyAsync(d_b, h_b, sizeof(double) * m,
@@ -689,48 +799,59 @@ struct GpuContext {
         cudaStreamSynchronize(stream);
     }
 
+    // Zero all scalar slots in one memset (call before a batch of async reductions).
+    void zeroScalars(int count) {
+        cudaMemsetAsync(d_scalar, 0, sizeof(double) * count, stream);
+    }
+
+    // Init scalar slots for MaxStep (need value 1.0, not 0.0).
+    double h_init_ones[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
+    void initMaxStepScalars(int slot, int count) {
+        cudaMemcpyAsync(d_scalar + slot, h_init_ones, sizeof(double) * count,
+                        cudaMemcpyHostToDevice, stream);
+    }
+
     // Async reduction launchers — write to d_scalar[slot], no sync.
+    // Caller must ensure the slot is zeroed (via zeroScalars) before calling.
     void gpuDotAsync(double* d_a, double* d_b, int sz, int slot) {
-        cudaMemsetAsync(d_scalar + slot, 0, sizeof(double), stream);
         kernelDot<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_a, d_b, d_scalar + slot);
     }
 
     void gpuInfNormAsync(double* d_v, int sz, int slot) {
-        cudaMemsetAsync(d_scalar + slot, 0, sizeof(double), stream);
         kernelInfNorm<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_v, d_scalar + slot);
     }
 
     void gpuMaxStepAsync(double* d_x, double* d_dx, int sz, double fraction, int slot) {
-        double one = 1.0;
-        cudaMemcpyAsync(d_scalar + slot, &one, sizeof(double), cudaMemcpyHostToDevice, stream);
         kernelMaxStep<<<gridSize(sz), kBlockSize, 0, stream>>>(
             sz, d_x, d_dx, fraction, d_scalar + slot);
     }
 
     void gpuMuAsync(double* d_z_in, double* d_s_in, int sz, int slot) {
-        kernelZS<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_z_in, d_s_in, d_tmp);
-        cudaMemsetAsync(d_scalar + slot, 0, sizeof(double), stream);
-        kernelSum<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_tmp, d_scalar + slot);
+        gpuDotAsync(d_z_in, d_s_in, sz, slot);
     }
 
     // Synchronous wrappers (for starting point and other non-hot paths).
     double gpuDot(double* d_a, double* d_b, int sz) {
+        zeroScalars(1);
         gpuDotAsync(d_a, d_b, sz, 0);
         return downloadScalar(0);
     }
 
     double gpuInfNorm(double* d_v, int sz) {
+        zeroScalars(1);
         gpuInfNormAsync(d_v, sz, 0);
         return downloadScalar(0);
     }
 
     double gpuMaxStep(double* d_x, double* d_dx, int sz, double fraction) {
+        initMaxStepScalars(0, 1);
         gpuMaxStepAsync(d_x, d_dx, sz, fraction, 0);
         double alpha = downloadScalar(0);
         return std::clamp(alpha, 0.0, 1.0);
     }
 
     double gpuMu(double* d_z_in, double* d_s_in, int sz) {
+        zeroScalars(1);
         gpuMuAsync(d_z_in, d_s_in, sz, 0);
         return downloadScalar(0) / std::max(sz, 1);
     }
@@ -748,6 +869,16 @@ struct GpuContext {
         return downloadScalar(0);
     }
 
+    // Lazily allocate augmented IR buffers (called on first augmented use).
+    bool allocAugIRBuffers() {
+        if (d_aug_ir_pool) return true;  // Already allocated.
+        size_t sz = static_cast<size_t>(2) * (n + m);
+        if (!cudaOk(cudaMalloc(&d_aug_ir_pool, sizeof(double) * sz))) return false;
+        d_aug_ir_rhs = d_aug_ir_pool;
+        d_aug_ir_sol = d_aug_ir_pool + (n + m);
+        return true;
+    }
+
     ~GpuContext() {
         if (vec_n1) cusparseDestroyDnVec(vec_n1);
         if (vec_n2) cusparseDestroyDnVec(vec_n2);
@@ -760,7 +891,7 @@ struct GpuContext {
         cudaFree(d_a_col_indices);
         cudaFree(d_a_values);
         cudaFree(d_pool);
-        if (cublas_handle) cublasDestroy(cublas_handle);
+        cudaFree(d_aug_ir_pool);
         if (cusparse_handle) cusparseDestroy(cusparse_handle);
         if (stream) cudaStreamDestroy(stream);
     }
@@ -1014,20 +1145,9 @@ struct NormalEqSolver {
         kernelCastF64toF32<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
             m, d_rhs_in, d_rhs_f32);
 
-        // Recreate dense matrix descriptors.
-        if (cudss_rhs_mat_f32) cudssMatrixDestroy(cudss_rhs_mat_f32);
-        if (cudss_sol_mat_f32) cudssMatrixDestroy(cudss_sol_mat_f32);
-        cudss_rhs_mat_f32 = nullptr;
-        cudss_sol_mat_f32 = nullptr;
-
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_rhs_mat_f32, m, 1, m,
-                                          d_rhs_f32, CUDA_R_32F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_sol_mat_f32, m, 1, m,
-                                          d_sol_f32, CUDA_R_32F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
+        // Rebind data pointers without recreating descriptors.
+        cudssMatrixSetValues(cudss_rhs_mat_f32, d_rhs_f32);
+        cudssMatrixSetValues(cudss_sol_mat_f32, d_sol_f32);
 
         if (!cudssOk(cudssExecute(cudss_handle_f32, CUDSS_PHASE_SOLVE,
                                    cudss_config_f32, cudss_data_f32,
@@ -1043,19 +1163,9 @@ struct NormalEqSolver {
 
     // Raw cuDSS solve (FP64 path).
     bool solveFp64(double* d_rhs_in, double* d_sol_out) {
-        if (cudss_rhs_mat) cudssMatrixDestroy(cudss_rhs_mat);
-        if (cudss_sol_mat) cudssMatrixDestroy(cudss_sol_mat);
-        cudss_rhs_mat = nullptr;
-        cudss_sol_mat = nullptr;
-
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_rhs_mat, ne_m, 1, ne_m,
-                                          d_rhs_in, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_sol_mat, ne_m, 1, ne_m,
-                                          d_sol_out, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
+        // Rebind data pointers without recreating descriptors.
+        cudssMatrixSetValues(cudss_rhs_mat, d_rhs_in);
+        cudssMatrixSetValues(cudss_sol_mat, d_sol_out);
 
         return cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE,
                                      cudss_config, cudss_data, cudss_mat,
@@ -1085,9 +1195,8 @@ struct NormalEqSolver {
             ctx->multiplyA(ctx->d_tmp, ctx->d_ir_residual);
 
             double reg = last_reg_;
-            cublasSetStream(ctx->cublas_handle, ctx->stream);
-            cublasDaxpy(ctx->cublas_handle, m, &reg, d_sol_out, 1,
-                        ctx->d_ir_residual, 1);
+            kernelAxpy<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
+                m, reg, d_sol_out, ctx->d_ir_residual);
 
             // residual = rhs - M*sol
             kernelResidualIR<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
@@ -1237,19 +1346,9 @@ struct AugmentedSolver {
     bool solve(double* d_rhs_in, double* d_sol_out) {
         if (!ok) return false;
 
-        if (cudss_rhs_mat) cudssMatrixDestroy(cudss_rhs_mat);
-        if (cudss_sol_mat) cudssMatrixDestroy(cudss_sol_mat);
-        cudss_rhs_mat = nullptr;
-        cudss_sol_mat = nullptr;
-
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_rhs_mat, aug_dim_, 1, aug_dim_,
-                                          d_rhs_in, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
-        if (!cudssOk(cudssMatrixCreateDn(&cudss_sol_mat, aug_dim_, 1, aug_dim_,
-                                          d_sol_out, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
+        // Rebind data pointers without recreating descriptors.
+        cudssMatrixSetValues(cudss_rhs_mat, d_rhs_in);
+        cudssMatrixSetValues(cudss_sol_mat, d_sol_out);
 
         return cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE,
                                      cudss_config, cudss_data, cudss_mat,
@@ -1337,12 +1436,14 @@ struct GpuBarrierImpl {
                 // NE too dense, use Augmented.
                 aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
                 if (!aug_available) return false;
+                if (!ctx.allocAugIRBuffers()) return false;
                 active_backend = Backend::Augmented;
             }
         } else {
             // Prefer augmented.
             aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
             if (!aug_available) return false;
+            if (!ctx.allocAugIRBuffers()) return false;
             active_backend = Backend::Augmented;
         }
 
@@ -1353,7 +1454,7 @@ struct GpuBarrierImpl {
     bool switchToAugmented() {
         if (aug_available) {
             active_backend = Backend::Augmented;
-            return true;
+            return ctx.allocAugIRBuffers();
         }
         // Lazy init augmented.
         int m = ctx.m, n = ctx.n;
@@ -1361,6 +1462,7 @@ struct GpuBarrierImpl {
                                            h_col_indices.data(),
                                            stored_nnz, &ctx);
         if (!aug_available) return false;
+        if (!ctx.allocAugIRBuffers()) return false;
         active_backend = Backend::Augmented;
         return true;
     }
@@ -1373,11 +1475,8 @@ struct GpuBarrierImpl {
         // s0 = c - A'y0. Recompute A'y into d_z, then s = c - z.
         if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) return false;
 
-        cudaMemcpyAsync(ctx.d_s, ctx.d_c, sizeof(double) * n,
-                        cudaMemcpyDeviceToDevice, ctx.stream);
-        double neg_one = -1.0;
-        cublasSetStream(ctx.cublas_handle, ctx.stream);
-        cublasDaxpy(ctx.cublas_handle, n, &neg_one, ctx.d_z, 1, ctx.d_s, 1);
+        kernelVecSub<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
+            n, ctx.d_c, ctx.d_z, ctx.d_s);
 
         // Shift to positivity.
         double min_z = ctx.gpuMin(ctx.d_z, n);
@@ -1386,12 +1485,10 @@ struct GpuBarrierImpl {
         double delta_z = std::max(-1.5 * min_z, 0.0);
         double delta_s = std::max(-1.5 * min_s, 0.0);
 
-        kernelInit<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(n, delta_z, ctx.d_tmp);
-        double one = 1.0;
-        cublasDaxpy(ctx.cublas_handle, n, &one, ctx.d_tmp, 1, ctx.d_z, 1);
-
-        kernelInit<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(n, delta_s, ctx.d_tmp);
-        cublasDaxpy(ctx.cublas_handle, n, &one, ctx.d_tmp, 1, ctx.d_s, 1);
+        kernelAddScalar<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
+            n, delta_z, ctx.d_z);
+        kernelAddScalar<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
+            n, delta_s, ctx.d_s);
 
         double zs_dot = ctx.gpuDot(ctx.d_z, ctx.d_s, n);
         double z_sum = ctx.gpuSum(ctx.d_z, n);
@@ -1570,21 +1667,22 @@ struct GpuBarrierImpl {
             ctx.multiplyA(ctx.d_z, ctx.d_az);
             ctx.multiplyAT(ctx.d_y, ctx.d_aty);
 
-            kernelResidualPrimal<<<gridSize(m), kBlockSize, 0, ctx.stream>>>(
-                m, ctx.d_b, ctx.d_az, ctx.d_rp);
-            kernelResidualDual<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
-                n, ctx.d_c, ctx.d_aty, ctx.d_s, ctx.d_rd);
-
-            // Batch residual reductions: mu, pinf, dinf, pobj → 1 sync.
-            ctx.gpuMuAsync(ctx.d_z, ctx.d_s, n, 0);      // slot 0 = sum(z*s)
-            ctx.gpuInfNormAsync(ctx.d_rp, m, 1);          // slot 1 = ||rp||_inf
-            ctx.gpuInfNormAsync(ctx.d_rd, n, 2);          // slot 2 = ||rd||_inf
-            ctx.gpuDotAsync(ctx.d_c, ctx.d_z, n, 3);      // slot 3 = c'z
-            ctx.downloadScalars(4);
+            // Batch: fused residual+norm, mu, pobj, dobj → 1 sync.
+            // Slots: 0=sum(z*s), 1=||rp||_inf, 2=||rd||_inf, 3=c'z, 4=b'y
+            ctx.zeroScalars(5);
+            ctx.gpuMuAsync(ctx.d_z, ctx.d_s, n, 0);
+            kernelResidualPrimalNorm<<<gridSize(m), kBlockSize, 0, ctx.stream>>>(
+                m, ctx.d_b, ctx.d_az, ctx.d_rp, ctx.d_scalar + 1);
+            kernelResidualDualNorm<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
+                n, ctx.d_c, ctx.d_aty, ctx.d_s, ctx.d_rd, ctx.d_scalar + 2);
+            ctx.gpuDotAsync(ctx.d_c, ctx.d_z, n, 3);
+            ctx.gpuDotAsync(ctx.d_b, ctx.d_y, m, 4);
+            ctx.downloadScalars(5);
             double mu = ctx.h_scalars[0] / std::max(n, 1);
             double pinf = ctx.h_scalars[1] * inv_b;
             double dinf = ctx.h_scalars[2] * inv_c;
             double pobj = obj_offset + ctx.h_scalars[3];
+            double dobj = obj_offset + ctx.h_scalars[4];
             double gap = std::abs(mu) / (1.0 + std::abs(pobj));
 
             // Update backend tag when switching.
@@ -1594,9 +1692,9 @@ struct GpuBarrierImpl {
 
             if (verbose) {
                 std::printf(
-                    "IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  "
+                    "IPM %4d  pobj=% .10e  dobj=% .10e  pinf=% .2e  dinf=% .2e  "
                     "gap=% .2e  reg=% .1e %s\n",
-                    iter, pobj, pinf, dinf, gap, reg_primal, backend_tag);
+                    iter, pobj, dobj, pinf, dinf, gap, reg_primal, backend_tag);
             }
 
             if (pinf < tol && dinf < tol && gap < tol) {
@@ -1732,10 +1830,11 @@ struct GpuBarrierImpl {
             }
 
             // Batch predictor reductions: step sizes + mu_aff parts → 1 sync.
-            ctx.gpuMaxStepAsync(ctx.d_z, ctx.d_dz_aff, n, 1.0, 0);   // slot 0
-            ctx.gpuMaxStepAsync(ctx.d_s, ctx.d_ds_aff, n, 1.0, 1);   // slot 1
-            // Fused 4-component dot: slots 2-5 = {z·s, z·ds, dz·s, dz·ds}
+            // Slots 0-1 = MaxStep (init 1.0), slots 2-5 = dot products (init 0.0).
+            ctx.initMaxStepScalars(0, 2);
             cudaMemsetAsync(ctx.d_scalar + 2, 0, sizeof(double) * 4, ctx.stream);
+            ctx.gpuMaxStepAsync(ctx.d_z, ctx.d_dz_aff, n, 1.0, 0);
+            ctx.gpuMaxStepAsync(ctx.d_s, ctx.d_ds_aff, n, 1.0, 1);
             kernelMuAffParts<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
                 n, ctx.d_z, ctx.d_s, ctx.d_dz_aff, ctx.d_ds_aff, ctx.d_scalar + 2);
             ctx.downloadScalars(6);
@@ -1766,6 +1865,7 @@ struct GpuBarrierImpl {
             }
 
             // Batch corrector step sizes → 1 sync.
+            ctx.initMaxStepScalars(0, 2);
             ctx.gpuMaxStepAsync(ctx.d_z, ctx.d_dz, n, step_fraction, 0);
             ctx.gpuMaxStepAsync(ctx.d_s, ctx.d_ds, n, step_fraction, 1);
             ctx.downloadScalars(2);

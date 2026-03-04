@@ -53,7 +53,7 @@ if(MIPX_USE_CUDA)
     if(MIPX_HAS_CUDSS)
         target_sources(mipx PRIVATE lp/barrier_gpu.cu lp/barrier_gpu_wrap.cpp)
         target_include_directories(mipx PRIVATE ${CUDSS_INCLUDE_DIR})
-        target_link_libraries(mipx PUBLIC ${CUDSS_LIBRARY} CUDA::cublas)
+        target_link_libraries(mipx PUBLIC ${CUDSS_LIBRARY})
         target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDSS)
         set_source_files_properties(lp/barrier_gpu.cu PROPERTIES
             LANGUAGE CUDA
