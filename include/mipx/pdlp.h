@@ -39,6 +39,7 @@ struct PdlpOptions {
     bool do_ruiz_scaling = true;
     Int ruiz_iterations = 10;
     bool do_pock_chambolle_scaling = true;
+    bool do_bound_obj_rescaling = true;
 
     // GPU acceleration.
     bool use_gpu = true;
@@ -99,6 +100,8 @@ private:
     std::vector<Real> scaled_col_lower_, scaled_col_upper_;
     std::vector<Real> scaled_row_lower_, scaled_row_upper_;
     std::vector<Real> row_scale_, col_scale_;
+    Real objective_scale_ = 1.0;
+    Real constraint_scale_ = 1.0;
     std::vector<Real> sigma_base_, tau_base_;
 
     // Explicit A^T CSR storage (for GPU path).
