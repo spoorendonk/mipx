@@ -94,9 +94,13 @@ std::vector<std::string> tokenize(const std::string& line) {
 }
 
 Real parseReal(const std::string& s) {
+    const char* begin = s.data();
+    const char* end = s.data() + s.size();
+    // std::from_chars may not accept a leading '+' on some implementations.
+    if (begin < end && *begin == '+') ++begin;
     Real val = 0.0;
-    auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), val);
-    if (ec != std::errc{}) {
+    auto [ptr, ec] = std::from_chars(begin, end, val);
+    if (ec != std::errc{} || ptr != end) {
         throw std::runtime_error("Invalid number: " + s);
     }
     return val;
@@ -116,6 +120,8 @@ Section parseSection(const std::string& line) {
     const auto& s = tokens[0];
     if (s == "NAME") return Section::Name;
     if (s == "ROWS") return Section::Rows;
+    // LAZYCONS / USERCUTS are CPLEX extensions that define additional rows.
+    if (s == "LAZYCONS" || s == "USERCUTS") return Section::Rows;
     if (s == "COLUMNS") return Section::Columns;
     if (s == "RHS") return Section::Rhs;
     if (s == "RANGES") return Section::Ranges;
@@ -165,9 +171,20 @@ LpProblem readMps(const std::string& filename) {
 
     std::string line;
     while (reader.getline(line)) {
-        // Skip empty lines and comments.
+        // Skip empty lines and full-line comments.
         if (line.empty()) continue;
         if (line[0] == '*' || line[0] == '$') continue;
+
+        // Strip inline '$' comments: '$' preceded by whitespace marks the
+        // start of a comment.  A '$' embedded inside a name (e.g. "x$foo")
+        // must not be treated as a comment delimiter.
+        for (std::string::size_type pos = 1; pos < line.size(); ++pos) {
+            if (line[pos] == '$' &&
+                std::isspace(static_cast<unsigned char>(line[pos - 1]))) {
+                line.erase(pos);
+                break;
+            }
+        }
 
         if (isSection(line)) {
             section = parseSection(line);
@@ -286,12 +303,13 @@ LpProblem readMps(const std::string& filename) {
                 // tokens[1] is bound name (ignored).
                 const std::string& col_name = tokens[2];
                 Index col_idx = getOrCreateCol(col_name);
+                const bool has_value = tokens.size() >= 4;
 
-                if (bound_type == "LO") {
+                if (bound_type == "LO" && has_value) {
                     prob.col_lower[col_idx] = parseReal(tokens[3]);
-                } else if (bound_type == "UP") {
+                } else if (bound_type == "UP" && has_value) {
                     prob.col_upper[col_idx] = parseReal(tokens[3]);
-                } else if (bound_type == "FX") {
+                } else if (bound_type == "FX" && has_value) {
                     Real v = parseReal(tokens[3]);
                     prob.col_lower[col_idx] = v;
                     prob.col_upper[col_idx] = v;
@@ -306,10 +324,10 @@ LpProblem readMps(const std::string& filename) {
                     prob.col_lower[col_idx] = 0.0;
                     prob.col_upper[col_idx] = 1.0;
                     prob.col_type[col_idx] = VarType::Binary;
-                } else if (bound_type == "LI") {
+                } else if (bound_type == "LI" && has_value) {
                     prob.col_lower[col_idx] = parseReal(tokens[3]);
                     prob.col_type[col_idx] = VarType::Integer;
-                } else if (bound_type == "UI") {
+                } else if (bound_type == "UI" && has_value) {
                     prob.col_upper[col_idx] = parseReal(tokens[3]);
                     prob.col_type[col_idx] = VarType::Integer;
                 } else if (bound_type == "SC") {

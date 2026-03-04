@@ -20,20 +20,31 @@ struct DualSimplexOptions {
     bool enable_adaptive_bfrt = true;
     Int adaptive_bfrt_max_pinf = 128;
     Int adaptive_bfrt_progress_window = 512;
+    // Auto-enable BFRT on very wide LPs where it consistently reduces
+    // stalling/degenerate pivot tails.
+    bool enable_auto_bfrt_wide = true;
+    Int auto_bfrt_min_cols = 5000;
+    Real auto_bfrt_min_col_row_ratio = 4.0;
     Int partial_pricing_chunk_min = 512;
     Int partial_pricing_full_scan_freq = 25;
 
     // Refactorization controls.
     bool enable_adaptive_refactorization = true;
-    Int adaptive_refactor_min_updates = 24;
-    Int adaptive_refactor_stall_pivots = 32;
+    // Maximum Forrest-Tomlin updates before mandatory reinversion.
+    // Non-positive enables auto sizing from basis dimension.
+    Int lu_update_limit = 0;
+    // Drop tolerance for non-pivot FT update entries (absolute magnitude).
+    // Non-positive enables auto sizing from basis dimension.
+    Real lu_ft_drop_tolerance = 0.0;
+    Int adaptive_refactor_min_updates = 32;
+    Int adaptive_refactor_stall_pivots = 64;
     Real adaptive_refactor_degenerate_pivot_tol = 1e-10;
     // Extra guardrails for primal-feasible/dual-infeasible pivot phase.
-    Int primal_feasible_adaptive_refactor_stall_pivots = 32;
-    Int primal_feasible_adaptive_refactor_min_updates = 24;
+    Int primal_feasible_adaptive_refactor_stall_pivots = 24;
+    Int primal_feasible_adaptive_refactor_min_updates = 16;
     // Non-positive disables the dual-progress stall gate.
-    Int primal_feasible_dual_progress_window = 0;
-    Int primal_feasible_refactor_cooldown = 0;
+    Int primal_feasible_dual_progress_window = 8;
+    Int primal_feasible_refactor_cooldown = 32;
     Real primal_feasible_dual_progress_improve_rel_tol = 1e-3;
 
     // Runtime SIMD controls for dense vector kernels.

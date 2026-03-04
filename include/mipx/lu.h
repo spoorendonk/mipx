@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -36,11 +37,19 @@ public:
     /// with new column `entering_col` (given in terms of original row indices/values).
     void update(Index pivot_pos, std::span<const Index> indices,
                 std::span<const Real> values);
+    /// Forrest-Tomlin rank-1 update with pre-transformed column `d = B^{-1} a_q`.
+    /// `transformed_col` is in basis-position order and must have size dimension().
+    void updateFromFtranColumn(Index pivot_pos,
+                               std::span<const Real> transformed_col);
 
     /// Check if refactorization is needed.
     [[nodiscard]] bool needsRefactorization() const;
     [[nodiscard]] Index numUpdates() const { return num_updates_; }
     [[nodiscard]] Index dimension() const { return dim_; }
+    void setMaxUpdates(Index limit) { max_updates_ = std::max<Index>(1, limit); }
+    [[nodiscard]] Index maxUpdates() const { return max_updates_; }
+    void setFtDropTolerance(Real tol) { ft_drop_tol_ = std::max<Real>(0.0, tol); }
+    [[nodiscard]] Real ftDropTolerance() const { return ft_drop_tol_; }
 
     /// Access work unit counter.
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -95,6 +104,7 @@ private:
     std::vector<Index> u_col_;
     std::vector<Real> u_val_;
     std::vector<Real> u_diag_;  // u_diag_[k] = U(k,k)
+    std::vector<Real> u_diag_inv_;
 
     // Forrest-Tomlin update etas.
     // Each update stores an eta vector and the position of the replaced column.
@@ -103,24 +113,33 @@ private:
     std::vector<Real> ft_value_;
     std::vector<Index> ft_pivot_pos_;  // column position in elimination order
     std::vector<Real> ft_pivot_val_;   // new diagonal value
+    std::vector<Real> ft_pivot_inv_;
+    std::vector<uint8_t> ft_is_dense_;
+    std::vector<Index> ft_dense_offset_;
+    std::vector<Real> ft_dense_value_;
+    uint64_t ft_dense_nnz_ = 0;
 
     Index num_updates_ = 0;
 
     // Reusable dense scratch buffers for hot-path solves/updates.
     mutable std::vector<Real> solve_work_;
     std::vector<Real> update_work_;
+    std::vector<Index> update_touched_;
     mutable std::vector<Index> sparse_steps_;
-    mutable std::vector<uint8_t> sparse_mark_;
+    mutable std::vector<uint32_t> sparse_epoch_;
+    mutable uint32_t sparse_epoch_id_ = 1;
 
-    static constexpr Index kMaxUpdates = 100;
+    Index max_updates_ = 500;
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
-    static constexpr Real kFtDropTol = 1e-13;
     static constexpr Real kGrowthLimit = 1e12;
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
+    static constexpr Index kFtDenseMinDim = 512;
+    static constexpr Real kFtDenseThreshold = 0.85;
 
     Real max_u_entry_ = 0.0;  // track growth
+    Real ft_drop_tol_ = 1e-13;
 
     // Deterministic work counter.
     mutable WorkUnits work_;
