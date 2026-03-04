@@ -20,6 +20,10 @@ include(FetchContent)
 # --- Dependencies ---
 
 find_package(ZLIB REQUIRED)
+
+find_package(BZip2 QUIET)
+option(MIPX_USE_BZIP2 "Enable bzip2 decompression for .mps.bz2 files" ${BZIP2_FOUND})
+
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
 option(MIPX_USE_CUDA "Enable CUDA acceleration" ON)

@@ -32,6 +32,8 @@ static std::vector<std::string> findInstances(const std::string& dir) {
         auto p = entry.path();
         if (p.extension() == ".gz" && p.stem().extension() == ".mps") {
             paths.push_back(p.string());
+        } else if (p.extension() == ".bz2" && p.stem().extension() == ".mps") {
+            paths.push_back(p.string());
         } else if (p.extension() == ".mps") {
             paths.push_back(p.string());
         }
@@ -43,7 +45,7 @@ static std::vector<std::string> findInstances(const std::string& dir) {
 static std::string instanceName(const std::string& path) {
     auto stem = fs::path(path).stem();  // e.g. "afiro.mps" or "afiro"
     if (stem.extension() == ".mps") {
-        return stem.stem().string();  // strip .mps from .mps.gz
+        return stem.stem().string();  // strip .mps from .mps.gz or .mps.bz2
     }
     return stem.string();
 }

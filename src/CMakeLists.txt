@@ -40,6 +40,11 @@ target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
 target_link_libraries(mipx PUBLIC ZLIB::ZLIB)
 
+if(MIPX_USE_BZIP2)
+    target_link_libraries(mipx PUBLIC BZip2::BZip2)
+    target_compile_definitions(mipx PUBLIC MIPX_HAS_BZIP2)
+endif()
+
 if(MIPX_USE_TBB)
     target_link_libraries(mipx PUBLIC TBB::tbb)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_TBB)
