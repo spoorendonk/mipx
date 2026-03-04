@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
 project(mipx LANGUAGES CXX)
 
+# Enable CUDA language if toolkit is available (must happen before options).
+find_package(CUDAToolkit QUIET)
+if(CUDAToolkit_FOUND)
+    enable_language(CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -12,14 +20,13 @@ include(FetchContent)
 # --- Dependencies ---
 
 find_package(ZLIB REQUIRED)
-find_package(CUDAToolkit QUIET)
 
 find_package(BZip2 QUIET)
 option(MIPX_USE_BZIP2 "Enable bzip2 decompression for .mps.bz2 files" ${BZIP2_FOUND})
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
-option(MIPX_USE_CUDA "Enable CUDA acceleration in barrier solver" ${CUDAToolkit_FOUND})
+option(MIPX_USE_CUDA "Enable CUDA acceleration" ON)
 option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
        "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
        ON)

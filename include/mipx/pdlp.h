@@ -12,37 +12,40 @@
 namespace mipx {
 
 struct PdlpOptions {
-    Int max_iter = 20000;
-    Real optimality_tol = 1e-6;
-    Real primal_tol = 1e-6;
-    Real dual_tol = 1e-6;
-    Int major_iteration = 64;
+    Int max_iter = 4000000;
+    Real optimality_tol = 1e-4;
+    Real primal_tol = 1e-4;
+    Real dual_tol = 1e-4;
 
-    // Adaptive step-size update.
-    Real initial_step_size_scaling = 0.95;
-    Real step_growth = 1.03;
-    Real step_reduction = 0.7;
-    Real min_step_size = 1e-6;
-    Real max_step_size = 1e2;
+    // Step size (power iteration for spectral norm).
+    Int sv_max_iter = 5000;
+    Real sv_tol = 1e-4;
 
-    // Primal/dual balancing and restart.
+    // Primal weight (PI controller at restart).
     Real primal_weight = 1.0;
-    Real primal_weight_update_smoothing = 0.5;
-    Real restart_sufficient_reduction = 0.2;
-    Real restart_necessary_reduction = 0.85;
-    Real extrapolation_factor = 1.0;
     bool update_primal_weight = true;
+    Real pid_kp = 0.99;
+    Real pid_ki = 0.01;
+    Real pid_kd = 0.0;
+    Real pid_i_smooth = 0.3;
 
-    // Scaling/preconditioning.
+    // Restart (fixed-point based).
+    Real restart_sufficient_decay = 0.2;
+    Real restart_necessary_decay = 0.5;
+    Real restart_artificial_fraction = 0.36;
+    Int termination_eval_frequency = 200;
+
+    // Scaling.
     bool do_ruiz_scaling = true;
-    Int ruiz_iterations = 8;
+    Int ruiz_iterations = 10;
     bool do_pock_chambolle_scaling = true;
-    Real default_alpha_pock_chambolle_rescaling = 1.0;
 
-    // Execution.
+    // GPU acceleration.
     bool use_gpu = true;
     Int gpu_min_rows = 512;
     Int gpu_min_nnz = 10000;
+
+    // Execution.
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
 };
@@ -79,44 +82,32 @@ public:
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
 
 private:
-    struct OriginalColExpr {
-        Real offset = 0.0;
-        Index col_a = -1;
-        Real coeff_a = 0.0;
-        Index col_b = -1;
-        Real coeff_b = 0.0;
-    };
-
-    bool buildStandardForm();
     void buildScaledProblem();
-    bool solveStandardForm(std::vector<Real>& z_unscaled, std::vector<Real>& y_unscaled,
-                           Int& iters);
-    void reconstructOriginalPrimals(std::span<const Real> z_unscaled);
-    bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
+    void buildTransposeCSR();
+    Real estimateSpectralNorm() const;
+#ifdef MIPX_HAS_CUDA
+    LpResult solveGpu();
+#endif
 
     PdlpOptions options_{};
     LpProblem original_;
     bool loaded_ = false;
-    bool transformed_ok_ = false;
-    bool transformed_infeasible_ = false;
 
-    SparseMatrix aeq_{0, 0};
-    std::vector<Real> beq_;
-    std::vector<Real> cstd_;
-    std::vector<OriginalColExpr> col_expr_;
-    Real std_obj_offset_ = 0.0;
-
-    SparseMatrix scaled_aeq_{0, 0};
-    std::vector<Real> bscaled_;
+    Real obj_sign_ = 1.0;
+    SparseMatrix scaled_a_{0, 0};
     std::vector<Real> cscaled_;
-    std::vector<Real> row_scale_;
-    std::vector<Real> col_scale_;
-    std::vector<Real> sigma_base_;
-    std::vector<Real> tau_base_;
+    std::vector<Real> scaled_col_lower_, scaled_col_upper_;
+    std::vector<Real> scaled_row_lower_, scaled_row_upper_;
+    std::vector<Real> row_scale_, col_scale_;
+    std::vector<Real> sigma_base_, tau_base_;
+
+    // Explicit A^T CSR storage (for GPU path).
+    std::vector<Real> at_values_;
+    std::vector<Index> at_col_indices_;
+    std::vector<Index> at_row_starts_;
 
     std::vector<Real> primal_orig_;
-    std::vector<Real> dual_eq_;
-    std::vector<Real> reduced_costs_std_;
+    std::vector<Real> dual_orig_;
     Status status_ = Status::Error;
     Real objective_ = 0.0;
     Int iterations_ = 0;

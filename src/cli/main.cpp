@@ -265,8 +265,6 @@ int main(int argc, char* argv[]) {
             }
             solver.setBarrierUseGpu(barrier_gpu);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
-            solver.setPdlpUseGpu(barrier_gpu);
-            solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
