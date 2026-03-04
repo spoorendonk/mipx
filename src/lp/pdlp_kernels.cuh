@@ -26,7 +26,7 @@ void launchComputeLambda(Real* d_lambda, const Int* d_inner_count, Int k_offset,
 
 // Halpern PDHG step kernels.
 void launchPrimalHalpernStep(
-    Index n, const Real* d_lambda, Real step, Real primal_weight,
+    Index n, const Real* d_lambda, const Real* d_step, const Real* d_primal_weight,
     Real* current_x, const Real* initial_x,
     Real* pdhg_x, Real* reflected_x,
     const Real* cscaled, const Real* at_y,
@@ -35,7 +35,7 @@ void launchPrimalHalpernStep(
     cudaStream_t stream);
 
 void launchDualHalpernStep(
-    Index m, const Real* d_lambda, Real step, Real primal_weight,
+    Index m, const Real* d_lambda, const Real* d_step, const Real* d_primal_weight,
     Real* current_y, const Real* initial_y,
     Real* pdhg_y, Real* reflected_y,
     const Real* a_xrefl, const Real* sigma_base,

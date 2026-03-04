@@ -37,7 +37,8 @@ void launchComputeLambda(Real* d_lambda, const Int* d_inner_count,
 // ---------------------------------------------------------------------------
 
 __global__ void primalHalpernStepKernel(
-    Index n, const Real* __restrict__ d_lambda, Real step, Real primal_weight,
+    Index n, const Real* __restrict__ d_lambda,
+    const Real* __restrict__ d_step, const Real* __restrict__ d_primal_weight,
     Real* __restrict__ current_x, const Real* __restrict__ initial_x,
     Real* __restrict__ pdhg_x, Real* __restrict__ reflected_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
@@ -48,6 +49,8 @@ __global__ void primalHalpernStepKernel(
     if (j >= n) return;
 
     Real lambda = *d_lambda;
+    Real step = *d_step;
+    Real primal_weight = *d_primal_weight;
     Real tau = step * tau_base[j] / primal_weight;
     Real temp = current_x[j] - tau * (cscaled[j] + at_y[j]);
     Real lb = col_lower[j];
@@ -62,7 +65,7 @@ __global__ void primalHalpernStepKernel(
 }
 
 void launchPrimalHalpernStep(
-    Index n, const Real* d_lambda, Real step, Real primal_weight,
+    Index n, const Real* d_lambda, const Real* d_step, const Real* d_primal_weight,
     Real* current_x, const Real* initial_x,
     Real* pdhg_x, Real* reflected_x,
     const Real* cscaled, const Real* at_y,
@@ -72,7 +75,7 @@ void launchPrimalHalpernStep(
 {
     if (n <= 0) return;
     primalHalpernStepKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, d_lambda, step, primal_weight,
+        n, d_lambda, d_step, d_primal_weight,
         current_x, initial_x, pdhg_x, reflected_x,
         cscaled, at_y, tau_base, col_lower, col_upper);
 }
@@ -82,7 +85,8 @@ void launchPrimalHalpernStep(
 // ---------------------------------------------------------------------------
 
 __global__ void dualHalpernStepKernel(
-    Index m, const Real* __restrict__ d_lambda, Real step, Real primal_weight,
+    Index m, const Real* __restrict__ d_lambda,
+    const Real* __restrict__ d_step, const Real* __restrict__ d_primal_weight,
     Real* __restrict__ current_y, const Real* __restrict__ initial_y,
     Real* __restrict__ pdhg_y, Real* __restrict__ reflected_y,
     const Real* __restrict__ a_xrefl, const Real* __restrict__ sigma_base,
@@ -92,6 +96,8 @@ __global__ void dualHalpernStepKernel(
     if (i >= m) return;
 
     Real lambda = *d_lambda;
+    Real step = *d_step;
+    Real primal_weight = *d_primal_weight;
     Real sigma = step * sigma_base[i] * primal_weight;
     Real v = current_y[i] + sigma * a_xrefl[i];
     Real rl = row_lower[i];
@@ -125,7 +131,7 @@ __global__ void dualHalpernStepKernel(
 }
 
 void launchDualHalpernStep(
-    Index m, const Real* d_lambda, Real step, Real primal_weight,
+    Index m, const Real* d_lambda, const Real* d_step, const Real* d_primal_weight,
     Real* current_y, const Real* initial_y,
     Real* pdhg_y, Real* reflected_y,
     const Real* a_xrefl, const Real* sigma_base,
@@ -134,7 +140,7 @@ void launchDualHalpernStep(
 {
     if (m <= 0) return;
     dualHalpernStepKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, d_lambda, step, primal_weight,
+        m, d_lambda, d_step, d_primal_weight,
         current_y, initial_y, pdhg_y, reflected_y,
         a_xrefl, sigma_base, row_lower, row_upper);
 }
