@@ -18,11 +18,26 @@ __device__ inline bool devIsFinite(Real v) {
 }
 
 // ---------------------------------------------------------------------------
+// Compute lambda on device
+// ---------------------------------------------------------------------------
+
+__global__ void computeLambdaKernel(Real* d_lambda, const Int* d_inner_count,
+                                     Int k_offset) {
+    Int k = *d_inner_count + k_offset;
+    *d_lambda = static_cast<Real>(k) / static_cast<Real>(k + 1);
+}
+
+void launchComputeLambda(Real* d_lambda, const Int* d_inner_count,
+                         Int k_offset, cudaStream_t stream) {
+    computeLambdaKernel<<<1, 1, 0, stream>>>(d_lambda, d_inner_count, k_offset);
+}
+
+// ---------------------------------------------------------------------------
 // Primal Halpern step
 // ---------------------------------------------------------------------------
 
 __global__ void primalHalpernStepKernel(
-    Index n, Real lambda, Real step, Real primal_weight,
+    Index n, const Real* __restrict__ d_lambda, Real step, Real primal_weight,
     Real* __restrict__ current_x, const Real* __restrict__ initial_x,
     Real* __restrict__ pdhg_x, Real* __restrict__ reflected_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
@@ -32,6 +47,7 @@ __global__ void primalHalpernStepKernel(
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n) return;
 
+    Real lambda = *d_lambda;
     Real tau = step * tau_base[j] / primal_weight;
     Real temp = current_x[j] - tau * (cscaled[j] + at_y[j]);
     Real lb = col_lower[j];
@@ -46,7 +62,7 @@ __global__ void primalHalpernStepKernel(
 }
 
 void launchPrimalHalpernStep(
-    Index n, Real lambda, Real step, Real primal_weight,
+    Index n, const Real* d_lambda, Real step, Real primal_weight,
     Real* current_x, const Real* initial_x,
     Real* pdhg_x, Real* reflected_x,
     const Real* cscaled, const Real* at_y,
@@ -56,7 +72,7 @@ void launchPrimalHalpernStep(
 {
     if (n <= 0) return;
     primalHalpernStepKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, lambda, step, primal_weight,
+        n, d_lambda, step, primal_weight,
         current_x, initial_x, pdhg_x, reflected_x,
         cscaled, at_y, tau_base, col_lower, col_upper);
 }
@@ -66,7 +82,7 @@ void launchPrimalHalpernStep(
 // ---------------------------------------------------------------------------
 
 __global__ void dualHalpernStepKernel(
-    Index m, Real lambda, Real step, Real primal_weight,
+    Index m, const Real* __restrict__ d_lambda, Real step, Real primal_weight,
     Real* __restrict__ current_y, const Real* __restrict__ initial_y,
     Real* __restrict__ pdhg_y, Real* __restrict__ reflected_y,
     const Real* __restrict__ a_xrefl, const Real* __restrict__ sigma_base,
@@ -75,6 +91,7 @@ __global__ void dualHalpernStepKernel(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= m) return;
 
+    Real lambda = *d_lambda;
     Real sigma = step * sigma_base[i] * primal_weight;
     Real v = current_y[i] + sigma * a_xrefl[i];
     Real rl = row_lower[i];
@@ -108,7 +125,7 @@ __global__ void dualHalpernStepKernel(
 }
 
 void launchDualHalpernStep(
-    Index m, Real lambda, Real step, Real primal_weight,
+    Index m, const Real* d_lambda, Real step, Real primal_weight,
     Real* current_y, const Real* initial_y,
     Real* pdhg_y, Real* reflected_y,
     const Real* a_xrefl, const Real* sigma_base,
@@ -117,7 +134,7 @@ void launchDualHalpernStep(
 {
     if (m <= 0) return;
     dualHalpernStepKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, lambda, step, primal_weight,
+        m, d_lambda, step, primal_weight,
         current_y, initial_y, pdhg_y, reflected_y,
         a_xrefl, sigma_base, row_lower, row_upper);
 }

@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <random>
 #include <utility>
 
 #include "mipx/mip_solver.h"
@@ -211,4 +212,80 @@ TEST_CASE("Concurrent root deterministic mode is reproducible",
               a_stats.root_race_pdlp_wins ==
           1);
     CHECK(b_stats.root_race_runs == 1);
+}
+
+namespace {
+
+LpProblem buildMediumLp() {
+    // A ~50-row LP with dense-ish constraints to exercise both GPU and CPU paths.
+    // min sum(j, c_j * x_j)  s.t.  sum(j, A_ij * x_j) <= b_i,  x_j >= 0
+    const Index rows = 50;
+    const Index cols = 80;
+
+    LpProblem lp;
+    lp.name = "gpu_vs_cpu_medium";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = cols;
+    lp.num_rows = rows;
+
+    // Objective: alternating +/- coefficients.
+    lp.obj.resize(cols);
+    for (Index j = 0; j < cols; ++j)
+        lp.obj[j] = (j % 2 == 0) ? 1.0 + 0.1 * j : -(0.5 + 0.05 * j);
+
+    lp.col_lower.assign(cols, 0.0);
+    lp.col_upper.assign(cols, 100.0);
+    lp.col_type.assign(cols, VarType::Continuous);
+
+    lp.row_lower.assign(rows, -kInf);
+    lp.row_upper.resize(rows);
+    for (Index i = 0; i < rows; ++i)
+        lp.row_upper[i] = 50.0 + 2.0 * i;
+
+    // Build constraint matrix with ~60% density.
+    std::vector<Triplet> trips;
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+    for (Index i = 0; i < rows; ++i) {
+        for (Index j = 0; j < cols; ++j) {
+            if (dist(rng) < 0.6) {
+                trips.push_back({i, j, 0.1 + dist(rng) * 2.0});
+            }
+        }
+    }
+    lp.matrix = SparseMatrix(rows, cols, std::move(trips));
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") {
+    auto lp = buildMediumLp();
+
+    PdlpSolver cpu_solver;
+    PdlpOptions cpu_opts;
+    cpu_opts.verbose = false;
+    cpu_opts.use_gpu = false;
+    cpu_solver.setOptions(cpu_opts);
+    cpu_solver.load(lp);
+    auto cpu_result = cpu_solver.solve();
+
+    PdlpSolver gpu_solver;
+    PdlpOptions gpu_opts;
+    gpu_opts.verbose = false;
+    gpu_opts.use_gpu = true;
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    gpu_solver.setOptions(gpu_opts);
+    gpu_solver.load(lp);
+    auto gpu_result = gpu_solver.solve();
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    // If CUDA is available, confirm GPU was actually used.
+    // If not, both are CPU — test still passes.
+#ifdef MIPX_HAS_CUDA
+    CHECK(gpu_solver.usedGpu());
+#endif
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-4));
 }

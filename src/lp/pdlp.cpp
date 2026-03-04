@@ -685,7 +685,7 @@ LpResult PdlpSolver::solveGpu() {
 
     used_gpu_ = false;
 
-    // Arena layout: 12n + 11m doubles.
+    // Arena layout: 15n + 12m + 3 doubles.
     // Iterate vectors (device-resident):
     //   current_x(n), current_y(m), initial_x(n), initial_y(m),
     //   pdhg_x(n), pdhg_y(m), reflected_x(n), reflected_y(m),
@@ -694,10 +694,11 @@ LpResult PdlpSolver::solveGpu() {
     //   cscaled(n), col_lower(n), col_upper(n), row_lower(m), row_upper(m),
     //   tau_base(n), sigma_base(m)
     // Power iteration: pi_x(n), pi_y(m), pi_x_new(n)
-    // Scratch: 1 double for reductions
+    // Scratch: 1 double for reductions, 1 double for lambda
+    // Plus 1 Int for inner_count (rounded up to 1 double for alignment)
     const size_t sn = static_cast<size_t>(n);
     const size_t sm = static_cast<size_t>(m);
-    const size_t arena_doubles = 15 * sn + 12 * sm + 1;
+    const size_t arena_doubles = 15 * sn + 12 * sm + 3;
 
     Real* d_arena = nullptr;
     if (!cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_arena),
@@ -731,6 +732,8 @@ LpResult PdlpSolver::solveGpu() {
     Real* d_pi_y        = d_pi_x + n;
     Real* d_pi_x_new    = d_pi_y + m;
     Real* d_scratch     = d_pi_x_new + n;
+    Real* d_lambda      = d_scratch + 1;
+    Int*  d_inner_count = reinterpret_cast<Int*>(d_lambda + 1);
 
     // Zero all iterate vectors.
     cudaMemset(d_arena, 0, (13 * sn + 8 * sm) * sizeof(Real));
@@ -820,11 +823,11 @@ LpResult PdlpSolver::solveGpu() {
     size_t buf_a_size = 0, buf_at_size = 0;
     cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                             &alpha_one, a_desc, desc_reflected_x, &beta_zero, desc_a_xrefl,
-                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_a_size);
+                            CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, &buf_a_size);
     // A^T * y (non-transpose on A^T desc): AT_desc * desc_current_y -> desc_at_y
     cusparseSpMV_bufferSize(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                             &alpha_one, at_desc, desc_current_y, &beta_zero, desc_at_y,
-                            CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buf_at_size);
+                            CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, &buf_at_size);
 
     void* d_buf_a = nullptr;
     void* d_buf_at = nullptr;
@@ -843,12 +846,12 @@ LpResult PdlpSolver::solveGpu() {
     auto spmv_a = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
         cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                      &alpha_one, a_desc, in, &beta_zero, out,
-                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buf_a);
+                     CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_a);
     };
     auto spmv_at = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
         cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                      &alpha_one, at_desc, in, &beta_zero, out,
-                     CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buf_at);
+                     CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_at);
     };
 
     // -----------------------------------------------------------------------
@@ -929,6 +932,32 @@ LpResult PdlpSolver::solveGpu() {
 
     bool converged = false;
 
+    // Initialize d_inner_count on device.
+    cudaMemset(d_inner_count, 0, sizeof(Int));
+
+    // CUDA graph capture state.
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t graphExec = nullptr;
+
+    // Helper: launch one batch of N inner iterations (no graph).
+    auto launchBatch = [&](Int batch) {
+        for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+            launchComputeLambda(d_lambda, d_inner_count, k_offset, stream);
+            spmv_at(desc_current_y, desc_at_y);
+            launchPrimalHalpernStep(
+                n, d_lambda, step, primal_weight,
+                d_current_x, d_initial_x, d_pdhg_x, d_reflected_x,
+                d_cscaled, d_at_y, d_tau_base, d_col_lower, d_col_upper,
+                stream);
+            spmv_a(desc_reflected_x, desc_a_xrefl);
+            launchDualHalpernStep(
+                m, d_lambda, step, primal_weight,
+                d_current_y, d_initial_y, d_pdhg_y, d_reflected_y,
+                d_a_xrefl, d_sigma_base, d_row_lower, d_row_upper,
+                stream);
+        }
+    };
+
     // -----------------------------------------------------------------------
     // Main PDHG loop (GPU-resident).
     // -----------------------------------------------------------------------
@@ -942,30 +971,34 @@ LpResult PdlpSolver::solveGpu() {
 
         {
             Int batch = std::min(N, options_.max_iter - total_count);
-            for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
-                Real lambda = static_cast<Real>(inner_count + k_offset) /
-                              static_cast<Real>(inner_count + k_offset + 1);
 
-                // A^T * current_y → at_y (non-transpose on A^T descriptor).
-                spmv_at(desc_current_y, desc_at_y);
-
-                // Primal Halpern step.
-                launchPrimalHalpernStep(
-                    n, lambda, step, primal_weight,
-                    d_current_x, d_initial_x, d_pdhg_x, d_reflected_x,
-                    d_cscaled, d_at_y, d_tau_base, d_col_lower, d_col_upper,
-                    stream);
-
-                // A * reflected_x → a_xrefl.
-                spmv_a(desc_reflected_x, desc_a_xrefl);
-
-                // Dual Halpern step.
-                launchDualHalpernStep(
-                    m, lambda, step, primal_weight,
-                    d_current_y, d_initial_y, d_pdhg_y, d_reflected_y,
-                    d_a_xrefl, d_sigma_base, d_row_lower, d_row_upper,
-                    stream);
+            if (batch == N) {
+                if (graphExec == nullptr) {
+                    // First full batch: capture the graph.
+                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaStreamSynchronize(stream);
+                    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+                    launchBatch(batch);
+                    cudaStreamEndCapture(stream, &graph);
+                    cudaGraphInstantiate(&graphExec, graph, 0);
+                    // Execute the captured graph for this first batch.
+                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaGraphLaunch(graphExec, stream);
+                } else {
+                    // Subsequent full batches: update d_inner_count and replay.
+                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaGraphLaunch(graphExec, stream);
+                }
+            } else {
+                // Last partial batch: fall back to non-graph launches.
+                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
+                                cudaMemcpyHostToDevice, stream);
+                launchBatch(batch);
             }
+
             inner_count += batch;
             total_count += batch;
         }
@@ -1070,10 +1103,15 @@ LpResult PdlpSolver::solveGpu() {
                 }
             }
 
+            // Invalidate graph since primal_weight may have changed.
+            if (graphExec) { cudaGraphExecDestroy(graphExec); graphExec = nullptr; }
+            if (graph) { cudaGraphDestroy(graph); graph = nullptr; }
+
             launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y,
                               d_initial_x, d_initial_y,
                               d_current_x, d_current_y, stream);
             inner_count = 0;
+            // d_inner_count will be updated at the start of the next batch.
             initial_fpe = -1.0;
             last_trial_fpe = std::numeric_limits<Real>::infinity();
         }
@@ -1115,6 +1153,10 @@ LpResult PdlpSolver::solveGpu() {
     }
 
 cleanup:
+    // Destroy CUDA graph.
+    if (graphExec) cudaGraphExecDestroy(graphExec);
+    if (graph) cudaGraphDestroy(graph);
+
     // Destroy cuSPARSE descriptors.
     if (desc_current_y) cusparseDestroyDnVec(desc_current_y);
     if (desc_at_y) cusparseDestroyDnVec(desc_at_y);
