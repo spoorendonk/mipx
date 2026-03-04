@@ -529,11 +529,11 @@ LpResult PdlpSolver::solve() {
         Real abs_dual_resid = std::sqrt(dual_resid_sq);
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
 
-        // Primal objective.
+        // Primal objective in scaled space.
         Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
         Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled;
 
-        // Dual objective via support function.
+        // Dual objective via support function (scaled space).
         // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
         // where delta*(z) = sup_{s in [l,u]} z*s = max(0,z)*u + min(0,z)*l.
         // Corrected dual objective: project reduced costs and dual values
@@ -573,10 +573,13 @@ LpResult PdlpSolver::solve() {
                        (1.0 + std::abs(pobj) + std::abs(dobj));
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
+            // Log true-space primal objective for readability.
+            Real pobj_log = original_.obj_offset +
+                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e\n",
-                total_count, pobj, rel_primal_resid, rel_dual_resid, rel_gap,
+                total_count, pobj_log, rel_primal_resid, rel_dual_resid, rel_gap,
                 fpe, primal_weight, step);
         }
 
@@ -1110,10 +1113,12 @@ LpResult PdlpSolver::solveGpu() {
         if (initial_fpe < 0.0) initial_fpe = fpe;
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
+            Real pobj_log = original_.obj_offset +
+                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e  [GPU]\n",
-                total_count, pobj, rel_primal_resid, rel_dual_resid, rel_gap,
+                total_count, pobj_log, rel_primal_resid, rel_dual_resid, rel_gap,
                 fpe, primal_weight, step);
         }
 
