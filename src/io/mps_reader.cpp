@@ -1,16 +1,22 @@
 #include "mipx/io.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <charconv>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <memory>
-#include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 
 #include <zlib.h>
+
+#ifdef MIPX_HAS_BZIP2
+#include <bzlib.h>
+#endif
 
 namespace mipx {
 
@@ -48,12 +54,93 @@ private:
     gzFile file_ = nullptr;
 };
 
-/// Line reader that works with both gzip and plain files.
+#ifdef MIPX_HAS_BZIP2
+/// RAII wrapper for bzip2 files.
+class BzFileReader {
+public:
+    explicit BzFileReader(const std::string& filename) {
+        fp_ = fopen(filename.c_str(), "rb");
+        if (!fp_) {
+            throw std::runtime_error("Cannot open file: " + filename);
+        }
+        int bzerror = BZ_OK;
+        bz_ = BZ2_bzReadOpen(&bzerror, fp_, 0, 0, nullptr, 0);
+        if (bzerror != BZ_OK) {
+            fclose(fp_);
+            throw std::runtime_error("BZ2_bzReadOpen failed: " + filename);
+        }
+    }
+
+    ~BzFileReader() {
+        if (bz_) {
+            int bzerror;
+            BZ2_bzReadClose(&bzerror, bz_);
+        }
+        if (fp_) fclose(fp_);
+    }
+
+    BzFileReader(const BzFileReader&) = delete;
+    BzFileReader& operator=(const BzFileReader&) = delete;
+
+    bool getline(std::string& line) {
+        line.clear();
+        while (true) {
+            // Return buffered characters up to next newline.
+            while (buf_pos_ < buf_len_) {
+                char c = buf_[buf_pos_++];
+                if (c == '\n') {
+                    // Strip trailing \r.
+                    while (!line.empty() && line.back() == '\r') {
+                        line.pop_back();
+                    }
+                    return true;
+                }
+                line.push_back(c);
+            }
+            // Refill buffer.
+            if (eof_) {
+                return !line.empty();
+            }
+            int bzerror = BZ_OK;
+            buf_len_ = BZ2_bzRead(&bzerror, bz_, buf_, sizeof(buf_));
+            buf_pos_ = 0;
+            if (bzerror == BZ_STREAM_END) {
+                eof_ = true;
+            } else if (bzerror != BZ_OK) {
+                return !line.empty();
+            }
+            if (buf_len_ == 0) {
+                eof_ = true;
+                return !line.empty();
+            }
+        }
+    }
+
+private:
+    FILE* fp_ = nullptr;
+    BZFILE* bz_ = nullptr;
+    char buf_[4096]{};
+    int buf_pos_ = 0;
+    int buf_len_ = 0;
+    bool eof_ = false;
+};
+#endif
+
+/// Line reader that works with gzip, bzip2, and plain files.
 class LineReader {
 public:
     explicit LineReader(const std::string& filename) {
-        if (filename.size() >= 3 &&
-            filename.substr(filename.size() - 3) == ".gz") {
+        if (filename.size() >= 4 &&
+            filename.substr(filename.size() - 4) == ".bz2") {
+#ifdef MIPX_HAS_BZIP2
+            bz_ = std::make_unique<BzFileReader>(filename);
+#else
+            throw std::runtime_error(
+                "bzip2 support not compiled in (need -DMIPX_USE_BZIP2=ON): " +
+                filename);
+#endif
+        } else if (filename.size() >= 3 &&
+                   filename.substr(filename.size() - 3) == ".gz") {
             gz_ = std::make_unique<GzFileReader>(filename);
         } else {
             plain_ = std::make_unique<std::ifstream>(filename);
@@ -64,6 +151,11 @@ public:
     }
 
     bool getline(std::string& line) {
+#ifdef MIPX_HAS_BZIP2
+        if (bz_) {
+            return bz_->getline(line);
+        }
+#endif
         if (gz_) {
             return gz_->getline(line);
         }
@@ -79,21 +171,37 @@ public:
 
 private:
     std::unique_ptr<GzFileReader> gz_;
+#ifdef MIPX_HAS_BZIP2
+    std::unique_ptr<BzFileReader> bz_;
+#endif
     std::unique_ptr<std::ifstream> plain_;
 };
 
-/// Split a line into whitespace-delimited tokens.
-std::vector<std::string> tokenize(const std::string& line) {
-    std::vector<std::string> tokens;
-    std::istringstream iss(line);
-    std::string token;
-    while (iss >> token) {
-        tokens.push_back(std::move(token));
+/// Zero-allocation tokenizer. MPS lines have at most 6 fields.
+struct Tokens {
+    std::array<std::string_view, 6> t;
+    int count = 0;
+    std::string_view operator[](int i) const { return t[i]; }
+    int size() const { return count; }
+    bool empty() const { return count == 0; }
+};
+
+Tokens tokenize(std::string_view line) {
+    Tokens tok;
+    std::string_view::size_type pos = 0;
+    const auto len = line.size();
+    while (tok.count < 6 && pos < len) {
+        // Skip whitespace.
+        while (pos < len && (line[pos] == ' ' || line[pos] == '\t')) ++pos;
+        if (pos >= len) break;
+        auto start = pos;
+        while (pos < len && line[pos] != ' ' && line[pos] != '\t') ++pos;
+        tok.t[tok.count++] = line.substr(start, pos - start);
     }
-    return tokens;
+    return tok;
 }
 
-Real parseReal(const std::string& s) {
+Real parseReal(std::string_view s) {
     const char* begin = s.data();
     const char* end = s.data() + s.size();
     // std::from_chars may not accept a leading '+' on some implementations.
@@ -101,7 +209,7 @@ Real parseReal(const std::string& s) {
     Real val = 0.0;
     auto [ptr, ec] = std::from_chars(begin, end, val);
     if (ec != std::errc{} || ptr != end) {
-        throw std::runtime_error("Invalid number: " + s);
+        throw std::runtime_error("Invalid number: " + std::string(s));
     }
     return val;
 }
@@ -114,10 +222,10 @@ bool isSection(const std::string& line) {
 
 enum class Section { None, Name, Rows, Columns, Rhs, Ranges, Bounds, Endata };
 
-Section parseSection(const std::string& line) {
+Section parseSection(std::string_view line) {
     auto tokens = tokenize(line);
     if (tokens.empty()) return Section::None;
-    const auto& s = tokens[0];
+    const auto s = tokens[0];
     if (s == "NAME") return Section::Name;
     if (s == "ROWS") return Section::Rows;
     // LAZYCONS / USERCUTS are CPLEX extensions that define additional rows.
@@ -130,6 +238,24 @@ Section parseSection(const std::string& line) {
     return Section::None;
 }
 
+/// Transparent hash/equal for heterogeneous unordered_map lookup.
+struct StringHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const {
+        return std::hash<std::string_view>{}(s);
+    }
+    size_t operator()(const std::string& s) const {
+        return std::hash<std::string_view>{}(s);
+    }
+};
+
+struct StringEqual {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const {
+        return a == b;
+    }
+};
+
 }  // namespace
 
 LpProblem readMps(const std::string& filename) {
@@ -137,9 +263,9 @@ LpProblem readMps(const std::string& filename) {
 
     LpProblem prob;
 
-    // Maps for name → index.
-    std::unordered_map<std::string, Index> row_map;
-    std::unordered_map<std::string, Index> col_map;
+    // Maps for name -> index (transparent lookup avoids temporary std::string).
+    std::unordered_map<std::string, Index, StringHash, StringEqual> row_map;
+    std::unordered_map<std::string, Index, StringHash, StringEqual> col_map;
 
     // Row data during parsing.
     std::vector<char> row_sense;  // 'N', 'L', 'G', 'E'
@@ -155,12 +281,28 @@ LpProblem readMps(const std::string& filename) {
     bool in_integer_section = false;
     Section section = Section::None;
 
-    auto getOrCreateCol = [&](const std::string& name) -> Index {
+    // Column name cache for scattered column accumulation.
+    std::string_view cached_col_name;
+    Index cached_col_idx = -1;
+
+    auto getOrCreateCol = [&](std::string_view name) -> Index {
+        // Fast path: MPS groups columns contiguously.
+        if (name == cached_col_name && cached_col_idx >= 0) {
+            return cached_col_idx;
+        }
         auto it = col_map.find(name);
-        if (it != col_map.end()) return it->second;
+        if (it != col_map.end()) {
+            cached_col_idx = it->second;
+            // cached_col_name will point into col_map key after insert,
+            // but for lookup hits the name sv still works next iteration.
+            cached_col_name = it->first;
+            return it->second;
+        }
         Index idx = prob.num_cols++;
-        col_map[name] = idx;
-        prob.col_names.push_back(name);
+        auto [ins_it, _] = col_map.emplace(std::string(name), idx);
+        cached_col_name = ins_it->first;
+        cached_col_idx = idx;
+        prob.col_names.emplace_back(name);
         prob.obj.push_back(0.0);
         prob.col_lower.push_back(0.0);
         prob.col_upper.push_back(kInf);
@@ -191,7 +333,7 @@ LpProblem readMps(const std::string& filename) {
             if (section == Section::Name) {
                 auto tokens = tokenize(line);
                 if (tokens.size() >= 2) {
-                    prob.name = tokens[1];
+                    prob.name = std::string(tokens[1]);
                 }
             }
             if (section == Section::Endata) break;
@@ -205,16 +347,16 @@ LpProblem readMps(const std::string& filename) {
             case Section::Rows: {
                 if (tokens.size() < 2) break;
                 char sense = tokens[0][0];
-                const std::string& name = tokens[1];
+                auto name = tokens[1];
                 if (sense == 'N') {
-                    obj_row_name = name;
+                    obj_row_name = std::string(name);
                     // Still add to row_map for coefficient parsing, but mark
                     // as objective.
-                    row_map[name] = -1;
+                    row_map[std::string(name)] = -1;
                 } else {
                     Index idx = prob.num_rows++;
-                    row_map[name] = idx;
-                    prob.row_names.push_back(name);
+                    row_map[std::string(name)] = idx;
+                    prob.row_names.emplace_back(name);
                     row_sense.push_back(sense);
                 }
                 break;
@@ -232,7 +374,7 @@ LpProblem readMps(const std::string& filename) {
                 }
 
                 if (tokens.size() < 3) break;
-                const std::string& col_name = tokens[0];
+                auto col_name = tokens[0];
                 Index col_idx = getOrCreateCol(col_name);
 
                 if (in_integer_section) {
@@ -240,14 +382,14 @@ LpProblem readMps(const std::string& filename) {
                 }
 
                 // Process pairs: (row_name, value).
-                for (size_t i = 1; i + 1 < tokens.size(); i += 2) {
-                    const std::string& row_name = tokens[i];
+                for (int i = 1; i + 1 < tokens.size(); i += 2) {
+                    auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
 
                     auto it = row_map.find(row_name);
                     if (it == row_map.end()) {
                         throw std::runtime_error(
-                            "MPS: unknown row '" + row_name + "'");
+                            "MPS: unknown row '" + std::string(row_name) + "'");
                     }
                     if (it->second == -1) {
                         // Objective row.
@@ -262,8 +404,8 @@ LpProblem readMps(const std::string& filename) {
             case Section::Rhs: {
                 // First token is RHS name (ignored), then pairs.
                 if (tokens.size() < 3) break;
-                for (size_t i = 1; i + 1 < tokens.size(); i += 2) {
-                    const std::string& row_name = tokens[i];
+                for (int i = 1; i + 1 < tokens.size(); i += 2) {
+                    auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
                     auto it = row_map.find(row_name);
                     if (it == row_map.end()) continue;
@@ -283,8 +425,8 @@ LpProblem readMps(const std::string& filename) {
 
             case Section::Ranges: {
                 if (tokens.size() < 3) break;
-                for (size_t i = 1; i + 1 < tokens.size(); i += 2) {
-                    const std::string& row_name = tokens[i];
+                for (int i = 1; i + 1 < tokens.size(); i += 2) {
+                    auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
                     auto it = row_map.find(row_name);
                     if (it == row_map.end() || it->second == -1) continue;
@@ -299,9 +441,9 @@ LpProblem readMps(const std::string& filename) {
 
             case Section::Bounds: {
                 if (tokens.size() < 3) break;
-                const std::string& bound_type = tokens[0];
+                auto bound_type = tokens[0];
                 // tokens[1] is bound name (ignored).
-                const std::string& col_name = tokens[2];
+                auto col_name = tokens[2];
                 Index col_idx = getOrCreateCol(col_name);
                 const bool has_value = tokens.size() >= 4;
 

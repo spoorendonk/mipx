@@ -41,12 +41,20 @@ target_include_directories(mipx PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
 target_link_libraries(mipx PUBLIC ZLIB::ZLIB)
 
+if(MIPX_USE_BZIP2)
+    target_link_libraries(mipx PUBLIC BZip2::BZip2)
+    target_compile_definitions(mipx PUBLIC MIPX_HAS_BZIP2)
+endif()
+
 if(MIPX_USE_TBB)
     target_link_libraries(mipx PUBLIC TBB::tbb)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_TBB)
 endif()
 
 if(MIPX_USE_CUDA)
+    target_sources(mipx PRIVATE
+        lp/pdlp_kernels.cu
+    )
     target_link_libraries(mipx PUBLIC CUDA::cudart CUDA::cusparse)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDA)
 

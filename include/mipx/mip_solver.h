@@ -253,11 +253,6 @@ public:
     void setBarrierGpuThresholds(Int, Int) {
         // Legacy — thresholds now controlled via BarrierAlgorithm dispatch.
     }
-    void setPdlpUseGpu(bool use_gpu) { pdlp_use_gpu_ = use_gpu; }
-    void setPdlpGpuThresholds(Int min_rows, Int min_nnz) {
-        pdlp_gpu_min_rows_ = std::max<Int>(0, min_rows);
-        pdlp_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
-    }
     void setParallelMode(ParallelMode mode) { parallel_mode_ = mode; }
     void setHeuristicMode(HeuristicRuntimeMode mode) {
         parallel_mode_ = (mode == HeuristicRuntimeMode::Opportunistic)
@@ -433,9 +428,6 @@ private:
     double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
-    bool pdlp_use_gpu_ = true;
-    Int pdlp_gpu_min_rows_ = 512;
-    Int pdlp_gpu_min_nnz_ = 10000;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     bool pre_root_lp_free_enabled_ = false;

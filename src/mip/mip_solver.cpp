@@ -3886,9 +3886,9 @@ MipResult MipSolver::solve() {
             PdlpSolver solver;
             PdlpOptions opts;
             opts.verbose = false;
-            opts.use_gpu = pdlp_use_gpu_;
-            opts.gpu_min_rows = pdlp_gpu_min_rows_;
-            opts.gpu_min_nnz = pdlp_gpu_min_nnz_;
+            opts.use_gpu = (barrier_algorithm_ == BarrierAlgorithm::Auto ||
+                           barrier_algorithm_ == BarrierAlgorithm::GpuCholesky ||
+                           barrier_algorithm_ == BarrierAlgorithm::GpuAugmented);
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);
