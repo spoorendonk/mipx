@@ -12,6 +12,10 @@
 
 #include <zlib.h>
 
+#ifdef MIPX_HAS_BZIP2
+#include <bzlib.h>
+#endif
+
 #ifdef __unix__
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -35,10 +39,20 @@ public:
     explicit LineReader(const std::string& filename) {
         bool is_gz = filename.size() >= 3 &&
                      filename.compare(filename.size() - 3, 3, ".gz") == 0;
+        bool is_bz2 = filename.size() >= 4 &&
+                      filename.compare(filename.size() - 4, 4, ".bz2") == 0;
 
         compressed_size_ = queryFileSize(filename);
 
-        if (is_gz) {
+        if (is_bz2) {
+#ifdef MIPX_HAS_BZIP2
+            initBz2(filename);
+#else
+            throw std::runtime_error(
+                "bzip2 support not compiled in (need -DMIPX_USE_BZIP2=ON): " +
+                filename);
+#endif
+        } else if (is_gz) {
             if (compressed_size_ <= kBulkDecompressThreshold) {
                 initGzBulk(filename);
             } else {
@@ -57,6 +71,13 @@ public:
         }
 #endif
         if (gz_file_) gzclose(gz_file_);
+#ifdef MIPX_HAS_BZIP2
+        if (bz_handle_) {
+            int bzerr;
+            BZ2_bzReadClose(&bzerr, bz_handle_);
+        }
+        if (bz_fp_) fclose(bz_fp_);
+#endif
     }
 
     LineReader(const LineReader&) = delete;
@@ -65,6 +86,9 @@ public:
     /// Returns next line (valid until next call).  Returns false at EOF.
     bool getline(std::string_view& out) {
         if (data_) return getlineMemory(out);
+#ifdef MIPX_HAS_BZIP2
+        if (bz_handle_) return getlineBz2(out);
+#endif
         return getlineBuffered(out);
     }
 
@@ -165,6 +189,73 @@ private:
         gzbuffer(gz_file_, 1 << 17);  // 128 KB zlib internal buffer
     }
 
+#ifdef MIPX_HAS_BZIP2
+    void initBz2(const std::string& filename) {
+        is_compressed_ = true;
+        bz_fp_ = fopen(filename.c_str(), "rb");
+        if (!bz_fp_)
+            throw std::runtime_error("Cannot open file: " + filename);
+        int bzerr = BZ_OK;
+        bz_handle_ = BZ2_bzReadOpen(&bzerr, bz_fp_, 0, 0, nullptr, 0);
+        if (bzerr != BZ_OK) {
+            fclose(bz_fp_);
+            bz_fp_ = nullptr;
+            throw std::runtime_error("BZ2_bzReadOpen failed: " + filename);
+        }
+    }
+
+    bool getlineBz2(std::string_view& out) {
+        overflow_.clear();
+
+        for (;;) {
+            if (buf_pos_ < buf_len_) {
+                const char* start = buf_ + buf_pos_;
+                auto remaining =
+                    static_cast<size_t>(buf_len_ - buf_pos_);
+                const char* nl = static_cast<const char*>(
+                    std::memchr(start, '\n', remaining));
+
+                if (nl) {
+                    auto len = static_cast<size_t>(nl - start);
+                    buf_pos_ += static_cast<int>(len) + 1;
+
+                    if (overflow_.empty()) {
+                        out = std::string_view(start, len);
+                    } else {
+                        overflow_.append(start, len);
+                        out = overflow_;
+                    }
+                    if (!out.empty() && out.back() == '\r')
+                        out.remove_suffix(1);
+                    return true;
+                }
+
+                overflow_.append(start, remaining);
+                buf_pos_ = buf_len_;
+            }
+
+            if (bz_eof_) {
+                if (!overflow_.empty()) {
+                    out = overflow_;
+                    if (!out.empty() && out.back() == '\r')
+                        out.remove_suffix(1);
+                    return true;
+                }
+                return false;
+            }
+
+            int bzerr = BZ_OK;
+            buf_len_ = BZ2_bzRead(&bzerr, bz_handle_, buf_, sizeof(buf_));
+            buf_pos_ = 0;
+            if (bzerr == BZ_STREAM_END || buf_len_ == 0) {
+                bz_eof_ = true;
+            } else if (bzerr != BZ_OK) {
+                bz_eof_ = true;
+            }
+        }
+    }
+#endif
+
     bool getlineMemory(std::string_view& out) {
         if (data_pos_ >= data_len_) return false;
 
@@ -253,6 +344,12 @@ private:
 
     size_t compressed_size_ = 0;
     bool is_compressed_ = false;
+
+#ifdef MIPX_HAS_BZIP2
+    FILE* bz_fp_ = nullptr;
+    BZFILE* bz_handle_ = nullptr;
+    bool bz_eof_ = false;
+#endif
 };
 
 /// Fixed-capacity token array (zero allocation).
@@ -383,11 +480,24 @@ LpProblem readMps(const std::string& filename) {
     bool in_integer_section = false;
     Section section = Section::None;
 
+    // Column name cache: MPS groups columns contiguously, so the same
+    // column name repeats on consecutive lines.  Cache the last lookup.
+    std::string_view cached_col_name;
+    Index cached_col_idx = -1;
+
     auto getOrCreateCol = [&](std::string_view name) -> Index {
+        if (name == cached_col_name && cached_col_idx >= 0)
+            return cached_col_idx;
         auto it = col_map.find(name);
-        if (it != col_map.end()) return it->second;
+        if (it != col_map.end()) {
+            cached_col_name = it->first;
+            cached_col_idx = it->second;
+            return it->second;
+        }
         Index idx = prob.num_cols++;
-        col_map.emplace(std::string(name), idx);
+        auto [ins_it, _] = col_map.emplace(std::string(name), idx);
+        cached_col_name = ins_it->first;
+        cached_col_idx = idx;
         prob.col_names.emplace_back(name);
         prob.obj.push_back(0.0);
         prob.col_lower.push_back(0.0);
