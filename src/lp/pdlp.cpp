@@ -159,6 +159,42 @@ void PdlpSolver::buildScaledProblem() {
             tau_base_[j] = 1.0 / std::max(std::sqrt(col_sq[j]), 1e-8);
         }
     }
+
+    // Stage 3: Bound-objective rescaling (cuPDLPx style).
+    objective_scale_ = 1.0;
+    constraint_scale_ = 1.0;
+    if (options_.do_bound_obj_rescaling && m > 0 && n > 0) {
+        Real obj_norm_sq = 0.0;
+        for (Index j = 0; j < n; ++j)
+            obj_norm_sq += cscaled_[j] * cscaled_[j];
+        objective_scale_ = 1.0 / (std::sqrt(obj_norm_sq) + 1.0);
+
+        Real bnd_norm_sq = 0.0;
+        for (Index i = 0; i < m; ++i) {
+            if (isFinite(scaled_row_lower_[i]))
+                bnd_norm_sq += scaled_row_lower_[i] * scaled_row_lower_[i];
+            if (isFinite(scaled_row_upper_[i]))
+                bnd_norm_sq += scaled_row_upper_[i] * scaled_row_upper_[i];
+        }
+        constraint_scale_ = 1.0 / (std::sqrt(bnd_norm_sq) + 1.0);
+
+        for (Index j = 0; j < n; ++j)
+            cscaled_[j] *= objective_scale_;
+        for (Index i = 0; i < m; ++i) {
+            if (isFinite(scaled_row_lower_[i]))
+                scaled_row_lower_[i] *= constraint_scale_;
+            if (isFinite(scaled_row_upper_[i]))
+                scaled_row_upper_[i] *= constraint_scale_;
+        }
+        // Scale column bounds to keep the problem equivalent under the
+        // substitution x = constraint_scale * x̃.
+        for (Index j = 0; j < n; ++j) {
+            if (isFinite(scaled_col_lower_[j]))
+                scaled_col_lower_[j] *= constraint_scale_;
+            if (isFinite(scaled_col_upper_[j]))
+                scaled_col_upper_[j] *= constraint_scale_;
+        }
+    }
 }
 
 void PdlpSolver::buildTransposeCSR() {
@@ -288,8 +324,8 @@ LpResult PdlpSolver::solve() {
             } else {
                 xj = isFinite(lb) ? lb : (isFinite(ub) ? ub : 0.0);
             }
-            // Unscale.
-            primal_orig_[j] = xj * col_scale_[j];
+            // Unscale (col_scale + constraint_scale).
+            primal_orig_[j] = xj * col_scale_[j] / constraint_scale_;
             obj_val += original_.obj[j] * primal_orig_[j];
         }
         if (unbounded) {
@@ -493,11 +529,11 @@ LpResult PdlpSolver::solve() {
         Real abs_dual_resid = std::sqrt(dual_resid_sq);
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
 
-        // Primal objective.
+        // Primal objective in scaled space.
         Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
         Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled;
 
-        // Dual objective via support function.
+        // Dual objective via support function (scaled space).
         // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
         // where delta*(z) = sup_{s in [l,u]} z*s = max(0,z)*u + min(0,z)*l.
         // Corrected dual objective: project reduced costs and dual values
@@ -537,10 +573,13 @@ LpResult PdlpSolver::solve() {
                        (1.0 + std::abs(pobj) + std::abs(dobj));
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
+            // Log true-space primal objective for readability.
+            Real pobj_log = original_.obj_offset +
+                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e\n",
-                total_count, pobj, rel_primal_resid, rel_dual_resid, rel_gap,
+                total_count, pobj_log, rel_primal_resid, rel_dual_resid, rel_gap,
                 fpe, primal_weight, step);
         }
 
@@ -583,7 +622,13 @@ LpResult PdlpSolver::solve() {
                 }
                 dual_dist = std::sqrt(dual_dist);
 
-                if (primal_dist > 1e-15 && dual_dist > 1e-15) {
+                Real ratio_infeas = (rel_primal_resid > 1e-15)
+                    ? rel_dual_resid / rel_primal_resid
+                    : 0.0;
+
+                if (primal_dist > 1e-16 && dual_dist > 1e-16 &&
+                    primal_dist < 1e12  && dual_dist < 1e12  &&
+                    ratio_infeas > 1e-8 && ratio_infeas < 1e8) {
                     Real error = std::log(dual_dist) - std::log(primal_dist) -
                                  std::log(primal_weight);
                     pw_error_sum = options_.pid_i_smooth * pw_error_sum + error;
@@ -605,6 +650,8 @@ LpResult PdlpSolver::solve() {
                     }
                 } else {
                     primal_weight = best_primal_weight;
+                    pw_error_sum = 0.0;
+                    pw_last_error = 0.0;
                 }
             }
 
@@ -627,18 +674,23 @@ LpResult PdlpSolver::solve() {
 
     if (converged) {
         // Reconstruct original solution.
+        // x_pdlp lives in scaled space: x_scaled = x_orig / col_scale * constraint_scale.
+        // Invert: x_orig = col_scale * x_pdlp / constraint_scale.
         primal_orig_.resize(static_cast<size_t>(original_.num_cols));
+        Real inv_con_scale = 1.0 / constraint_scale_;
         for (Index j = 0; j < n; ++j) {
-            Real xj = pdhg_x[j] * col_scale_[j];
+            Real xj = pdhg_x[j] * col_scale_[j] * inv_con_scale;
             if (isFinite(original_.col_lower[j]))
                 xj = std::max(xj, original_.col_lower[j]);
             if (isFinite(original_.col_upper[j]))
                 xj = std::min(xj, original_.col_upper[j]);
             primal_orig_[j] = xj;
         }
+        // Dual: y_pdlp is scaled by row_scale * objective_scale.
         dual_orig_.resize(static_cast<size_t>(original_.num_rows));
+        Real inv_obj_scale = 1.0 / objective_scale_;
         for (Index i = 0; i < m; ++i) {
-            dual_orig_[i] = obj_sign_ * pdhg_y[i] * row_scale_[i];
+            dual_orig_[i] = obj_sign_ * pdhg_y[i] * row_scale_[i] * inv_obj_scale;
         }
 
         // Compute objective from original primals.
@@ -1061,10 +1113,12 @@ LpResult PdlpSolver::solveGpu() {
         if (initial_fpe < 0.0) initial_fpe = fpe;
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
+            Real pobj_log = original_.obj_offset +
+                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e  [GPU]\n",
-                total_count, pobj, rel_primal_resid, rel_dual_resid, rel_gap,
+                total_count, pobj_log, rel_primal_resid, rel_dual_resid, rel_gap,
                 fpe, primal_weight, step);
         }
 
@@ -1097,7 +1151,13 @@ LpResult PdlpSolver::solveGpu() {
                 Real primal_dist = std::sqrt(h_metrics->primal_dist_sq);
                 Real dual_dist = std::sqrt(h_metrics->dual_dist_sq);
 
-                if (primal_dist > 1e-15 && dual_dist > 1e-15) {
+                Real ratio_infeas = (rel_primal_resid > 1e-15)
+                    ? rel_dual_resid / rel_primal_resid
+                    : 0.0;
+
+                if (primal_dist > 1e-16 && dual_dist > 1e-16 &&
+                    primal_dist < 1e12  && dual_dist < 1e12  &&
+                    ratio_infeas > 1e-8 && ratio_infeas < 1e8) {
                     Real error = std::log(dual_dist) - std::log(primal_dist) -
                                  std::log(primal_weight);
                     pw_error_sum = options_.pid_i_smooth * pw_error_sum + error;
@@ -1118,6 +1178,8 @@ LpResult PdlpSolver::solveGpu() {
                     }
                 } else {
                     primal_weight = best_primal_weight;
+                    pw_error_sum = 0.0;
+                    pw_last_error = 0.0;
                 }
             }
 
@@ -1147,8 +1209,9 @@ LpResult PdlpSolver::solveGpu() {
 
         // Unscale to original space.
         primal_orig_.resize(sn);
+        Real inv_con_scale = 1.0 / constraint_scale_;
         for (Index j = 0; j < n; ++j) {
-            Real xj = pdhg_x_host[j] * col_scale_[j];
+            Real xj = pdhg_x_host[j] * col_scale_[j] * inv_con_scale;
             if (isFinite(original_.col_lower[j]))
                 xj = std::max(xj, original_.col_lower[j]);
             if (isFinite(original_.col_upper[j]))
@@ -1156,8 +1219,9 @@ LpResult PdlpSolver::solveGpu() {
             primal_orig_[j] = xj;
         }
         dual_orig_.resize(sm);
+        Real inv_obj_scale = 1.0 / objective_scale_;
         for (Index i = 0; i < m; ++i) {
-            dual_orig_[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i];
+            dual_orig_[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i] * inv_obj_scale;
         }
 
         Real obj_val = original_.obj_offset;

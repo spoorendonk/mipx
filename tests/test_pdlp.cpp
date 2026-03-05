@@ -365,3 +365,166 @@ TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") 
 #endif
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-4));
 }
+
+// ---------------------------------------------------------------------------
+// Bound-objective rescaling tests
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LpResult solvePdlp(const LpProblem& lp, PdlpOptions opts) {
+    PdlpSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    return solver.solve();
+}
+
+PdlpOptions quietOpts(Int max_iter = 50000, bool rescaling = true,
+                       bool gpu = false) {
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.max_iter = max_iter;
+    opts.do_bound_obj_rescaling = rescaling;
+    opts.use_gpu = gpu;
+    return opts;
+}
+
+}  // namespace
+
+TEST_CASE("PdlpSolver: bound-obj rescaling matches no-rescaling on simple LP",
+          "[pdlp][rescaling]") {
+    auto lp = buildSimpleLp();
+
+    auto result_on  = solvePdlp(lp, quietOpts(50000, true));
+    auto result_off = solvePdlp(lp, quietOpts(50000, false));
+
+    REQUIRE(result_on.status == Status::Optimal);
+    REQUIRE(result_off.status == Status::Optimal);
+    CHECK_THAT(result_on.objective, WithinAbs(-4.0, 1e-4));
+    CHECK_THAT(result_off.objective, WithinAbs(-4.0, 1e-4));
+    CHECK_THAT(result_on.objective, WithinAbs(result_off.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: bound-obj rescaling on medium LP", "[pdlp][rescaling]") {
+    auto lp = buildMediumLp();
+
+    auto result_on  = solvePdlp(lp, quietOpts(500000, true));
+    auto result_off = solvePdlp(lp, quietOpts(500000, false));
+
+    REQUIRE(result_on.status == Status::Optimal);
+    REQUIRE(result_off.status == Status::Optimal);
+    // First-order methods converge to ~1e-4 relative tolerance, so
+    // objectives may differ by O(0.1) on this ~425-obj problem.
+    CHECK_THAT(result_on.objective, WithinAbs(result_off.objective, 1.0));
+}
+
+TEST_CASE("PdlpSolver: rescaling with binding column bounds", "[pdlp][rescaling]") {
+    // min -x - 2y  s.t.  x + y <= 100,  0 <= x <= 3,  0 <= y <= 5
+    // Optimal: x=3, y=5, obj = -3 - 10 = -13 (column bounds bind, not row).
+    LpProblem lp;
+    lp.name = "pdlp_col_bound_binding";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {3.0, 5.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {100.0};
+    lp.row_names = {"slack"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    auto result = solvePdlp(lp, quietOpts(50000, true));
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-13.0, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: rescaling with large rhs disparity", "[pdlp][rescaling]") {
+    // min -x - y  s.t.  x <= 1000,  y <= 2,  x,y >= 0
+    // Large rhs disparity exercises constraint_scale normalization.
+    // Optimal: x=1000, y=2, obj = -1002.
+    LpProblem lp;
+    lp.name = "pdlp_large_rhs";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1000.0, 2.0};
+    lp.row_names = {"big", "small"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+
+    auto result = solvePdlp(lp, quietOpts(100000, true));
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-1002.0, 1.0));
+}
+
+TEST_CASE("PdlpSolver: rescaling with equality constraints", "[pdlp][rescaling]") {
+    // min x + 2y  s.t.  x + y = 10,  x,y >= 0
+    // Optimal: x=10, y=0, obj = 10.
+    LpProblem lp;
+    lp.name = "pdlp_equality";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {10.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    auto result = solvePdlp(lp, quietOpts(100000, true));
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(10.0, 0.1));
+}
+
+// ---------------------------------------------------------------------------
+// Rescaling regression / GPU consistency
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: rescaling does not regress iteration count on medium LP",
+          "[pdlp][rescaling][performance]") {
+    auto lp = buildMediumLp();
+
+    auto result_on  = solvePdlp(lp, quietOpts(500000, true));
+    auto result_off = solvePdlp(lp, quietOpts(500000, false));
+
+    REQUIRE(result_on.status == Status::Optimal);
+    REQUIRE(result_off.status == Status::Optimal);
+    // On well-scaled problems rescaling may not help, but shouldn't hurt much.
+    CHECK(result_on.iterations <= result_off.iterations * 2);
+}
+
+TEST_CASE("PdlpSolver: GPU with rescaling matches CPU", "[pdlp][rescaling][gpu]") {
+    auto lp = buildMediumLp();
+
+    auto cpu_result = solvePdlp(lp, quietOpts(500000, true, false));
+
+    auto gpu_opts = quietOpts(500000, true, true);
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    auto gpu_result = solvePdlp(lp, gpu_opts);
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
+}
