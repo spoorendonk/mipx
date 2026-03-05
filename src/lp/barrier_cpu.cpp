@@ -40,31 +40,34 @@ void computeAmd(Index n,
         }
     }
 
-    std::vector<bool> eliminated(static_cast<size_t>(n), false);
+    // Min-heap via ordered set of (degree, node) pairs — O(n log n) total.
+    std::set<std::pair<Index, Index>> heap;
+    for (Index j = 0; j < n; ++j) {
+        heap.emplace(static_cast<Index>(adj[j].size()), j);
+    }
 
     for (Index step = 0; step < n; ++step) {
-        // Pick uneliminated node with minimum degree.
-        Index best = -1;
-        Index best_deg = n + 1;
-        for (Index j = 0; j < n; ++j) {
-            if (!eliminated[j]) {
-                auto deg = static_cast<Index>(adj[j].size());
-                if (deg < best_deg) {
-                    best = j;
-                    best_deg = deg;
-                }
-            }
-        }
+        // Pick uneliminated node with minimum degree — O(1).
+        auto [best_deg, best] = *heap.begin();
+        heap.erase(heap.begin());
 
         perm[step] = best;
         iperm[best] = step;
-        eliminated[best] = true;
 
-        // Collect uneliminated neighbors.
+        // Collect uneliminated neighbors and remove them from heap.
         std::vector<Index> nbrs;
         nbrs.reserve(adj[best].size());
         for (Index nb : adj[best]) {
-            if (!eliminated[nb]) nbrs.push_back(nb);
+            auto it = heap.find({static_cast<Index>(adj[nb].size()), nb});
+            if (it != heap.end()) {
+                heap.erase(it);
+                nbrs.push_back(nb);
+            }
+        }
+
+        // Remove best from neighbor adjacency lists.
+        for (Index nb : nbrs) {
+            adj[nb].erase(best);
         }
 
         // Form clique among neighbors.
@@ -75,8 +78,11 @@ void computeAmd(Index n,
             }
         }
 
-        // Remove eliminated node from neighbor lists.
-        for (Index nb : adj[best]) adj[nb].erase(best);
+        // Re-insert neighbors with updated degrees.
+        for (Index nb : nbrs) {
+            heap.emplace(static_cast<Index>(adj[nb].size()), nb);
+        }
+
         adj[best].clear();
     }
 }
@@ -389,6 +395,18 @@ static void diagScaleLDL(const std::vector<Real>& d,
     }
 }
 
+// Binary search for L[j,k] in a sorted column of the symbolic factorization.
+// Returns index into l_row_idx/l_val, or -1 if not found.
+static Index findInColumn(const SymbolicFact& sym, Index k, Index j) {
+    auto beg = sym.l_row_idx.begin() + sym.l_col_ptr[k];
+    auto end = sym.l_row_idx.begin() + sym.l_col_ptr[k + 1];
+    auto it = std::lower_bound(beg, end, j);
+    if (it != end && *it == j) {
+        return static_cast<Index>(sym.l_col_ptr[k] + (it - beg));
+    }
+    return -1;
+}
+
 }  // anonymous namespace
 
 // ============================================================================
@@ -525,14 +543,9 @@ private:
 
             // Column modifications from previous columns k with L[j,k] != 0.
             for (Index k : sym_.l_row_to_cols[j]) {
-                // Find L[j,k].
-                Real ljk = 0.0;
-                for (Index p = sym_.l_col_ptr[k]; p < sym_.l_col_ptr[k + 1]; ++p) {
-                    if (sym_.l_row_idx[p] == j) {
-                        ljk = l_val_[p];
-                        break;
-                    }
-                }
+                // Find L[j,k] via binary search (l_row_idx is sorted).
+                Index pk = findInColumn(sym_, k, j);
+                Real ljk = (pk >= 0) ? l_val_[pk] : 0.0;
 
                 // Diagonal: w[j] -= ljk^2
                 w[j] -= ljk * ljk;
@@ -715,14 +728,9 @@ private:
 
             // Column modifications: for each k < j with L[j,k] != 0.
             for (Index k : sym_.l_row_to_cols[j]) {
-                Real ljk = 0.0;
-                for (Index p = sym_.l_col_ptr[k]; p < sym_.l_col_ptr[k + 1];
-                     ++p) {
-                    if (sym_.l_row_idx[p] == j) {
-                        ljk = l_val_[p];
-                        break;
-                    }
-                }
+                // Find L[j,k] via binary search (l_row_idx is sorted).
+                Index pk = findInColumn(sym_, k, j);
+                Real ljk = (pk >= 0) ? l_val_[pk] : 0.0;
 
                 Real ljk_dk = ljk * d_[k];
 

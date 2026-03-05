@@ -494,10 +494,10 @@ __global__ void kernelMin(int n, const double* v, double* result) {
     }
 }
 
-__global__ void kernelZS(int n, const double* z, const double* s, double* out) {
+__global__ void kernelElemMul(int n, const double* a, const double* b, double* out) {
     for (int j = blockIdx.x * blockDim.x + threadIdx.x; j < n;
          j += gridDim.x * blockDim.x) {
-        out[j] = z[j] * s[j];
+        out[j] = a[j] * b[j];
     }
 }
 
@@ -699,8 +699,9 @@ struct GpuContext {
                 CUSPARSE_INDEX_BASE_ZERO, CUDA_R_64F)))
             return false;
 
-        // Allocate pool: n-sized * 15 + m-sized * 11 + max(m,n) + 16 + 2*(n+m)
-        // Augmented IR buffers (2*(n+m)) are allocated lazily on first use.
+        // Allocate pool: n-sized * 15 + m-sized * 11 + max(m,n) + 16 + 2*(n+m).
+        // d_aug_rhs/d_aug_sol are in this pool; d_aug_ir_rhs/d_aug_ir_sol
+        // are lazily allocated separately on first augmented IR use.
         int mn = std::max(m, n);
         size_t pool_size = static_cast<size_t>(15 * n + 11 * m + mn + 16 + 2 * (n + m));
         if (!cudaOk(cudaMalloc(&d_pool, sizeof(double) * pool_size))) return false;
@@ -1190,7 +1191,7 @@ struct NormalEqSolver {
         for (int step = 0; step < ir_steps; ++step) {
             // Compute M * sol where M = A*diag(theta)*A' + reg*I.
             ctx->multiplyAT(d_sol_out, ctx->d_tmp);
-            kernelZS<<<gridSize(n), kBlockSize, 0, ctx->stream>>>(
+            kernelElemMul<<<gridSize(n), kBlockSize, 0, ctx->stream>>>(
                 n, ctx->d_tmp, ctx->d_theta, ctx->d_tmp);
             ctx->multiplyA(ctx->d_tmp, ctx->d_ir_residual);
 
@@ -1629,11 +1630,11 @@ struct GpuBarrierImpl {
                int* out_status, int* out_iters) {
         int m = ctx.m, n = ctx.n;
         ir_steps_ = ir_steps;
-        // We can't use std::atomic in CUDA code, so cast to volatile bool*.
-        // The caller guarantees this is an atomic<bool>, and volatile read
-        // gives us the needed visibility on x86.
-        const volatile bool* stop_flag =
-            static_cast<const volatile bool*>(stop_flag_ptr);
+        // The caller passes a std::atomic<bool>* as void*.  We can't include
+        // <atomic> in .cu, but __atomic_load_n is a GCC/nvcc builtin that
+        // gives us correct atomic semantics without UB.
+        const bool* stop_flag =
+            static_cast<const bool*>(stop_flag_ptr);
 
         if (!computeStartingPoint()) return false;
 
@@ -1657,7 +1658,8 @@ struct GpuBarrierImpl {
             : "[gpu-aug]";
 
         for (int iter = 0; iter < max_iter; ++iter) {
-            if (stop_flag != nullptr && *stop_flag) {
+            if (stop_flag != nullptr &&
+                __atomic_load_n(stop_flag, __ATOMIC_RELAXED)) {
                 *out_iters = iter;
                 *out_status = 2;  // IterLimit
                 return false;

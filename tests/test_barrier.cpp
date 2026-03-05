@@ -98,6 +98,38 @@ LpProblem buildTriangleLp() {
     return lp;
 }
 
+// Wide LP where every row touches all columns, producing a dense NE matrix.
+// With 40 cols and 2 rows: avg_ne_row_density ≈ 40, exceeding the threshold
+// of 20, which triggers the augmented backend in Auto mode.
+// min -sum(x_j) s.t. sum(x_j) <= 100, sum(2*x_j) <= 180, x_j >= 0.
+// Optimal: x_j = 2.5 each, obj = -100.
+LpProblem buildWideDenseLp() {
+    constexpr int N = 40;
+    LpProblem lp;
+    lp.name = "barrier_wide_dense";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = N;
+    lp.obj.assign(N, -1.0);
+    lp.col_lower.assign(N, 0.0);
+    lp.col_upper.assign(N, kInf);
+    lp.col_type.assign(N, VarType::Continuous);
+    for (int j = 0; j < N; ++j)
+        lp.col_names.push_back("x" + std::to_string(j));
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {100.0, 180.0};
+    lp.row_names = {"sum1", "sum2"};
+
+    std::vector<Triplet> trips;
+    for (int j = 0; j < N; ++j) {
+        trips.push_back({0, j, 1.0});
+        trips.push_back({1, j, 2.0});
+    }
+    lp.matrix = SparseMatrix(2, N, std::move(trips));
+    return lp;
+}
+
 }  // namespace
 
 // ============================================================================
@@ -319,6 +351,51 @@ TEST_CASE("BarrierSolver GPU vs CPU: objectives match", "[barrier][gpu-cross]") 
 }
 
 #endif  // MIPX_HAS_CUDSS
+
+// ============================================================================
+// Auto-switching and fallback tests
+// ============================================================================
+
+TEST_CASE("BarrierSolver Auto: wide dense LP triggers augmented backend",
+          "[barrier][auto-switch]") {
+    auto lp = buildWideDenseLp();
+
+    // Auto backend should detect avg_ne_row_density > 20 and use augmented.
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::Auto;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    // Cross-check with dual simplex.
+    DualSimplexSolver ds;
+    ds.load(lp);
+    ds.setVerbose(false);
+    auto ds_result = ds.solve();
+
+    REQUIRE(ds_result.status == Status::Optimal);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
+}
+
+TEST_CASE("BarrierSolver: dual simplex fallback on max_iter=1",
+          "[barrier][fallback]") {
+    auto lp = buildTriangleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.max_iter = 1;  // Force barrier to fail, triggering dual simplex fallback.
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
 
 // ============================================================================
 // MIP integration (barrier root policy)

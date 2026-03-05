@@ -308,6 +308,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     loaded_ = true;
     status_ = Status::Error;
     objective_ = 0.0;
+    scaled_obj_ = 0.0;
     iterations_ = 0;
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_eq_.clear();
@@ -665,6 +666,13 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
                              std_obj_offset_, z, y, s, iters);
     }
 
+    // Compute objective while z is still in scaled space.
+    // In scaled space: c_s'*z_s = (C*c)'*z_s = c'*(C*z_s) = c'*z_orig,
+    // so dot(cstd_, z) gives the correct original objective.
+    // After unscaling, cstd_ remains scaled but z is unscaled, which would
+    // give c'*C^2*z_s — wrong.
+    scaled_obj_ = std_obj_offset_ + dot(cstd_, z);
+
     // Unscale solution.
     if (!col_scale_.empty()) {
         for (Index j = 0; j < n; ++j) {
@@ -744,7 +752,7 @@ LpResult BarrierSolver::solve() {
     dual_eq_ = y;
     reduced_costs_std_ = s;
 
-    Real min_obj = std_obj_offset_ + dot(cstd_, z);
+    Real min_obj = scaled_obj_;
     objective_ = (original_.sense == Sense::Minimize) ? min_obj : -min_obj;
     status_ = Status::Optimal;
     iterations_ = iters;

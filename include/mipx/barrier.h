@@ -88,6 +88,7 @@ private:
     std::vector<Real> cstd_;
     std::vector<OriginalColExpr> col_expr_;
     Real std_obj_offset_ = 0.0;
+    Real scaled_obj_ = 0.0;  // objective computed before Ruiz unscaling
 
     // Ruiz scaling factors.
     std::vector<Real> row_scale_;
