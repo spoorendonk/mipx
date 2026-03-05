@@ -7,6 +7,7 @@ add_library(mipx STATIC
     lp/dual_simplex.cpp
     lp/exact_refinement.cpp
     lp/barrier.cpp
+    lp/barrier_cpu.cpp
     lp/pdlp.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
@@ -56,6 +57,16 @@ if(MIPX_USE_CUDA)
     )
     target_link_libraries(mipx PUBLIC CUDA::cudart CUDA::cusparse)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDA)
+
+    if(MIPX_HAS_CUDSS)
+        target_sources(mipx PRIVATE lp/barrier_gpu.cu lp/barrier_gpu_wrap.cpp)
+        target_include_directories(mipx PRIVATE ${CUDSS_INCLUDE_DIR})
+        target_link_libraries(mipx PUBLIC ${CUDSS_LIBRARY})
+        target_compile_definitions(mipx PUBLIC MIPX_HAS_CUDSS)
+        set_source_files_properties(lp/barrier_gpu.cu PROPERTIES
+            LANGUAGE CUDA
+            COMPILE_FLAGS "--expt-relaxed-constexpr")
+    endif()
 endif()
 
 if(MIPX_ENABLE_LP_LIGHT_HEURISTICS)
