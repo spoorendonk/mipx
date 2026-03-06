@@ -148,7 +148,7 @@ private:
 
 /// Create two child nodes by branching on variable branch_var with value branch_val.
 /// Left child: x_j <= floor(branch_val), right child: x_j >= ceil(branch_val).
-std::pair<BnbNode, BnbNode> createChildren(const BnbNode& parent,
+std::pair<BnbNode, BnbNode> createChildren(BnbNode parent,
                                             Index branch_var,
                                             Real branch_val);
 

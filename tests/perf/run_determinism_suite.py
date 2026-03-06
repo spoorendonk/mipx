@@ -32,6 +32,14 @@ FLOAT_LINE_PATTERNS = {
     "work_units": re.compile(r"^Work units:\s*([\-+0-9.eE]+)\s*$", re.MULTILINE),
     "time_seconds": re.compile(r"^Time:\s*([\-+0-9.eE]+)s\s*$", re.MULTILINE),
 }
+CONTRACT_OVERRIDE_PREFIXES = (
+    "--parallel-mode",
+    "--seed",
+    "--search-stable",
+    "--search-default",
+    "--search-aggressive",
+    "--no-cuts",
+)
 
 
 @dataclass
@@ -51,6 +59,21 @@ class RunSample:
 
 def parse_csv_tokens(raw: str) -> list[str]:
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
+
+
+def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--solver-arg":
+            if i + 1 >= len(argv):
+                raise SystemExit("--solver-arg requires one argument")
+            out.append(f"--solver-arg={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
 
 
 def collect_instances(miplib_dir: Path, instance_filter: str, max_instances: int) -> list[str]:
@@ -131,11 +154,26 @@ def parse_args() -> argparse.Namespace:
         help="Also require node/lp-iteration/work-unit equality (default checks status/objective).",
     )
     parser.add_argument("--solver-arg", action="append", default=[])
-    return parser.parse_args()
+    return parser.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
+
+
+def validate_solver_args(solver_args: list[str]) -> None:
+    conflicting = []
+    for arg in solver_args:
+        for key in CONTRACT_OVERRIDE_PREFIXES:
+            if arg == key or arg.startswith(f"{key}="):
+                conflicting.append(arg)
+                break
+    if conflicting:
+        raise SystemExit(
+            "Conflicting --solver-arg values for determinism suite contract: "
+            f"{conflicting}. Use dedicated suite flags instead."
+        )
 
 
 def main() -> int:
     args = parse_args()
+    validate_solver_args(args.solver_arg)
 
     binary = Path(args.binary)
     miplib_dir = Path(args.miplib_dir)
