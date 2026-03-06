@@ -132,6 +132,35 @@ The regression gate fails if the median candidate metric regresses by more
 than the configured percentage. Default gate is strict: `0.0%` allowed median
 regression.
 
+## Dedicated MIP Baseline + Gate
+
+For a focused MIP-only regression loop (similar to dual-focused flows), use the
+committed regression corpus at `tests/perf/mip_regression_corpus.csv` and the
+dedicated scripts below.
+
+Generate/update the committed MIP baseline CSV:
+
+```bash
+python3 tests/perf/generate_mip_regression_baseline.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib
+```
+
+Run MIP self-regression gate against committed baseline (strict `work_units`):
+
+```bash
+python3 tests/perf/run_mip_regression_gate.py \
+  --candidate-binary ./build/mipx-solve
+```
+
+Or compare candidate vs a baseline binary instead of committed CSV:
+
+```bash
+python3 tests/perf/run_mip_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve
+```
+
 ## Determinism Suite
 
 Validate deterministic reproducibility at fixed seed in both single-thread

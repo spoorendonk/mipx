@@ -53,6 +53,21 @@ def parse_csv_tokens(raw: str) -> list[str]:
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
 
 
+def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--solver-arg":
+            if i + 1 >= len(argv):
+                raise SystemExit("--solver-arg requires one argument")
+            out.append(f"--solver-arg={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
+
+
 def collect_instances(miplib_dir: Path, instance_filter: str, max_instances: int) -> list[str]:
     available = sorted(p.name.removesuffix(".mps.gz") for p in miplib_dir.glob("*.mps.gz"))
     if not available:
@@ -131,7 +146,7 @@ def parse_args() -> argparse.Namespace:
         help="Also require node/lp-iteration/work-unit equality (default checks status/objective).",
     )
     parser.add_argument("--solver-arg", action="append", default=[])
-    return parser.parse_args()
+    return parser.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
 
 
 def main() -> int:

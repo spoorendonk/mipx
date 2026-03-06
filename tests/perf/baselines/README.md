@@ -10,6 +10,8 @@ Files:
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
+- `mipx_mip_baseline_meta.json`: generation metadata for the dedicated
+  MIP regression baseline workflow.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).
@@ -27,6 +29,7 @@ Regenerate with (canonical Python entrypoints):
 ```bash
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_mip_regression_baseline.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
