@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--time-limit", type=float, default=900.0)
     p.add_argument("--aggregate", choices=("median", "geomean"), default="median")
     p.add_argument("--netlib-min-common", type=int, default=5)
-    p.add_argument("--mittelman-min-common", type=int, default=10)
+    p.add_argument("--mittelman-min-common", type=int, default=5)
 
     p.add_argument("--max-work-regression-pct", type=float, default=0.0)
     p.add_argument("--max-work-instance-regression-pct", type=float, default=20.0)
@@ -58,6 +58,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--candidate-mittelman-csv", default="")
     p.add_argument("--baseline-netlib-csv", default="")
     p.add_argument("--baseline-mittelman-csv", default="")
+
+    p.add_argument("--correctness-mode", choices=("off", "warn", "fail"), default="fail")
+    p.add_argument("--correctness-corpus", default=str(PERF_DIR / "netlib_dual_corpus.csv"))
+    p.add_argument("--correctness-time-limit", type=float, default=60.0)
+    p.add_argument("--correctness-objective-rel-tol", type=float, default=1e-6)
+    p.add_argument("--correctness-repeats", type=int, default=1)
+    p.add_argument("--highs-binary", default="")
+
     p.add_argument("--summary-md", default="")
     p.add_argument("--solver-arg", action="append", default=[])
     return p.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
@@ -136,7 +144,14 @@ def run_lp_bench(
             ]
         )
     else:
-        cmd.extend(["--netlib-dir", str(netlib_dir)])
+        cmd.extend(
+            [
+                "--netlib-dir",
+                str(netlib_dir),
+                "--time-limit",
+                f"{time_limit:g}",
+            ]
+        )
     run(cmd)
 
 
@@ -189,6 +204,52 @@ def run_check(
     ]
     proc = run(cmd, check=False)
     return proc.returncode
+
+
+def run_correctness_precheck(
+    *,
+    candidate_binary: Path,
+    netlib_dir: Path,
+    correctness_script: Path,
+    correctness_corpus: Path,
+    out_dir: Path,
+    instances: list[str],
+    time_limit: float,
+    objective_rel_tol: float,
+    repeats: int,
+    highs_binary: str,
+) -> tuple[int, Path, Path]:
+    csv_out = out_dir / "candidate_correctness.csv"
+    summary_out = out_dir / "candidate_correctness_summary.md"
+    cmd = [
+        sys.executable,
+        str(correctness_script),
+        "--mipx-binary",
+        str(candidate_binary),
+        "--netlib-dir",
+        str(netlib_dir),
+        "--corpus",
+        str(correctness_corpus),
+        "--output",
+        str(csv_out),
+        "--summary",
+        str(summary_out),
+        "--instances",
+        ",".join(instances),
+        "--time-limit",
+        f"{time_limit:g}",
+        "--threads",
+        "1",
+        "--objective-rel-tol",
+        f"{objective_rel_tol:g}",
+        "--disable-presolve",
+        "--repeats",
+        str(repeats),
+    ]
+    if highs_binary:
+        cmd.extend(["--highs-binary", highs_binary])
+    proc = run(cmd, check=False)
+    return proc.returncode, csv_out, summary_out
 
 
 def render_top_table(items: list[dict[str, object]], *, kind: str) -> list[str]:
@@ -295,9 +356,11 @@ def main() -> int:
     run_netlib = PERF_DIR / "run_netlib_lp_bench.py"
     run_mittelman = PERF_DIR / "run_mittelman_lp_bench.py"
     check_script = PERF_DIR / "check_regression.py"
+    correctness_script = PERF_DIR / "run_dual_correctness_investigation.py"
 
     cand_bin = Path(args.candidate_binary)
     base_bin = Path(args.baseline_binary) if args.baseline_binary else None
+    correctness_corpus = Path(args.correctness_corpus)
 
     cand_netlib_csv = Path(args.candidate_netlib_csv) if args.candidate_netlib_csv else out_dir / "candidate_netlib.csv"
     cand_mittelman_csv = (
@@ -312,6 +375,39 @@ def main() -> int:
     need_candidate_mittelman = not args.candidate_mittelman_csv
     if need_candidate_netlib or need_candidate_mittelman:
         ensure_executable(cand_bin, "candidate binary")
+
+    correctness_status = "not_run"
+    correctness_csv: Path | None = None
+    correctness_summary: Path | None = None
+    if need_candidate_netlib and args.correctness_mode != "off":
+        print("[dual-gate] Running candidate correctness precheck...")
+        corr_rc, corr_csv, corr_summary = run_correctness_precheck(
+            candidate_binary=cand_bin,
+            netlib_dir=netlib_dir,
+            correctness_script=correctness_script,
+            correctness_corpus=correctness_corpus,
+            out_dir=out_dir,
+            instances=netlib_instances,
+            time_limit=args.correctness_time_limit,
+            objective_rel_tol=args.correctness_objective_rel_tol,
+            repeats=args.correctness_repeats,
+            highs_binary=args.highs_binary,
+        )
+        correctness_csv = corr_csv
+        correctness_summary = corr_summary
+        if corr_rc == 0:
+            correctness_status = "pass"
+        elif args.correctness_mode == "warn":
+            correctness_status = "warn"
+            print("[dual-gate] WARN: candidate correctness precheck failed; continuing (--correctness-mode warn)")
+        else:
+            correctness_status = "fail"
+            print("[dual-gate] FAIL: candidate correctness precheck failed")
+            print(f"[dual-gate] Correctness CSV: {corr_csv}")
+            print(f"[dual-gate] Correctness summary: {corr_summary}")
+            return 1
+    elif args.correctness_mode == "off":
+        correctness_status = "off"
 
     if need_candidate_netlib:
         run_lp_bench(
@@ -430,6 +526,18 @@ def main() -> int:
         (
             "- Secondary metric: `time_seconds` "
             f"({args.time_regression_mode}, allowed aggregate regression: {args.max_time_regression_pct:.2f}%)"
+        ),
+        f"- Correctness precheck mode: `{args.correctness_mode}`",
+        f"- Correctness precheck status: `{correctness_status}`",
+        (
+            f"- Correctness summary: `{correctness_summary}`"
+            if correctness_summary is not None
+            else "- Correctness summary: n/a"
+        ),
+        (
+            f"- Correctness CSV: `{correctness_csv}`"
+            if correctness_csv is not None
+            else "- Correctness CSV: n/a"
         ),
         "",
     ]

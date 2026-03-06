@@ -115,11 +115,19 @@ def evaluate_metric(
 
         b_val = parse_float(b_row.get(metric, ""))
         c_val = parse_float(c_row.get(metric, ""))
-        if b_val is None or c_val is None or b_val <= 0:
+        if b_val is None or c_val is None:
             skipped_metric.append(name)
             continue
 
-        ratio = c_val / b_val
+        if b_val < 0 or c_val < 0:
+            skipped_metric.append(name)
+            continue
+
+        if b_val == 0:
+            ratio = 1.0 if c_val == 0 else float("inf")
+        else:
+            ratio = c_val / b_val
+
         ratios.append(ratio)
         pair_ratios.append((name, ratio))
 

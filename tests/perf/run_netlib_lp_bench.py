@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--netlib-dir", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--repeats", type=int, default=3)
+    p.add_argument("--time-limit", type=float, default=0.0, help="Per-run solve timeout in seconds (0=off).")
     p.add_argument(
         "--instances",
         default="",
@@ -87,14 +88,23 @@ def parse_iterations(text: str) -> float | None:
     return None
 
 
-def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
+def run_cmd(cmd: list[str], timeout_s: float) -> tuple[str, str, float]:
     import time
 
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    elapsed = time.perf_counter() - t0
-    out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    return proc.returncode, out, elapsed
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s if timeout_s > 0 else None)
+        elapsed = time.perf_counter() - t0
+        out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        if proc.returncode != 0:
+            return "solve_error", out, elapsed
+        return "ok", out, elapsed
+    except subprocess.TimeoutExpired as e:
+        elapsed = time.perf_counter() - t0
+        out = ((e.stdout or "") if isinstance(e.stdout, str) else "") + (
+            "\n" + (e.stderr or "") if isinstance(e.stderr, str) and e.stderr else ""
+        )
+        return "time_limit", out, elapsed
 
 
 def main() -> int:
@@ -139,9 +149,9 @@ def main() -> int:
             status = "ok"
 
             for _ in range(args.repeats):
-                code, out, elapsed = run_cmd([str(bin_path), str(inst), *args.solver_arg])
-                if code != 0:
-                    status = "solve_error"
+                code, out, elapsed = run_cmd([str(bin_path), str(inst), *args.solver_arg], args.time_limit)
+                if code in {"time_limit", "solve_error"}:
+                    status = code
                     break
 
                 t = parse_solve_time(out)
@@ -167,7 +177,7 @@ def main() -> int:
                 if it is not None:
                     iterations.append(it)
 
-            if status in {"solve_error", "parse_error"}:
+            if status in {"solve_error", "parse_error", "time_limit"}:
                 w.writerow([name, "", "", status, "", ""])
                 continue
 

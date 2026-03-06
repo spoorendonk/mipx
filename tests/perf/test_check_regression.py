@@ -204,3 +204,48 @@ def test_secondary_fail_mode_enforces_time_regression(tmp_path: Path) -> None:
     )
     assert proc.returncode == 1, proc.stdout + "\n" + proc.stderr
     assert "Secondary metric" in proc.stdout
+
+
+def test_zero_baseline_metric_is_comparable(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline.csv"
+    candidate = tmp_path / "candidate.csv"
+    write_csv(
+        baseline,
+        [
+            {"instance": "a", "status": "optimal", "work_units": "0", "time_seconds": "10"},
+            {"instance": "b", "status": "optimal", "work_units": "0", "time_seconds": "10"},
+        ],
+    )
+    write_csv(
+        candidate,
+        [
+            {"instance": "a", "status": "optimal", "work_units": "0", "time_seconds": "10"},
+            {"instance": "b", "status": "optimal", "work_units": "1", "time_seconds": "10"},
+        ],
+    )
+
+    proc = run_check(
+        [
+            "--baseline",
+            str(baseline),
+            "--candidate",
+            str(candidate),
+            "--metric",
+            "work_units",
+            "--aggregate",
+            "median",
+            "--max-regression-pct",
+            "0",
+            "--max-instance-regression-pct",
+            "0",
+            "--min-common-instances",
+            "2",
+            "--status-column",
+            "status",
+            "--required-statuses",
+            "optimal",
+            "--require-status-match",
+        ]
+    )
+    assert proc.returncode == 1, proc.stdout + "\n" + proc.stderr
+    assert "Per-instance cap exceeded" in proc.stdout

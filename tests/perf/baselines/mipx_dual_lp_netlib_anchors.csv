@@ -1,0 +1,9 @@
+instance,time_seconds,work_units,status,objective,iterations
+afiro,0.000000,0.010000,optimal,-464.75314286,16
+adlittle,0.000000,0.150000,optimal,225494.96316,84
+blend,0.000000,0.260000,optimal,-30.812149846,98
+sc50a,0.000000,0.070000,optimal,-64.575077059,49
+greenbea,2.190000,1609.000000,optimal,-72555248.13,14198
+pilot,,,time_limit,,
+ship12l,0.050000,32.100000,optimal,1470187.9193,1268
+sierra,0.030000,14.020000,optimal,15394362.184,817

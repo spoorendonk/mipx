@@ -35,6 +35,11 @@ Default solver policy in this gate:
 - `--no-presolve`
 - `--quiet`
 
+Correctness precheck (before perf comparison, default `fail` mode):
+- Runs `run_dual_correctness_investigation.py` on the Netlib dual corpus.
+- Uses `.solu` + HiGHS simplex parity checks.
+- Modes: `off`, `warn`, `fail`.
+
 Run candidate vs baseline binaries:
 
 ```bash
@@ -55,6 +60,17 @@ Artifacts (under `--out-dir`, default `/tmp/mipx_dual_perf_gate`):
 - `netlib_regression_summary.json`
 - `mittelman_regression_summary.json`
 - `dual_perf_summary.md`
+
+Dual baseline generation for stored anchor corpora:
+
+```bash
+python3 tests/perf/generate_dual_baselines.py \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --mittelman-dir ./tests/data/mittelman_lp \
+  --netlib-time-limit 120 \
+  --mittelman-time-limit 300
+```
 
 Corpora:
 - Netlib anchors: `tests/perf/netlib_dual_corpus.csv`
@@ -109,6 +125,7 @@ Generate and store HiGHS CLI + mipx wall-clock baselines:
 ```bash
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_dual_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
@@ -118,6 +135,9 @@ This writes:
 - `tests/perf/baselines/highs_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
+- `tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv`
+- `tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv`
+- `tests/perf/baselines/mipx_dual_lp_baseline_meta.json`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
 - `tests/perf/baselines/pdlp_lp_compare_netlib.csv`
