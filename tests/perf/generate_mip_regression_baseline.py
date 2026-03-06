@@ -19,8 +19,27 @@ PERF_DIR = ROOT_DIR / "tests" / "perf"
 DEFAULT_BINARY = ROOT_DIR / "build" / "mipx-solve"
 DEFAULT_MIPLIB_DIR = ROOT_DIR / "tests" / "data" / "miplib"
 DEFAULT_CORPUS = PERF_DIR / "mip_regression_corpus.csv"
-DEFAULT_OUTPUT = ROOT_DIR / "tests" / "perf" / "baselines" / "mipx_mip_miplib_small.csv"
-DEFAULT_META = ROOT_DIR / "tests" / "perf" / "baselines" / "mipx_mip_baseline_meta.json"
+DEFAULT_OUTPUT = (
+    ROOT_DIR
+    / "tests"
+    / "perf"
+    / "baselines"
+    / "mipx_mip_regression_small_seed1_t1_stable.csv"
+)
+DEFAULT_META = (
+    ROOT_DIR
+    / "tests"
+    / "perf"
+    / "baselines"
+    / "mipx_mip_regression_small_seed1_t1_stable_meta.json"
+)
+CONTRACT_OVERRIDE_PREFIXES = (
+    "--parallel-mode",
+    "--seed",
+    "--search-stable",
+    "--search-default",
+    "--search-aggressive",
+)
 
 
 def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
@@ -99,6 +118,20 @@ def flatten_solver_args(values: list[str]) -> list[str]:
     return out
 
 
+def validate_solver_args(solver_args: list[str]) -> None:
+    conflicting = []
+    for arg in solver_args:
+        for key in CONTRACT_OVERRIDE_PREFIXES:
+            if arg == key or arg.startswith(f"{key}="):
+                conflicting.append(arg)
+                break
+    if conflicting:
+        raise SystemExit(
+            "Conflicting --solver-arg values for deterministic baseline generation: "
+            f"{conflicting}. Use dedicated script flags instead."
+        )
+
+
 def main() -> int:
     args = parse_args()
 
@@ -114,6 +147,7 @@ def main() -> int:
         raise SystemExit(f"MIPLIB directory not found: {miplib_dir}")
     if args.repeats < 1 or args.threads < 1:
         raise SystemExit("--repeats and --threads must be >= 1")
+    validate_solver_args(args.solver_arg)
 
     instances = load_corpus_instances(corpus)
 

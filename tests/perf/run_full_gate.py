@@ -21,6 +21,13 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
+CONTRACT_OVERRIDE_PREFIXES = (
+    "--parallel-mode",
+    "--seed",
+    "--search-stable",
+    "--search-default",
+    "--search-aggressive",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,6 +118,20 @@ def flatten_solver_args(values: list[str]) -> list[str]:
     return out
 
 
+def validate_solver_args(solver_args: list[str]) -> None:
+    conflicting = []
+    for arg in solver_args:
+        for key in CONTRACT_OVERRIDE_PREFIXES:
+            if arg == key or arg.startswith(f"{key}="):
+                conflicting.append(arg)
+                break
+    if conflicting:
+        raise SystemExit(
+            "Conflicting --solver-arg values for deterministic contract: "
+            f"{conflicting}. Use top-level --parallel-mode/--seed/--search-profile flags."
+        )
+
+
 def regression_check(
     *,
     check_script: Path,
@@ -168,6 +189,7 @@ def main() -> int:
         raise SystemExit("--lp-repeats and --mip-repeats must be >= 1")
     if args.threads < 1:
         raise SystemExit("--threads must be >= 1")
+    validate_solver_args(args.solver_arg)
 
     if (not args.baseline_lp_csv or not args.baseline_mip_csv) and (
         base_bin is None or not base_bin.is_file() or not base_bin.stat().st_mode & 0o111

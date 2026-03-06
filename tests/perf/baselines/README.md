@@ -10,8 +10,10 @@ Files:
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
-- `mipx_mip_baseline_meta.json`: generation metadata for the dedicated
-  MIP regression baseline workflow.
+- `mipx_mip_regression_small_seed1_t1_stable.csv`: dedicated deterministic
+  MIP regression baseline (seed=1, threads=1, search=stable corpus).
+- `mipx_mip_regression_small_seed1_t1_stable_meta.json`: metadata for the
+  dedicated deterministic MIP regression baseline workflow.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).

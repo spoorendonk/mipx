@@ -146,6 +146,10 @@ python3 tests/perf/generate_mip_regression_baseline.py \
   --miplib-dir ./tests/data/miplib
 ```
 
+Default outputs:
+- `tests/perf/baselines/mipx_mip_regression_small_seed1_t1_stable.csv`
+- `tests/perf/baselines/mipx_mip_regression_small_seed1_t1_stable_meta.json`
+
 Run MIP self-regression gate against committed baseline (strict `work_units`):
 
 ```bash
@@ -160,6 +164,8 @@ python3 tests/perf/run_mip_regression_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve
 ```
+
+When `--baseline-binary` is provided, it takes precedence over `--baseline-csv`.
 
 ## Determinism Suite
 

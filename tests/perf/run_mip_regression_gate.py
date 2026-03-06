@@ -15,7 +15,20 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
 DEFAULT_MIPLIB_DIR = ROOT_DIR / "tests" / "data" / "miplib"
 DEFAULT_CORPUS = PERF_DIR / "mip_regression_corpus.csv"
-DEFAULT_BASELINE_CSV = ROOT_DIR / "tests" / "perf" / "baselines" / "mipx_mip_miplib_small.csv"
+DEFAULT_BASELINE_CSV = (
+    ROOT_DIR
+    / "tests"
+    / "perf"
+    / "baselines"
+    / "mipx_mip_regression_small_seed1_t1_stable.csv"
+)
+CONTRACT_OVERRIDE_PREFIXES = (
+    "--parallel-mode",
+    "--seed",
+    "--search-stable",
+    "--search-default",
+    "--search-aggressive",
+)
 
 
 def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
@@ -92,6 +105,20 @@ def flatten_solver_args(values: list[str]) -> list[str]:
     return out
 
 
+def validate_solver_args(solver_args: list[str]) -> None:
+    conflicting = []
+    for arg in solver_args:
+        for key in CONTRACT_OVERRIDE_PREFIXES:
+            if arg == key or arg.startswith(f"{key}="):
+                conflicting.append(arg)
+                break
+    if conflicting:
+        raise SystemExit(
+            "Conflicting --solver-arg values for deterministic MIP gate: "
+            f"{conflicting}. Use dedicated gate flags instead."
+        )
+
+
 def benchmark(
     *,
     run_script: Path,
@@ -148,8 +175,11 @@ def main() -> int:
         raise SystemExit(f"MIPLIB directory not found: {miplib_dir}")
     if args.repeats < 1 or args.threads < 1:
         raise SystemExit("--repeats and --threads must be >= 1")
+    validate_solver_args(args.solver_arg)
 
     use_baseline_csv = baseline_csv is not None and baseline_csv.is_file()
+    if baseline_binary is not None:
+        use_baseline_csv = False
     if not use_baseline_csv:
         if baseline_binary is None:
             raise SystemExit(

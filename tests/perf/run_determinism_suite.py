@@ -32,6 +32,14 @@ FLOAT_LINE_PATTERNS = {
     "work_units": re.compile(r"^Work units:\s*([\-+0-9.eE]+)\s*$", re.MULTILINE),
     "time_seconds": re.compile(r"^Time:\s*([\-+0-9.eE]+)s\s*$", re.MULTILINE),
 }
+CONTRACT_OVERRIDE_PREFIXES = (
+    "--parallel-mode",
+    "--seed",
+    "--search-stable",
+    "--search-default",
+    "--search-aggressive",
+    "--no-cuts",
+)
 
 
 @dataclass
@@ -149,8 +157,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
 
 
+def validate_solver_args(solver_args: list[str]) -> None:
+    conflicting = []
+    for arg in solver_args:
+        for key in CONTRACT_OVERRIDE_PREFIXES:
+            if arg == key or arg.startswith(f"{key}="):
+                conflicting.append(arg)
+                break
+    if conflicting:
+        raise SystemExit(
+            "Conflicting --solver-arg values for determinism suite contract: "
+            f"{conflicting}. Use dedicated suite flags instead."
+        )
+
+
 def main() -> int:
     args = parse_args()
+    validate_solver_args(args.solver_arg)
 
     binary = Path(args.binary)
     miplib_dir = Path(args.miplib_dir)
