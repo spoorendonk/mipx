@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+#include <set>
 #include <vector>
 
 #include "mipx/core.h"
@@ -77,8 +79,40 @@ public:
     NodePolicy policy() const { return policy_; }
 
 private:
+    struct NodeKey {
+        Int id = -1;
+        Real lp_bound = kInf;
+        Real estimate = kInf;
+        Int depth = 0;
+    };
+
+    struct BestBoundLess {
+        bool operator()(const NodeKey& a, const NodeKey& b) const;
+    };
+    struct BestFirstLess {
+        bool operator()(const NodeKey& a, const NodeKey& b) const;
+    };
+    struct DepthFirstLess {
+        bool operator()(const NodeKey& a, const NodeKey& b) const;
+    };
+    struct BestEstimateLess {
+        bool operator()(const NodeKey& a, const NodeKey& b) const;
+    };
+    struct DepthBiasedLess {
+        bool operator()(const NodeKey& a, const NodeKey& b) const;
+    };
+
+    [[nodiscard]] static NodeKey makeKey(const BnbNode& node);
+    void insertNode(BnbNode node);
+    void eraseById(Int id);
+
     NodePolicy policy_;
-    std::vector<BnbNode> nodes_;
+    std::map<Int, BnbNode> nodes_;
+    std::set<NodeKey, BestBoundLess> best_bound_;
+    std::set<NodeKey, BestFirstLess> best_first_;
+    std::set<NodeKey, DepthFirstLess> depth_first_;
+    std::set<NodeKey, BestEstimateLess> best_estimate_;
+    std::set<NodeKey, DepthBiasedLess> depth_biased_;
     Int next_id_ = 0;
 };
 

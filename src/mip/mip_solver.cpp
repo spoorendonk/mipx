@@ -1201,31 +1201,10 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
                                       bool lp_infeasible) {
     if (bound_changes.empty()) return;
 
-    struct AggregatedBounds {
-        bool has_lb = false;
-        bool has_ub = false;
-        Real lb = -kInf;
-        Real ub = kInf;
-    };
-
-    std::unordered_map<Index, AggregatedBounds> aggregated;
-    aggregated.reserve(bound_changes.size());
-    for (const auto& bc : bound_changes) {
-        auto& bounds = aggregated[bc.variable];
-        if (bc.is_upper) {
-            bounds.has_ub = true;
-            bounds.ub = std::min(bounds.ub, bc.bound);
-        } else {
-            bounds.has_lb = true;
-            bounds.lb = std::max(bounds.lb, bc.bound);
-        }
-    }
-
     ConflictClause clause;
-    clause.literals.reserve(aggregated.size() * 2);
-    for (const auto& [var, bounds] : aggregated) {
-        if (bounds.has_lb) clause.literals.push_back({var, bounds.lb, false});
-        if (bounds.has_ub) clause.literals.push_back({var, bounds.ub, true});
+    clause.literals.reserve(bound_changes.size());
+    for (const auto& bc : bound_changes) {
+        clause.literals.push_back({bc.variable, bc.bound, bc.is_upper});
     }
     if (clause.literals.empty()) return;
 
@@ -1235,6 +1214,24 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
                   if (a.is_upper != b.is_upper) return a.is_upper < b.is_upper;
                   return a.bound < b.bound;
               });
+
+    std::size_t write = 0;
+    for (const auto& lit : clause.literals) {
+        if (write > 0 &&
+            clause.literals[write - 1].variable == lit.variable &&
+            clause.literals[write - 1].is_upper == lit.is_upper) {
+            if (lit.is_upper) {
+                clause.literals[write - 1].bound =
+                    std::min(clause.literals[write - 1].bound, lit.bound);
+            } else {
+                clause.literals[write - 1].bound =
+                    std::max(clause.literals[write - 1].bound, lit.bound);
+            }
+            continue;
+        }
+        clause.literals[write++] = lit;
+    }
+    clause.literals.resize(write);
 
     conflict_stats_.minimized_literals +=
         std::max<Int>(0, static_cast<Int>(bound_changes.size()) -
@@ -1267,33 +1264,29 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
     }
 }
 
-bool MipSolver::isConflictTriggered(std::span<const Index> vars,
-                                    std::span<const Real> node_lb,
-                                    std::span<const Real> node_ub) {
+bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
     if (conflict_pool_.empty()) return false;
-
-    std::unordered_map<Index, Index> pos;
-    pos.reserve(vars.size());
-    for (Index i = 0; i < static_cast<Index>(vars.size()); ++i) {
-        pos.emplace(vars[i], i);
-    }
 
     for (auto& clause : conflict_pool_) {
         bool triggered = true;
         for (const auto& lit : clause.literals) {
-            auto it = pos.find(lit.variable);
-            if (it == pos.end()) {
+            if (lit.variable < 0 ||
+                lit.variable >= static_cast<Index>(node_scratch.var_epoch.size())) {
                 triggered = false;
                 break;
             }
-            const Index p = it->second;
+            if (node_scratch.var_epoch[lit.variable] != node_scratch.current_epoch) {
+                triggered = false;
+                break;
+            }
+            const Index p = node_scratch.var_pos[lit.variable];
             if (lit.is_upper) {
-                if (node_ub[p] > lit.bound + 1e-9) {
+                if (node_scratch.node_ub[p] > lit.bound + 1e-9) {
                     triggered = false;
                     break;
                 }
             } else {
-                if (node_lb[p] < lit.bound - 1e-9) {
+                if (node_scratch.node_lb[p] < lit.bound - 1e-9) {
                     triggered = false;
                     break;
                 }
@@ -1497,6 +1490,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              std::vector<Real>& current_lower,
                              std::vector<Real>& current_upper,
                              std::vector<Index>& touched_vars,
+                             NodeScratch& node_scratch,
                              NodeWorkStats& node_stats,
                              Int& int_inf_out) {
     children_out.clear();
@@ -1540,22 +1534,42 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         touched_vars.push_back(j);
     }
 
-    // Apply this node's bound changes using per-variable aggregation.
-    std::unordered_map<Index, Index> var_pos;
-    std::vector<Index> vars;
-    std::vector<Real> node_lb;
-    std::vector<Real> node_ub;
+    // Apply this node's bound changes using deterministic reusable scratch maps.
+    if (node_scratch.var_epoch.size() != static_cast<std::size_t>(problem_.num_cols)) {
+        node_scratch.var_epoch.assign(static_cast<std::size_t>(problem_.num_cols), 0);
+        node_scratch.var_pos.assign(static_cast<std::size_t>(problem_.num_cols), -1);
+        node_scratch.current_epoch = 1;
+    }
+    if (node_scratch.current_epoch == std::numeric_limits<Int>::max()) {
+        std::fill(node_scratch.var_epoch.begin(), node_scratch.var_epoch.end(), 0);
+        node_scratch.current_epoch = 1;
+    } else {
+        ++node_scratch.current_epoch;
+    }
+    const Int epoch = node_scratch.current_epoch;
+
+    auto& vars = node_scratch.vars;
+    auto& node_lb = node_scratch.node_lb;
+    auto& node_ub = node_scratch.node_ub;
+    vars.clear();
+    node_lb.clear();
+    node_ub.clear();
     vars.reserve(node.bound_changes.size());
     node_lb.reserve(node.bound_changes.size());
     node_ub.reserve(node.bound_changes.size());
 
     for (const auto& bc : node.bound_changes) {
-        auto [it, inserted] = var_pos.emplace(bc.variable, static_cast<Index>(vars.size()));
-        Index pos = it->second;
-        if (inserted) {
+        if (bc.variable < 0 || bc.variable >= problem_.num_cols) continue;
+        Index pos = -1;
+        if (node_scratch.var_epoch[bc.variable] != epoch) {
+            node_scratch.var_epoch[bc.variable] = epoch;
+            pos = static_cast<Index>(vars.size());
+            node_scratch.var_pos[bc.variable] = pos;
             vars.push_back(bc.variable);
             node_lb.push_back(problem_.col_lower[bc.variable]);
             node_ub.push_back(problem_.col_upper[bc.variable]);
+        } else {
+            pos = node_scratch.var_pos[bc.variable];
         }
         if (bc.is_upper) {
             node_ub[pos] = std::min(node_ub[pos], bc.bound);
@@ -1597,7 +1611,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     node_stats.bound_apply_seconds += std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
-    if (use_conflicts && isConflictTriggered(vars, node_lb, node_ub)) {
+    if (use_conflicts && isConflictTriggered(node_scratch)) {
         return false;
     }
 
@@ -1613,11 +1627,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         std::chrono::steady_clock::now() - t0).count();
 
     if (!node.local_cuts.empty()) {
-        std::vector<Index> starts;
-        std::vector<Index> col_indices;
-        std::vector<Real> values;
-        std::vector<Real> lower;
-        std::vector<Real> upper;
+        auto& starts = node_scratch.row_starts;
+        auto& col_indices = node_scratch.row_col_indices;
+        auto& values = node_scratch.row_values;
+        auto& lower = node_scratch.row_lower;
+        auto& upper = node_scratch.row_upper;
+        starts.clear();
+        col_indices.clear();
+        values.clear();
+        lower.clear();
+        upper.clear();
         starts.reserve(node.local_cuts.size());
         lower.reserve(node.local_cuts.size());
         upper.reserve(node.local_cuts.size());
@@ -1845,11 +1864,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         }
     }
 
-    std::vector<Cut> node_local_cuts = node.local_cuts;
+    std::vector<Cut> node_local_cuts = std::move(node.local_cuts);
     if (!node_local_cuts.empty()) {
-        std::vector<Cut> kept;
+        auto& kept = node_scratch.kept_cuts;
+        kept.clear();
         kept.reserve(node_local_cuts.size());
-        for (auto cut : node_local_cuts) {
+        for (auto& cut : node_local_cuts) {
             const Real dist = cutDistanceToBinding(cut, node_primals_out);
             if (dist <= 1e-4) {
                 cut.age = 0;
@@ -1898,11 +1918,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 if (generated == 0) break;
 
                 auto top_indices = tree_pool.topByEfficacy(max_tree_cuts);
-                std::vector<Index> starts;
-                std::vector<Index> col_indices;
-                std::vector<Real> values;
-                std::vector<Real> lower;
-                std::vector<Real> upper;
+                auto& starts = node_scratch.row_starts;
+                auto& col_indices = node_scratch.row_col_indices;
+                auto& values = node_scratch.row_values;
+                auto& lower = node_scratch.row_lower;
+                auto& upper = node_scratch.row_upper;
+                starts.clear();
+                col_indices.clear();
+                values.clear();
+                lower.clear();
+                upper.clear();
                 Int global_rows = 0;
 
                 for (Index idx : top_indices) {
@@ -2066,6 +2091,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     uint64_t det_log_next_tick = 1000000;
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
+    NodeScratch node_scratch;
     Int rins_calls = 0;
     Int rins_solves = 0;
     Int rins_found = 0;
@@ -2167,6 +2193,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                                     children, node_obj, node_primals, node_iters,
                                     node_work,
                                     current_lower, current_upper, touched_vars,
+                                    node_scratch,
                                     node_stats, node_int_inf);
         total_lp_iters += node_iters;
         total_work += node_work;
@@ -2336,6 +2363,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             std::vector<Real> current_lower;
             std::vector<Real> current_upper;
             std::vector<Index> touched_vars;
+            NodeScratch node_scratch;
             NodeWorkStats node_stats;
             Int rins_calls = 0;
             Int rins_solves = 0;
@@ -2442,6 +2470,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                             worker_ctx.current_lower,
                                             worker_ctx.current_upper,
                                             worker_ctx.touched_vars,
+                                            worker_ctx.node_scratch,
                                             worker_ctx.node_stats,
                                             task.node_int_inf);
             });
@@ -2620,6 +2649,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         std::vector<Index> touched_vars;
         touched_vars.reserve(problem_.num_cols);
         NodeWorkStats local_node_stats;
+        NodeScratch local_node_scratch;
         Int local_rins_calls = 0;
         Int local_rins_solves = 0;
         Int local_rins_found = 0;
@@ -2684,6 +2714,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                         children, node_obj, node_primals, node_iters,
                                         node_work,
                                         current_lower, current_upper, touched_vars,
+                                        local_node_scratch,
                                         local_node_stats, node_int_inf);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
             atomic_work.count(workUnitTicks(node_work));

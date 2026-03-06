@@ -328,6 +328,21 @@ private:
         Int cold_starts = 0;
     };
 
+    struct NodeScratch {
+        std::vector<Int> var_epoch;
+        std::vector<Index> var_pos;
+        Int current_epoch = 1;
+        std::vector<Index> vars;
+        std::vector<Real> node_lb;
+        std::vector<Real> node_ub;
+        std::vector<Index> row_starts;
+        std::vector<Index> row_col_indices;
+        std::vector<Real> row_values;
+        std::vector<Real> row_lower;
+        std::vector<Real> row_upper;
+        std::vector<Cut> kept_cuts;
+    };
+
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
                          LpProblem* certificate_problem = nullptr);
@@ -375,14 +390,13 @@ private:
                      std::vector<Real>& current_lower,
                      std::vector<Real>& current_upper,
                      std::vector<Index>& touched_vars,
+                     NodeScratch& node_scratch,
                      NodeWorkStats& node_stats,
                      Int& int_inf_out);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);
-    bool isConflictTriggered(std::span<const Index> vars,
-                             std::span<const Real> node_lb,
-                             std::span<const Real> node_ub);
+    bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
                                             std::span<const Real> current_upper,
