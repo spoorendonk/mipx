@@ -6,6 +6,12 @@ Required CSV columns:
 - `instance`
 - metric column (default `work_units`)
 
+Recommended LP metadata columns (used by dual-simplex gate/reporting):
+- `status`
+- `objective`
+- `iterations`
+- `time_seconds`
+
 Full LP+MIP gate example (single command):
 
 ```bash
@@ -16,6 +22,48 @@ python3 tests/perf/run_full_gate.py \
   --miplib-dir ./tests/data/miplib \
   --solver-arg --quiet
 ```
+
+## Dual Simplex Perf Gate (Netlib Anchors + Mittelman Curated)
+
+This gate is dual-simplex specific and enforces a **work-units-first**
+regression policy:
+- Primary hard gate: `work_units` (aggregate + per-instance cap).
+- Secondary metric: `time_seconds` (`warn` by default; can be `fail`).
+
+Default solver policy in this gate:
+- `--dual`
+- `--no-presolve`
+- `--quiet`
+
+Run candidate vs baseline binaries:
+
+```bash
+python3 tests/perf/run_dual_perf_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --mittelman-dir ./tests/data/mittelman_lp \
+  --max-work-regression-pct 0 \
+  --max-work-instance-regression-pct 20 \
+  --time-regression-mode warn \
+  --max-time-regression-pct 10
+```
+
+Artifacts (under `--out-dir`, default `/tmp/mipx_dual_perf_gate`):
+- `candidate_netlib.csv`, `baseline_netlib.csv`
+- `candidate_mittelman.csv`, `baseline_mittelman.csv`
+- `netlib_regression_summary.json`
+- `mittelman_regression_summary.json`
+- `dual_perf_summary.md`
+
+Corpora:
+- Netlib anchors: `tests/perf/netlib_dual_corpus.csv`
+- Mittelman curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+
+SOTA guard policy for dual-simplex work:
+- Keep changes aligned with modern HiGHS-style mechanisms.
+- Do not accept speedups from numerically weaker legacy shortcuts.
+- Treat status/objective mismatches as correctness failures before perf claims.
 
 ## Presolve Matrix (Light CI + Internal)
 

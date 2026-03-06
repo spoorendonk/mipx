@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mipx-solve over Netlib .mps.gz files and emit median benchmark CSV."""
+"""Run mipx-solve over Netlib LP files and emit median benchmark CSV."""
 
 from __future__ import annotations
 
@@ -33,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--netlib-dir", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--repeats", type=int, default=3)
+    p.add_argument(
+        "--instances",
+        default="",
+        help="Optional comma-separated instance names (without .mps/.mps.gz).",
+    )
     p.add_argument("--solver-arg", action="append", default=[])
     return p.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
 
@@ -70,6 +75,18 @@ def parse_solve_time(text: str) -> float | None:
     return parse_first_float(r"^Time:\s*([\-+0-9.eE]+)s\s*$", text)
 
 
+def parse_objective(text: str) -> float | None:
+    return parse_first_float(r"^Objective:\s*([\-+0-9.eE]+)\s*$", text)
+
+
+def parse_iterations(text: str) -> float | None:
+    for pat in (r"^Iterations:\s*([\-+0-9.eE]+)\s*$", r"^LP iterations:\s*([\-+0-9.eE]+)\s*$"):
+        v = parse_first_float(pat, text)
+        if v is not None:
+            return v
+    return None
+
+
 def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
     import time
 
@@ -89,19 +106,36 @@ def main() -> int:
     if not bin_path.is_file() or not bin_path.stat().st_mode & 0o111:
         raise SystemExit(f"Binary not executable: {bin_path}")
 
-    instances = sorted(netlib_dir.glob("*.mps.gz"))
-    if not instances:
-        raise SystemExit(f"No .mps.gz instances found in {netlib_dir}")
+    # Prefer .mps.gz, then .mps if gzip is not available.
+    instance_map: dict[str, Path] = {}
+    for inst in sorted(netlib_dir.glob("*.mps.gz")):
+        instance_map[inst.name.removesuffix(".mps.gz")] = inst
+    for inst in sorted(netlib_dir.glob("*.mps")):
+        name = inst.name.removesuffix(".mps")
+        instance_map.setdefault(name, inst)
+
+    if not instance_map:
+        raise SystemExit(f"No .mps/.mps.gz instances found in {netlib_dir}")
+
+    requested = [x.strip() for x in args.instances.split(",") if x.strip()]
+    selected_names = requested if requested else sorted(instance_map)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["instance", "time_seconds", "work_units", "status"])
+        w.writerow(["instance", "time_seconds", "work_units", "status", "objective", "iterations"])
 
-        for inst in instances:
-            name = inst.name.removesuffix(".mps.gz")
+        for name in selected_names:
+            inst = instance_map.get(name)
+            if inst is None:
+                w.writerow([name, "", "", "missing_instance", "", ""])
+                print(f"  {name}: missing_instance")
+                continue
+
             times: list[float] = []
             works: list[float] = []
+            objectives: list[float] = []
+            iterations: list[float] = []
             status = "ok"
 
             for _ in range(args.repeats):
@@ -117,6 +151,8 @@ def main() -> int:
                 if wu is None:
                     status = "parse_error"
                     break
+                obj = parse_objective(out)
+                it = parse_iterations(out)
 
                 run_status = parse_status(out)
                 if status == "ok":
@@ -126,12 +162,18 @@ def main() -> int:
 
                 times.append(t)
                 works.append(wu)
+                if obj is not None:
+                    objectives.append(obj)
+                if it is not None:
+                    iterations.append(it)
 
             if status in {"solve_error", "parse_error"}:
-                w.writerow([name, "", "", status])
+                w.writerow([name, "", "", status, "", ""])
                 continue
 
-            w.writerow([name, f"{median(times):.6f}", f"{median(works):.6f}", status])
+            obj_out = f"{median(objectives):.12g}" if objectives else ""
+            it_out = f"{median(iterations):.12g}" if iterations else ""
+            w.writerow([name, f"{median(times):.6f}", f"{median(works):.6f}", status, obj_out, it_out])
 
     print(f"Wrote benchmark CSV: {out_path}")
     return 0
