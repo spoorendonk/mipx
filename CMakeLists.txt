@@ -26,7 +26,7 @@ option(MIPX_USE_BZIP2 "Enable bzip2 decompression for .mps.bz2 files" ${BZIP2_FO
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
-option(MIPX_USE_CUDA "Enable CUDA acceleration" ON)
+option(MIPX_USE_CUDA "Enable CUDA acceleration" ${CUDAToolkit_FOUND})
 option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
        "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
        ON)

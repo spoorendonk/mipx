@@ -368,7 +368,8 @@ LpResult PdlpSolver::solve() {
     std::vector<Real> reflected_x(static_cast<size_t>(n), 0.0);
     std::vector<Real> reflected_y(static_cast<size_t>(m), 0.0);
 
-    std::vector<Real> at_y(static_cast<size_t>(n), 0.0);
+    std::vector<Real> at_current_y(static_cast<size_t>(n), 0.0);
+    std::vector<Real> at_pdhg_y(static_cast<size_t>(n), 0.0);
     std::vector<Real> a_xrefl(static_cast<size_t>(m), 0.0);
     std::vector<Real> ax(static_cast<size_t>(m), 0.0);
     std::vector<Real> delta_y_vec(static_cast<size_t>(m), 0.0);
@@ -416,13 +417,13 @@ LpResult PdlpSolver::solve() {
             Real lambda = static_cast<Real>(inner_count + k_offset) /
                           static_cast<Real>(inner_count + k_offset + 1);
 
-            // 1. A^T * current_y → at_y.
-            scaled_a_.multiplyTranspose(current_y, at_y);
+            // 1. A^T * current_y.
+            scaled_a_.multiplyTranspose(current_y, at_current_y);
 
             // 2. Primal step + project + reflect + Halpern.
             for (Index j = 0; j < n; ++j) {
                 Real tau = step * tau_base_[j] / primal_weight;
-                Real temp = current_x[j] - tau * (cscaled_[j] + at_y[j]);
+                Real temp = current_x[j] - tau * (cscaled_[j] + at_current_y[j]);
                 pdhg_x[j] = std::clamp(temp, scaled_col_lower_[j], scaled_col_upper_[j]);
                 reflected_x[j] = 2.0 * pdhg_x[j] - current_x[j];
                 current_x[j] = lambda * reflected_x[j] + (1.0 - lambda) * initial_x[j];
@@ -505,11 +506,11 @@ LpResult PdlpSolver::solve() {
         Real abs_primal_resid = std::sqrt(primal_resid_sq);
         Real rel_primal_resid = abs_primal_resid / (1.0 + bound_norm);
 
-        // Dual residual: for each j, check reduced cost feasibility.
-        scaled_a_.multiplyTranspose(pdhg_y, at_y);
+        // Refresh A^T * pdhg_y for convergence checks on the current iterate.
+        scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
         Real dual_resid_sq = 0.0;
         for (Index j = 0; j < n; ++j) {
-            Real grad = cscaled_[j] + at_y[j];
+            Real grad = cscaled_[j] + at_pdhg_y[j];
             Real xj = pdhg_x[j];
             Real lb = scaled_col_lower_[j];
             Real ub = scaled_col_upper_[j];
@@ -543,7 +544,7 @@ LpResult PdlpSolver::solve() {
         //   row_term[i] = -y_i * ru_i if y_i > 0, -y_i * rl_i if y_i < 0
         Real dobj_col = 0.0;
         for (Index j = 0; j < n; ++j) {
-            Real grad = cscaled_[j] + at_y[j];
+            Real grad = cscaled_[j] + at_pdhg_y[j];
             Real lb = scaled_col_lower_[j];
             Real ub = scaled_col_upper_[j];
             // Project grad to dual-feasible region.
@@ -899,15 +900,15 @@ LpResult PdlpSolver::solveGpu() {
     used_gpu_ = true;
 
     // SpMV helper lambdas.
-    auto spmv_a = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
-        cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                     &alpha_one, a_desc, in, &beta_zero, out,
-                     CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_a);
+    auto spmv_a = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) -> bool {
+        return cusparseOk(cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                       &alpha_one, a_desc, in, &beta_zero, out,
+                                       CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_a));
     };
-    auto spmv_at = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) {
-        cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
-                     &alpha_one, at_desc, in, &beta_zero, out,
-                     CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_at);
+    auto spmv_at = [&](cusparseDnVecDescr_t in, cusparseDnVecDescr_t out) -> bool {
+        return cusparseOk(cusparseSpMV(handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                       &alpha_one, at_desc, in, &beta_zero, out,
+                                       CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_at));
     };
 
     // -----------------------------------------------------------------------
@@ -1074,11 +1075,27 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         // --- Convergence check ---
-        // Compute A * pdhg_x, A^T * pdhg_y, delta_y, A^T * delta_y.
-        spmv_a(desc_pdhg_x, desc_ax);
-        spmv_at(desc_pdhg_y, desc_at_y);
+        // Compute A * pdhg_x, delta_y, A^T * delta_y, then refresh A^T * pdhg_y.
+        if (!spmv_a(desc_pdhg_x, desc_ax)) {
+            status_ = Status::Error;
+            objective_ = 0.0;
+            iterations_ = total_count;
+            goto cleanup;
+        }
         launchSubtract(m, d_pdhg_y, d_initial_y, d_delta_y, stream);
-        spmv_at(desc_delta_y, desc_at_delta_y);
+        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
+            status_ = Status::Error;
+            objective_ = 0.0;
+            iterations_ = total_count;
+            goto cleanup;
+        }
+        // Refresh A^T * pdhg_y immediately before convergence reduction.
+        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
+            status_ = Status::Error;
+            objective_ = 0.0;
+            iterations_ = total_count;
+            goto cleanup;
+        }
 
         // Fused reduction.
         launchZeroMetrics(d_metrics, stream);
