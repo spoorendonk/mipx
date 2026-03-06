@@ -418,6 +418,8 @@ private:
         Int age = 0;
         Int hits = 0;
     };
+    ConflictClause acquireConflictClause();
+    void recycleConflictClause(ConflictClause clause);
 
     // Problem data.
     LpProblem problem_;
@@ -488,6 +490,9 @@ private:
     Int exact_refinement_repair_passes_ = 2;
     MipExactRefinementStats exact_refinement_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
+    std::vector<ConflictClause> conflict_clause_pool_{};
+    std::size_t conflict_clause_pool_limit_ = 256;
+    std::size_t conflict_clause_capacity_limit_ = 4096;
     std::vector<Real> conflict_scores_{};
     std::unordered_map<Int, Index> sibling_branch_cache_{};
     ReliabilityBranching branching_rule_;

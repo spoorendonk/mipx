@@ -1180,6 +1180,26 @@ HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     return config;
 }
 
+MipSolver::ConflictClause MipSolver::acquireConflictClause() {
+    if (conflict_clause_pool_.empty()) return {};
+    ConflictClause clause = std::move(conflict_clause_pool_.back());
+    conflict_clause_pool_.pop_back();
+    clause.literals.clear();
+    clause.age = 0;
+    clause.hits = 0;
+    return clause;
+}
+
+void MipSolver::recycleConflictClause(ConflictClause clause) {
+    clause.literals.clear();
+    clause.age = 0;
+    clause.hits = 0;
+    if (clause.literals.capacity() == 0) return;
+    if (clause.literals.capacity() > conflict_clause_capacity_limit_) return;
+    if (conflict_clause_pool_.size() >= conflict_clause_pool_limit_) return;
+    conflict_clause_pool_.push_back(std::move(clause));
+}
+
 void MipSolver::ageConflictPool() {
     if (conflict_pool_.empty()) return;
 
@@ -1190,19 +1210,29 @@ void MipSolver::ageConflictPool() {
         score = std::max<Real>(0.0, score * 0.995);
     }
 
-    const auto old_size = conflict_pool_.size();
-    std::erase_if(conflict_pool_, [&](const ConflictClause& clause) {
-        return clause.age > conflict_max_age_ || clause.literals.empty();
-    });
-    conflict_stats_.purged += static_cast<Int>(old_size - conflict_pool_.size());
+    Int purged = 0;
+    std::vector<ConflictClause> kept;
+    kept.reserve(conflict_pool_.size());
+    for (auto& clause : conflict_pool_) {
+        if (clause.age > conflict_max_age_ || clause.literals.empty()) {
+            recycleConflictClause(std::move(clause));
+            ++purged;
+            continue;
+        }
+        kept.push_back(std::move(clause));
+    }
+    conflict_pool_ = std::move(kept);
+    conflict_stats_.purged += purged;
 }
 
 void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                       bool lp_infeasible) {
     if (bound_changes.empty()) return;
 
-    ConflictClause clause;
-    clause.literals.reserve(bound_changes.size());
+    ConflictClause clause = acquireConflictClause();
+    if (clause.literals.capacity() < bound_changes.size()) {
+        clause.literals.reserve(bound_changes.size());
+    }
     for (const auto& bc : bound_changes) {
         clause.literals.push_back({bc.variable, bc.bound, bc.is_upper});
     }
@@ -1259,6 +1289,7 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
                 return a.hits < b.hits;
             });
         if (victim == conflict_pool_.end()) break;
+        recycleConflictClause(std::move(*victim));
         conflict_pool_.erase(victim);
         ++conflict_stats_.purged;
     }
@@ -2050,7 +2081,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     solved_node.local_cuts = std::move(node_local_cuts);
 
-    auto [left, right] = createChildren(solved_node, branch_var,
+    auto [left, right] = createChildren(std::move(solved_node), branch_var,
                                         node_primals_out[branch_var]);
     left.lp_bound = node_obj_out;
     right.lp_bound = node_obj_out;
@@ -2926,6 +2957,9 @@ MipResult MipSolver::solve() {
     tree_presolve_stats_ = {};
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
+    for (auto& clause : conflict_pool_) {
+        recycleConflictClause(std::move(clause));
+    }
     conflict_pool_.clear();
     conflict_scores_.assign(problem_.num_cols, 0.0);
     sibling_branch_cache_.clear();
@@ -4452,7 +4486,7 @@ MipResult MipSolver::solve() {
     }
 
     if (branch_var >= 0) {
-        auto [left, right] = createChildren(root_node, branch_var,
+        auto [left, right] = createChildren(std::move(root_node), branch_var,
                                             root_primals[branch_var]);
         left.lp_bound = root_bound;
         right.lp_bound = root_bound;
