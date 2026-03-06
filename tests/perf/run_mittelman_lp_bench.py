@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", required=True)
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--time-limit", type=float, default=15000)
+    p.add_argument(
+        "--instances",
+        default="",
+        help="Optional comma-separated instance names (without .mps/.mps.gz).",
+    )
     p.add_argument("--solver-arg", action="append", default=[])
     return p.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
 
@@ -73,6 +78,18 @@ def parse_work_units(text: str) -> float | None:
 
 def parse_solve_time(text: str) -> float | None:
     return parse_first_float(r"^Time:\s*([\-+0-9.eE]+)s\s*$", text)
+
+
+def parse_objective(text: str) -> float | None:
+    return parse_first_float(r"^Objective:\s*([\-+0-9.eE]+)\s*$", text)
+
+
+def parse_iterations(text: str) -> float | None:
+    for pat in (r"^Iterations:\s*([\-+0-9.eE]+)\s*$", r"^LP iterations:\s*([\-+0-9.eE]+)\s*$"):
+        v = parse_first_float(pat, text)
+        if v is not None:
+            return v
+    return None
 
 
 def run_cmd(cmd: list[str], timeout_s: float) -> tuple[str, str, float]:
@@ -117,17 +134,26 @@ def main() -> int:
     if not instance_map:
         raise SystemExit(f"No .mps.gz instances found in {mittelman_dir} or {netlib_dir}")
 
-    print(f"[mittelman-lp] Found {len(instance_map)} LP instances")
+    requested = [x.strip() for x in args.instances.split(",") if x.strip()]
+    selected_names = requested if requested else sorted(instance_map)
+    print(f"[mittelman-lp] Selected {len(selected_names)} LP instances")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["instance", "time_seconds", "work_units", "status"])
+        w.writerow(["instance", "time_seconds", "work_units", "status", "objective", "iterations"])
 
-        for name in sorted(instance_map):
-            inst = instance_map[name]
+        for name in selected_names:
+            inst = instance_map.get(name)
+            if inst is None:
+                w.writerow([name, "", "", "missing_instance", "", ""])
+                print(f"  {name}: missing_instance")
+                continue
+
             times: list[float] = []
             works: list[float] = []
+            objectives: list[float] = []
+            iterations: list[float] = []
             status = "ok"
 
             for _ in range(args.repeats):
@@ -143,6 +169,8 @@ def main() -> int:
                 if wu is None:
                     status = "parse_error"
                     break
+                obj = parse_objective(out)
+                it = parse_iterations(out)
 
                 run_status = parse_status(out)
                 if status == "ok":
@@ -152,15 +180,21 @@ def main() -> int:
 
                 times.append(t)
                 works.append(wu)
+                if obj is not None:
+                    objectives.append(obj)
+                if it is not None:
+                    iterations.append(it)
 
             if status in {"solve_error", "parse_error", "time_limit"}:
-                w.writerow([name, "", "", status])
+                w.writerow([name, "", "", status, "", ""])
                 print(f"  {name}: {status}")
                 continue
 
             med_t = median(times)
             med_w = median(works)
-            w.writerow([name, f"{med_t:.6f}", f"{med_w:.6f}", status])
+            obj_out = f"{median(objectives):.12g}" if objectives else ""
+            it_out = f"{median(iterations):.12g}" if iterations else ""
+            w.writerow([name, f"{med_t:.6f}", f"{med_w:.6f}", status, obj_out, it_out])
             print(f"  {name}: {med_t:.6f}s, {med_w:.6f} wu, {status}")
 
     print(f"Wrote Mittelman LP benchmark CSV: {out_path}")

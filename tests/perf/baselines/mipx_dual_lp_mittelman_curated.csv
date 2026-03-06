@@ -1,0 +1,7 @@
+instance,time_seconds,work_units,status,objective,iterations
+neos-5052403-cygnet,,,time_limit,,
+qap15,,,time_limit,,
+s250r10,,,time_limit,,
+s100,,,time_limit,,
+square41,,,time_limit,,
+ex10,,,time_limit,,
