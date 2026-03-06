@@ -2,9 +2,15 @@
 
 Use the benchmark scripts + `check_regression.py` to enforce no-regression policy.
 
-Required CSV columns:
-- `instance`
-- metric column (default `work_units`)
+`run_full_gate.py` now follows a dual-metric policy:
+- Algorithmic regression: strict gate on `work_units` (default `0.0%` allowed).
+- Runtime regression: looser tracking on `time_seconds` (non-fatal by default).
+
+Deterministic contract defaults in `run_full_gate.py`:
+- `--parallel-mode deterministic`
+- fixed `--seed`
+- fixed `--threads`
+- `--search-stable`
 
 Full LP+MIP gate example (single command):
 
@@ -14,8 +20,16 @@ python3 tests/perf/run_full_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --miplib-dir ./tests/data/miplib \
+  --threads 4 \
+  --seed 1 \
+  --algorithmic-metric work_units \
+  --algorithmic-max-regression-pct 0 \
+  --wall-metric time_seconds \
+  --wall-max-regression-pct 35 \
   --solver-arg --quiet
 ```
+
+Use `--enforce-wall-clock` if wall-clock regression should be fatal.
 
 ## Presolve Matrix (Light CI + Internal)
 

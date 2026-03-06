@@ -286,6 +286,21 @@ int main(int argc, char* argv[]) {
             solver.setSearchProfile(search_profile);
             solver.load(lp);
             auto result = solver.solve();
+            const char* parallel_mode_name =
+                (parallel_mode == mipx::ParallelMode::Deterministic)
+                    ? "deterministic"
+                    : "opportunistic";
+            const char* search_profile_name = "default";
+            if (search_profile == mipx::SearchProfile::Stable) {
+                search_profile_name = "stable";
+            } else if (search_profile == mipx::SearchProfile::Aggressive) {
+                search_profile_name = "aggressive";
+            }
+            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s\n",
+                    parallel_mode_name,
+                    static_cast<unsigned long long>(heuristic_seed),
+                    num_threads,
+                    search_profile_name);
 
             if (result.status == mipx::Status::Optimal &&
                 result.gap_limit_reached) {
