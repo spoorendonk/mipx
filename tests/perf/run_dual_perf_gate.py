@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mittelman-corpus", default=str(PERF_DIR / "mittelman_dual_corpus.csv"))
 
     p.add_argument("--repeats", type=int, default=3)
-    p.add_argument("--time-limit", type=float, default=900.0)
+    p.add_argument("--time-limit", type=float, default=60.0)
     p.add_argument("--aggregate", choices=("median", "geomean"), default="median")
     p.add_argument("--netlib-min-common", type=int, default=5)
     p.add_argument("--mittelman-min-common", type=int, default=5)

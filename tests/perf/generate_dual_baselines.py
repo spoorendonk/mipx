@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--netlib-corpus", default=str(PERF_DIR / "netlib_dual_corpus.csv"))
     p.add_argument("--mittelman-corpus", default=str(PERF_DIR / "mittelman_dual_corpus.csv"))
     p.add_argument("--repeats", type=int, default=1)
-    p.add_argument("--netlib-time-limit", type=float, default=120.0)
-    p.add_argument("--mittelman-time-limit", type=float, default=300.0)
+    p.add_argument("--netlib-time-limit", type=float, default=60.0)
+    p.add_argument("--mittelman-time-limit", type=float, default=60.0)
     p.add_argument("--solver-arg", action="append", default=[])
     return p.parse_args()
 

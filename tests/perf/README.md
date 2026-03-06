@@ -68,8 +68,8 @@ python3 tests/perf/generate_dual_baselines.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --mittelman-dir ./tests/data/mittelman_lp \
-  --netlib-time-limit 120 \
-  --mittelman-time-limit 300
+  --netlib-time-limit 60 \
+  --mittelman-time-limit 60
 ```
 
 Corpora:
