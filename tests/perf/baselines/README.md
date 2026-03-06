@@ -9,6 +9,7 @@ Files:
 - `highs_baseline_meta.json`: generation metadata (timestamp, HiGHS version,
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
+- `mipx_pdlp_lp_netlib_small.csv`: mipx PDLP LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib

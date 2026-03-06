@@ -69,6 +69,7 @@ This writes:
 - `tests/perf/baselines/highs_lp_netlib_small.csv`
 - `tests/perf/baselines/highs_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
+- `tests/perf/baselines/mipx_pdlp_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
@@ -92,6 +93,25 @@ python3 tests/perf/run_netlib_lp_bench.py \
 python3 tests/perf/check_regression.py \
   --baseline benchmarks/baseline_v1.csv \
   --candidate benchmarks/pr_step2.csv \
+  --metric work_units
+```
+
+PDLP LP example (Netlib CPU PDLP, gate on `work_units`):
+
+```bash
+python3 tests/perf/run_netlib_pdlp_lp_bench.py \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --output /tmp/mipx_pdlp_candidate.csv \
+  --repeats 3 \
+  --threads 1 \
+  --time-limit 60 \
+  --disable-presolve \
+  --solver-arg --quiet
+
+python3 tests/perf/check_regression.py \
+  --baseline tests/perf/baselines/mipx_pdlp_lp_netlib_small.csv \
+  --candidate /tmp/mipx_pdlp_candidate.csv \
   --metric work_units
 ```
 
@@ -265,6 +285,26 @@ python3 tests/perf/run_pdlp_lp_regression_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib
 ```
+
+This default run enforces strict PDLP algorithmic regression (`work_units`) on:
+- `mipx_pdlp_cpu`
+- `mipx_pdlp_gpu` (forced GPU thresholds)
+
+Enable wall-clock gates (SIMD/AVX proxy, multithread probe, GPU):
+
+```bash
+python3 tests/perf/run_pdlp_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --wall-clock-gate \
+  --wall-mt-threads 8
+```
+
+Wall-clock notes:
+- CPU single-thread gate uses `time_seconds` as a SIMD/AVX proxy.
+- CPU multi-thread gate is auto-skipped if the PDLP LP path reports single-thread execution.
+- Forced-GPU gate is auto-skipped if backend probing does not report `PDLP backend: GPU`.
 
 MIP comparison example (same instance set as HiGHS MIP baseline):
 

@@ -168,13 +168,14 @@ def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
 def run_mipx_pdlp(
     binary: str,
     model: Path,
+    threads: int,
     use_gpu: bool,
     disable_presolve: bool,
     force_gpu: bool,
     time_limit: float,
     relax_integrality: bool,
 ) -> SolverResult:
-    cmd = [binary, str(model), "--pdlp", "--quiet"]
+    cmd = [binary, str(model), "--pdlp", "--quiet", "--threads", str(max(1, threads))]
     if use_gpu:
         cmd.append("--gpu")
         if force_gpu:
@@ -446,6 +447,7 @@ def main() -> int:
             lambda p: run_mipx_pdlp(
                 args.mipx_binary,
                 p,
+                threads=args.threads,
                 use_gpu=False,
                 disable_presolve=args.disable_presolve,
                 force_gpu=False,
@@ -460,6 +462,7 @@ def main() -> int:
             lambda p: run_mipx_pdlp(
                 args.mipx_binary,
                 p,
+                threads=args.threads,
                 use_gpu=True,
                 disable_presolve=args.disable_presolve,
                 force_gpu=args.force_mipx_gpu,

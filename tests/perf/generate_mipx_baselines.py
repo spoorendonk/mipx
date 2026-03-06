@@ -19,11 +19,14 @@ MIPLIB_DIR = ROOT_DIR / "tests" / "data" / "miplib"
 BIN = ROOT_DIR / "build" / "mipx-solve"
 
 LP_OUT = OUT_DIR / "mipx_lp_netlib_small.csv"
+PDLP_LP_OUT = OUT_DIR / "mipx_pdlp_lp_netlib_small.csv"
 MIP_OUT = OUT_DIR / "mipx_mip_miplib_small.csv"
 META_JSON = OUT_DIR / "mipx_baseline_meta.json"
 
 NETLIB_RUNNER = ROOT_DIR / "tests" / "perf" / "run_netlib_lp_bench.sh"
+NETLIB_PDLP_RUNNER = ROOT_DIR / "tests" / "perf" / "run_netlib_pdlp_lp_bench.sh"
 MIPLIB_RUNNER = ROOT_DIR / "tests" / "perf" / "run_miplib_mip_bench.sh"
+NETLIB_SMALL_INSTANCES = "adlittle,afiro,blend,kb2,sc105,sc205,sc50a,sc50b,share1b,share2b,stocfor1"
 
 
 def run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -55,6 +58,29 @@ def main() -> int:
             str(LP_OUT),
             "--repeats",
             "3",
+            "--solver-arg",
+            "--quiet",
+        ]
+    )
+
+    run(
+        [
+            str(NETLIB_PDLP_RUNNER),
+            "--binary",
+            str(BIN),
+            "--netlib-dir",
+            str(NETLIB_DIR),
+            "--output",
+            str(PDLP_LP_OUT),
+            "--repeats",
+            "3",
+            "--threads",
+            "1",
+            "--time-limit",
+            "60",
+            "--disable-presolve",
+            "--instances",
+            NETLIB_SMALL_INSTANCES,
             "--solver-arg",
             "--quiet",
         ]
@@ -96,6 +122,7 @@ def main() -> int:
 
     print("Wrote baselines:")
     print(f"  {LP_OUT}")
+    print(f"  {PDLP_LP_OUT}")
     print(f"  {MIP_OUT}")
     print(f"  {META_JSON}")
     return 0
