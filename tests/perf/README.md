@@ -22,6 +22,7 @@ Generate and store HiGHS CLI + mipx wall-clock baselines:
 ```bash
 python3 tests/perf/generate_highspy_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_mipx_barrier_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
@@ -31,6 +32,8 @@ This writes:
 - `tests/perf/baselines/highspy_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
+- `tests/perf/baselines/mipx_barrier_cpu_netlib_small.csv`
+- `tests/perf/baselines/mipx_barrier_gpu_netlib_small.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
 - `tests/perf/baselines/pdlp_lp_compare_netlib.csv`
@@ -192,6 +195,49 @@ To compare mipx against HiGHS CLI, use `--metric time_seconds` and one of
 the stored HiGHS baseline CSV files as `--baseline`.
 These comparisons are informational (cross-solver wall-clock), not strict
 no-regression gates.
+
+## Barrier Self-Regression Gate
+
+Dedicated barrier workflow (candidate vs baseline `mipx` binaries):
+
+```bash
+python3 tests/perf/run_barrier_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --instances-dir tests/data/netlib
+```
+
+Shell wrapper:
+
+```bash
+./tests/perf/run_barrier_lp_regression_gate.sh \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --instances-dir tests/data/netlib
+```
+
+Enforced by default:
+- Algorithmic regression gate on `work_units` for both:
+  - `mipx_barrier_cpu`
+  - `mipx_barrier_gpu`
+- Default thresholds are strict (`0.0%` median regression allowed).
+
+Opt-in wall-clock bands (machine-noise aware, separate lanes):
+
+```bash
+python3 tests/perf/run_barrier_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --instances-dir tests/data/netlib \
+  --enable-wall-clock-bands \
+  --simd-wall-clock-max-regression-pct 8 \
+  --gpu-wall-clock-max-regression-pct 12
+```
+
+Notes:
+- CPU wall-clock lane models SIMD/AVX regressions (`mipx_barrier_cpu`).
+- GPU wall-clock lane is gated independently (`mipx_barrier_gpu`).
+- Wall-clock checks are disabled unless `--enable-wall-clock-bands` is set.
 
 ## PDLP LP Comparison (mipx vs HiGHS vs cuOpt)
 

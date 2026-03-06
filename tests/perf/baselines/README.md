@@ -11,6 +11,9 @@ Files:
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
+- `mipx_barrier_cpu_netlib_small.csv`: mipx barrier CPU baseline (Netlib LP set).
+- `mipx_barrier_gpu_netlib_small.csv`: mipx barrier GPU baseline (Netlib LP set; forced GPU path).
+- `mipx_barrier_baseline_meta.json`: generation metadata for mipx barrier baseline snapshots.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).
 - `barrier_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
@@ -27,6 +30,7 @@ Regenerate with (canonical Python entrypoints):
 ```bash
 python3 tests/perf/generate_highspy_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_mipx_barrier_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
