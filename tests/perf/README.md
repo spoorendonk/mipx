@@ -12,6 +12,12 @@ Deterministic contract defaults in `run_full_gate.py`:
 - fixed `--threads`
 - `--search-stable`
 
+Recommended LP metadata columns (used by dual-simplex gate/reporting):
+- `status`
+- `objective`
+- `iterations`
+- `time_seconds`
+
 Full LP+MIP gate example (single command):
 
 ```bash
@@ -30,6 +36,64 @@ python3 tests/perf/run_full_gate.py \
 ```
 
 Use `--enforce-wall-clock` if wall-clock regression should be fatal.
+
+## Dual Simplex Perf Gate (Netlib Anchors + Mittelman Curated)
+
+This gate is dual-simplex specific and enforces a **work-units-first**
+regression policy:
+- Primary hard gate: `work_units` (aggregate + per-instance cap).
+- Secondary metric: `time_seconds` (`warn` by default; can be `fail`).
+
+Default solver policy in this gate:
+- `--dual`
+- `--no-presolve`
+- `--quiet`
+
+Correctness precheck (before perf comparison, default `fail` mode):
+- Runs `run_dual_correctness_investigation.py` on the Netlib dual corpus.
+- Uses `.solu` + HiGHS simplex parity checks.
+- Modes: `off`, `warn`, `fail`.
+
+Run candidate vs baseline binaries:
+
+```bash
+python3 tests/perf/run_dual_perf_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --mittelman-dir ./tests/data/mittelman_lp \
+  --max-work-regression-pct 0 \
+  --max-work-instance-regression-pct 20 \
+  --time-regression-mode warn \
+  --max-time-regression-pct 10
+```
+
+Artifacts (under `--out-dir`, default `/tmp/mipx_dual_perf_gate`):
+- `candidate_netlib.csv`, `baseline_netlib.csv`
+- `candidate_mittelman.csv`, `baseline_mittelman.csv`
+- `netlib_regression_summary.json`
+- `mittelman_regression_summary.json`
+- `dual_perf_summary.md`
+
+Dual baseline generation for stored anchor corpora:
+
+```bash
+python3 tests/perf/generate_dual_baselines.py \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --mittelman-dir ./tests/data/mittelman_lp \
+  --netlib-time-limit 60 \
+  --mittelman-time-limit 60
+```
+
+Corpora:
+- Netlib anchors: `tests/perf/netlib_dual_corpus.csv`
+- Mittelman curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+
+SOTA guard policy for dual-simplex work:
+- Keep changes aligned with modern HiGHS-style mechanisms.
+- Do not accept speedups from numerically weaker legacy shortcuts.
+- Treat status/objective mismatches as correctness failures before perf claims.
 
 ## Presolve Matrix (Light CI + Internal)
 
@@ -75,6 +139,7 @@ Generate and store HiGHS CLI + mipx wall-clock baselines:
 ```bash
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_dual_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
@@ -84,6 +149,9 @@ This writes:
 - `tests/perf/baselines/highs_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
+- `tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv`
+- `tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv`
+- `tests/perf/baselines/mipx_dual_lp_baseline_meta.json`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
 - `tests/perf/baselines/pdlp_lp_compare_netlib.csv`
