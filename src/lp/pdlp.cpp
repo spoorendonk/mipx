@@ -910,10 +910,17 @@ LpResult PdlpSolver::solveGpu() {
                                        &alpha_one, at_desc, in, &beta_zero, out,
                                        CUDA_R_64F, CUSPARSE_SPMV_CSR_ALG2, d_buf_at));
     };
+    auto failGpuSolve = [&](Int iters) {
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+    };
 
     // -----------------------------------------------------------------------
     // Power iteration on device for spectral norm.
     // -----------------------------------------------------------------------
+    bool power_iter_spmv_failed = false;
+    Real step = 1.0;
     {
         std::mt19937 rng(42);
         std::normal_distribution<Real> dist(0.0, 1.0);
@@ -927,9 +934,15 @@ LpResult PdlpSolver::solveGpu() {
         Real sigma_sq = 1.0;
         for (Index iter = 0; iter < options_.sv_max_iter; ++iter) {
             // y = A * x
-            spmv_a(desc_pi_x, desc_pi_y);
+            if (!spmv_a(desc_pi_x, desc_pi_y)) {
+                power_iter_spmv_failed = true;
+                break;
+            }
             // x_new = A^T * y
-            spmv_at(desc_pi_y, desc_pi_x_new);
+            if (!spmv_at(desc_pi_y, desc_pi_x_new)) {
+                power_iter_spmv_failed = true;
+                break;
+            }
 
             sigma_sq = launchDotProduct(n, d_pi_x, d_pi_x_new, d_scratch, stream);
 
@@ -950,17 +963,11 @@ LpResult PdlpSolver::solveGpu() {
             if (resid < options_.sv_tol * std::abs(sigma_sq)) break;
         }
 
-        Real spectral = std::sqrt(std::max(sigma_sq, 1e-12));
-        // Step size from spectral norm.
-        Real step_init = 0.998 / spectral;
-        // Store into a variable accessible below.
-        // We'll use 'step' directly in the main loop.
-        cudaMemcpy(d_scratch, &step_init, sizeof(Real), cudaMemcpyHostToDevice);
+        if (!power_iter_spmv_failed) {
+            Real spectral = std::sqrt(std::max(sigma_sq, 1e-12));
+            step = 0.998 / spectral;
+        }
     }
-
-    // Retrieve step from scratch (stored during power iteration).
-    Real step;
-    cudaMemcpy(&step, d_scratch, sizeof(Real), cudaMemcpyDeviceToHost);
 
     // Upload step and primal_weight to device-resident scalars so kernels
     // read via pointer indirection — this allows CUDA graphs to survive restarts.
@@ -1005,20 +1012,26 @@ LpResult PdlpSolver::solveGpu() {
     auto launchBatch = [&](Int batch) {
         for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
             launchComputeLambda(d_lambda, d_inner_count, k_offset, stream);
-            spmv_at(desc_current_y, desc_at_y);
+            if (!spmv_at(desc_current_y, desc_at_y)) return false;
             launchPrimalHalpernStep(
                 n, d_lambda, d_step, d_primal_weight,
                 d_current_x, d_initial_x, d_pdhg_x, d_reflected_x,
                 d_cscaled, d_at_y, d_tau_base, d_col_lower, d_col_upper,
                 stream);
-            spmv_a(desc_reflected_x, desc_a_xrefl);
+            if (!spmv_a(desc_reflected_x, desc_a_xrefl)) return false;
             launchDualHalpernStep(
                 m, d_lambda, d_step, d_primal_weight,
                 d_current_y, d_initial_y, d_pdhg_y, d_reflected_y,
                 d_a_xrefl, d_sigma_base, d_row_lower, d_row_upper,
                 stream);
         }
+        return true;
     };
+
+    if (power_iter_spmv_failed) {
+        failGpuSolve(0);
+        goto cleanup;
+    }
 
     // -----------------------------------------------------------------------
     // Main PDHG loop (GPU-resident).
@@ -1041,7 +1054,12 @@ LpResult PdlpSolver::solveGpu() {
                                     cudaMemcpyHostToDevice, stream);
                     cudaStreamSynchronize(stream);
                     cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-                    launchBatch(batch);
+                    if (!launchBatch(batch)) {
+                        // Ensure the stream exits capture mode on early failure.
+                        cudaStreamEndCapture(stream, &graph);
+                        failGpuSolve(total_count);
+                        goto cleanup;
+                    }
                     cudaStreamEndCapture(stream, &graph);
                     if (graph == nullptr) {
                         // Graph capture failed permanently — fall back to
@@ -1049,7 +1067,10 @@ LpResult PdlpSolver::solveGpu() {
                         graphCaptureFailed = true;
                         cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
                                         cudaMemcpyHostToDevice, stream);
-                        launchBatch(batch);
+                        if (!launchBatch(batch)) {
+                            failGpuSolve(total_count);
+                            goto cleanup;
+                        }
                     } else {
                         cudaGraphInstantiate(&graphExec, graph, 0);
                         // Execute the captured graph for this first batch.
@@ -1067,7 +1088,10 @@ LpResult PdlpSolver::solveGpu() {
                 // Last partial batch: fall back to non-graph launches.
                 cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
                                 cudaMemcpyHostToDevice, stream);
-                launchBatch(batch);
+                if (!launchBatch(batch)) {
+                    failGpuSolve(total_count);
+                    goto cleanup;
+                }
             }
 
             inner_count += batch;
@@ -1077,23 +1101,17 @@ LpResult PdlpSolver::solveGpu() {
         // --- Convergence check ---
         // Compute A * pdhg_x, delta_y, A^T * delta_y, then refresh A^T * pdhg_y.
         if (!spmv_a(desc_pdhg_x, desc_ax)) {
-            status_ = Status::Error;
-            objective_ = 0.0;
-            iterations_ = total_count;
+            failGpuSolve(total_count);
             goto cleanup;
         }
         launchSubtract(m, d_pdhg_y, d_initial_y, d_delta_y, stream);
         if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-            status_ = Status::Error;
-            objective_ = 0.0;
-            iterations_ = total_count;
+            failGpuSolve(total_count);
             goto cleanup;
         }
         // Refresh A^T * pdhg_y immediately before convergence reduction.
         if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-            status_ = Status::Error;
-            objective_ = 0.0;
-            iterations_ = total_count;
+            failGpuSolve(total_count);
             goto cleanup;
         }
 

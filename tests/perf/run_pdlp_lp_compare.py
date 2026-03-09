@@ -198,10 +198,14 @@ def run_mipx_pdlp(
     iterations = parse_first_float(r"^Iterations:\s*([\-+0-9.eE]+)\s*$", out)
     work = parse_first_float(r"^Work units:\s*([\-+0-9.eE]+)\s*$", out)
     solve_time = parse_first_float(r"^Time:\s*([\-+0-9.eE]+)s\s*$", out)
+    if solve_time is None or solve_time <= 0.0:
+        # The CLI time is printed with coarse precision on very fast solves.
+        # Fall back to wall time to keep regression metrics strictly positive.
+        solve_time = elapsed
 
     return SolverResult(
         status=status,
-        time_seconds=solve_time if solve_time is not None else elapsed,
+        time_seconds=solve_time,
         iterations=iterations,
         objective=objective,
         work_units=work,
