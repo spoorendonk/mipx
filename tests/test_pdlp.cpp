@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <string>
 #include <utility>
 
 #include "mipx/dual_simplex.h"
@@ -174,10 +175,23 @@ TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
     concurrent_solver.setCutsEnabled(false);
     concurrent_solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
     concurrent_solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
-    concurrent_solver.setBarrierUseGpu(false);
+    concurrent_solver.setBarrierUseGpu(true);
+    concurrent_solver.setBarrierGpuThresholds(0, 0);
     concurrent_solver.setPdlpUseGpu(false);
     concurrent_solver.load(lp);
-    auto concurrent_result = concurrent_solver.solve();
+    MipResult concurrent_result{};
+    try {
+        concurrent_result = concurrent_solver.solve();
+    } catch (const std::exception& e) {
+        const std::string msg = e.what();
+        if (msg.find("Barrier GPU backend unavailable in this build") !=
+                std::string::npos ||
+            msg.find("Barrier GPU backend initialization failed") !=
+                std::string::npos) {
+            SKIP(msg);
+        }
+        throw;
+    }
 
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(concurrent_result.status == Status::Optimal);
@@ -196,10 +210,23 @@ TEST_CASE("Concurrent root deterministic mode is reproducible",
         solver.setCutsEnabled(false);
         solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
         solver.setRootLpPolicy(RootLpPolicy::ConcurrentRootExperimental);
-        solver.setBarrierUseGpu(false);
+        solver.setBarrierUseGpu(true);
+        solver.setBarrierGpuThresholds(0, 0);
         solver.setPdlpUseGpu(false);
         solver.load(lp);
-        auto result = solver.solve();
+        MipResult result{};
+        try {
+            result = solver.solve();
+        } catch (const std::exception& e) {
+            const std::string msg = e.what();
+            if (msg.find("Barrier GPU backend unavailable in this build") !=
+                    std::string::npos ||
+                msg.find("Barrier GPU backend initialization failed") !=
+                    std::string::npos) {
+                SKIP(msg);
+            }
+            throw;
+        }
         return std::make_pair(result, solver.getLpStats());
     };
 

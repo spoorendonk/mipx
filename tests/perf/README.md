@@ -217,10 +217,10 @@ Shell wrapper:
 ```
 
 Enforced by default:
-- Algorithmic regression gate on `work_units` for both:
-  - `mipx_barrier_cpu`
+- Algorithmic regression gate on `work_units` for:
   - `mipx_barrier_gpu`
 - Default thresholds are strict (`0.0%` median regression allowed).
+- CPU barrier lanes are available with `--enable-cpu-barrier-lanes`.
 
 Opt-in wall-clock bands (machine-noise aware, separate lanes):
 
@@ -229,14 +229,16 @@ python3 tests/perf/run_barrier_lp_regression_gate.py \
   --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --instances-dir tests/data/netlib \
+  --enable-cpu-barrier-lanes \
   --enable-wall-clock-bands \
   --simd-wall-clock-max-regression-pct 8 \
   --gpu-wall-clock-max-regression-pct 12
 ```
 
 Notes:
-- CPU wall-clock lane models SIMD/AVX regressions (`mipx_barrier_cpu`).
 - GPU wall-clock lane is gated independently (`mipx_barrier_gpu`).
+- CPU wall-clock SIMD/AVX lane (`mipx_barrier_cpu`) is enabled only when
+  `--enable-cpu-barrier-lanes` is passed.
 - Wall-clock checks are disabled unless `--enable-wall-clock-bands` is set.
 
 ## PDLP LP Comparison (mipx vs HiGHS vs cuOpt)

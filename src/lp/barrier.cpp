@@ -4,9 +4,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <stdexcept>
 #include <utility>
-
-#include "mipx/dual_simplex.h"
 
 #ifdef MIPX_HAS_CUDA
 // Defined in barrier_gpu.cu — thin C++ linkage bridge.
@@ -32,12 +31,6 @@ inline bool isFinite(Real v) {
     return std::isfinite(v);
 }
 
-inline Real l2Norm(std::span<const Real> v) {
-    Real sum = 0.0;
-    for (Real x : v) sum += x * x;
-    return std::sqrt(sum);
-}
-
 inline Real infNorm(std::span<const Real> v) {
     Real n = 0.0;
     for (Real x : v) n = std::max(n, std::abs(x));
@@ -48,19 +41,6 @@ inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     Real s = 0.0;
     for (Index i = 0; i < static_cast<Index>(a.size()); ++i) s += a[i] * b[i];
     return s;
-}
-
-inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx,
-                              Real fraction) {
-    Real alpha = 1.0;
-    for (Index i = 0; i < static_cast<Index>(x.size()); ++i) {
-        if (dx[i] < 0.0) {
-            alpha = std::min(alpha, -fraction * x[i] / dx[i]);
-        }
-    }
-    if (alpha < 0.0) alpha = 0.0;
-    if (alpha > 1.0) alpha = 1.0;
-    return alpha;
 }
 
 }  // namespace
@@ -342,6 +322,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     row_scale_.clear();
     col_scale_.clear();
     dense_cols_.clear();
+    last_error_.clear();
     transformed_ok_ = buildStandardForm();
 }
 
@@ -491,6 +472,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
                                       std::vector<Real>& y,
                                       std::vector<Real>& s,
                                       Int& iters) {
+    last_error_.clear();
     const Index m = aeq_.numRows();
     const Index n = aeq_.numCols();
     if (n == 0) {
@@ -520,25 +502,42 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     // Detect dense columns.
     detectDenseColumns();
 
-    // Try GPU path first.
-#ifdef MIPX_HAS_CUDA
-    bool gpu_worthwhile = options_.use_gpu &&
-                          aeq_.numRows() >= options_.gpu_min_rows &&
-                          aeq_.numNonzeros() >= options_.gpu_min_nnz;
-    if (gpu_worthwhile) {
-        bool gpu_ok = solveStandardFormGpu(z, y, s, iters);
-        if (gpu_ok || used_gpu_) {
-            return gpu_ok;
-        }
-        // GPU init failed (e.g. NE too dense for Cholesky).
-        // CPU CG with diagonal preconditioning won't help either —
-        // fall through to dual simplex fallback.
+    if (!options_.use_gpu) {
+        last_error_ =
+            "Barrier currently requires GPU backend; run with --gpu "
+            "or enable CUDA barrier backends.";
         return false;
     }
-#endif
 
-    // CPU CG fallback (used when CUDA not available or GPU not requested).
-    return solveStandardFormCpu(z, y, s, iters);
+    if (aeq_.numRows() < options_.gpu_min_rows ||
+        aeq_.numNonzeros() < options_.gpu_min_nnz) {
+        char msg[256];
+        std::snprintf(
+            msg, sizeof(msg),
+            "Barrier GPU thresholds not met: rows=%d (min=%d), nnz=%d (min=%d).",
+            static_cast<int>(aeq_.numRows()),
+            static_cast<int>(options_.gpu_min_rows),
+            static_cast<int>(aeq_.numNonzeros()),
+            static_cast<int>(options_.gpu_min_nnz));
+        last_error_ = msg;
+        return false;
+    }
+
+#ifdef MIPX_HAS_CUDA
+    bool ok = solveStandardFormGpu(z, y, s, iters);
+    if (ok) return true;
+    if (last_error_.empty()) {
+        last_error_ = used_gpu_
+                          ? "Barrier GPU solve failed."
+                          : "Barrier GPU backend initialization failed.";
+    }
+    return false;
+#else
+    last_error_ =
+        "Barrier GPU backend unavailable in this build "
+        "(rebuild with -DMIPX_USE_CUDA=ON and a detected CUDA toolkit).";
+    return false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -556,312 +555,20 @@ bool BarrierSolver::solveStandardFormGpu(
                                        std_obj_offset_, z, y, s, iters,
                                        gpu_initialized);
     if (gpu_initialized) used_gpu_ = true;
+    if (!ok && !gpu_initialized && last_error_.empty()) {
+        last_error_ = "Barrier GPU backend initialization failed.";
+    } else if (!ok && last_error_.empty()) {
+        last_error_ = "Barrier GPU solve failed.";
+    }
     return ok;
 #else
+    if (last_error_.empty()) {
+        last_error_ =
+            "Barrier GPU backend unavailable in this build "
+            "(rebuild with -DMIPX_USE_CUDA=ON and a detected CUDA toolkit).";
+    }
     return false;
 #endif
-}
-
-// ---------------------------------------------------------------------------
-// CPU CG fallback (preserved from original, with Mehrotra starting point)
-// ---------------------------------------------------------------------------
-
-bool BarrierSolver::solveStandardFormCpu(std::vector<Real>& z,
-                                         std::vector<Real>& y,
-                                         std::vector<Real>& s,
-                                         Int& iters) {
-    const Index m = aeq_.numRows();
-    const Index n = aeq_.numCols();
-    const Real reg = std::max(options_.regularization, 1e-12);
-
-    z.assign(static_cast<size_t>(n), 1.0);
-    y.assign(static_cast<size_t>(m), 0.0);
-    s.assign(static_cast<size_t>(n), 1.0);
-
-    // Mehrotra starting point on CPU.
-    {
-        // Compute diagonal preconditioner for A*A' with D=I.
-        std::vector<Real> diag(static_cast<size_t>(m), reg);
-        for (Index i = 0; i < m; ++i) {
-            auto rv = aeq_.row(i);
-            Real d = reg;
-            for (Index k = 0; k < rv.size(); ++k) {
-                Real a = rv.values[k];
-                d += a * a;
-            }
-            diag[i] = std::max(d, reg);
-        }
-
-        // Solve (A*A' + reg*I)*y0 ≈ b via CG with diagonal preconditioner.
-        std::vector<Real> cg_r = beq_;
-        std::vector<Real> cg_z_vec(static_cast<size_t>(m), 0.0);
-        std::vector<Real> cg_p(static_cast<size_t>(m), 0.0);
-        std::vector<Real> cg_q(static_cast<size_t>(m), 0.0);
-        std::vector<Real> cg_tmp(static_cast<size_t>(n), 0.0);
-
-        std::fill(y.begin(), y.end(), 0.0);
-        for (Index i = 0; i < m; ++i) cg_z_vec[i] = cg_r[i] / diag[i];
-        cg_p = cg_z_vec;
-        Real rz = dot(cg_r, cg_z_vec);
-        Real rhs_norm = l2Norm(beq_);
-
-        if (rhs_norm > 1e-30) {
-            Real tol_abs = std::max(1e-6 * rhs_norm, 1e-14);
-            for (Index it = 0; it < std::min(options_.max_cg_iter, (Int)100); ++it) {
-                // q = A * (A' * p) + reg * p.
-                aeq_.multiplyTranspose(cg_p, cg_tmp);
-                aeq_.multiply(cg_tmp, cg_q);
-                for (Index i = 0; i < m; ++i) cg_q[i] += reg * cg_p[i];
-
-                Real pAp = dot(cg_p, cg_q);
-                if (std::abs(pAp) < 1e-30) break;
-
-                Real alpha = rz / pAp;
-                for (Index i = 0; i < m; ++i) {
-                    y[i] += alpha * cg_p[i];
-                    cg_r[i] -= alpha * cg_q[i];
-                }
-                if (l2Norm(cg_r) <= tol_abs) break;
-
-                for (Index i = 0; i < m; ++i) cg_z_vec[i] = cg_r[i] / diag[i];
-                Real rz_new = dot(cg_r, cg_z_vec);
-                if (std::abs(rz) < 1e-30) break;
-                Real beta = rz_new / rz;
-                for (Index i = 0; i < m; ++i) cg_p[i] = cg_z_vec[i] + beta * cg_p[i];
-                rz = rz_new;
-            }
-        }
-
-        // z0 = A' * y0.
-        aeq_.multiplyTranspose(y, z);
-
-        // s0 = c - A' * y0 = c - z0.
-        for (Index j = 0; j < n; ++j) s[j] = cstd_[j] - z[j];
-
-        // Shift to positivity.
-        Real min_z = *std::min_element(z.begin(), z.end());
-        Real min_s = *std::min_element(s.begin(), s.end());
-        Real delta_z = std::max(-1.5 * min_z, 0.0);
-        Real delta_s = std::max(-1.5 * min_s, 0.0);
-
-        for (Index j = 0; j < n; ++j) {
-            z[j] += delta_z;
-            s[j] += delta_s;
-        }
-
-        // Centering correction.
-        Real zs_dot = dot(z, s);
-        Real z_sum = 0.0, s_sum = 0.0;
-        for (Index j = 0; j < n; ++j) { z_sum += z[j]; s_sum += s[j]; }
-        Real dp = 0.5 * zs_dot / std::max(s_sum, 1e-30);
-        Real dd = 0.5 * zs_dot / std::max(z_sum, 1e-30);
-        for (Index j = 0; j < n; ++j) {
-            z[j] = std::max(z[j] + dp, 1e-4);
-            s[j] = std::max(s[j] + dd, 1e-4);
-        }
-    }
-
-    // IPM work vectors.
-    std::vector<Real> az(static_cast<size_t>(m), 0.0);
-    std::vector<Real> at_y(static_cast<size_t>(n), 0.0);
-    std::vector<Real> rp(static_cast<size_t>(m), 0.0);
-    std::vector<Real> rd(static_cast<size_t>(n), 0.0);
-    std::vector<Real> rc(static_cast<size_t>(n), 0.0);
-    std::vector<Real> theta(static_cast<size_t>(n), 0.0);
-    std::vector<Real> h(static_cast<size_t>(n), 0.0);
-    std::vector<Real> ah(static_cast<size_t>(m), 0.0);
-    std::vector<Real> rhs(static_cast<size_t>(m), 0.0);
-    std::vector<Real> dy(static_cast<size_t>(m), 0.0);
-    std::vector<Real> at_dy(static_cast<size_t>(n), 0.0);
-    std::vector<Real> dz(static_cast<size_t>(n), 0.0);
-    std::vector<Real> ds(static_cast<size_t>(n), 0.0);
-    std::vector<Real> dz_aff(static_cast<size_t>(n), 0.0);
-    std::vector<Real> dy_aff(static_cast<size_t>(m), 0.0);
-    std::vector<Real> ds_aff(static_cast<size_t>(n), 0.0);
-
-    std::vector<Real> diag_precond(static_cast<size_t>(m), reg);
-    std::vector<Real> cg_r(static_cast<size_t>(m), 0.0);
-    std::vector<Real> cg_z_cg(static_cast<size_t>(m), 0.0);
-    std::vector<Real> cg_p(static_cast<size_t>(m), 0.0);
-    std::vector<Real> cg_q(static_cast<size_t>(m), 0.0);
-    std::vector<Real> cg_tmp_n(static_cast<size_t>(n), 0.0);
-
-    auto applyNormalEq = [&](std::span<const Real> v, std::span<Real> out,
-                             std::span<const Real> theta_local) -> bool {
-        std::fill(cg_tmp_n.begin(), cg_tmp_n.end(), 0.0);
-        aeq_.multiplyTranspose(v, cg_tmp_n);
-        for (Index j = 0; j < n; ++j) cg_tmp_n[j] *= theta_local[j];
-        aeq_.multiply(cg_tmp_n, out);
-        for (Index i = 0; i < m; ++i) out[i] += reg * v[i];
-        return true;
-    };
-
-    auto solveNormalEq = [&](std::span<const Real> rhs_local,
-                             std::span<Real> sol,
-                             std::span<const Real> theta_local,
-                             Real cg_rel_tol_local) -> bool {
-        std::fill(sol.begin(), sol.end(), 0.0);
-
-        std::fill(diag_precond.begin(), diag_precond.end(), reg);
-        for (Index i = 0; i < m; ++i) {
-            auto rv = aeq_.row(i);
-            Real d = reg;
-            for (Index k = 0; k < rv.size(); ++k) {
-                Index j = rv.indices[k];
-                Real a = rv.values[k];
-                d += theta_local[j] * a * a;
-            }
-            diag_precond[i] = std::max(d, reg);
-        }
-
-        cg_r.assign(rhs_local.begin(), rhs_local.end());
-        for (Index i = 0; i < m; ++i) cg_z_cg[i] = cg_r[i] / diag_precond[i];
-        cg_p = cg_z_cg;
-
-        Real rz = dot(cg_r, cg_z_cg);
-        Real rhs_n = l2Norm(rhs_local);
-        if (rhs_n < 1e-30) {
-            std::fill(sol.begin(), sol.end(), 0.0);
-            return true;
-        }
-
-        Real tol_abs = std::max(cg_rel_tol_local * rhs_n, 1e-14);
-
-        for (Index it = 0; it < options_.max_cg_iter; ++it) {
-            if (options_.stop_flag != nullptr &&
-                options_.stop_flag->load(std::memory_order_relaxed)) {
-                return false;
-            }
-            std::fill(cg_q.begin(), cg_q.end(), 0.0);
-            if (!applyNormalEq(cg_p, cg_q, theta_local)) return false;
-            Real pAp = dot(cg_p, cg_q);
-            if (std::abs(pAp) < 1e-30) return false;
-
-            Real alpha = rz / pAp;
-            for (Index i = 0; i < m; ++i) {
-                sol[i] += alpha * cg_p[i];
-                cg_r[i] -= alpha * cg_q[i];
-            }
-
-            Real rnorm = l2Norm(cg_r);
-            if (rnorm <= tol_abs) return true;
-
-            for (Index i = 0; i < m; ++i) cg_z_cg[i] = cg_r[i] / diag_precond[i];
-            Real rz_new = dot(cg_r, cg_z_cg);
-            if (std::abs(rz) < 1e-30) return false;
-            Real beta = rz_new / rz;
-            for (Index i = 0; i < m; ++i) cg_p[i] = cg_z_cg[i] + beta * cg_p[i];
-            rz = rz_new;
-        }
-
-        return false;
-    };
-
-    auto solveNewton = [&](std::span<const Real> rp_local,
-                           std::span<const Real> rd_local,
-                           std::span<const Real> rc_local,
-                           std::span<Real> dz_out,
-                           std::span<Real> dy_out,
-                           std::span<Real> ds_out,
-                           Real cg_rel_tol_local) -> bool {
-        for (Index j = 0; j < n; ++j) {
-            Real sj = std::max(s[j], 1e-12);
-            theta[j] = z[j] / sj;
-            h[j] = rc_local[j] / sj - theta[j] * rd_local[j];
-        }
-
-        std::fill(ah.begin(), ah.end(), 0.0);
-        aeq_.multiply(h, ah);
-        for (Index i = 0; i < m; ++i) rhs[i] = rp_local[i] - ah[i];
-
-        if (!solveNormalEq(rhs, dy_out, theta, cg_rel_tol_local)) return false;
-
-        std::fill(at_dy.begin(), at_dy.end(), 0.0);
-        aeq_.multiplyTranspose(dy_out, at_dy);
-
-        for (Index j = 0; j < n; ++j) {
-            ds_out[j] = rd_local[j] - at_dy[j];
-            dz_out[j] = h[j] + theta[j] * at_dy[j];
-        }
-        return true;
-    };
-
-    const Real inv_b = 1.0 / (1.0 + infNorm(beq_));
-    const Real inv_c = 1.0 / (1.0 + infNorm(cstd_));
-
-    for (Index iter = 0; iter < options_.max_iter; ++iter) {
-        if (options_.stop_flag != nullptr &&
-            options_.stop_flag->load(std::memory_order_relaxed)) {
-            iters = iter;
-            return false;
-        }
-        std::fill(az.begin(), az.end(), 0.0);
-        std::fill(at_y.begin(), at_y.end(), 0.0);
-        aeq_.multiply(z, az);
-        aeq_.multiplyTranspose(y, at_y);
-
-        for (Index i = 0; i < m; ++i) rp[i] = beq_[i] - az[i];
-        for (Index j = 0; j < n; ++j) rd[j] = cstd_[j] - at_y[j] - s[j];
-
-        Real mu = dot(z, s) / std::max<Index>(n, 1);
-        Real primal_inf = infNorm(rp) * inv_b;
-        Real dual_inf = infNorm(rd) * inv_c;
-        Real gap = std::abs(mu) / (1.0 + std::abs(std_obj_offset_ + dot(cstd_, z)));
-
-        if (options_.verbose) {
-            std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e\n",
-                        iter,
-                        std_obj_offset_ + dot(cstd_, z),
-                        primal_inf, dual_inf, gap);
-        }
-
-        if (primal_inf < options_.primal_dual_tol &&
-            dual_inf < options_.primal_dual_tol &&
-            gap < options_.primal_dual_tol) {
-            iters = iter;
-            return true;
-        }
-
-        for (Index j = 0; j < n; ++j) rc[j] = -z[j] * s[j];
-        const Real cg_rel_tol_iter =
-            std::clamp(std::sqrt(std::max(std::abs(mu), 1e-30)),
-                       options_.cg_rel_tol, 1e-3);
-
-        if (!solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff, cg_rel_tol_iter)) return false;
-
-        Real alpha_aff_p = maxStepToBoundary(z, dz_aff, 1.0);
-        Real alpha_aff_d = maxStepToBoundary(s, ds_aff, 1.0);
-
-        Real mu_aff = 0.0;
-        for (Index j = 0; j < n; ++j) {
-            mu_aff += (z[j] + alpha_aff_p * dz_aff[j]) *
-                      (s[j] + alpha_aff_d * ds_aff[j]);
-        }
-        mu_aff /= std::max<Index>(n, 1);
-
-        Real sigma = std::pow(std::max(mu_aff, 0.0) / std::max(mu, 1e-30), 3.0);
-        sigma = std::clamp(sigma, 0.0, 1.0);
-
-        for (Index j = 0; j < n; ++j) {
-            rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
-        }
-
-        if (!solveNewton(rp, rd, rc, dz, dy, ds, cg_rel_tol_iter)) return false;
-
-        Real alpha_p = maxStepToBoundary(z, dz, options_.step_fraction);
-        Real alpha_d = maxStepToBoundary(s, ds, options_.step_fraction);
-
-        for (Index j = 0; j < n; ++j) {
-            z[j] += alpha_p * dz[j];
-            s[j] += alpha_d * ds[j];
-            z[j] = std::max(z[j], 1e-12);
-            s[j] = std::max(s[j], 1e-12);
-        }
-        for (Index i = 0; i < m; ++i) y[i] += alpha_d * dy[i];
-    }
-
-    iters = options_.max_iter;
-    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -896,24 +603,12 @@ LpResult BarrierSolver::solve() {
             iterations_ = iters;
             return {status_, objective_, iterations_, 0.0};
         }
-
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
-        dual_eq_.clear();
-        reduced_costs_std_.clear();
-
-        double seconds = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        double work = fb.work_units;
-        (void)seconds;
-        return {status_, objective_, iterations_, work};
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        std::string msg =
+            last_error_.empty() ? "Barrier solve failed." : last_error_;
+        throw std::runtime_error(msg + " (dual-simplex fallback disabled).");
     }
 
     // Compute objective in scaled space (before unscaling).
@@ -924,18 +619,12 @@ LpResult BarrierSolver::solve() {
 
     reconstructOriginalPrimals(z);
     if (!checkOriginalPrimalFeasibility(primal_orig_)) {
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
-        dual_eq_.clear();
-        reduced_costs_std_.clear();
-        return {status_, objective_, iterations_, fb.work_units};
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        throw std::runtime_error(
+            "Barrier produced a primal-infeasible solution "
+            "(dual-simplex fallback disabled).");
     }
 
     dual_eq_ = y;

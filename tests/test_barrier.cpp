@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include <string>
 
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
@@ -9,6 +12,30 @@ using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
 namespace {
+
+BarrierOptions gpuBarrierOpts() {
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = true;
+    opts.gpu_min_rows = 0;
+    opts.gpu_min_nnz = 0;
+    return opts;
+}
+
+LpResult solveBarrierOrSkip(BarrierSolver& solver) {
+    try {
+        return solver.solve();
+    } catch (const std::exception& e) {
+        const std::string msg = e.what();
+        if (msg.find("Barrier GPU backend unavailable in this build") !=
+                std::string::npos ||
+            msg.find("Barrier GPU backend initialization failed") !=
+                std::string::npos) {
+            SKIP(msg);
+        }
+        throw;
+    }
+}
 
 LpProblem buildSimpleLp() {
     LpProblem lp;
@@ -148,12 +175,10 @@ TEST_CASE("BarrierSolver: solves simple LP", "[barrier]") {
     auto lp = buildSimpleLp();
 
     BarrierSolver solver;
-    BarrierOptions opts;
-    opts.verbose = false;
-    opts.use_gpu = false;
+    BarrierOptions opts = gpuBarrierOpts();
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    auto result = solveBarrierOrSkip(solver);
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
@@ -168,12 +193,10 @@ TEST_CASE("BarrierSolver: handles bounds-only LP", "[barrier]") {
     auto lp = buildBoundsOnlyLp();
 
     BarrierSolver solver;
-    BarrierOptions opts;
-    opts.verbose = false;
-    opts.use_gpu = false;
+    BarrierOptions opts = gpuBarrierOpts();
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    auto result = solveBarrierOrSkip(solver);
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
@@ -196,8 +219,24 @@ TEST_CASE("Barrier root policy: MIP objective matches dual root policy", "[barri
     barrier_solver.setVerbose(false);
     barrier_solver.setCutsEnabled(false);
     barrier_solver.setRootLpPolicy(RootLpPolicy::BarrierRoot);
+    barrier_solver.setBarrierUseGpu(true);
+    barrier_solver.setBarrierGpuThresholds(0, 0);
     barrier_solver.load(lp);
-    auto barrier_result = barrier_solver.solve();
+    MipResult barrier_result{};
+    try {
+        barrier_result = barrier_solver.solve();
+    } catch (const std::exception& e) {
+        const std::string msg = e.what();
+        if (msg.find("Barrier GPU backend unavailable in this build") !=
+                std::string::npos ||
+            msg.find("Barrier GPU thresholds not met") !=
+                std::string::npos ||
+            msg.find("Barrier GPU backend initialization failed") !=
+                std::string::npos) {
+            SKIP(msg);
+        }
+        throw;
+    }
 
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(barrier_result.status == Status::Optimal);
@@ -210,13 +249,11 @@ TEST_CASE("BarrierSolver: medium LP with scaling", "[barrier]") {
     auto lp = buildMediumLp();
 
     BarrierSolver solver;
-    BarrierOptions opts;
-    opts.verbose = false;
-    opts.use_gpu = false;
+    BarrierOptions opts = gpuBarrierOpts();
     opts.ruiz_iterations = 10;
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    auto result = solveBarrierOrSkip(solver);
 
     REQUIRE(result.status == Status::Optimal);
     CHECK(result.objective >= -1e-6);  // All costs positive, lower bounds 0.
@@ -240,12 +277,10 @@ TEST_CASE("BarrierSolver: maximization problem", "[barrier]") {
     auto lp = buildMaxLp();
 
     BarrierSolver solver;
-    BarrierOptions opts;
-    opts.verbose = false;
-    opts.use_gpu = false;
+    BarrierOptions opts = gpuBarrierOpts();
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    auto result = solveBarrierOrSkip(solver);
 
     REQUIRE(result.status == Status::Optimal);
 
@@ -263,23 +298,19 @@ TEST_CASE("BarrierSolver: scaling with no scaling gives same result", "[barrier]
 
     // With scaling.
     BarrierSolver solver1;
-    BarrierOptions opts1;
-    opts1.verbose = false;
-    opts1.use_gpu = false;
+    BarrierOptions opts1 = gpuBarrierOpts();
     opts1.ruiz_iterations = 10;
     solver1.setOptions(opts1);
     solver1.load(lp);
-    auto r1 = solver1.solve();
+    auto r1 = solveBarrierOrSkip(solver1);
 
     // Without scaling.
     BarrierSolver solver2;
-    BarrierOptions opts2;
-    opts2.verbose = false;
-    opts2.use_gpu = false;
+    BarrierOptions opts2 = gpuBarrierOpts();
     opts2.ruiz_iterations = 0;
     solver2.setOptions(opts2);
     solver2.load(lp);
-    auto r2 = solver2.solve();
+    auto r2 = solveBarrierOrSkip(solver2);
 
     REQUIRE(r1.status == Status::Optimal);
     REQUIRE(r2.status == Status::Optimal);
@@ -312,13 +343,11 @@ TEST_CASE("BarrierSolver: dense column detection", "[barrier]") {
     lp.matrix = SparseMatrix(3, 4, std::move(trips));
 
     BarrierSolver solver;
-    BarrierOptions opts;
-    opts.verbose = false;
-    opts.use_gpu = false;
+    BarrierOptions opts = gpuBarrierOpts();
     opts.dense_col_fraction = 0.5;  // threshold: nnz > 0.5 * 3 = 1.5, so col 0 is dense.
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    auto result = solveBarrierOrSkip(solver);
 
     REQUIRE(result.status == Status::Optimal);
 
@@ -330,3 +359,18 @@ TEST_CASE("BarrierSolver: dense column detection", "[barrier]") {
     REQUIRE(ds_result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
 }
+
+#ifndef MIPX_HAS_CUDA
+TEST_CASE("BarrierSolver: reports unavailable in non-CUDA build", "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts = gpuBarrierOpts();
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    REQUIRE_THROWS_WITH(
+        solver.solve(),
+        Catch::Matchers::ContainsSubstring("Barrier GPU backend unavailable in this build"));
+}
+#endif

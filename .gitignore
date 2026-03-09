@@ -11,3 +11,4 @@ tests/data/miplib/
 tests/data/mittelman_lp/
 tests/data/.cache/
 tests/data/*_roundtrip.mps
+plan-barrier.md

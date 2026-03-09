@@ -6,8 +6,49 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 MIPX=./build/mipx-solve
-TLIMIT="${2:-120}"
+MODE="--all"
+TLIMIT="120"
 RTOL=1e-4  # relative tolerance for objective comparison
+
+usage() {
+    echo "Usage: ./benchmark_barrier.sh [--netlib|--miplib|--all] [--time-limit N]"
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --netlib|--miplib|--all)
+            MODE="$1"
+            shift
+            ;;
+        --time-limit)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --time-limit requires a value" >&2
+                usage >&2
+                exit 2
+            fi
+            TLIMIT="$2"
+            shift 2
+            ;;
+        --time-limit=*)
+            TLIMIT="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "error: unknown option '$1'" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if ! [[ "$TLIMIT" =~ ^[0-9]+$ ]] || [[ "$TLIMIT" -le 0 ]]; then
+    echo "error: --time-limit must be a positive integer (seconds)" >&2
+    exit 2
+fi
 
 # Parse solu file into associative array
 declare -A SOLU_VALS
@@ -24,13 +65,22 @@ load_solu() {
 # Run mipx barrier (force GPU with min thresholds at 0)
 run_mipx() {
     local mps="$1"
-    local out
-    out=$(timeout "$TLIMIT" $MIPX "$mps" --barrier --no-presolve --relax-integrality --gpu --gpu-min-rows 0 --gpu-min-nnz 0 --quiet 2>&1) || true
+    local out rc=0
+    out=$(timeout "$TLIMIT" $MIPX "$mps" --barrier --no-presolve --relax-integrality --gpu --gpu-min-rows 0 --gpu-min-nnz 0 --quiet 2>&1) || rc=$?
     local obj status iters time_s
     obj=$(echo "$out" | grep "^Objective:" | awk '{print $2}')
     status=$(echo "$out" | grep "^Status:" | awk '{print $2}')
     iters=$(echo "$out" | grep "^Iterations:" | awk '{print $2}')
     time_s=$(echo "$out" | grep "^Time:" | awk '{print $2}' | sed 's/s//')
+    if [[ -z "${status:-}" ]]; then
+        if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+            status="timeout"
+        elif [[ "$rc" -ne 0 ]]; then
+            status="error"
+        else
+            status="timeout"
+        fi
+    fi
     echo "${status:-timeout}|${obj:-NA}|${iters:-NA}|${time_s:-NA}"
 }
 
@@ -209,8 +259,6 @@ run_set() {
     fi
     echo ""
 }
-
-MODE="${1:---all}"
 
 if [[ "$MODE" == "--netlib" || "$MODE" == "--all" ]]; then
     echo ""

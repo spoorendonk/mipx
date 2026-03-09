@@ -1157,7 +1157,7 @@ struct GpuBarrierImpl {
                                                          ctx.d_rc);
 
             if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc, ctx.d_dz_aff,
-                                 ctx.d_dy_aff, ctx.d_ds_aff))
+                                 ctx.d_dy_aff, ctx.d_ds_aff, opts.ir_steps))
                 return false;
 
             double alpha_aff_p =
@@ -1187,7 +1187,7 @@ struct GpuBarrierImpl {
                 ctx.d_rc);
 
             if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc, ctx.d_dz,
-                                 ctx.d_dy, ctx.d_ds))
+                                 ctx.d_dy, ctx.d_ds, opts.ir_steps))
                 return false;
 
             double alpha_p =
@@ -1217,7 +1217,7 @@ struct GpuBarrierImpl {
     // Solve Newton step: given rp, rd, rc, compute dz, dy, ds.
     bool solveNewtonStep(double* d_rp, double* d_rd, double* d_rc,
                          double* d_dz_out, double* d_dy_out,
-                         double* d_ds_out) {
+                         double* d_ds_out, int ir_steps) {
         int m = ctx.m, n = ctx.n;
 
         // h = rc/s - theta*rd.
@@ -1231,8 +1231,9 @@ struct GpuBarrierImpl {
         kernelNormalEqRhs<<<gridSize(m), kBlockSize, 0, ctx.stream>>>(
             m, d_rp, ctx.d_ah, ctx.d_rhs);
 
-        // Solve NE system for dy (with 2 steps of iterative refinement).
-        if (!ne_solver.solveRefined(ctx.d_rhs, d_dy_out, 2)) return false;
+        // Solve NE system for dy with caller-configured iterative refinement.
+        if (!ne_solver.solveRefined(ctx.d_rhs, d_dy_out, ir_steps))
+            return false;
 
         // atdy = A' * dy.
         ctx.multiplyAT(d_dy_out, ctx.d_atdy);

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "mipx/core.h"
@@ -29,10 +30,6 @@ struct BarrierOptions {
 
     // Iterative-refinement steps after each direct solve.
     Int ir_steps = 2;
-
-    // CG fallback options (used when CUDA is unavailable).
-    Int max_cg_iter = 500;
-    Real cg_rel_tol = 1e-10;
 
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
@@ -83,8 +80,6 @@ private:
                            std::vector<Real>& s, Int& iters);
     bool solveStandardFormGpu(std::vector<Real>& z, std::vector<Real>& y,
                               std::vector<Real>& s, Int& iters);
-    bool solveStandardFormCpu(std::vector<Real>& z, std::vector<Real>& y,
-                              std::vector<Real>& s, Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
 
@@ -124,6 +119,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+    std::string last_error_;
 
 };
 

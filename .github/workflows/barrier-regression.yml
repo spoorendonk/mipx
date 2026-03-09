@@ -1,0 +1,142 @@
+name: Barrier Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      instances:
+        description: "Comma-separated instance names (empty = all available)"
+        required: false
+        default: ""
+      max_instances:
+        description: "Max instances (0 = all)"
+        required: false
+        default: "0"
+      repeats:
+        description: "Runs per solver/instance"
+        required: false
+        default: "3"
+      time_limit:
+        description: "Per-instance time limit in seconds"
+        required: false
+        default: "60"
+      work_min_common_instances:
+        description: "Minimum common optimal instances for work-unit gates"
+        required: false
+        default: "5"
+      enable_cpu_barrier_lanes:
+        description: "Enable CPU barrier regression lanes"
+        required: false
+        type: boolean
+        default: false
+      enable_wall_clock_bands:
+        description: "Enable wall-clock regression bands"
+        required: false
+        type: boolean
+        default: false
+      wall_clock_min_common_instances:
+        description: "Minimum common optimal instances for wall-clock bands"
+        required: false
+        default: "5"
+      simd_wall_clock_max_regression_pct:
+        description: "CPU wall-clock max median regression (%)"
+        required: false
+        default: "8"
+      gpu_wall_clock_max_regression_pct:
+        description: "GPU wall-clock max median regression (%)"
+        required: false
+        default: "12"
+
+jobs:
+  barrier-regression:
+    runs-on: [self-hosted, linux, x64, gpu]
+    env:
+      BASELINE_WORKTREE: ${{ runner.temp }}/mipx-main-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps (apt-based runners)
+        run: |
+          set -euxo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build zlib1g-dev libtbb-dev
+          fi
+
+      - name: Prepare baseline worktree (origin/main)
+        run: |
+          set -euxo pipefail
+          git fetch origin main --depth=1
+          git worktree prune
+          if git worktree list --porcelain | grep -Fqx "worktree ${BASELINE_WORKTREE}"; then
+            git worktree remove --force "${BASELINE_WORKTREE}"
+          fi
+          rm -rf "${BASELINE_WORKTREE}"
+          git worktree add --detach "${BASELINE_WORKTREE}" origin/main
+
+      - name: Download Netlib instances (small set)
+        run: |
+          set -euxo pipefail
+          ./tests/data/download_netlib.sh --small
+
+      - name: Configure + build baseline binary
+        run: |
+          set -euxo pipefail
+          cmake -S "${BASELINE_WORKTREE}" -B "${BASELINE_WORKTREE}/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMIPX_BUILD_TESTS=OFF \
+            -DMIPX_BUILD_PYTHON=OFF
+          cmake --build "${BASELINE_WORKTREE}/build" -j"$(nproc)"
+
+      - name: Configure + build candidate binary
+        run: |
+          set -euxo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMIPX_BUILD_TESTS=OFF \
+            -DMIPX_BUILD_PYTHON=OFF
+          cmake --build build -j"$(nproc)"
+
+      - name: Run barrier regression gate
+        run: |
+          set -euxo pipefail
+          extra_args=()
+          if [[ "${{ inputs.enable_cpu_barrier_lanes }}" == "true" ]]; then
+            extra_args+=(--enable-cpu-barrier-lanes)
+          fi
+          if [[ "${{ inputs.enable_wall_clock_bands }}" == "true" ]]; then
+            extra_args+=(
+              --enable-wall-clock-bands
+              --wall-clock-min-common-instances "${{ inputs.wall_clock_min_common_instances }}"
+              --simd-wall-clock-max-regression-pct "${{ inputs.simd_wall_clock_max_regression_pct }}"
+              --gpu-wall-clock-max-regression-pct "${{ inputs.gpu_wall_clock_max_regression_pct }}"
+            )
+          fi
+          python3 tests/perf/run_barrier_lp_regression_gate.py \
+            --candidate-binary ./build/mipx-solve \
+            --baseline-binary "${BASELINE_WORKTREE}/build/mipx-solve" \
+            --instances-dir tests/data/netlib \
+            --instances "${{ inputs.instances }}" \
+            --max-instances "${{ inputs.max_instances }}" \
+            --repeats "${{ inputs.repeats }}" \
+            --time-limit "${{ inputs.time_limit }}" \
+            --work-min-common-instances "${{ inputs.work_min_common_instances }}" \
+            --out-dir /tmp/mipx_barrier_gate \
+            "${extra_args[@]}"
+
+      - name: Upload barrier gate outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: barrier-regression-results
+          path: /tmp/mipx_barrier_gate
+
+      - name: Cleanup baseline worktree
+        if: always()
+        run: |
+          set -euxo pipefail
+          if git worktree list --porcelain | grep -Fqx "worktree ${BASELINE_WORKTREE}"; then
+            git worktree remove --force "${BASELINE_WORKTREE}"
+          fi
+          rm -rf "${BASELINE_WORKTREE}"

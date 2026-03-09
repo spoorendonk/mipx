@@ -2,9 +2,11 @@
 """Run barrier LP self-regression gate (candidate vs baseline mipx binaries).
 
 This workflow enforces two independent checks:
-1) Algorithmic regressions: strict `work_units` checks (CPU lane + GPU lane).
-2) Wall-clock bands: optional `time_seconds` checks for CPU (SIMD/AVX lane)
-   and GPU lane, with separate tolerances for machine-noise-aware gating.
+1) Algorithmic regressions: strict `work_units` checks (GPU lane by default;
+   optional CPU lane when enabled).
+2) Wall-clock bands: optional `time_seconds` checks (GPU lane by default;
+   optional CPU SIMD/AVX lane when enabled), with separate tolerances for
+   machine-noise-aware gating.
 """
 
 from __future__ import annotations
@@ -100,6 +102,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Minimum common optimal instances required for work_units checks.",
+    )
+    p.add_argument(
+        "--enable-cpu-barrier-lanes",
+        action="store_true",
+        help=(
+            "Enable CPU barrier regression lanes. "
+            "Disabled by default while CPU barrier backends are under development."
+        ),
     )
 
     # Opt-in wall-clock band checks.
@@ -296,13 +306,6 @@ def main() -> int:
 
     work_lanes = [
         GateLane(
-            name="Algorithmic gate (CPU barrier, work_units)",
-            solver="mipx_barrier_cpu",
-            metric="work_units",
-            max_regression_pct=args.cpu_work_max_regression_pct,
-            min_common_instances=args.work_min_common_instances,
-        ),
-        GateLane(
             name="Algorithmic gate (GPU barrier, work_units)",
             solver="mipx_barrier_gpu",
             metric="work_units",
@@ -310,6 +313,17 @@ def main() -> int:
             min_common_instances=args.work_min_common_instances,
         ),
     ]
+    if args.enable_cpu_barrier_lanes:
+        work_lanes.insert(
+            0,
+            GateLane(
+                name="Algorithmic gate (CPU barrier, work_units)",
+                solver="mipx_barrier_cpu",
+                metric="work_units",
+                max_regression_pct=args.cpu_work_max_regression_pct,
+                min_common_instances=args.work_min_common_instances,
+            ),
+        )
 
     for lane in work_lanes:
         print(f"\n=== {lane.name} ===")
@@ -318,13 +332,6 @@ def main() -> int:
     if args.enable_wall_clock_bands:
         time_lanes = [
             GateLane(
-                name="Wall-clock band (CPU barrier SIMD/AVX lane)",
-                solver="mipx_barrier_cpu",
-                metric="time_seconds",
-                max_regression_pct=args.simd_wall_clock_max_regression_pct,
-                min_common_instances=args.wall_clock_min_common_instances,
-            ),
-            GateLane(
                 name="Wall-clock band (GPU barrier lane)",
                 solver="mipx_barrier_gpu",
                 metric="time_seconds",
@@ -332,6 +339,17 @@ def main() -> int:
                 min_common_instances=args.wall_clock_min_common_instances,
             ),
         ]
+        if args.enable_cpu_barrier_lanes:
+            time_lanes.insert(
+                0,
+                GateLane(
+                    name="Wall-clock band (CPU barrier SIMD/AVX lane)",
+                    solver="mipx_barrier_cpu",
+                    metric="time_seconds",
+                    max_regression_pct=args.simd_wall_clock_max_regression_pct,
+                    min_common_instances=args.wall_clock_min_common_instances,
+                ),
+            )
         for lane in time_lanes:
             print(f"\n=== {lane.name} ===")
             run_lane_gate(lane, baseline_compare_csv, candidate_compare_csv, out_dir)
