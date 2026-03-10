@@ -748,9 +748,9 @@ LpResult DualSimplexSolver::solve() {
     // full reinversions and update-drift stalls.
     Int lu_update_limit = options_.lu_update_limit;
     if (lu_update_limit <= 0) {
-        // Wall-clock tuned default for no-presolve dual simplex:
-        // keep FT updates longer before reinversion.
-        lu_update_limit = 150;
+        // Narrower bases benefit from earlier reinversion, while larger bases
+        // still prefer a deeper Forrest-Tomlin update chain.
+        lu_update_limit = (num_rows_ < 2000) ? 75 : 150;
     }
     lu_.setMaxUpdates(lu_update_limit);
     Real lu_ft_drop_tol = options_.lu_ft_drop_tolerance;
@@ -1236,7 +1236,6 @@ LpResult DualSimplexSolver::solve() {
         } else {
             ++iters_since_pinf_improve;
         }
-
         if (leaving_row < 0) {
             // All basic variables are primal feasible.
 
