@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--binary", default=str(ROOT_DIR / "build" / "mipx-solve"))
     p.add_argument("--netlib-dir", default=str(ROOT_DIR / "tests" / "data" / "netlib"))
     p.add_argument("--mittelman-dir", default=str(ROOT_DIR / "tests" / "data" / "mittelman_lp"))
+    p.add_argument("--miplib-dir", default=str(ROOT_DIR / "tests" / "data" / "miplib"))
     p.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     p.add_argument("--netlib-corpus", default=str(PERF_DIR / "netlib_dual_corpus.csv"))
     p.add_argument("--mittelman-corpus", default=str(PERF_DIR / "mittelman_dual_corpus.csv"))
@@ -81,7 +82,7 @@ def main() -> int:
     mittelman_out = out_dir / "mipx_dual_lp_mittelman_curated.csv"
     meta_out = out_dir / "mipx_dual_lp_baseline_meta.json"
 
-    solver_args = ["--dual", "--no-presolve", "--quiet", *args.solver_arg]
+    solver_args = ["--dual", "--no-presolve", "--relax-integrality", "--quiet", *args.solver_arg]
     solver_arg_tokens: list[str] = []
     for sarg in solver_args:
         solver_arg_tokens.extend(["--solver-arg", sarg])
@@ -113,6 +114,8 @@ def main() -> int:
             str(binary),
             "--mittelman-dir",
             args.mittelman_dir,
+            "--miplib-dir",
+            args.miplib_dir,
             "--netlib-dir",
             args.netlib_dir,
             "--output",

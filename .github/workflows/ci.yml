@@ -39,6 +39,46 @@ jobs:
       - name: Run Python tests
         run: pytest -q python/tests
 
+  dual-perf-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build zlib1g-dev libtbb-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install HiGHS
+        run: python3 -m pip install highspy
+      - name: Check HiGHS CLI
+        run: |
+          command -v highs >/dev/null
+          highs --version
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build -j2
+      - name: Download dual gate datasets
+        run: |
+          ./tests/data/download_netlib.sh
+          ./tests/data/download_miplib.sh --small
+      - name: Run dual simplex perf gate
+        run: |
+          python3 tests/perf/run_dual_perf_gate.py \
+            --candidate-binary ./build/mipx-solve \
+            --highs-binary highs \
+            --netlib-dir ./tests/data/netlib \
+            --miplib-dir ./tests/data/miplib \
+            --baseline-netlib-csv ./tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv \
+            --baseline-mittelman-csv ./tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv \
+            --out-dir /tmp/dual-perf-gate
+      - name: Upload dual gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dual-perf-gate-artifacts
+          path: /tmp/dual-perf-gate
+
   presolve-smoke:
     if: ${{ inputs.run_presolve_smoke == true }}
     runs-on: ubuntu-latest

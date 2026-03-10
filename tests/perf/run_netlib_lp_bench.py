@@ -155,7 +155,7 @@ def main() -> int:
                     break
 
                 t = parse_solve_time(out)
-                if t is None:
+                if t is None or (t <= 0.0 and elapsed > 0.0):
                     t = elapsed
                 wu = parse_work_units(out)
                 if wu is None:
