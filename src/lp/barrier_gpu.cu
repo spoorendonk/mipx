@@ -1312,6 +1312,9 @@ struct GpuBarrierImpl {
 
             // Factorize normal equations with regularization.
             double cur_reg = base_reg * reg_boost;
+            if (gap < 1e-4) {
+                cur_reg *= 100.0;
+            }
             bool factorized = false;
             for (int attempt = 0; attempt < 3; ++attempt) {
                 if (ne_solver.factorize(cur_reg)) {
