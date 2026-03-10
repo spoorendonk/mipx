@@ -44,7 +44,7 @@ int main(int argc, char* argv[]) {
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
-            "[--verbose|--quiet]\n");
+            "[--verbose|--quiet] [--print-backend]\n");
         return 1;
     }
 
@@ -54,6 +54,7 @@ int main(int argc, char* argv[]) {
     mipx::Int node_limit = 1000000;
     double gap_tol = 1e-4;
     bool verbose = true;
+    bool print_backend = false;
     bool presolve = true;
     bool presolve_forcing_rows = true;
     bool presolve_dual_fixing = true;
@@ -124,6 +125,8 @@ int main(int argc, char* argv[]) {
             verbose = true;
         } else if (arg == "--quiet") {
             verbose = false;
+        } else if (arg == "--print-backend") {
+            print_backend = true;
         } else if (arg == "--barrier") {
             lp_mode = LpMode::Barrier;
         } else if (arg == "--pdlp") {
@@ -426,10 +429,10 @@ int main(int argc, char* argv[]) {
             auto t1 = std::chrono::steady_clock::now();
             double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
 
-            if (lp_mode == LpMode::Barrier && verbose) {
+            if (lp_mode == LpMode::Barrier && (verbose || print_backend)) {
                 log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
-            if (lp_mode == LpMode::Pdlp && verbose) {
+            if (lp_mode == LpMode::Pdlp && (verbose || print_backend)) {
                 log.log("PDLP backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
 

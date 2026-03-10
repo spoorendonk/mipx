@@ -173,6 +173,7 @@ class SolverResult:
     iterations: float | None = None
     objective: float | None = None
     work_units: float | None = None
+    backend: str | None = None
     error: str | None = None
 
 
@@ -210,7 +211,15 @@ def run_mipx_pdlp(
     time_limit: float,
     relax_integrality: bool,
 ) -> SolverResult:
-    cmd = [binary, str(model), "--pdlp", "--quiet", "--threads", str(max(1, threads))]
+    cmd = [
+        binary,
+        str(model),
+        "--pdlp",
+        "--quiet",
+        "--print-backend",
+        "--threads",
+        str(max(1, threads)),
+    ]
     if use_gpu:
         cmd.append("--gpu")
         if force_gpu:
@@ -235,6 +244,7 @@ def run_mipx_pdlp(
     iterations = parse_first_float(r"^Iterations:\s*([\-+0-9.eE]+)\s*$", out)
     work = parse_first_float(r"^Work units:\s*([\-+0-9.eE]+)\s*$", out)
     solve_time = parse_first_float(r"^Time:\s*([\-+0-9.eE]+)s\s*$", out)
+    backend_match = re.search(r"^PDLP backend:\s*(GPU|CPU)\s*$", out, re.MULTILINE)
     if solve_time is None or solve_time <= 0.0:
         # The CLI time is printed with coarse precision on very fast solves.
         # Fall back to wall time to keep regression metrics strictly positive.
@@ -246,6 +256,7 @@ def run_mipx_pdlp(
         iterations=iterations,
         objective=objective,
         work_units=work,
+        backend=backend_match.group(1).lower() if backend_match else None,
     )
 
 
@@ -427,6 +438,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-presolve", action="store_true")
     p.add_argument("--relax-integrality", action="store_true")
     p.add_argument("--force-mipx-gpu", action="store_true")
+    p.add_argument("--no-mipx-cpu", action="store_true")
+    p.add_argument("--no-mipx-gpu", action="store_true")
     p.add_argument("--no-highs", action="store_true")
     p.add_argument("--highs-binary", default="")
     p.add_argument("--highs-ipx", action="store_true", help="Use HiGHS IPX instead of PDLP.")
@@ -469,6 +482,7 @@ def summarize_and_write(
                 "status",
                 "objective",
                 "work_units",
+                "backend",
                 "error",
             ],
         )
@@ -544,36 +558,38 @@ def main() -> int:
     cuopt_cli = resolve_executable(cuopt_cli)
 
     solvers: list[tuple[str, Callable[[Path], SolverResult]]] = []
-    solvers.append(
-        (
-            "mipx_pdlp_cpu",
-            lambda p: run_mipx_pdlp(
-                args.mipx_binary,
-                p,
-                threads=args.threads,
-                use_gpu=False,
-                disable_presolve=args.disable_presolve,
-                force_gpu=False,
-                time_limit=args.time_limit,
-                relax_integrality=args.relax_integrality,
-            ),
+    if not args.no_mipx_cpu:
+        solvers.append(
+            (
+                "mipx_pdlp_cpu",
+                lambda p: run_mipx_pdlp(
+                    args.mipx_binary,
+                    p,
+                    threads=args.threads,
+                    use_gpu=False,
+                    disable_presolve=args.disable_presolve,
+                    force_gpu=False,
+                    time_limit=args.time_limit,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
         )
-    )
-    solvers.append(
-        (
-            "mipx_pdlp_gpu",
-            lambda p: run_mipx_pdlp(
-                args.mipx_binary,
-                p,
-                threads=args.threads,
-                use_gpu=True,
-                disable_presolve=args.disable_presolve,
-                force_gpu=args.force_mipx_gpu,
-                time_limit=args.time_limit,
-                relax_integrality=args.relax_integrality,
-            ),
+    if not args.no_mipx_gpu:
+        solvers.append(
+            (
+                "mipx_pdlp_gpu",
+                lambda p: run_mipx_pdlp(
+                    args.mipx_binary,
+                    p,
+                    threads=args.threads,
+                    use_gpu=True,
+                    disable_presolve=args.disable_presolve,
+                    force_gpu=args.force_mipx_gpu,
+                    time_limit=args.time_limit,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
         )
-    )
     if cupdlpx_binary:
         solvers.append(
             (
@@ -642,12 +658,14 @@ def main() -> int:
                 "status": status,
                 "objective": f"{median([float(x) for x in objs]):.12g}" if objs else "",
                 "work_units": f"{median([float(x) for x in works]):.6f}" if works else "",
+                "backend": run_results[0].backend or "",
                 "error": " | ".join(errors[:1]) if errors else "",
             }
             rows.append(row)
             print(
                 f"{name:16s} {solver_name:14s} status={status:14s} "
                 f"time={row['time_seconds'] or '-':>9s} "
+                f"backend={row['backend'] or '-':>3s} "
                 f"iter={row['iterations'] or '-':>6s}"
             )
 

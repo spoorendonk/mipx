@@ -24,6 +24,7 @@ def test_compare_script_includes_cupdlpx_rows(tmp_path: Path) -> None:
     mipx.write_text(
         """#!/usr/bin/env bash
 cat <<'OUT'
+PDLP backend: CPU
 Status: Optimal
 Objective: -8
 Iterations: 34
@@ -83,6 +84,9 @@ OUT
     assert cupdlpx_row["iterations"] == "600"
     assert cupdlpx_row["time_seconds"] == "0.018700"
 
+    mipx_row = next(row for row in rows if row["solver"] == "mipx_pdlp_cpu")
+    assert mipx_row["backend"] == "cpu"
+
 
 def test_compare_script_enforces_external_time_limit(tmp_path: Path) -> None:
     instances_dir = tmp_path / "netlib"
@@ -131,3 +135,54 @@ OUT
     rows = list(csv.DictReader(out_csv.open(encoding="utf-8")))
     assert rows
     assert {row["status"] for row in rows} == {"time_limit"}
+
+
+def test_compare_script_can_skip_mipx_cpu_lane(tmp_path: Path) -> None:
+    instances_dir = tmp_path / "netlib"
+    instances_dir.mkdir()
+    (instances_dir / "toy.mps.gz").write_bytes(b"")
+
+    mipx = tmp_path / "fake_mipx_gpu.sh"
+    mipx.write_text(
+        """#!/usr/bin/env bash
+cat <<'OUT'
+PDLP backend: GPU
+Status: Optimal
+Objective: -8
+Iterations: 34
+Work units: 56
+Time: 0.02s
+OUT
+""",
+        encoding="utf-8",
+    )
+    make_executable(mipx)
+
+    out_csv = tmp_path / "compare_gpu_only.csv"
+    cmd = [
+        sys.executable,
+        str(COMPARE_SCRIPT),
+        "--mipx-binary",
+        str(mipx),
+        "--instances-dir",
+        str(instances_dir),
+        "--output",
+        str(out_csv),
+        "--repeats",
+        "1",
+        "--threads",
+        "1",
+        "--time-limit",
+        "1",
+        "--no-mipx-cpu",
+        "--no-cupdlpx",
+        "--no-highs",
+        "--no-cuopt",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+
+    rows = list(csv.DictReader(out_csv.open(encoding="utf-8")))
+    assert len(rows) == 1
+    assert rows[0]["solver"] == "mipx_pdlp_gpu"
+    assert rows[0]["backend"] == "gpu"

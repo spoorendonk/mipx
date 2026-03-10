@@ -272,12 +272,14 @@ python3 tests/perf/run_pdlp_lp_compare.py \
 
 This emits one CSV row per `(instance, solver)` with:
 - `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, cupdlpx, highs_pdlp|highs_ipx, cuopt_pdlp}`
-- `time_seconds, iterations, status, objective, work_units`
+- `time_seconds, iterations, status, objective, work_units, backend`
 
 Notes:
 - `--cupdlpx-binary` or `MIPX_CUPDLPX_BINARY` enables standalone `cuPDLPx` rows.
 - If `cuPDLPx` is not configured, the generic compare run skips it cleanly.
 - `--time-limit` is enforced as an external wall-clock cap by the harness so cross-solver PDLP runs remain comparable even though `mipx` PDLP CLI time-limit plumbing is still incomplete.
+- `backend` records actual `mipx` PDLP execution (`cpu` or `gpu`) when available, so the auto-GPU lane can be separated from threshold-driven CPU fallback.
+- `--no-mipx-cpu` or `--no-mipx-gpu` lets you benchmark only the relevant lane.
 - `--disable-presolve` isolates PDLP-kernel behavior and avoids presolve skew.
 - `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
 - `--highs-ipx` forces HiGHS IPX instead of attempting HiGHS PDLP.
