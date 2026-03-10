@@ -1599,8 +1599,6 @@ LpResult DualSimplexSolver::solve() {
                 degenerate_pivot_streak = 0;
                 resetPrimalFeasibleProgress();
                 primal_feasible_pivots_since_refactor = 0;
-                std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-                devex_reset_count_ = 0;
             }
 
             ++iterations_;
@@ -2104,10 +2102,6 @@ LpResult DualSimplexSolver::solve() {
             degenerate_pivot_streak = 0;
             resetPrimalFeasibleProgress();
             primal_feasible_pivots_since_refactor = 0;
-
-            // Reset Devex weights after refactorization.
-            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-            devex_reset_count_ = 0;
 
             // Re-apply cost shifts if still active.
             if (has_cost_shift) {
