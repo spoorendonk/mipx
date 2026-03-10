@@ -360,6 +360,62 @@ TEST_CASE("BarrierSolver: dense column detection", "[barrier]") {
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
 }
 
+TEST_CASE("BarrierSolver: reports GPU-only requirement when GPU is disabled",
+          "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    REQUIRE_THROWS_WITH(
+        solver.solve(),
+        Catch::Matchers::ContainsSubstring(
+            "Barrier currently requires GPU backend"));
+}
+
+TEST_CASE("BarrierSolver: reports threshold gating explicitly", "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    REQUIRE_THROWS_WITH(
+        solver.solve(),
+        Catch::Matchers::ContainsSubstring("Barrier GPU thresholds not met"));
+}
+
+#ifdef MIPX_HAS_CUDA
+TEST_CASE("BarrierSolver: GPU backend honors ir_steps setting", "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver0;
+    BarrierOptions opts0 = gpuBarrierOpts();
+    opts0.ir_steps = 0;
+    solver0.setOptions(opts0);
+    solver0.load(lp);
+    auto r0 = solveBarrierOrSkip(solver0);
+
+    BarrierSolver solver3;
+    BarrierOptions opts3 = gpuBarrierOpts();
+    opts3.ir_steps = 3;
+    solver3.setOptions(opts3);
+    solver3.load(lp);
+    auto r3 = solveBarrierOrSkip(solver3);
+
+    REQUIRE(r0.status == Status::Optimal);
+    REQUIRE(r3.status == Status::Optimal);
+    CHECK_THAT(r0.objective, WithinAbs(r3.objective, 1e-5));
+}
+#endif
+
 #ifndef MIPX_HAS_CUDA
 TEST_CASE("BarrierSolver: reports unavailable in non-CUDA build", "[barrier]") {
     auto lp = buildSimpleLp();

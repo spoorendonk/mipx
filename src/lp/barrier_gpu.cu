@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -26,6 +27,26 @@ static bool cudaOk(cudaError_t e) { return e == cudaSuccess; }
 static bool cusparseOk(cusparseStatus_t e) { return e == CUSPARSE_STATUS_SUCCESS; }
 static bool cublasOk(cublasStatus_t e) { return e == CUBLAS_STATUS_SUCCESS; }
 static bool cudssOk(cudssStatus_t e) { return e == CUDSS_STATUS_SUCCESS; }
+
+static const char* cudssStatusName(cudssStatus_t status) {
+    switch (status) {
+    case CUDSS_STATUS_SUCCESS:
+        return "success";
+    case CUDSS_STATUS_NOT_INITIALIZED:
+        return "not_initialized";
+    case CUDSS_STATUS_ALLOC_FAILED:
+        return "alloc_failed";
+    case CUDSS_STATUS_INVALID_VALUE:
+        return "invalid_value";
+    case CUDSS_STATUS_NOT_SUPPORTED:
+        return "not_supported";
+    case CUDSS_STATUS_EXECUTION_FAILED:
+        return "execution_failed";
+    case CUDSS_STATUS_INTERNAL_ERROR:
+        return "internal_error";
+    }
+    return "unknown";
+}
 
 // ---------------------------------------------------------------------------
 // CUDA kernels — block size 256, grid-stride loops
@@ -656,6 +677,8 @@ struct GpuContext {
 // ---------------------------------------------------------------------------
 
 struct NormalEqSolver {
+    static constexpr double kMaxAvgNeRowDensity = 64.0;
+
     // cuDSS handles.
     cudssHandle_t cudss_handle = nullptr;
     cudssConfig_t cudss_config = nullptr;
@@ -680,9 +703,11 @@ struct NormalEqSolver {
 
     // Last regularization used in factorize().
     double last_reg_ = 0.0;
+    double avg_ne_row_density_ = 0.0;
 
     bool analyzed = false;
     bool ok = false;
+    std::string last_error;
 
     NormalEqSolver() = default;
 
@@ -691,11 +716,25 @@ struct NormalEqSolver {
     bool analyze(const SparseMatrix& a, GpuContext* context) {
         ctx = context;
         ne_m = a.numRows();
+        last_error.clear();
 
-        if (!cudssOk(cudssCreate(&cudss_handle))) return false;
-        if (!cudssOk(cudssSetStream(cudss_handle, ctx->stream))) return false;
-        if (!cudssOk(cudssConfigCreate(&cudss_config))) return false;
-        if (!cudssOk(cudssDataCreate(cudss_handle, &cudss_data))) return false;
+        auto fail = [&](const std::string& message) {
+            last_error = message;
+            return false;
+        };
+        auto failStatus = [&](const char* op, cudssStatus_t status) {
+            return fail(std::string(op) + " failed (" + cudssStatusName(status) +
+                        ")");
+        };
+
+        auto status = cudssCreate(&cudss_handle);
+        if (!cudssOk(status)) return failStatus("cudssCreate", status);
+        status = cudssSetStream(cudss_handle, ctx->stream);
+        if (!cudssOk(status)) return failStatus("cudssSetStream", status);
+        status = cudssConfigCreate(&cudss_config);
+        if (!cudssOk(status)) return failStatus("cudssConfigCreate", status);
+        status = cudssDataCreate(cudss_handle, &cudss_data);
+        if (!cudssOk(status)) return failStatus("cudssDataCreate", status);
 
         // Compute NE pattern: lower triangle of A*A'.
         int m = ne_m;
@@ -740,9 +779,15 @@ struct NormalEqSolver {
 
         // Skip GPU Cholesky if NE matrix is too dense — cuDSS can hang
         // on dense NE patterns due to excessive fill-in during factorization.
-        double avg_ne_row_density = static_cast<double>(ne_nnz) / std::max(m, 1);
-        if (avg_ne_row_density > 20.0) {
-            return false;
+        avg_ne_row_density_ =
+            static_cast<double>(ne_nnz) / std::max(m, 1);
+        if (avg_ne_row_density_ > kMaxAvgNeRowDensity) {
+            return fail("normal-equation pattern too dense for cuDSS (avg row "
+                        "density " +
+                        std::to_string(avg_ne_row_density_) + " > " +
+                        std::to_string(kMaxAvgNeRowDensity) + ", rows=" +
+                        std::to_string(m) + ", nnz=" +
+                        std::to_string(ne_nnz) + ")");
         }
 
         std::vector<int> h_ne_col_indices(ne_nnz);
@@ -754,53 +799,62 @@ struct NormalEqSolver {
 
         // Upload to GPU.
         if (!cudaOk(cudaMalloc(&d_ne_row_starts, sizeof(int) * (m + 1))))
-            return false;
+            return fail("cudaMalloc d_ne_row_starts failed");
         if (!cudaOk(cudaMalloc(&d_ne_col_indices, sizeof(int) * ne_nnz)))
-            return false;
+            return fail("cudaMalloc d_ne_col_indices failed");
         if (!cudaOk(cudaMalloc(&d_ne_values, sizeof(double) * ne_nnz)))
-            return false;
+            return fail("cudaMalloc d_ne_values failed");
         if (!cudaOk(cudaMalloc(&d_ir_residual, sizeof(double) * m)))
-            return false;
+            return fail("cudaMalloc d_ir_residual failed");
         if (!cudaOk(cudaMalloc(&d_ir_correction, sizeof(double) * m)))
-            return false;
+            return fail("cudaMalloc d_ir_correction failed");
 
         if (!cudaOk(cudaMemcpyAsync(d_ne_row_starts, h_ne_row_starts.data(),
                                      sizeof(int) * (m + 1),
                                      cudaMemcpyHostToDevice, ctx->stream)))
-            return false;
+            return fail("cudaMemcpyAsync d_ne_row_starts failed");
         if (!cudaOk(cudaMemcpyAsync(d_ne_col_indices, h_ne_col_indices.data(),
                                      sizeof(int) * ne_nnz,
                                      cudaMemcpyHostToDevice, ctx->stream)))
-            return false;
+            return fail("cudaMemcpyAsync d_ne_col_indices failed");
         if (!cudaOk(cudaMemsetAsync(d_ne_values, 0, sizeof(double) * ne_nnz,
                                      ctx->stream)))
-            return false;
+            return fail("cudaMemsetAsync d_ne_values failed");
+
+        int hybrid_mode = 1;
+        status = cudssConfigSet(cudss_config, CUDSS_CONFIG_HYBRID_MODE,
+                                &hybrid_mode, sizeof(hybrid_mode));
+        if (!cudssOk(status)) {
+            return failStatus("cudssConfigSet(CUDSS_CONFIG_HYBRID_MODE)",
+                              status);
+        }
 
         // Create cuDSS sparse matrix (lower triangle, SPD).
-        if (!cudssOk(cudssMatrixCreateCsr(
-                &cudss_mat, ne_m, ne_m, ne_nnz, d_ne_row_starts,
-                nullptr,
-                d_ne_col_indices, d_ne_values,
-                CUDA_R_32I, CUDA_R_64F,
-                CUDSS_MTYPE_SPD, CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO)))
-            return false;
+        status = cudssMatrixCreateCsr(&cudss_mat, ne_m, ne_m, ne_nnz,
+                                      d_ne_row_starts, nullptr,
+                                      d_ne_col_indices, d_ne_values,
+                                      CUDA_R_32I, CUDA_R_64F, CUDSS_MTYPE_SPD,
+                                      CUDSS_MVIEW_LOWER, CUDSS_BASE_ZERO);
+        if (!cudssOk(status)) return failStatus("cudssMatrixCreateCsr", status);
 
-        if (!cudssOk(cudssMatrixCreateDn(
-                &cudss_rhs_mat, ne_m, 1, ne_m, ctx->d_rhs, CUDA_R_64F,
-                CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
-        if (!cudssOk(cudssMatrixCreateDn(
-                &cudss_sol_mat, ne_m, 1, ne_m, ctx->d_dy, CUDA_R_64F,
-                CUDSS_LAYOUT_COL_MAJOR)))
-            return false;
+        status = cudssMatrixCreateDn(&cudss_rhs_mat, ne_m, 1, ne_m, ctx->d_rhs,
+                                     CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR);
+        if (!cudssOk(status))
+            return failStatus("cudssMatrixCreateDn(rhs)", status);
+        status = cudssMatrixCreateDn(&cudss_sol_mat, ne_m, 1, ne_m, ctx->d_dy,
+                                     CUDA_R_64F, CUDSS_LAYOUT_COL_MAJOR);
+        if (!cudssOk(status))
+            return failStatus("cudssMatrixCreateDn(sol)", status);
 
         // Symbolic analysis.
-        if (!cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS,
-                                   cudss_config, cudss_data, cudss_mat,
-                                   cudss_sol_mat, cudss_rhs_mat)))
-            return false;
+        status = cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS, cudss_config,
+                              cudss_data, cudss_mat, cudss_sol_mat,
+                              cudss_rhs_mat);
+        if (!cudssOk(status))
+            return failStatus("cudssExecute(analysis)", status);
 
-        if (!cudaOk(cudaStreamSynchronize(ctx->stream))) return false;
+        if (!cudaOk(cudaStreamSynchronize(ctx->stream)))
+            return fail("cudaStreamSynchronize after analysis failed");
 
         analyzed = true;
         ok = true;
@@ -810,6 +864,7 @@ struct NormalEqSolver {
     // Form NE values on GPU and factorize.
     bool factorize(double reg) {
         if (!ok) return false;
+        last_error.clear();
         last_reg_ = reg;
 
         // Form NE values via merge-join kernel.
@@ -829,7 +884,11 @@ struct NormalEqSolver {
             status = cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION,
                                    cudss_config, cudss_data, cudss_mat,
                                    cudss_sol_mat, cudss_rhs_mat);
-            if (!cudssOk(status)) return false;
+            if (!cudssOk(status)) {
+                last_error = std::string("cudssExecute(factorization) failed (") +
+                             cudssStatusName(status) + ")";
+                return false;
+            }
         }
 
         return true;
@@ -839,6 +898,7 @@ struct NormalEqSolver {
     // d_rhs_in and d_sol_out are device pointers of size m.
     bool solve(double* d_rhs_in, double* d_sol_out) {
         if (!ok) return false;
+        last_error.clear();
 
         // Update dense matrix pointers.
         if (cudss_rhs_mat) cudssMatrixDestroy(cudss_rhs_mat);
@@ -848,16 +908,26 @@ struct NormalEqSolver {
 
         if (!cudssOk(cudssMatrixCreateDn(&cudss_rhs_mat, ne_m, 1, ne_m,
                                           d_rhs_in, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
+                                          CUDSS_LAYOUT_COL_MAJOR))) {
+            last_error = "cudssMatrixCreateDn(rhs) failed";
             return false;
+        }
         if (!cudssOk(cudssMatrixCreateDn(&cudss_sol_mat, ne_m, 1, ne_m,
                                           d_sol_out, CUDA_R_64F,
-                                          CUDSS_LAYOUT_COL_MAJOR)))
+                                          CUDSS_LAYOUT_COL_MAJOR))) {
+            last_error = "cudssMatrixCreateDn(sol) failed";
             return false;
+        }
 
-        return cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE,
-                                     cudss_config, cudss_data, cudss_mat,
-                                     cudss_sol_mat, cudss_rhs_mat));
+        auto status = cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config,
+                                   cudss_data, cudss_mat, cudss_sol_mat,
+                                   cudss_rhs_mat);
+        if (!cudssOk(status)) {
+            last_error = std::string("cudssExecute(solve) failed (") +
+                         cudssStatusName(status) + ")";
+            return false;
+        }
+        return true;
     }
 
     // Solve with iterative refinement.
@@ -902,6 +972,8 @@ struct NormalEqSolver {
         return true;
     }
 
+    const std::string& error() const { return last_error; }
+
     ~NormalEqSolver() {
         if (cudss_rhs_mat) cudssMatrixDestroy(cudss_rhs_mat);
         if (cudss_sol_mat) cudssMatrixDestroy(cudss_sol_mat);
@@ -929,18 +1001,27 @@ struct GpuBarrierImpl {
     NormalEqSolver ne_solver;
 
     bool initialized = false;
+    std::string last_error;
 
     bool init(const SparseMatrix& a, std::span<const double> b,
               std::span<const double> c) {
-        if (!ctx.init(a, b, c)) return false;
-        if (!ne_solver.analyze(a, &ctx)) return false;
+        if (!ctx.init(a, b, c)) {
+            last_error = "Barrier GPU context initialization failed.";
+            return false;
+        }
+        if (!ne_solver.analyze(a, &ctx)) {
+            last_error = ne_solver.error().empty()
+                             ? "Barrier GPU normal-equation analysis failed."
+                             : "Barrier GPU " + ne_solver.error() + ".";
+            return false;
+        }
         initialized = true;
         return true;
     }
 
     // Compute Mehrotra starting point on GPU.
     bool computeStartingPoint() {
-        int m = ctx.m, n = ctx.n;
+        int n = ctx.n;
 
         // Set theta = ones for starting point.
         kernelFillOnes<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(n,
@@ -948,13 +1029,29 @@ struct GpuBarrierImpl {
 
         // Factorize A*I*A' + reg*I = A*A' + reg*I.
         double reg = 1e-8;
-        if (!ne_solver.factorize(reg)) return false;
+        if (!ne_solver.factorize(reg)) {
+            last_error = ne_solver.error().empty()
+                             ? "Barrier GPU starting-point factorization failed."
+                             : "Barrier GPU starting-point factorization failed: " +
+                                   ne_solver.error() + ".";
+            return false;
+        }
 
         // Solve (A*A')*y0 = b.
-        if (!ne_solver.solve(ctx.d_b, ctx.d_y)) return false;
+        if (!ne_solver.solve(ctx.d_b, ctx.d_y)) {
+            last_error = ne_solver.error().empty()
+                             ? "Barrier GPU starting-point solve failed."
+                             : "Barrier GPU starting-point solve failed: " +
+                                   ne_solver.error() + ".";
+            return false;
+        }
 
         // z0 = A' * y0.
-        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) return false;
+        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) {
+            last_error =
+                "Barrier GPU starting-point transpose multiply failed.";
+            return false;
+        }
 
         // s0 = c - A' * y0 = c - z0.
         kernelResidualDual<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
@@ -1093,8 +1190,8 @@ struct GpuBarrierImpl {
                                 cudaMemcpyDeviceToDevice, ctx.stream);
                 cudaStreamSynchronize(ctx.stream);
 
-                // Check with 10x relaxed tolerance.
-                double relaxed_tol = opts.primal_dual_tol * 10.0;
+                // Accept the restored iterate if it is already close enough.
+                double relaxed_tol = opts.primal_dual_tol * 50.0;
                 if (prev_pinf < relaxed_tol && prev_dinf < relaxed_tol &&
                     prev_gap < relaxed_tol) {
                     if (opts.verbose) {
@@ -1107,6 +1204,13 @@ struct GpuBarrierImpl {
                     return true;
                 }
                 iters = iter;
+                char msg[192];
+                std::snprintf(
+                    msg, sizeof(msg),
+                    "Barrier GPU numerical instability at iter %d "
+                    "(pinf %.2e -> %.2e, dinf %.2e -> %.2e).",
+                    iter, prev_pinf, pinf, prev_dinf, dinf);
+                last_error = msg;
                 return false;
             }
 
@@ -1120,6 +1224,13 @@ struct GpuBarrierImpl {
                                     stagnant_iters);
                     }
                     iters = iter;
+                    char msg[160];
+                    std::snprintf(
+                        msg, sizeof(msg),
+                        "Barrier GPU stagnation after %d consecutive iterations "
+                        "without gap improvement.",
+                        stagnant_iters);
+                    last_error = msg;
                     return false;
                 }
             } else {
@@ -1148,6 +1259,13 @@ struct GpuBarrierImpl {
             }
             if (!factorized) {
                 iters = iter;
+                char msg[256];
+                std::snprintf(
+                    msg, sizeof(msg),
+                    "Barrier GPU factorization failed at iter %d after regularization retries%s%s.",
+                    iter, ne_solver.error().empty() ? "" : ": ",
+                    ne_solver.error().c_str());
+                last_error = msg;
                 return false;
             }
 
@@ -1157,8 +1275,16 @@ struct GpuBarrierImpl {
                                                          ctx.d_rc);
 
             if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc, ctx.d_dz_aff,
-                                 ctx.d_dy_aff, ctx.d_ds_aff, opts.ir_steps))
+                                 ctx.d_dy_aff, ctx.d_ds_aff, opts.ir_steps)) {
+                char msg[256];
+                std::snprintf(
+                    msg, sizeof(msg),
+                    "Barrier GPU predictor Newton solve failed at iter %d%s%s.",
+                    iter, ne_solver.error().empty() ? "" : ": ",
+                    ne_solver.error().c_str());
+                last_error = msg;
                 return false;
+            }
 
             double alpha_aff_p =
                 ctx.gpuMaxStep(ctx.d_z, ctx.d_dz_aff, n, 1.0);
@@ -1187,8 +1313,16 @@ struct GpuBarrierImpl {
                 ctx.d_rc);
 
             if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc, ctx.d_dz,
-                                 ctx.d_dy, ctx.d_ds, opts.ir_steps))
+                                 ctx.d_dy, ctx.d_ds, opts.ir_steps)) {
+                char msg[256];
+                std::snprintf(
+                    msg, sizeof(msg),
+                    "Barrier GPU corrector Newton solve failed at iter %d%s%s.",
+                    iter, ne_solver.error().empty() ? "" : ": ",
+                    ne_solver.error().c_str());
+                last_error = msg;
                 return false;
+            }
 
             double alpha_p =
                 ctx.gpuMaxStep(ctx.d_z, ctx.d_dz, n, opts.step_fraction);
@@ -1211,6 +1345,7 @@ struct GpuBarrierImpl {
         }
 
         iters = opts.max_iter;
+        last_error = "Barrier GPU reached maximum IPM iterations.";
         return false;
     }
 
@@ -1274,12 +1409,17 @@ bool gpuBarrierSolve(const SparseMatrix& aeq, std::span<const Real> beq,
                      const BarrierOptions& opts, Real std_obj_offset,
                      std::vector<Real>& z, std::vector<Real>& y,
                      std::vector<Real>& s, Int& iters,
-                     bool& gpu_initialized) {
+                     bool& gpu_initialized, std::string& error_msg) {
     gpu_initialized = false;
     GpuBarrierImpl impl;
-    if (!impl.init(aeq, beq, cstd)) return false;
+    if (!impl.init(aeq, beq, cstd)) {
+        error_msg = impl.last_error;
+        return false;
+    }
     gpu_initialized = true;
-    return impl.solve(opts, std_obj_offset, beq, cstd, z, y, s, iters);
+    bool ok = impl.solve(opts, std_obj_offset, beq, cstd, z, y, s, iters);
+    if (!ok) error_msg = impl.last_error;
+    return ok;
 }
 
 }  // namespace detail

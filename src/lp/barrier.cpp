@@ -15,7 +15,7 @@ bool gpuBarrierSolve(const SparseMatrix& aeq, std::span<const Real> beq,
                      const BarrierOptions& opts, Real std_obj_offset,
                      std::vector<Real>& z, std::vector<Real>& y,
                      std::vector<Real>& s, Int& iters,
-                     bool& gpu_initialized);
+                     bool& gpu_initialized, std::string& error_msg);
 }  // namespace mipx::detail
 #endif
 
@@ -551,14 +551,19 @@ bool BarrierSolver::solveStandardFormGpu(
     [[maybe_unused]] Int& iters) {
 #ifdef MIPX_HAS_CUDA
     bool gpu_initialized = false;
+    std::string gpu_error;
     bool ok = detail::gpuBarrierSolve(aeq_, beq_, cstd_, options_,
                                        std_obj_offset_, z, y, s, iters,
-                                       gpu_initialized);
+                                       gpu_initialized, gpu_error);
     if (gpu_initialized) used_gpu_ = true;
-    if (!ok && !gpu_initialized && last_error_.empty()) {
-        last_error_ = "Barrier GPU backend initialization failed.";
-    } else if (!ok && last_error_.empty()) {
-        last_error_ = "Barrier GPU solve failed.";
+    if (!ok && last_error_.empty()) {
+        if (!gpu_error.empty()) {
+            last_error_ = gpu_error;
+        } else if (!gpu_initialized) {
+            last_error_ = "Barrier GPU backend initialization failed.";
+        } else {
+            last_error_ = "Barrier GPU solve failed.";
+        }
     }
     return ok;
 #else
