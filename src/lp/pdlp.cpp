@@ -656,7 +656,7 @@ LpResult PdlpSolver::solve() {
                         options_.pid_kp * error +
                         options_.pid_ki * pw_error_sum +
                         options_.pid_kd * delta_error);
-                    primal_weight = std::clamp(primal_weight, 1e-8, 1e8);
+                    primal_weight = std::clamp(primal_weight, 1e-4, 1e8);
                     pw_last_error = error;
 
                     // Track best weight.
@@ -1231,7 +1231,7 @@ LpResult PdlpSolver::solveGpu() {
                         options_.pid_kp * error +
                         options_.pid_ki * pw_error_sum +
                         options_.pid_kd * delta_error);
-                    primal_weight = std::clamp(primal_weight, 1e-8, 1e8);
+                    primal_weight = std::clamp(primal_weight, 1e-4, 1e8);
                     pw_last_error = error;
 
                     Real score = std::abs(
