@@ -407,7 +407,8 @@ private:
                      std::vector<Index>& touched_vars,
                      NodeScratch& node_scratch,
                      NodeWorkStats& node_stats,
-                     Int& int_inf_out);
+                     Int& int_inf_out,
+                     Int strong_branch_budget_override = -1);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);

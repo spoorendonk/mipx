@@ -1343,6 +1343,7 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     const auto& sstats = solver.getSearchStats();
     CHECK(sstats.policy_switches >= 1);
     CHECK(sstats.restarts >= 1);
+    CHECK(sstats.restart_nodes_dropped == 0);
     CHECK(sstats.strong_budget_updates >= 1);
 }
 

@@ -106,6 +106,38 @@ const char* searchProfileName(SearchProfile profile) {
     }
 }
 
+NodePolicy selectSearchPolicy(SearchProfile profile, Int stagnation_nodes) {
+    switch (profile) {
+        case SearchProfile::Stable:
+            return NodePolicy::BestFirst;
+        case SearchProfile::Aggressive:
+            if (stagnation_nodes >= 24) return NodePolicy::DepthBiased;
+            return NodePolicy::BestEstimate;
+        case SearchProfile::Default:
+        default:
+            if (stagnation_nodes >= 64) return NodePolicy::DepthBiased;
+            if (stagnation_nodes >= 20) return NodePolicy::BestEstimate;
+            return NodePolicy::BestFirst;
+    }
+}
+
+Int computeStrongBranchBudget(SearchProfile profile,
+                              Int node_depth,
+                              Int stagnation_nodes,
+                              Int restart_stagnation_nodes) {
+    Int strong_budget = 8;
+    switch (profile) {
+        case SearchProfile::Stable: strong_budget = 4; break;
+        case SearchProfile::Default: strong_budget = 8; break;
+        case SearchProfile::Aggressive: strong_budget = 12; break;
+    }
+    if (node_depth >= 8) strong_budget -= 2;
+    if (stagnation_nodes >= restart_stagnation_nodes / 2) {
+        strong_budget += (profile == SearchProfile::Aggressive) ? 4 : 2;
+    }
+    return std::clamp<Int>(strong_budget, 4, 24);
+}
+
 const char* exactRefinementModeName(ExactRefinementMode mode) {
     switch (mode) {
         case ExactRefinementMode::Off: return "off";
@@ -1553,7 +1585,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                              std::vector<Index>& touched_vars,
                              NodeScratch& node_scratch,
                              NodeWorkStats& node_stats,
-                             Int& int_inf_out) {
+                             Int& int_inf_out,
+                             Int strong_branch_budget_override) {
     children_out.clear();
     node_iters_out = 0;
     node_work_out = 0.0;
@@ -2120,6 +2153,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     if (branch_var < 0) {
         {
             std::lock_guard<std::mutex> lock(branching_mutex_);
+            const Int saved_budget = branching_rule_.strongBranchProbeBudget();
+            if (strong_branch_budget_override >= 2 &&
+                strong_branch_budget_override != saved_budget) {
+                branching_rule_.setStrongBranchProbeBudget(
+                    strong_branch_budget_override);
+            }
             auto selection = branching_rule_.select(lp, problem_,
                                                     node_primals_out,
                                                     current_lower,
@@ -2127,6 +2166,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                                                     node_result.objective,
                                                     false,
                                                     branching_stats_);
+            if (strong_branch_budget_override >= 2 &&
+                strong_branch_budget_override != saved_budget) {
+                branching_rule_.setStrongBranchProbeBudget(saved_budget);
+            }
             branch_var = selection.variable;
         }
         if (use_conflicts && branch_var >= 0) {
@@ -2199,21 +2242,6 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
     Int rins_fixed_sum = 0;
     Int nodes_since_incumbent = 0;
 
-    auto selectPolicy = [&](Int stagnation_nodes) -> NodePolicy {
-        switch (search_profile_) {
-            case SearchProfile::Stable:
-                return NodePolicy::BestFirst;
-            case SearchProfile::Aggressive:
-                if (stagnation_nodes >= 24) return NodePolicy::DepthBiased;
-                return NodePolicy::BestEstimate;
-            case SearchProfile::Default:
-            default:
-                if (stagnation_nodes >= 64) return NodePolicy::DepthBiased;
-                if (stagnation_nodes >= 20) return NodePolicy::BestEstimate;
-                return NodePolicy::BestFirst;
-        }
-    };
-
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
             if (verbose_) log_.log("Node limit reached.\n");
@@ -2235,7 +2263,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
             break;
         }
 
-        const NodePolicy target_policy = selectPolicy(nodes_since_incumbent);
+        const NodePolicy target_policy =
+            selectSearchPolicy(search_profile_, nodes_since_incumbent);
         if (queue.policy() != target_policy) {
             queue.setPolicy(target_policy);
             ++search_stats_.policy_switches;
@@ -2246,38 +2275,19 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
         if (allow_restarts && search_profile_ != SearchProfile::Stable &&
             nodes_since_incumbent >= restart_stagnation_nodes_ &&
             queue.size() > restart_keep_nodes_) {
-            auto pending = queue.takeAll();
-            const Int old_size = static_cast<Int>(pending.size());
-            std::sort(pending.begin(), pending.end(),
-                      [](const BnbNode& a, const BnbNode& b) {
-                          if (a.lp_bound != b.lp_bound) return a.lp_bound < b.lp_bound;
-                          if (a.depth != b.depth) return a.depth > b.depth;
-                          return a.id < b.id;
-                      });
-            const Int keep = std::min<Int>(restart_keep_nodes_,
-                                           static_cast<Int>(pending.size()));
-            pending.resize(static_cast<std::size_t>(keep));
-            queue.replaceAll(std::move(pending));
+            // Exact-safe restart: reset the queue policy without discarding any
+            // unexplored nodes. Dropping queued nodes would turn restart into a
+            // heuristic truncation and can produce invalid "optimal" claims.
             queue.setPolicy(NodePolicy::BestFirst);
             ++search_stats_.restarts;
-            search_stats_.restart_nodes_dropped += (old_size - keep);
             nodes_since_incumbent = 0;
             if (queue.empty()) break;
         }
 
         BnbNode node = queue.pop();
-        Int strong_budget = 8;
-        switch (search_profile_) {
-            case SearchProfile::Stable: strong_budget = 4; break;
-            case SearchProfile::Default: strong_budget = 8; break;
-            case SearchProfile::Aggressive: strong_budget = 12; break;
-        }
-        if (node.depth >= 8) strong_budget -= 2;
-        if (nodes_since_incumbent >= restart_stagnation_nodes_ / 2) {
-            strong_budget += (search_profile_ == SearchProfile::Aggressive) ? 4 : 2;
-        }
-        strong_budget = std::clamp<Int>(strong_budget, 4, 24);
-        branching_rule_.setStrongBranchProbeBudget(strong_budget);
+        const Int strong_budget = computeStrongBranchBudget(
+            search_profile_, node.depth, nodes_since_incumbent,
+            restart_stagnation_nodes_);
         ++search_stats_.strong_budget_updates;
         ++nodes_explored;
 
@@ -2293,7 +2303,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
                                     node_work,
                                     current_lower, current_upper, touched_vars,
                                     node_scratch,
-                                    node_stats, node_int_inf);
+                                    node_stats, node_int_inf,
+                                    strong_budget);
         total_lp_iters += node_iters;
         total_work += node_work;
         bool improved_this_node = false;
@@ -2475,6 +2486,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         struct DeterministicTask {
             Int worker_id = 0;
             Int node_num = 0;
+            Int strong_branch_budget = -1;
             BnbNode node;
             bool branched = false;
             std::vector<BnbNode> children;
@@ -2523,6 +2535,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 
         uint64_t det_heur_next_tick = kDetHeurGateQuantumTicks;
         uint64_t det_log_next_tick = kDetLogQuantumTicks;
+        Int nodes_since_incumbent = 0;
         while (true) {
             if (nodes_explored >= node_limit_) break;
             if (elapsed() >= time_limit_) break;
@@ -2535,6 +2548,25 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             const Real best_bound = queue.bestBound();
             if (incumbent < kInf && computeGap(incumbent, best_bound) < gap_tol_) {
                 break;
+            }
+
+            const NodePolicy target_policy =
+                selectSearchPolicy(search_profile_, nodes_since_incumbent);
+            if (queue.policy() != target_policy) {
+                queue.setPolicy(target_policy);
+                ++search_stats_.policy_switches;
+            }
+
+            const bool allow_restarts =
+                (search_profile_ == SearchProfile::Aggressive) || restarts_enabled_;
+            if (allow_restarts && search_profile_ != SearchProfile::Stable &&
+                nodes_since_incumbent >= restart_stagnation_nodes_ &&
+                queue.size() > restart_keep_nodes_) {
+                // Keep deterministic threaded restart exact-safe as well.
+                queue.setPolicy(NodePolicy::BestFirst);
+                ++search_stats_.restarts;
+                nodes_since_incumbent = 0;
+                if (queue.empty()) break;
             }
 
             const Int remaining_nodes = std::max<Int>(0, node_limit_ - nodes_explored);
@@ -2552,6 +2584,12 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 task.worker_id = active_workers[static_cast<std::size_t>(i)];
                 task.node_num = ++nodes_explored;
                 task.node = queue.pop();
+                task.strong_branch_budget = computeStrongBranchBudget(
+                    search_profile_,
+                    task.node.depth,
+                    nodes_since_incumbent + i,
+                    restart_stagnation_nodes_);
+                ++search_stats_.strong_budget_updates;
             }
 
             tbb::parallel_for(Int(0), batch_size, [&](Int i) {
@@ -2571,7 +2609,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                             worker_ctx.touched_vars,
                                             worker_ctx.node_scratch,
                                             worker_ctx.node_stats,
-                                            task.node_int_inf);
+                                            task.node_int_inf,
+                                            task.strong_branch_budget);
             });
 
             for (Int i = 0; i < batch_size; ++i) {
@@ -2683,6 +2722,12 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                                 incumbent, log_best_bound,
                                 static_cast<double>(cur_ticks) * 1e-6,
                                 found_incumbent, task.node_int_inf);
+                }
+
+                if (found_incumbent) {
+                    nodes_since_incumbent = 0;
+                } else {
+                    ++nodes_since_incumbent;
                 }
             }
         }
