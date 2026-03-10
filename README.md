@@ -315,14 +315,6 @@ python/            Nanobind bindings, Python package, and Python tests
 docs/              Documentation and roadmap
 ```
 
-## Roadmap
-
-See [docs/roadmap.md](docs/roadmap.md) for the full implementation plan.
-
-**Current focus:** symmetry handling (Step 33) and exact-LP refinement planning (Step 34).
-
-**Future work:** concurrent root racing, crossover improvements, and column generation.
-
 ## References
 
 - [HiGHS](https://github.com/ERGO-Code/HiGHS) — high-performance LP/MIP solver
