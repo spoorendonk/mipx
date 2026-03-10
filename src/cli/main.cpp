@@ -88,6 +88,7 @@ int main(int argc, char* argv[]) {
     mipx::Int tree_presolve_depth_frequency = 3;
     bool tree_cuts_enabled = false;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
+    bool search_profile_explicit = false;
     bool symmetry_enabled = true;
     mipx::ExactRefinementMode exact_refine_mode =
         mipx::ExactRefinementMode::Off;
@@ -248,10 +249,13 @@ int main(int argc, char* argv[]) {
             dual_lu_ft_drop_tolerance = std::atof(argv[++i]);
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
+            search_profile_explicit = true;
         } else if (arg == "--search-default") {
             search_profile = mipx::SearchProfile::Default;
+            search_profile_explicit = true;
         } else if (arg == "--search-aggressive") {
             search_profile = mipx::SearchProfile::Aggressive;
+            search_profile_explicit = true;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -268,6 +272,10 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
             return 1;
         }
+    }
+
+    if (!search_profile_explicit && num_threads > 1) {
+        search_profile = mipx::SearchProfile::Aggressive;
     }
 
     try {
