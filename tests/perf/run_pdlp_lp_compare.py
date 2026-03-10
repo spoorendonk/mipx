@@ -508,10 +508,12 @@ def summarize_and_write(
             continue
         vals = [v for _, v in objs]
         span = max(vals) - min(vals)
-        if abs(span) > objective_tol:
+        scale = max(1.0, *(abs(v) for v in vals))
+        rel_span = abs(span) / scale
+        if rel_span > objective_tol:
             disagreements += 1
             details = ", ".join(f"{s}={v:.9g}" for s, v in objs)
-            print(f"WARNING {inst}: span={span:.3e} :: {details}")
+            print(f"WARNING {inst}: rel_span={rel_span:.3e} abs_span={span:.3e} :: {details}")
     if disagreements == 0:
         print("No objective disagreements above tolerance.")
 

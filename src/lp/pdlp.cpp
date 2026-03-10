@@ -530,9 +530,11 @@ LpResult PdlpSolver::solve() {
         Real abs_dual_resid = std::sqrt(dual_resid_sq);
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
 
-        // Primal objective in scaled space.
+        // Compare objective gap in true objective space after reversing the
+        // bound/objective rescaling used in the PDLP model.
         Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
-        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled;
+        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
+        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
 
         // Dual objective via support function (scaled space).
         // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
@@ -568,7 +570,8 @@ LpResult PdlpSolver::solve() {
             else if (yi < 0.0 && isFinite(rl))
                 dobj_row -= yi * rl;
         }
-        Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row);
+        Real dobj = original_.obj_offset +
+                    obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
 
         Real rel_gap = std::abs(pobj - dobj) /
                        (1.0 + std::abs(pobj) + std::abs(dobj));
@@ -576,7 +579,7 @@ LpResult PdlpSolver::solve() {
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
             // Log true-space primal objective for readability.
             Real pobj_log = original_.obj_offset +
-                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
+                            obj_sign_ * pobj_scaled * obj_unscale;
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e\n",
@@ -1137,8 +1140,11 @@ LpResult PdlpSolver::solveGpu() {
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
 
         Real pobj_scaled = h_metrics->primal_obj;
-        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled;
-        Real dobj = original_.obj_offset + obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row);
+        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
+        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+        Real dobj = original_.obj_offset +
+                    obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row) *
+                        obj_unscale;
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
         Real movement = h_metrics->fpe_movement;
@@ -1149,7 +1155,7 @@ LpResult PdlpSolver::solveGpu() {
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
             Real pobj_log = original_.obj_offset +
-                            obj_sign_ * pobj_scaled / (objective_scale_ * constraint_scale_);
+                            obj_sign_ * pobj_scaled * obj_unscale;
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e  [GPU]\n",
