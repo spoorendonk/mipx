@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare LP PDLP performance across mipx, HiGHS, and cuOpt.
+"""Compare LP PDLP performance across mipx, cuPDLPx, HiGHS, and cuOpt.
 
 Example:
   python3 tests/perf/run_pdlp_lp_compare.py \
@@ -21,6 +21,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +131,24 @@ def locate_highs_binary(explicit: str) -> str | None:
     if env:
         return env
     return shutil.which("highs")
+
+
+def locate_cupdlpx_binary(explicit: str) -> str | None:
+    if explicit:
+        return explicit
+    for env_name in ("MIPX_CUPDLPX_BINARY", "CUPDLPX_BINARY"):
+        env = os.environ.get(env_name)
+        if env:
+            return env
+    return shutil.which("cupdlpx")
+
+
+def resolve_executable(candidate: str | None) -> str | None:
+    if not candidate:
+        return None
+    if os.path.isfile(candidate):
+        return candidate
+    return shutil.which(candidate)
 
 
 def write_highs_options_file(threads: int, relax_integrality: bool) -> str:
@@ -322,6 +341,53 @@ def run_cuopt_pdlp(
     )
 
 
+def run_cupdlpx(
+    binary: str,
+    model: Path,
+    time_limit: float,
+    disable_presolve: bool,
+    relax_integrality: bool,
+) -> SolverResult:
+    if relax_integrality:
+        return SolverResult(
+            status="unsupported",
+            time_seconds=0.0,
+            error="cuPDLPx runner does not support --relax-integrality in this harness",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="mipx_cupdlpx_") as tmp_dir:
+        cmd = [
+            binary,
+            str(model),
+            tmp_dir,
+            "--eps_opt",
+            "1e-4",
+            "--eps_feas",
+            "1e-4",
+        ]
+        if disable_presolve:
+            cmd.append("--no_presolve")
+        if time_limit > 0:
+            cmd.extend(["--time_limit", f"{time_limit:g}"])
+
+        code, out, elapsed = run_cmd(cmd)
+        if code != 0:
+            return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
+
+        raw_status = re.search(r"^\s*Status\s*:\s*(.+?)\s*$", out, re.MULTILINE)
+        status = normalize_status(raw_status.group(1)) if raw_status else "unknown"
+        objective = parse_first_float(r"^\s*Primal objective\s*:\s*([\-+0-9.eE]+)\s*$", out)
+        iterations = parse_first_float(r"^\s*Iterations\s*:\s*([\-+0-9.eE]+)\s*$", out)
+        solve_time = parse_first_float(r"^\s*Solve time\s*:\s*([\-+0-9.eE]+)\s+sec\s*$", out)
+
+        return SolverResult(
+            status=status,
+            time_seconds=solve_time if solve_time is not None else elapsed,
+            iterations=iterations,
+            objective=objective,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mipx-binary", default="./build/mipx-solve")
@@ -338,6 +404,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-highs", action="store_true")
     p.add_argument("--highs-binary", default="")
     p.add_argument("--highs-ipx", action="store_true", help="Use HiGHS IPX instead of PDLP.")
+    p.add_argument("--no-cupdlpx", action="store_true")
+    p.add_argument("--cupdlpx-binary", default="")
     p.add_argument("--no-cuopt", action="store_true")
     p.add_argument("--cuopt-cli", default="")
     p.add_argument("--cuopt-num-gpus", type=int, default=1)
@@ -435,14 +503,17 @@ def main() -> int:
 
     instances = collect_instances(args.instances_dir, args.instances, args.max_instances)
     highs_binary = None if args.no_highs else locate_highs_binary(args.highs_binary)
+    highs_binary = resolve_executable(highs_binary)
     if not args.no_highs and not highs_binary:
         raise SystemExit("HiGHS binary not found. Set --highs-binary or HIGHS_BINARY.")
-    if highs_binary and not shutil.which(highs_binary) and not Path(highs_binary).is_file():
-        raise SystemExit(f"HiGHS binary not found: {highs_binary}")
+
+    cupdlpx_binary = None if args.no_cupdlpx else locate_cupdlpx_binary(args.cupdlpx_binary)
+    cupdlpx_binary = resolve_executable(cupdlpx_binary)
+    if args.cupdlpx_binary and not cupdlpx_binary:
+        raise SystemExit(f"cuPDLPx binary not found: {args.cupdlpx_binary}")
 
     cuopt_cli = None if args.no_cuopt else locate_cuopt_cli(args.cuopt_cli)
-    if cuopt_cli and not os.path.isfile(cuopt_cli):
-        cuopt_cli = shutil.which(cuopt_cli) or None
+    cuopt_cli = resolve_executable(cuopt_cli)
 
     solvers: list[tuple[str, Callable[[Path], SolverResult]]] = []
     solvers.append(
@@ -475,6 +546,19 @@ def main() -> int:
             ),
         )
     )
+    if cupdlpx_binary:
+        solvers.append(
+            (
+                "cupdlpx",
+                lambda p: run_cupdlpx(
+                    cupdlpx_binary,
+                    p,
+                    time_limit=args.time_limit,
+                    disable_presolve=args.disable_presolve,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
+        )
     if not args.no_highs:
         highs_solver = "highs_ipx" if args.highs_ipx else "highs_pdlp"
         solvers.append(

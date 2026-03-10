@@ -251,13 +251,16 @@ the stored HiGHS baseline CSV files as `--baseline`.
 These comparisons are informational (cross-solver wall-clock), not strict
 no-regression gates.
 
-## PDLP LP Comparison (mipx vs HiGHS vs cuOpt)
+## PDLP LP Comparison (mipx vs cuPDLPx vs HiGHS vs cuOpt)
 
-For LP PDLP-focused comparisons (CPU/GPU and cross-solver):
+For LP PDLP-focused comparisons, `cuPDLPx` is the primary external reference.
+The tracked compare harness supports CPU/GPU `mipx` rows plus optional
+`cuPDLPx`, HiGHS, and cuOpt rows:
 
 ```bash
 python3 tests/perf/run_pdlp_lp_compare.py \
   --mipx-binary ./build/mipx-solve \
+  --cupdlpx-binary /path/to/cupdlpx \
   --instances-dir tests/data/netlib \
   --output /tmp/pdlp_lp_compare.csv \
   --repeats 3 \
@@ -268,14 +271,16 @@ python3 tests/perf/run_pdlp_lp_compare.py \
 ```
 
 This emits one CSV row per `(instance, solver)` with:
-- `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, highs_pdlp|highs_ipx, cuopt_pdlp}`
+- `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, cupdlpx, highs_pdlp|highs_ipx, cuopt_pdlp}`
 - `time_seconds, iterations, status, objective, work_units`
 
 Notes:
+- `--cupdlpx-binary` or `MIPX_CUPDLPX_BINARY` enables standalone `cuPDLPx` rows.
+- If `cuPDLPx` is not configured, the generic compare run skips it cleanly.
 - `--disable-presolve` isolates PDLP-kernel behavior and avoids presolve skew.
 - `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
 - `--highs-ipx` forces HiGHS IPX instead of attempting HiGHS PDLP.
-- `--relax-integrality` solves LP relaxations for MIP instances (e.g., MIPLIB `.mps.gz`) in all solvers.
+- `--relax-integrality` is supported for `mipx`, HiGHS, and cuOpt. The standalone `cuPDLPx` lane in this harness is LP-only.
 
 PDLP self-regression gate (candidate vs baseline mipx binaries):
 

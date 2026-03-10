@@ -18,10 +18,10 @@ Files:
 - `barrier_lp_compare_meta.json`: barrier comparison generation metadata
   (tool versions, GPU/driver info).
 - `pdlp_lp_compare_netlib.csv`: LP PDLP comparison on Netlib
-  (`mipx_pdlp_cpu`, `mipx_pdlp_gpu`, `highs_pdlp` or `highs_ipx`, `cuopt_pdlp`).
+  (`mipx_pdlp_cpu`, `mipx_pdlp_gpu`, optional `cupdlpx`, `highs_pdlp` or `highs_ipx`, `cuopt_pdlp`).
 - `pdlp_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
 - `pdlp_lp_compare_meta.json`: PDLP comparison generation metadata
-  (tool versions, GPU/driver info).
+  (tool versions, including optional `cuPDLPx`, GPU/driver info).
 
 Regenerate with (canonical Python entrypoints):
 
@@ -58,5 +58,7 @@ Shell wrapper equivalent:
 Notes:
 - These are machine-specific wall-clock references.
 - Use `work_units`-based gates for strict no-regression checks.
+- `cuPDLPx` rows are included when `--cupdlpx-binary` or
+  `MIPX_CUPDLPX_BINARY` is available during generation.
 - Mittelman LP params: 15000s time limit, 1 thread (simplex).
 - Mittelman MIP params: 7200s time limit, 8 threads, 1e-4 gap tolerance.
