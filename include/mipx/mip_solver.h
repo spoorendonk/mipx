@@ -318,6 +318,9 @@ public:
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
+    [[nodiscard]] MipTreePresolveStats treePresolveStatsSnapshot() const;
+    void mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta);
+
     struct NodeWorkStats {
         double bound_apply_seconds = 0.0;
         double basis_set_seconds = 0.0;
@@ -492,6 +495,7 @@ private:
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
+    mutable std::mutex tree_presolve_stats_mutex_;
     SymmetryManager symmetry_manager_;
     bool symmetry_enabled_ = true;
     mutable Logger log_;

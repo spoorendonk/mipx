@@ -1145,6 +1145,23 @@ bool MipSolver::hasLpLightCapability() const {
     return kLpLightCompiled;
 }
 
+MipTreePresolveStats MipSolver::treePresolveStatsSnapshot() const {
+    std::lock_guard<std::mutex> lock(tree_presolve_stats_mutex_);
+    return tree_presolve_stats_;
+}
+
+void MipSolver::mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta) {
+    std::lock_guard<std::mutex> lock(tree_presolve_stats_mutex_);
+    tree_presolve_stats_.attempts += delta.attempts;
+    tree_presolve_stats_.runs += delta.runs;
+    tree_presolve_stats_.skipped += delta.skipped;
+    tree_presolve_stats_.infeasible += delta.infeasible;
+    tree_presolve_stats_.activity_tightenings += delta.activity_tightenings;
+    tree_presolve_stats_.reduced_cost_tightenings += delta.reduced_cost_tightenings;
+    tree_presolve_stats_.lp_resolves += delta.lp_resolves;
+    tree_presolve_stats_.lp_delta += delta.lp_delta;
+}
+
 HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     HeuristicRuntimeConfig config;
     config.mode = heuristicRuntimeMode(parallel_mode_);
@@ -1722,18 +1739,27 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     int_inf_out = frac_count;
 
     // In-tree presolve: run safe local tightening passes at selected tree nodes.
-    if (tree_presolve_enabled_ && num_threads_ <= 1 &&
+    if (tree_presolve_enabled_ &&
+        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
         node.depth > 0 && node.depth <= tree_presolve_max_depth_) {
-        ++tree_presolve_stats_.attempts;
+        const auto tree_presolve_snapshot = treePresolveStatsSnapshot();
+        MipTreePresolveStats tree_presolve_delta{};
+        tree_presolve_delta.attempts = 1;
+        bool tree_presolve_stats_flushed = false;
+        auto flushTreePresolveStats = [&]() {
+            if (tree_presolve_stats_flushed) return;
+            mergeTreePresolveStatsDelta(tree_presolve_delta);
+            tree_presolve_stats_flushed = true;
+        };
         const bool depth_gate = (node.depth % tree_presolve_depth_frequency_ == 0);
         const bool frac_gate = (frac_count >= tree_presolve_min_frac_);
 
         bool benefit_skip = false;
-        if (tree_presolve_stats_.runs >= 6) {
+        if (tree_presolve_snapshot.runs >= 6) {
             const Real avg_tight = static_cast<Real>(
-                tree_presolve_stats_.activity_tightenings +
-                tree_presolve_stats_.reduced_cost_tightenings) /
-                static_cast<Real>(std::max<Int>(1, tree_presolve_stats_.runs));
+                tree_presolve_snapshot.activity_tightenings +
+                tree_presolve_snapshot.reduced_cost_tightenings) /
+                static_cast<Real>(std::max<Int>(1, tree_presolve_snapshot.runs));
             if (avg_tight < 0.5 && frac_count < tree_presolve_min_frac_ * 2 &&
                 !depth_gate) {
                 benefit_skip = true;
@@ -1751,7 +1777,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
             }
 
             if (!dp.propagate()) {
-                ++tree_presolve_stats_.infeasible;
+                ++tree_presolve_delta.infeasible;
+                flushTreePresolveStats();
                 if (use_conflicts) {
                     learnConflictFromNode(node.bound_changes, false);
                 }
@@ -1764,7 +1791,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 const Real lb = std::max(current_lower[j], new_lb);
                 const Real ub = std::min(current_upper[j], new_ub);
                 if (lb > ub + 1e-12) {
-                    ++tree_presolve_stats_.infeasible;
+                    ++tree_presolve_delta.infeasible;
                     return false;
                 }
                 if (lb > current_lower[j] + 1e-9 || ub < current_upper[j] - 1e-9) {
@@ -1793,7 +1820,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
             symmetry_tightened.clear();
             if (!enforceSymmetryBounds(current_lower, current_upper,
                                        &symmetry_tightened, &node_work_out)) {
-                ++tree_presolve_stats_.infeasible;
+                ++tree_presolve_delta.infeasible;
+                flushTreePresolveStats();
                 if (use_conflicts) {
                     learnConflictFromNode(node.bound_changes, false);
                 }
@@ -1840,7 +1868,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                     if (!enforceSymmetryBounds(current_lower, current_upper,
                                                &symmetry_tightened,
                                                &node_work_out)) {
-                        ++tree_presolve_stats_.infeasible;
+                        ++tree_presolve_delta.infeasible;
+                        flushTreePresolveStats();
                         if (use_conflicts) {
                             learnConflictFromNode(node.bound_changes, false);
                         }
@@ -1854,32 +1883,35 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 }
             }
 
-            ++tree_presolve_stats_.runs;
-            tree_presolve_stats_.activity_tightenings += activity_tight;
-            tree_presolve_stats_.reduced_cost_tightenings += rc_tight;
+            ++tree_presolve_delta.runs;
+            tree_presolve_delta.activity_tightenings += activity_tight;
+            tree_presolve_delta.reduced_cost_tightenings += rc_tight;
             const Int total_tight = activity_tight + rc_tight;
             if (total_tight > 0) {
                 const Real prev_obj = node_obj_out;
                 const auto refresh = lp.solve();
                 node_iters_out += refresh.iterations;
                 node_work_out += refresh.work_units;
-                ++tree_presolve_stats_.lp_resolves;
+                ++tree_presolve_delta.lp_resolves;
 
                 if (refresh.status == Status::Infeasible) {
-                    ++tree_presolve_stats_.infeasible;
+                    ++tree_presolve_delta.infeasible;
+                    flushTreePresolveStats();
                     if (use_conflicts) {
                         learnConflictFromNode(node.bound_changes, true);
                     }
                     return false;
                 }
                 if (refresh.status != Status::Optimal) {
+                    flushTreePresolveStats();
                     return false;
                 }
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
-                tree_presolve_stats_.lp_delta += std::abs(prev_obj - node_obj_out);
+                tree_presolve_delta.lp_delta += std::abs(prev_obj - node_obj_out);
                 if (incumbent_snapshot < kInf &&
                     node_obj_out >= incumbent_snapshot - 1e-6) {
+                    flushTreePresolveStats();
                     return false;
                 }
 
@@ -1890,8 +1922,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 }
                 int_inf_out = frac_count;
             }
+            flushTreePresolveStats();
         } else {
-            ++tree_presolve_stats_.skipped;
+            ++tree_presolve_delta.skipped;
+            flushTreePresolveStats();
         }
     }
 
