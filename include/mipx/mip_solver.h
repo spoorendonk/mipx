@@ -459,11 +459,11 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
-    // Serial in-tree presolve is disabled by default while correctness hardening
-    // is in progress for benchmark regressions.
-    bool tree_presolve_enabled_ = false;
+    // Serial in-tree presolve is enabled by default because it materially
+    // improves hard MIP search on benchmark instances.
+    bool tree_presolve_enabled_ = true;
     Int tree_presolve_max_depth_ = 24;
-    Int tree_presolve_min_frac_ = 4;
+    Int tree_presolve_min_frac_ = 8;
     Int tree_presolve_depth_frequency_ = 3;
     // Serial in-tree cuts are disabled by default while correctness hardening
     // is in progress for benchmark regressions.

@@ -23,6 +23,12 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
+            "[--conflicts|--no-conflicts] "
+            "[--tree-presolve|--no-tree-presolve] "
+            "[--tree-presolve-max-depth N] "
+            "[--tree-presolve-min-frac N] "
+            "[--tree-presolve-depth-frequency N] "
+            "[--tree-cuts|--no-tree-cuts] "
             "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
             "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
             "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
@@ -73,6 +79,12 @@ int main(int argc, char* argv[]) {
     bool pre_root_early_stop = true;
     bool pre_root_lplight = false;
     bool pre_root_portfolio = true;
+    bool conflicts_enabled = true;
+    bool tree_presolve_enabled = true;
+    mipx::Int tree_presolve_max_depth = 24;
+    mipx::Int tree_presolve_min_frac = 8;
+    mipx::Int tree_presolve_depth_frequency = 3;
+    bool tree_cuts_enabled = false;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
     bool symmetry_enabled = true;
     mipx::ExactRefinementMode exact_refine_mode =
@@ -108,6 +120,27 @@ int main(int argc, char* argv[]) {
             presolve = false;
         } else if (arg == "--presolve") {
             presolve = true;
+        } else if (arg == "--conflicts") {
+            conflicts_enabled = true;
+        } else if (arg == "--no-conflicts") {
+            conflicts_enabled = false;
+        } else if (arg == "--tree-presolve") {
+            tree_presolve_enabled = true;
+        } else if (arg == "--no-tree-presolve") {
+            tree_presolve_enabled = false;
+        } else if (arg == "--tree-presolve-max-depth" && i + 1 < argc) {
+            tree_presolve_max_depth =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-presolve-min-frac" && i + 1 < argc) {
+            tree_presolve_min_frac =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-presolve-depth-frequency" && i + 1 < argc) {
+            tree_presolve_depth_frequency =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-cuts") {
+            tree_cuts_enabled = true;
+        } else if (arg == "--no-tree-cuts") {
+            tree_cuts_enabled = false;
         } else if (arg == "--presolve-forcing-rows") {
             presolve_forcing_rows = true;
         } else if (arg == "--no-presolve-forcing-rows") {
@@ -273,6 +306,12 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
+            solver.setConflictsEnabled(conflicts_enabled);
+            solver.setTreePresolveEnabled(tree_presolve_enabled);
+            solver.setTreePresolveControls(tree_presolve_max_depth,
+                                           tree_presolve_min_frac,
+                                           tree_presolve_depth_frequency);
+            solver.setTreeCutsEnabled(tree_cuts_enabled);
             solver.setSymmetryEnabled(symmetry_enabled);
             solver.setExactRefinementMode(exact_refine_mode);
             solver.setExactRefinementRationalCheck(exact_rational_check);
@@ -294,11 +333,18 @@ int main(int argc, char* argv[]) {
             } else if (search_profile == mipx::SearchProfile::Aggressive) {
                 search_profile_name = "aggressive";
             }
-            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s\n",
+            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s "
+                    "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
+                    "tree_presolve_freq=%d tree_cuts=%s\n",
                     parallel_mode_name,
                     static_cast<unsigned long long>(heuristic_seed),
                     num_threads,
-                    search_profile_name);
+                    search_profile_name,
+                    conflicts_enabled ? "on" : "off",
+                    tree_presolve_enabled ? "on" : "off",
+                    tree_presolve_min_frac,
+                    tree_presolve_depth_frequency,
+                    tree_cuts_enabled ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal &&
                 result.gap_limit_reached) {
