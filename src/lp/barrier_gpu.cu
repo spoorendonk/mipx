@@ -1314,6 +1314,9 @@ struct GpuBarrierImpl {
             double cur_reg = base_reg * reg_boost;
             if (gap < 1e-4) {
                 cur_reg *= 100.0;
+                if (gap < 5e-5) {
+                    cur_reg *= 10.0;
+                }
             }
             bool factorized = false;
             for (int attempt = 0; attempt < 3; ++attempt) {
