@@ -1754,6 +1754,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     Int tree_presolve_max_depth = tree_presolve_max_depth_;
     Int tree_presolve_min_frac = tree_presolve_min_frac_;
     Int tree_presolve_depth_frequency = tree_presolve_depth_frequency_;
+    bool tree_presolve_frac_gate_enabled = true;
     if (tree_presolve_binary_lite_profile_active_) {
         tree_presolve_max_depth = std::min<Int>(
             tree_presolve_max_depth, kTreePresolveBinaryLiteMaxDepth);
@@ -1762,6 +1763,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         tree_presolve_depth_frequency = std::max<Int>(
             tree_presolve_depth_frequency,
             kTreePresolveBinaryLiteDepthFrequency);
+        tree_presolve_frac_gate_enabled = false;
     }
 
     // In-tree presolve: run safe local tightening passes at selected tree nodes.
@@ -1778,7 +1780,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
             tree_presolve_stats_flushed = true;
         };
         const bool depth_gate = (node.depth % tree_presolve_depth_frequency == 0);
-        const bool frac_gate = (frac_count >= tree_presolve_min_frac);
+        const bool frac_gate = tree_presolve_frac_gate_enabled &&
+                               (frac_count >= tree_presolve_min_frac);
 
         bool benefit_skip = false;
         if (tree_presolve_snapshot.runs >= 6) {
