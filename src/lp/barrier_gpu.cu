@@ -4,6 +4,7 @@
 #include "mipx/barrier.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -199,6 +200,48 @@ __global__ void kernelDotPartial(int n, const double* a, const double* b,
         __syncthreads();
     }
     if (threadIdx.x == 0) partials[blockIdx.x] = sdata[0];
+}
+
+__global__ void kernelDot4Partial(int n, const double* a0, const double* b0,
+                                  const double* a1, const double* b1,
+                                  const double* a2, const double* b2,
+                                  const double* a3, const double* b3,
+                                  double* partials) {
+    __shared__ double s0[kBlockSize];
+    __shared__ double s1[kBlockSize];
+    __shared__ double s2[kBlockSize];
+    __shared__ double s3[kBlockSize];
+    double sum0 = 0.0;
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+    double sum3 = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        sum0 += a0[i] * b0[i];
+        sum1 += a1[i] * b1[i];
+        sum2 += a2[i] * b2[i];
+        sum3 += a3[i] * b3[i];
+    }
+    s0[threadIdx.x] = sum0;
+    s1[threadIdx.x] = sum1;
+    s2[threadIdx.x] = sum2;
+    s3[threadIdx.x] = sum3;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            s0[threadIdx.x] += s0[threadIdx.x + s];
+            s1[threadIdx.x] += s1[threadIdx.x + s];
+            s2[threadIdx.x] += s2[threadIdx.x + s];
+            s3[threadIdx.x] += s3[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x] = s0[0];
+        partials[gridDim.x + blockIdx.x] = s1[0];
+        partials[2 * gridDim.x + blockIdx.x] = s2[0];
+        partials[3 * gridDim.x + blockIdx.x] = s3[0];
+    }
 }
 
 // Inf-norm reduction.
@@ -491,6 +534,21 @@ struct GpuContext {
 
     GpuContext() = default;
 
+    double accumulateReduce(int blocks, int offset) const {
+        double sum = 0.0;
+        const size_t base = static_cast<size_t>(offset) * blocks;
+        for (int i = 0; i < blocks; ++i) sum += h_reduce[base + i];
+        return sum;
+    }
+
+    double downloadReduceSum(int blocks, int offset) {
+        cudaMemcpyAsync(h_reduce.data() + static_cast<size_t>(offset) * blocks,
+                        d_reduce + static_cast<size_t>(offset) * blocks,
+                        sizeof(double) * blocks, cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        return accumulateReduce(blocks, offset);
+    }
+
     bool init(const SparseMatrix& a, std::span<const double> b_host,
               std::span<const double> c_host) {
         m = a.numRows();
@@ -536,7 +594,7 @@ struct GpuContext {
         // m-sized: y, b, y_bak, az, rp, ah, rhs, dy, dy_aff = 9
         // s_bak: n, tmp: max(m,n), deterministic reduction partials, scalar: 4
         int mn = std::max(m, n);
-        int reduce_slots = std::max(gridSize(mn), 1);
+        int reduce_slots = 4 * std::max(gridSize(mn), 1);
         size_t pool_size =
             static_cast<size_t>(15 * n + 9 * m + mn + reduce_slots + 4);
         if (!cudaOk(cudaMalloc(&d_pool, sizeof(double) * pool_size))) return false;
@@ -642,12 +700,7 @@ struct GpuContext {
         int blocks = std::max(gridSize(sz), 1);
         kernelDotPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_a, d_b,
                                                             d_reduce);
-        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        double sum = 0.0;
-        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
-        return sum;
+        return downloadReduceSum(blocks, 0);
     }
 
     // Compute inf-norm on GPU.
@@ -679,12 +732,7 @@ struct GpuContext {
         int blocks = std::max(gridSize(sz), 1);
         kernelSumPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_tmp,
                                                             d_reduce);
-        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
-        double sum = 0.0;
-        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
-        return sum / std::max(sz, 1);
+        return downloadReduceSum(blocks, 0) / std::max(sz, 1);
     }
 
     // Compute min of vector.
@@ -701,12 +749,20 @@ struct GpuContext {
         int blocks = std::max(gridSize(sz), 1);
         kernelSumPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_v,
                                                             d_reduce);
-        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
+        return downloadReduceSum(blocks, 0);
+    }
+
+    std::array<double, 4> gpuDot4(double* d_a0, double* d_b0, double* d_a1,
+                                  double* d_b1, double* d_a2, double* d_b2,
+                                  double* d_a3, double* d_b3, int sz) {
+        int blocks = std::max(gridSize(sz), 1);
+        kernelDot4Partial<<<blocks, kBlockSize, 0, stream>>>(
+            sz, d_a0, d_b0, d_a1, d_b1, d_a2, d_b2, d_a3, d_b3, d_reduce);
+        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * 4 * blocks,
                         cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
-        double sum = 0.0;
-        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
-        return sum;
+        return {accumulateReduce(blocks, 0), accumulateReduce(blocks, 1),
+                accumulateReduce(blocks, 2), accumulateReduce(blocks, 3)};
     }
 
     ~GpuContext() {
@@ -1362,10 +1418,9 @@ struct GpuBarrierImpl {
                 ctx.gpuMaxStep(ctx.d_s, ctx.d_ds_aff, n, 1.0);
 
             // mu_aff = mu(z+ap*dz, s+ad*ds) via dot product decomposition.
-            double zs = ctx.gpuDot(ctx.d_z, ctx.d_s, n);
-            double z_ds = ctx.gpuDot(ctx.d_z, ctx.d_ds_aff, n);
-            double dz_s = ctx.gpuDot(ctx.d_dz_aff, ctx.d_s, n);
-            double dz_ds = ctx.gpuDot(ctx.d_dz_aff, ctx.d_ds_aff, n);
+            auto [zs, z_ds, dz_s, dz_ds] = ctx.gpuDot4(
+                ctx.d_z, ctx.d_s, ctx.d_z, ctx.d_ds_aff, ctx.d_dz_aff,
+                ctx.d_s, ctx.d_dz_aff, ctx.d_ds_aff, n);
             double mu_aff =
                 (zs + alpha_aff_d * z_ds + alpha_aff_p * dz_s +
                  alpha_aff_p * alpha_aff_d * dz_ds) /
