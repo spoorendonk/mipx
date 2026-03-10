@@ -13,6 +13,8 @@ Files:
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
 - `mipx_barrier_cpu_netlib_small.csv`: mipx barrier CPU baseline (Netlib LP set).
 - `mipx_barrier_gpu_netlib_small.csv`: mipx barrier GPU baseline (Netlib LP set; forced GPU path).
+- `barrier_gpu_stable_netlib_small.txt`: curated forced-GPU Netlib subset used by the
+  default barrier regression gate while broader GPU coverage is still under hardening.
 - `mipx_barrier_baseline_meta.json`: generation metadata for mipx barrier baseline snapshots.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).

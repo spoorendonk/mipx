@@ -22,6 +22,9 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
+DEFAULT_GPU_STABLE_SET = (
+    ROOT_DIR / "tests" / "perf" / "baselines" / "barrier_gpu_stable_netlib_small.txt"
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--instances-dir", default=str(ROOT_DIR / "tests" / "data" / "netlib"))
     p.add_argument("--instances", default="")
     p.add_argument("--max-instances", type=int, default=0)
+    p.add_argument(
+        "--all-available-instances",
+        action="store_true",
+        help=(
+            "Use all available/selected instances instead of the default curated "
+            "stable GPU barrier set when --instances is omitted."
+        ),
+    )
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--threads", type=int, default=1)
     p.add_argument("--time-limit", type=float, default=60.0)
@@ -139,6 +150,24 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def load_default_gpu_stable_instances() -> list[str]:
+    if not DEFAULT_GPU_STABLE_SET.is_file():
+        raise SystemExit(f"default GPU stable-set file not found: {DEFAULT_GPU_STABLE_SET}")
+    return [
+        line.strip()
+        for line in DEFAULT_GPU_STABLE_SET.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def resolve_instance_filter(args: argparse.Namespace) -> str:
+    if args.instances.strip():
+        return args.instances.strip()
+    if args.max_instances > 0 or args.all_available_instances:
+        return ""
+    return ",".join(load_default_gpu_stable_instances())
+
+
 def run(cmd: list[str]) -> None:
     print("+", " ".join(cmd), flush=True)
     result = subprocess.run(cmd)
@@ -153,6 +182,7 @@ def ensure_executable(path: Path, what: str) -> None:
 
 def run_barrier_compare(binary: Path, output_csv: Path, args: argparse.Namespace) -> None:
     compare_script = PERF_DIR / "run_barrier_lp_compare.py"
+    instances_filter = resolve_instance_filter(args)
     cmd = [
         sys.executable,
         str(compare_script),
@@ -177,8 +207,8 @@ def run_barrier_compare(binary: Path, output_csv: Path, args: argparse.Namespace
         cmd.append("--force-mipx-gpu")
     if args.relax_integrality:
         cmd.append("--relax-integrality")
-    if args.instances:
-        cmd.extend(["--instances", args.instances])
+    if instances_filter:
+        cmd.extend(["--instances", instances_filter])
     if args.max_instances > 0:
         cmd.extend(["--max-instances", str(args.max_instances)])
     run(cmd)
@@ -295,6 +325,12 @@ def main() -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    effective_instances = resolve_instance_filter(args)
+    if effective_instances:
+        print(f"[barrier-gate] Effective instance set: {effective_instances}")
+    else:
+        print("[barrier-gate] Effective instance set: all available (subject to --max-instances)")
 
     baseline_compare_csv = out_dir / "baseline_barrier_compare.csv"
     candidate_compare_csv = out_dir / "candidate_barrier_compare.csv"

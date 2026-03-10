@@ -219,8 +219,13 @@ Shell wrapper:
 Enforced by default:
 - Algorithmic regression gate on `work_units` for:
   - `mipx_barrier_gpu`
+- Empty `--instances` uses the curated stable GPU set from
+  `tests/perf/baselines/barrier_gpu_stable_netlib_small.txt`:
+  `adlittle,afiro,blend,sc50b,share2b,stocfor1`
 - Default thresholds are strict (`0.0%` median regression allowed).
 - CPU barrier lanes are available with `--enable-cpu-barrier-lanes`.
+- Use `--all-available-instances` to opt out of the curated GPU set for
+  exploratory full-Netlib runs.
 
 Opt-in wall-clock bands (machine-noise aware, separate lanes):
 

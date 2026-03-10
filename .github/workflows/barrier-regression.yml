@@ -4,13 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       instances:
-        description: "Comma-separated instance names (empty = all available)"
+        description: "Comma-separated instance names (empty = curated stable GPU set)"
         required: false
         default: ""
       max_instances:
-        description: "Max instances (0 = all)"
+        description: "Max instances (0 = full selected set)"
         required: false
         default: "0"
+      all_available_instances:
+        description: "Opt out of curated stable GPU set and use all available instances"
+        required: false
+        type: boolean
+        default: false
       repeats:
         description: "Runs per solver/instance"
         required: false
@@ -104,6 +109,9 @@ jobs:
           extra_args=()
           if [[ "${{ inputs.enable_cpu_barrier_lanes }}" == "true" ]]; then
             extra_args+=(--enable-cpu-barrier-lanes)
+          fi
+          if [[ "${{ inputs.all_available_instances }}" == "true" ]]; then
+            extra_args+=(--all-available-instances)
           fi
           if [[ "${{ inputs.enable_wall_clock_bands }}" == "true" ]]; then
             extra_args+=(
