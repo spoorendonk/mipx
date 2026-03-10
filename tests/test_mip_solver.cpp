@@ -1368,6 +1368,23 @@ TEST_CASE("MipSolver: in-tree presolve telemetry is populated", "[mip][presolve]
     CHECK(stats.reduced_cost_tightenings >= 0);
 }
 
+TEST_CASE("MipSolver: tree presolve auto tuning classifies small pure-binary models",
+          "[mip][presolve][tree]") {
+    MipSolver pure_binary;
+    pure_binary.setVerbose(false);
+    pure_binary.load(buildKnapsackMip());
+    CHECK(pure_binary.isTreePresolveAutoTuningEnabled());
+    CHECK(pure_binary.isTreePresolveBinaryLiteProfileActive());
+
+    pure_binary.setTreePresolveAutoTuning(false);
+    CHECK_FALSE(pure_binary.isTreePresolveBinaryLiteProfileActive());
+
+    MipSolver general_integer;
+    general_integer.setVerbose(false);
+    general_integer.load(buildBranchingMip());
+    CHECK_FALSE(general_integer.isTreePresolveBinaryLiteProfileActive());
+}
+
 TEST_CASE("MipSolver: in-tree presolve preserves feasible optimum", "[mip][presolve][tree]") {
     auto lp = buildBranchingMip();
 

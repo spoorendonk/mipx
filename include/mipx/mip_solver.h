@@ -298,6 +298,12 @@ public:
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
     }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    void setTreePresolveAutoTuning(bool enabled) {
+        tree_presolve_auto_tuning_enabled_ = enabled;
+        if (loaded_) {
+            refreshTreePresolveProfile();
+        }
+    }
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
     void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
         tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
@@ -311,6 +317,12 @@ public:
     [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
+    [[nodiscard]] bool isTreePresolveAutoTuningEnabled() const {
+        return tree_presolve_auto_tuning_enabled_;
+    }
+    [[nodiscard]] bool isTreePresolveBinaryLiteProfileActive() const {
+        return tree_presolve_binary_lite_profile_active_;
+    }
     const MipSymmetryStats& getSymmetryStats() const { return symmetry_stats_; }
     const MipExactRefinementStats& getExactRefinementStats() const {
         return exact_refinement_stats_;
@@ -318,6 +330,7 @@ public:
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
+    void refreshTreePresolveProfile();
     [[nodiscard]] MipTreePresolveStats treePresolveStatsSnapshot() const;
     void mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta);
 
@@ -465,9 +478,14 @@ private:
     // Serial in-tree presolve is enabled by default because it materially
     // improves hard MIP search on benchmark instances.
     bool tree_presolve_enabled_ = true;
+    bool tree_presolve_auto_tuning_enabled_ = true;
     Int tree_presolve_max_depth_ = 24;
     Int tree_presolve_min_frac_ = 8;
     Int tree_presolve_depth_frequency_ = 3;
+    bool tree_presolve_binary_lite_profile_active_ = false;
+    Int model_binary_vars_ = 0;
+    Int model_general_integer_vars_ = 0;
+    Int model_continuous_vars_ = 0;
     // Serial in-tree cuts are disabled by default while correctness hardening
     // is in progress for benchmark regressions.
     bool tree_cuts_enabled_ = false;
@@ -527,6 +545,11 @@ private:
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
     static constexpr Real kHeurBudgetMaxWorkShare = 0.20;
     static constexpr Int kHeurBudgetMaxFrequencyScale = 8;
+    static constexpr Int kTreePresolveBinaryLiteMaxCols = 512;
+    static constexpr Int kTreePresolveBinaryLiteMaxRows = 512;
+    static constexpr Int kTreePresolveBinaryLiteMaxDepth = 8;
+    static constexpr Int kTreePresolveBinaryLiteMinFrac = 12;
+    static constexpr Int kTreePresolveBinaryLiteDepthFrequency = 6;
 };
 
 }  // namespace mipx

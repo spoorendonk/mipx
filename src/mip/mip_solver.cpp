@@ -1138,11 +1138,24 @@ void MipSolver::load(const LpProblem& problem) {
     } else {
         problem_ = problem;
     }
+    refreshTreePresolveProfile();
     loaded_ = true;
 }
 
 bool MipSolver::hasLpLightCapability() const {
     return kLpLightCompiled;
+}
+
+void MipSolver::refreshTreePresolveProfile() {
+    countVarTypes(problem_, model_binary_vars_, model_general_integer_vars_,
+                  model_continuous_vars_);
+    tree_presolve_binary_lite_profile_active_ =
+        tree_presolve_auto_tuning_enabled_ &&
+        model_binary_vars_ > 0 &&
+        model_general_integer_vars_ == 0 &&
+        model_continuous_vars_ == 0 &&
+        problem_.num_cols <= kTreePresolveBinaryLiteMaxCols &&
+        problem_.num_rows <= kTreePresolveBinaryLiteMaxRows;
 }
 
 MipTreePresolveStats MipSolver::treePresolveStatsSnapshot() const {
@@ -1738,10 +1751,23 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
     }
     int_inf_out = frac_count;
 
+    Int tree_presolve_max_depth = tree_presolve_max_depth_;
+    Int tree_presolve_min_frac = tree_presolve_min_frac_;
+    Int tree_presolve_depth_frequency = tree_presolve_depth_frequency_;
+    if (tree_presolve_binary_lite_profile_active_) {
+        tree_presolve_max_depth = std::min<Int>(
+            tree_presolve_max_depth, kTreePresolveBinaryLiteMaxDepth);
+        tree_presolve_min_frac = std::max<Int>(
+            tree_presolve_min_frac, kTreePresolveBinaryLiteMinFrac);
+        tree_presolve_depth_frequency = std::max<Int>(
+            tree_presolve_depth_frequency,
+            kTreePresolveBinaryLiteDepthFrequency);
+    }
+
     // In-tree presolve: run safe local tightening passes at selected tree nodes.
     if (tree_presolve_enabled_ &&
         (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
-        node.depth > 0 && node.depth <= tree_presolve_max_depth_) {
+        node.depth > 0 && node.depth <= tree_presolve_max_depth) {
         const auto tree_presolve_snapshot = treePresolveStatsSnapshot();
         MipTreePresolveStats tree_presolve_delta{};
         tree_presolve_delta.attempts = 1;
@@ -1751,8 +1777,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
             mergeTreePresolveStatsDelta(tree_presolve_delta);
             tree_presolve_stats_flushed = true;
         };
-        const bool depth_gate = (node.depth % tree_presolve_depth_frequency_ == 0);
-        const bool frac_gate = (frac_count >= tree_presolve_min_frac_);
+        const bool depth_gate = (node.depth % tree_presolve_depth_frequency == 0);
+        const bool frac_gate = (frac_count >= tree_presolve_min_frac);
 
         bool benefit_skip = false;
         if (tree_presolve_snapshot.runs >= 6) {
@@ -1760,7 +1786,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                 tree_presolve_snapshot.activity_tightenings +
                 tree_presolve_snapshot.reduced_cost_tightenings) /
                 static_cast<Real>(std::max<Int>(1, tree_presolve_snapshot.runs));
-            if (avg_tight < 0.5 && frac_count < tree_presolve_min_frac_ * 2 &&
+            if (avg_tight < 0.5 && frac_count < tree_presolve_min_frac * 2 &&
                 !depth_gate) {
                 benefit_skip = true;
             }
@@ -3035,19 +3061,34 @@ MipResult MipSolver::solve() {
         log_.log("Thread count: %u physical cores, %u logical processors, using up to %d threads%s%s\n",
                  physical, logical, num_threads_, tbb_str, simd_str);
 
-        // Variable type breakdown.
-        Int n_binary = 0, n_integer = 0, n_continuous = 0;
-        countVarTypes(problem_, n_binary, n_integer, n_continuous);
-
         // Build type string.
         char type_buf[128] = "";
-        if (n_binary > 0 || n_integer > 0) {
+        if (model_binary_vars_ > 0 || model_general_integer_vars_ > 0) {
             char* p = type_buf;
             p += std::snprintf(p, sizeof(type_buf), " (");
             bool first = true;
-            if (n_binary > 0) { p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d binary", n_binary); first = false; }
-            if (n_integer > 0) { if (!first) p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), ", "); p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d integer", n_integer); first = false; }
-            if (n_continuous > 0) { if (!first) p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), ", "); p += std::snprintf(p, sizeof(type_buf) - (p - type_buf), "%d continuous", n_continuous); }
+            if (model_binary_vars_ > 0) {
+                p += std::snprintf(p, sizeof(type_buf) - (p - type_buf),
+                                   "%d binary", model_binary_vars_);
+                first = false;
+            }
+            if (model_general_integer_vars_ > 0) {
+                if (!first) {
+                    p += std::snprintf(p, sizeof(type_buf) - (p - type_buf),
+                                       ", ");
+                }
+                p += std::snprintf(p, sizeof(type_buf) - (p - type_buf),
+                                   "%d integer", model_general_integer_vars_);
+                first = false;
+            }
+            if (model_continuous_vars_ > 0) {
+                if (!first) {
+                    p += std::snprintf(p, sizeof(type_buf) - (p - type_buf),
+                                       ", ");
+                }
+                p += std::snprintf(p, sizeof(type_buf) - (p - type_buf),
+                                   "%d continuous", model_continuous_vars_);
+            }
             std::snprintf(p, sizeof(type_buf) - (p - type_buf), ")");
         }
         log_.log("Solving MIP with:\n  %d rows, %d cols%s, %d nonzeros\n",
@@ -3075,6 +3116,9 @@ MipResult MipSolver::solve() {
         }
         if (!tree_presolve_enabled_) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_presolve=off ");
+        } else if (tree_presolve_binary_lite_profile_active_) {
+            sp += std::snprintf(sp, sizeof(settings) - (sp - settings),
+                                "tree_presolve_profile=binary-lite ");
         }
         if (!tree_cuts_enabled_) {
             sp += std::snprintf(sp, sizeof(settings) - (sp - settings), "tree_cuts=off ");
@@ -3228,10 +3272,12 @@ MipResult MipSolver::solve() {
     if (using_transformed_problem) {
         original_problem = std::move(problem_);
         problem_ = std::move(working_problem);
+        refreshTreePresolveProfile();
     }
     auto restoreProblem = [&]() {
         if (!using_transformed_problem) return;
         problem_ = std::move(original_problem);
+        refreshTreePresolveProfile();
     };
 
     auto applyPostsolve = [&](MipResult& result) {

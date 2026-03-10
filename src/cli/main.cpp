@@ -25,6 +25,7 @@ int main(int argc, char* argv[]) {
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
             "[--conflicts|--no-conflicts] "
             "[--tree-presolve|--no-tree-presolve] "
+            "[--tree-presolve-auto|--no-tree-presolve-auto] "
             "[--tree-presolve-max-depth N] "
             "[--tree-presolve-min-frac N] "
             "[--tree-presolve-depth-frequency N] "
@@ -81,6 +82,7 @@ int main(int argc, char* argv[]) {
     bool pre_root_portfolio = true;
     bool conflicts_enabled = true;
     bool tree_presolve_enabled = true;
+    bool tree_presolve_auto = true;
     mipx::Int tree_presolve_max_depth = 24;
     mipx::Int tree_presolve_min_frac = 8;
     mipx::Int tree_presolve_depth_frequency = 3;
@@ -128,6 +130,10 @@ int main(int argc, char* argv[]) {
             tree_presolve_enabled = true;
         } else if (arg == "--no-tree-presolve") {
             tree_presolve_enabled = false;
+        } else if (arg == "--tree-presolve-auto") {
+            tree_presolve_auto = true;
+        } else if (arg == "--no-tree-presolve-auto") {
+            tree_presolve_auto = false;
         } else if (arg == "--tree-presolve-max-depth" && i + 1 < argc) {
             tree_presolve_max_depth =
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
@@ -308,6 +314,7 @@ int main(int argc, char* argv[]) {
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setConflictsEnabled(conflicts_enabled);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
+            solver.setTreePresolveAutoTuning(tree_presolve_auto);
             solver.setTreePresolveControls(tree_presolve_max_depth,
                                            tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
@@ -335,7 +342,7 @@ int main(int argc, char* argv[]) {
             }
             log.log("Run profile: mode=%s seed=%llu threads=%d search=%s "
                     "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
-                    "tree_presolve_freq=%d tree_cuts=%s\n",
+                    "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s\n",
                     parallel_mode_name,
                     static_cast<unsigned long long>(heuristic_seed),
                     num_threads,
@@ -344,6 +351,7 @@ int main(int argc, char* argv[]) {
                     tree_presolve_enabled ? "on" : "off",
                     tree_presolve_min_frac,
                     tree_presolve_depth_frequency,
+                    tree_presolve_auto ? "on" : "off",
                     tree_cuts_enabled ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal &&
