@@ -16,7 +16,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
 DEFAULT_INSTANCES = (
-    "air04,air05,blend2,flugpl,gt2,p0201,supportcase16,stein45inf"
+    "air04,air05,blend2,dcmulti,flugpl,gen,glass4,gt2,p0201,"
+    "supportcase16,stein45inf"
 )
 SOLVED_STATUSES = {"optimal", "gap_limit"}
 

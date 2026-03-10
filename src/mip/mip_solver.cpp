@@ -1799,8 +1799,13 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
         tree_presolve_frac_gate_enabled = false;
     }
 
-    // In-tree presolve: run safe local tightening passes at selected tree nodes.
+    const bool tree_presolve_model_supported = (model_continuous_vars_ == 0);
+
+    // In-tree presolve: currently limited to all-discrete models. Mixed
+    // continuous MIPs need additional hardening before row-activity tightening
+    // is trusted in-tree.
     if (tree_presolve_enabled_ &&
+        tree_presolve_model_supported &&
         (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
         node.depth > 0 && node.depth <= tree_presolve_max_depth) {
         const auto tree_presolve_snapshot = treePresolveStatsSnapshot();
