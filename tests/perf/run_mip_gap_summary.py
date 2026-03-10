@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
 DEFAULT_INSTANCES = "air04,air05,blend2,flugpl,gt2,p0201"
+SOLVED_STATUSES = {"optimal", "gap_limit"}
 
 
 def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
@@ -89,6 +90,10 @@ def count_statuses(rows: dict[str, dict[str, str]]) -> dict[str, int]:
     return counts
 
 
+def is_solved_status(status: str) -> bool:
+    return status in SOLVED_STATUSES
+
+
 def compare_rows(
     mipx_rows: dict[str, dict[str, str]],
     highs_rows: dict[str, dict[str, str]],
@@ -105,7 +110,7 @@ def compare_rows(
         mipx_status = (mipx_rows[name].get("status") or "").strip().lower()
         highs_status = (highs_rows[name].get("status") or "").strip().lower()
 
-        if mipx_status == "optimal" and highs_status == "optimal":
+        if is_solved_status(mipx_status) and is_solved_status(highs_status):
             both_optimal.append(name)
             mipx_time = parse_float(mipx_rows[name].get("time_seconds", ""))
             highs_time = parse_float(highs_rows[name].get("time_seconds", ""))
@@ -120,9 +125,9 @@ def compare_rows(
                         "ratio": ratio,
                     }
                 )
-        elif mipx_status == "optimal":
+        elif is_solved_status(mipx_status):
             mipx_only_optimal.append(name)
-        elif highs_status == "optimal":
+        elif is_solved_status(highs_status):
             highs_only_optimal.append(name)
         else:
             neither_optimal.append(name)
@@ -161,20 +166,24 @@ def render_markdown(
     lines.append(f"- gap tolerance: {args.gap_tol:g}")
     lines.append("")
     lines.append("## Solve Status")
-    lines.append(f"- mipx optimal: {count_statuses(mipx_rows).get('optimal', 0)}/{len(instances)}")
-    lines.append(f"- HiGHS optimal: {count_statuses(highs_rows).get('optimal', 0)}/{len(instances)}")
-    lines.append(f"- both optimal: {len(comparison['both_optimal'])}")
-    lines.append(f"- mipx-only optimal: {len(comparison['mipx_only_optimal'])}")
-    lines.append(f"- HiGHS-only optimal: {len(comparison['highs_only_optimal'])}")
+    mipx_counts = count_statuses(mipx_rows)
+    highs_counts = count_statuses(highs_rows)
+    mipx_solved = sum(count for status, count in mipx_counts.items() if is_solved_status(status))
+    highs_solved = sum(count for status, count in highs_counts.items() if is_solved_status(status))
+    lines.append(f"- mipx solved: {mipx_solved}/{len(instances)}")
+    lines.append(f"- HiGHS solved: {highs_solved}/{len(instances)}")
+    lines.append(f"- both solved: {len(comparison['both_optimal'])}")
+    lines.append(f"- mipx-only solved: {len(comparison['mipx_only_optimal'])}")
+    lines.append(f"- HiGHS-only solved: {len(comparison['highs_only_optimal'])}")
     lines.append("")
     lines.append("## Time Ratio")
     geomean_ratio = comparison["time_geomean_ratio"]
     median_ratio = comparison["time_median_ratio"]
     if geomean_ratio is None:
-        lines.append("- no common optimal runs with valid timing")
+        lines.append("- no common solved runs with valid timing")
     else:
-        lines.append(f"- geomean mipx/HiGHS time ratio on common optimal runs: {geomean_ratio:.3f}x")
-        lines.append(f"- median mipx/HiGHS time ratio on common optimal runs: {median_ratio:.3f}x")
+        lines.append(f"- geomean mipx/HiGHS time ratio on common solved runs: {geomean_ratio:.3f}x")
+        lines.append(f"- median mipx/HiGHS time ratio on common solved runs: {median_ratio:.3f}x")
     lines.append("")
     lines.append("## Per-Instance")
     lines.append("| Instance | mipx status | HiGHS status | mipx time (s) | HiGHS time (s) | Ratio |")
