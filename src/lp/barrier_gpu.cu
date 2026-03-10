@@ -202,6 +202,34 @@ __global__ void kernelDotPartial(int n, const double* a, const double* b,
     if (threadIdx.x == 0) partials[blockIdx.x] = sdata[0];
 }
 
+__global__ void kernelDot2Partial(int n, const double* a0, const double* b0,
+                                  const double* a1, const double* b1,
+                                  double* partials) {
+    __shared__ double s0[kBlockSize];
+    __shared__ double s1[kBlockSize];
+    double sum0 = 0.0;
+    double sum1 = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        sum0 += a0[i] * b0[i];
+        sum1 += a1[i] * b1[i];
+    }
+    s0[threadIdx.x] = sum0;
+    s1[threadIdx.x] = sum1;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            s0[threadIdx.x] += s0[threadIdx.x + s];
+            s1[threadIdx.x] += s1[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x] = s0[0];
+        partials[gridDim.x + blockIdx.x] = s1[0];
+    }
+}
+
 __global__ void kernelDot4Partial(int n, const double* a0, const double* b0,
                                   const double* a1, const double* b1,
                                   const double* a2, const double* b2,
@@ -725,11 +753,6 @@ struct GpuContext {
         return alpha;
     }
 
-    // Compute mu = sum(z*s) / n on GPU.
-    double gpuMu(double* d_z_in, double* d_s_in, int sz) {
-        return gpuDot(d_z_in, d_s_in, sz) / std::max(sz, 1);
-    }
-
     // Compute min of vector.
     double gpuMin(double* d_v, int sz) {
         double big = 1e30;
@@ -758,6 +781,17 @@ struct GpuContext {
         cudaStreamSynchronize(stream);
         return {accumulateReduce(blocks, 0), accumulateReduce(blocks, 1),
                 accumulateReduce(blocks, 2), accumulateReduce(blocks, 3)};
+    }
+
+    std::array<double, 2> gpuDot2(double* d_a0, double* d_b0, double* d_a1,
+                                  double* d_b1, int sz) {
+        int blocks = std::max(gridSize(sz), 1);
+        kernelDot2Partial<<<blocks, kBlockSize, 0, stream>>>(
+            sz, d_a0, d_b0, d_a1, d_b1, d_reduce);
+        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * 2 * blocks,
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        return {accumulateReduce(blocks, 0), accumulateReduce(blocks, 1)};
     }
 
     ~GpuContext() {
@@ -1265,11 +1299,13 @@ struct GpuBarrierImpl {
                 n, ctx.d_c, ctx.d_aty, ctx.d_s, ctx.d_rd);
 
             // Convergence check.
-            double mu = ctx.gpuMu(ctx.d_z, ctx.d_s, n);
+            auto [zs_dot, cz_dot] =
+                ctx.gpuDot2(ctx.d_z, ctx.d_s, ctx.d_c, ctx.d_z, n);
+            double mu = zs_dot / std::max(n, 1);
             double complementarity = std::abs(mu) * std::max(n, 1);
             double pinf = ctx.gpuInfNorm(ctx.d_rp, m) * inv_b;
             double dinf = ctx.gpuInfNorm(ctx.d_rd, n) * inv_c;
-            double pobj = std_obj_offset + ctx.gpuDot(ctx.d_c, ctx.d_z, n);
+            double pobj = std_obj_offset + cz_dot;
             double gap = complementarity / (1.0 + std::abs(pobj));
 
             if (opts.verbose) {
