@@ -496,19 +496,26 @@ def summarize_and_write(
         by_instance.setdefault(row["instance"], []).append(row)
 
     print("\nPer-solver summary")
-    print("solver,rows,optimal,median_time,geomean_time,median_iterations")
+    print("solver,rows,optimal,median_time,geomean_time,median_iterations,backend_counts")
     for solver in sorted(by_solver):
         rows = by_solver[solver]
         times = [float(r["time_seconds"]) for r in rows if r["time_seconds"]]
         opt_rows = [r for r in rows if r["status"] == "optimal"]
         opt_times = [float(r["time_seconds"]) for r in opt_rows if r["time_seconds"]]
         opt_iters = [float(r["iterations"]) for r in opt_rows if r["iterations"]]
+        backend_counts: dict[str, int] = {}
+        for row in rows:
+            backend = row.get("backend", "").strip() or "-"
+            backend_counts[backend] = backend_counts.get(backend, 0) + 1
         med_time = median(times) if times else float("nan")
         gmean_time = geomean(opt_times) if opt_times else float("nan")
         med_iter = median(opt_iters) if opt_iters else float("nan")
+        backend_summary = ";".join(
+            f"{backend}:{backend_counts[backend]}" for backend in sorted(backend_counts)
+        )
         print(
             f"{solver},{len(rows)},{len(opt_rows)},"
-            f"{med_time:.6f},{gmean_time:.6f},{med_iter:.2f}"
+            f"{med_time:.6f},{gmean_time:.6f},{med_iter:.2f},{backend_summary}"
         )
 
     print("\nObjective agreement check (optimal-only)")
