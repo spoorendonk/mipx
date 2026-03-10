@@ -1784,13 +1784,18 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node,
                                (frac_count >= tree_presolve_min_frac);
 
         bool benefit_skip = false;
-        if (tree_presolve_snapshot.runs >= 6) {
+        const Int benefit_skip_runs =
+            tree_presolve_binary_lite_profile_active_ ? 4 : 6;
+        if (tree_presolve_snapshot.runs >= benefit_skip_runs) {
             const Real avg_tight = static_cast<Real>(
                 tree_presolve_snapshot.activity_tightenings +
                 tree_presolve_snapshot.reduced_cost_tightenings) /
                 static_cast<Real>(std::max<Int>(1, tree_presolve_snapshot.runs));
-            if (avg_tight < 0.5 && frac_count < tree_presolve_min_frac * 2 &&
-                !depth_gate) {
+            const bool binary_lite_cold = tree_presolve_binary_lite_profile_active_ &&
+                                          avg_tight < 4.0;
+            if (binary_lite_cold ||
+                (avg_tight < 0.5 && frac_count < tree_presolve_min_frac * 2 &&
+                 !depth_gate)) {
                 benefit_skip = true;
             }
         }
