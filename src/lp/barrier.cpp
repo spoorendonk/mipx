@@ -43,6 +43,15 @@ inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     return s;
 }
 
+inline Real computeOriginalObjective(const LpProblem& problem,
+                                     std::span<const Real> x) {
+    Real obj = problem.obj_offset;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        obj += problem.obj[j] * x[j];
+    }
+    return obj;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -616,9 +625,6 @@ LpResult BarrierSolver::solve() {
         throw std::runtime_error(msg + " (dual-simplex fallback disabled).");
     }
 
-    // Compute objective in scaled space (before unscaling).
-    Real min_obj = std_obj_offset_ + dot(cstd_, z);
-
     // Unscale solution back to original space.
     unscaleResult(z, y, s);
 
@@ -634,7 +640,7 @@ LpResult BarrierSolver::solve() {
 
     dual_eq_ = y;
     reduced_costs_std_ = s;
-    objective_ = (original_.sense == Sense::Minimize) ? min_obj : -min_obj;
+    objective_ = computeOriginalObjective(original_, primal_orig_);
     status_ = Status::Optimal;
     iterations_ = iters;
 

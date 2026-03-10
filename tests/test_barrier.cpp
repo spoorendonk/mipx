@@ -169,6 +169,14 @@ LpProblem buildMaxLp() {
     return lp;
 }
 
+Real originalObjective(const LpProblem& lp, std::span<const Real> x) {
+    Real obj = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        obj += lp.obj[j] * x[j];
+    }
+    return obj;
+}
+
 }  // namespace
 
 TEST_CASE("BarrierSolver: solves simple LP", "[barrier]") {
@@ -291,6 +299,22 @@ TEST_CASE("BarrierSolver: maximization problem", "[barrier]") {
     auto ds_result = ds.solve();
     REQUIRE(ds_result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
+}
+
+TEST_CASE("BarrierSolver: reported objective matches reconstructed primal",
+          "[barrier]") {
+    auto lp = buildMaxLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts = gpuBarrierOpts();
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solveBarrierOrSkip(solver);
+
+    REQUIRE(result.status == Status::Optimal);
+    auto x = solver.getPrimalValues();
+    REQUIRE(x.size() == static_cast<size_t>(lp.num_cols));
+    CHECK_THAT(result.objective, WithinAbs(originalObjective(lp, x), 1e-6));
 }
 
 TEST_CASE("BarrierSolver: scaling with no scaling gives same result", "[barrier]") {

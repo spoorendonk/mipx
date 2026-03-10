@@ -184,6 +184,23 @@ __global__ void kernelDot(int n, const double* a, const double* b,
     if (threadIdx.x == 0) atomicAdd(result, sdata[0]);
 }
 
+__global__ void kernelDotPartial(int n, const double* a, const double* b,
+                                 double* partials) {
+    __shared__ double sdata[kBlockSize];
+    double sum = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        sum += a[i] * b[i];
+    }
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) partials[blockIdx.x] = sdata[0];
+}
+
 // Inf-norm reduction.
 __global__ void kernelInfNorm(int n, const double* v, double* result) {
     __shared__ double sdata[kBlockSize];
@@ -362,6 +379,22 @@ __global__ void kernelSum(int n, const double* v, double* result) {
     if (threadIdx.x == 0) atomicAdd(result, sdata[0]);
 }
 
+__global__ void kernelSumPartial(int n, const double* v, double* partials) {
+    __shared__ double sdata[kBlockSize];
+    double sum = 0.0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += gridDim.x * blockDim.x) {
+        sum += v[i];
+    }
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) partials[blockIdx.x] = sdata[0];
+}
+
 // Min reduction for finding min(z) or min(s).
 __global__ void kernelMin(int n, const double* v, double* result) {
     __shared__ double sdata[kBlockSize];
@@ -441,6 +474,8 @@ struct GpuContext {
     // Scratch for reductions.
     double* d_scalar = nullptr;   // 4 scalars on device
     double* d_tmp = nullptr;      // max(m,n)-sized temp for reductions
+    double* d_reduce = nullptr;   // partial reductions, size gridSize(max(m,n))
+    std::vector<double> h_reduce;
 
     // cuSPARSE vector descriptors.
     cusparseDnVecDescr_t vec_n1 = nullptr;  // size n, for input
@@ -499,9 +534,11 @@ struct GpuContext {
         // Allocate all IPM vectors in a single cudaMalloc (reduces init overhead).
         // n-sized: z, s, c, z_bak, aty, rd, rc, theta, h, atdy, dz, ds, dz_aff, ds_aff = 14
         // m-sized: y, b, y_bak, az, rp, ah, rhs, dy, dy_aff = 9
-        // s_bak: n, scalar: 4, tmp: max(m,n)
+        // s_bak: n, tmp: max(m,n), deterministic reduction partials, scalar: 4
         int mn = std::max(m, n);
-        size_t pool_size = static_cast<size_t>(15 * n + 9 * m + mn + 4);
+        int reduce_slots = std::max(gridSize(mn), 1);
+        size_t pool_size =
+            static_cast<size_t>(15 * n + 9 * m + mn + reduce_slots + 4);
         if (!cudaOk(cudaMalloc(&d_pool, sizeof(double) * pool_size))) return false;
 
         double* p = d_pool;
@@ -519,7 +556,9 @@ struct GpuContext {
         d_rhs = take_m(); d_dy = take_m(); d_dy_aff = take_m();
 
         d_tmp = p; p += mn;
+        d_reduce = p; p += reduce_slots;
         d_scalar = p; p += 4;
+        h_reduce.assign(static_cast<size_t>(reduce_slots), 0.0);
 
         // Upload b, c.
         if (!cudaOk(cudaMemcpyAsync(d_b, b_host.data(), sizeof(double) * m,
@@ -600,10 +639,15 @@ struct GpuContext {
 
     // Compute dot(a, b) on GPU and return.
     double gpuDot(double* d_a, double* d_b, int sz) {
-        cudaMemsetAsync(d_scalar, 0, sizeof(double), stream);
-        kernelDot<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_a, d_b,
-                                                            d_scalar);
-        return downloadScalar(0);
+        int blocks = std::max(gridSize(sz), 1);
+        kernelDotPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_a, d_b,
+                                                            d_reduce);
+        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        double sum = 0.0;
+        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
+        return sum;
     }
 
     // Compute inf-norm on GPU.
@@ -632,9 +676,14 @@ struct GpuContext {
     double gpuMu(double* d_z_in, double* d_s_in, int sz) {
         kernelZS<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_z_in, d_s_in,
                                                            d_tmp);
-        cudaMemsetAsync(d_scalar, 0, sizeof(double), stream);
-        kernelSum<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_tmp, d_scalar);
-        double sum = downloadScalar(0);
+        int blocks = std::max(gridSize(sz), 1);
+        kernelSumPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_tmp,
+                                                            d_reduce);
+        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        double sum = 0.0;
+        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
         return sum / std::max(sz, 1);
     }
 
@@ -649,9 +698,15 @@ struct GpuContext {
 
     // Compute sum of vector.
     double gpuSum(double* d_v, int sz) {
-        cudaMemsetAsync(d_scalar, 0, sizeof(double), stream);
-        kernelSum<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_v, d_scalar);
-        return downloadScalar(0);
+        int blocks = std::max(gridSize(sz), 1);
+        kernelSumPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_v,
+                                                            d_reduce);
+        cudaMemcpyAsync(h_reduce.data(), d_reduce, sizeof(double) * blocks,
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        double sum = 0.0;
+        for (int i = 0; i < blocks; ++i) sum += h_reduce[i];
+        return sum;
     }
 
     ~GpuContext() {
@@ -891,6 +946,11 @@ struct NormalEqSolver {
             }
         }
 
+        if (!cudaOk(cudaStreamSynchronize(ctx->stream))) {
+            last_error = "cudaStreamSynchronize after factorization failed";
+            return false;
+        }
+
         return true;
     }
 
@@ -925,6 +985,10 @@ struct NormalEqSolver {
         if (!cudssOk(status)) {
             last_error = std::string("cudssExecute(solve) failed (") +
                          cudssStatusName(status) + ")";
+            return false;
+        }
+        if (!cudaOk(cudaStreamSynchronize(ctx->stream))) {
+            last_error = "cudaStreamSynchronize after solve failed";
             return false;
         }
         return true;
@@ -1133,7 +1197,6 @@ struct GpuBarrierImpl {
         double prev_pinf = 1e30, prev_dinf = 1e30, prev_gap = 1e30;
         int stagnant_iters = 0;
         double reg_boost = 1.0;  // multiplicative boost on regularization
-
         for (int iter = 0; iter < opts.max_iter; ++iter) {
             if (opts.stop_flag != nullptr &&
                 opts.stop_flag->load(std::memory_order_relaxed)) {
@@ -1152,10 +1215,11 @@ struct GpuBarrierImpl {
 
             // Convergence check.
             double mu = ctx.gpuMu(ctx.d_z, ctx.d_s, n);
+            double complementarity = std::abs(mu) * std::max(n, 1);
             double pinf = ctx.gpuInfNorm(ctx.d_rp, m) * inv_b;
             double dinf = ctx.gpuInfNorm(ctx.d_rd, n) * inv_c;
             double pobj = std_obj_offset + ctx.gpuDot(ctx.d_c, ctx.d_z, n);
-            double gap = std::abs(mu) / (1.0 + std::abs(pobj));
+            double gap = complementarity / (1.0 + std::abs(pobj));
 
             if (opts.verbose) {
                 std::printf(
