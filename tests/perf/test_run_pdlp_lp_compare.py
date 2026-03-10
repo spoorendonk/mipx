@@ -82,3 +82,52 @@ OUT
     assert cupdlpx_row["objective"] == "-8"
     assert cupdlpx_row["iterations"] == "600"
     assert cupdlpx_row["time_seconds"] == "0.018700"
+
+
+def test_compare_script_enforces_external_time_limit(tmp_path: Path) -> None:
+    instances_dir = tmp_path / "netlib"
+    instances_dir.mkdir()
+    (instances_dir / "toy.mps.gz").write_bytes(b"")
+
+    sleeper = tmp_path / "fake_timeout_solver.sh"
+    sleeper.write_text(
+        """#!/usr/bin/env bash
+sleep 2
+cat <<'OUT'
+Status: Optimal
+Objective: -8
+Iterations: 34
+Work units: 56
+Time: 2s
+OUT
+""",
+        encoding="utf-8",
+    )
+    make_executable(sleeper)
+
+    out_csv = tmp_path / "compare_timeout.csv"
+    cmd = [
+        sys.executable,
+        str(COMPARE_SCRIPT),
+        "--mipx-binary",
+        str(sleeper),
+        "--instances-dir",
+        str(instances_dir),
+        "--output",
+        str(out_csv),
+        "--repeats",
+        "1",
+        "--threads",
+        "1",
+        "--time-limit",
+        "0.1",
+        "--no-cupdlpx",
+        "--no-highs",
+        "--no-cuopt",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+    assert proc.returncode == 0, proc.stdout + "\n" + proc.stderr
+
+    rows = list(csv.DictReader(out_csv.open(encoding="utf-8")))
+    assert rows
+    assert {row["status"] for row in rows} == {"time_limit"}

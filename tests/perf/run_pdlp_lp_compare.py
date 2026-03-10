@@ -176,12 +176,28 @@ class SolverResult:
     error: str | None = None
 
 
-def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
+def run_cmd(cmd: list[str], timeout_seconds: float | None = None) -> tuple[int, str, float]:
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    elapsed = time.perf_counter() - t0
-    output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    return proc.returncode, output, elapsed
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0.0 else None,
+        )
+        elapsed = time.perf_counter() - t0
+        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        return proc.returncode, output, elapsed
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.perf_counter() - t0
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        output = stdout + ("\n" + stderr if stderr else "")
+        return 124, output, elapsed
 
 
 def run_mipx_pdlp(
@@ -208,7 +224,9 @@ def run_mipx_pdlp(
     if time_limit > 0:
         cmd.extend(["--time-limit", f"{time_limit:g}"])
 
-    code, out, elapsed = run_cmd(cmd)
+    code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+    if code == 124:
+        return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
     if code != 0:
         return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 
@@ -258,13 +276,17 @@ def run_highs(
         if time_limit > 0:
             cmd.extend(["--time_limit", f"{time_limit:g}"])
 
-        code, out, elapsed = run_cmd(cmd)
+        code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+        if code == 124:
+            return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
         solver_note = ""
         if code != 0 and requested_solver == "pdlp":
             fallback = cmd.copy()
             solver_idx = fallback.index("--solver") + 1
             fallback[solver_idx] = "ipx"
-            code, out, elapsed = run_cmd(fallback)
+            code, out, elapsed = run_cmd(fallback, timeout_seconds=time_limit)
+            if code == 124:
+                return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
             solver_note = "highs_pdlp_unavailable_fallback_ipx"
         if code != 0:
             return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
@@ -316,7 +338,9 @@ def run_cuopt_pdlp(
     if time_limit > 0:
         cmd.extend(["--time-limit", f"{time_limit:g}"])
 
-    code, out, elapsed = run_cmd(cmd)
+    code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+    if code == 124:
+        return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
     if code != 0:
         return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 
@@ -370,7 +394,9 @@ def run_cupdlpx(
         if time_limit > 0:
             cmd.extend(["--time_limit", f"{time_limit:g}"])
 
-        code, out, elapsed = run_cmd(cmd)
+        code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+        if code == 124:
+            return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
         if code != 0:
             return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 

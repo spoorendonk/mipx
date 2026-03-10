@@ -277,6 +277,7 @@ This emits one CSV row per `(instance, solver)` with:
 Notes:
 - `--cupdlpx-binary` or `MIPX_CUPDLPX_BINARY` enables standalone `cuPDLPx` rows.
 - If `cuPDLPx` is not configured, the generic compare run skips it cleanly.
+- `--time-limit` is enforced as an external wall-clock cap by the harness so cross-solver PDLP runs remain comparable even though `mipx` PDLP CLI time-limit plumbing is still incomplete.
 - `--disable-presolve` isolates PDLP-kernel behavior and avoids presolve skew.
 - `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
 - `--highs-ipx` forces HiGHS IPX instead of attempting HiGHS PDLP.
