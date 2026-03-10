@@ -11,6 +11,8 @@ using Index = int;
 struct GpuConvergenceMetrics {
     Real primal_resid_sq;
     Real dual_resid_sq;
+    Real primal_resid_max;
+    Real dual_resid_max;
     Real primal_obj;
     Real dual_obj_col;
     Real dual_obj_row;

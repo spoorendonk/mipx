@@ -1,14 +1,19 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <filesystem>
 #include <random>
 #include <utility>
 
+#include "mipx/dual_simplex.h"
+#include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
+#include "mipx/presolve.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -74,6 +79,8 @@ LpProblem buildBranchingMip() {
 }
 
 }  // namespace
+
+static std::string testDataDir() { return std::string(TEST_DATA_DIR); }
 
 TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     auto lp = buildSimpleLp();
@@ -416,6 +423,46 @@ TEST_CASE("PdlpSolver: bound-obj rescaling on medium LP", "[pdlp][rescaling]") {
     // First-order methods converge to ~1e-4 relative tolerance, so
     // objectives may differ by O(0.1) on this ~425-obj problem.
     CHECK_THAT(result_on.objective, WithinAbs(result_off.objective, 1.0));
+}
+
+TEST_CASE("PdlpSolver: presolved adlittle tracks dual objective", "[pdlp][netlib][presolve]") {
+    const fs::path path = fs::path(testDataDir()) / "netlib" / "adlittle.mps.gz";
+    if (!fs::exists(path)) {
+        SUCCEED("Netlib adlittle not available");
+        return;
+    }
+
+    auto lp = readMps(path.string());
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+
+    DualSimplexSolver dual;
+    dual.setVerbose(false);
+    dual.load(reduced);
+    auto dual_result = dual.solve();
+    REQUIRE(dual_result.status == Status::Optimal);
+    auto dual_full = presolver.postsolve(dual.getPrimalValues());
+    Real dual_obj = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        dual_obj += lp.obj[j] * dual_full[j];
+    }
+
+    PdlpSolver pdlp;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    pdlp.setOptions(opts);
+    pdlp.load(reduced);
+    auto pdlp_result = pdlp.solve();
+    REQUIRE(pdlp_result.status == Status::Optimal);
+
+    auto pdlp_full = presolver.postsolve(pdlp.getPrimalValues());
+    Real pdlp_obj = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        pdlp_obj += lp.obj[j] * pdlp_full[j];
+    }
+
+    CHECK_THAT(pdlp_obj, WithinAbs(dual_obj, 1.0));
 }
 
 TEST_CASE("PdlpSolver: rescaling with binding column bounds", "[pdlp][rescaling]") {

@@ -391,13 +391,18 @@ LpResult PdlpSolver::solve() {
     Real best_pw_score = std::numeric_limits<Real>::infinity();
 
     // Precompute norms for relative termination.
-    Real c_norm = l2Norm(cscaled_);
+    Real c_norm = l2Norm(original_.obj);
+    Real c_norm_inf = 0.0;
+    for (Real c : original_.obj) c_norm_inf = std::max(c_norm_inf, std::abs(c));
     Real bound_norm = 0.0;
+    Real bound_norm_inf = 0.0;
     for (Index i = 0; i < m; ++i) {
-        Real rl = scaled_row_lower_[i];
-        Real ru = scaled_row_upper_[i];
+        Real rl = original_.row_lower[i];
+        Real ru = original_.row_upper[i];
         if (isFinite(rl)) bound_norm += rl * rl;
         if (isFinite(ru)) bound_norm += ru * ru;
+        if (isFinite(rl)) bound_norm_inf = std::max(bound_norm_inf, std::abs(rl));
+        if (isFinite(ru)) bound_norm_inf = std::max(bound_norm_inf, std::abs(ru));
     }
     bound_norm = std::sqrt(bound_norm);
 
@@ -498,17 +503,22 @@ LpResult PdlpSolver::solve() {
 
         // Primal residual.
         Real primal_resid_sq = 0.0;
+        Real primal_resid_max = 0.0;
         for (Index i = 0; i < m; ++i) {
-            Real violation = ax[i] - std::clamp(ax[i], scaled_row_lower_[i],
-                                                 scaled_row_upper_[i]);
+            Real violation_scaled = ax[i] - std::clamp(ax[i], scaled_row_lower_[i],
+                                                       scaled_row_upper_[i]);
+            Real violation = violation_scaled / (constraint_scale_ * row_scale_[i]);
             primal_resid_sq += violation * violation;
+            primal_resid_max = std::max(primal_resid_max, std::abs(violation));
         }
         Real abs_primal_resid = std::sqrt(primal_resid_sq);
         Real rel_primal_resid = abs_primal_resid / (1.0 + bound_norm);
+        Real rel_primal_resid_inf = primal_resid_max / (1.0 + bound_norm_inf);
 
         // Refresh A^T * pdhg_y for convergence checks on the current iterate.
         scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
         Real dual_resid_sq = 0.0;
+        Real dual_resid_max = 0.0;
         for (Index j = 0; j < n; ++j) {
             Real grad = cscaled_[j] + at_pdhg_y[j];
             Real xj = pdhg_x[j];
@@ -525,10 +535,13 @@ LpResult PdlpSolver::solve() {
             } else {
                 dr = grad;
             }
-            dual_resid_sq += dr * dr;
+            Real dr_orig = dr / (objective_scale_ * col_scale_[j]);
+            dual_resid_sq += dr_orig * dr_orig;
+            dual_resid_max = std::max(dual_resid_max, std::abs(dr_orig));
         }
         Real abs_dual_resid = std::sqrt(dual_resid_sq);
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
+        Real rel_dual_resid_inf = dual_resid_max / (1.0 + c_norm_inf);
 
         // Compare objective gap in true objective space after reversing the
         // bound/objective rescaling used in the PDLP model.
@@ -588,7 +601,9 @@ LpResult PdlpSolver::solve() {
         }
 
         if (rel_primal_resid <= options_.primal_tol &&
+            rel_primal_resid_inf <= options_.primal_tol &&
             rel_dual_resid <= options_.dual_tol &&
+            rel_dual_resid_inf <= options_.dual_tol &&
             rel_gap <= options_.optimality_tol) {
             converged = true;
             break;
@@ -992,12 +1007,17 @@ LpResult PdlpSolver::solveGpu() {
 
     // Precompute norms for relative termination.
     Real c_norm = l2Norm(cscaled_);
+    Real c_norm_inf = 0.0;
+    for (Real c : cscaled_) c_norm_inf = std::max(c_norm_inf, std::abs(c));
     Real bound_norm = 0.0;
+    Real bound_norm_inf = 0.0;
     for (Index i = 0; i < m; ++i) {
         Real rl = scaled_row_lower_[i];
         Real ru = scaled_row_upper_[i];
         if (isFinite(rl)) bound_norm += rl * rl;
         if (isFinite(ru)) bound_norm += ru * ru;
+        if (isFinite(rl)) bound_norm_inf = std::max(bound_norm_inf, std::abs(rl));
+        if (isFinite(ru)) bound_norm_inf = std::max(bound_norm_inf, std::abs(ru));
     }
     bound_norm = std::sqrt(bound_norm);
 
@@ -1136,8 +1156,10 @@ LpResult PdlpSolver::solveGpu() {
         // Host-side convergence computation.
         Real abs_primal_resid = std::sqrt(h_metrics->primal_resid_sq);
         Real rel_primal_resid = abs_primal_resid / (1.0 + bound_norm);
+        Real rel_primal_resid_inf = h_metrics->primal_resid_max / (1.0 + bound_norm_inf);
         Real abs_dual_resid = std::sqrt(h_metrics->dual_resid_sq);
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
+        Real rel_dual_resid_inf = h_metrics->dual_resid_max / (1.0 + c_norm_inf);
 
         Real pobj_scaled = h_metrics->primal_obj;
         Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
@@ -1164,7 +1186,9 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         if (rel_primal_resid <= options_.primal_tol &&
+            rel_primal_resid_inf <= options_.primal_tol &&
             rel_dual_resid <= options_.dual_tol &&
+            rel_dual_resid_inf <= options_.dual_tol &&
             rel_gap <= options_.optimality_tol) {
             converged = true;
             break;

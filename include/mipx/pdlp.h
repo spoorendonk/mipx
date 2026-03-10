@@ -13,9 +13,9 @@ namespace mipx {
 
 struct PdlpOptions {
     Int max_iter = 4000000;
-    Real optimality_tol = 1e-4;
-    Real primal_tol = 1e-4;
-    Real dual_tol = 1e-4;
+    Real optimality_tol = 5e-5;
+    Real primal_tol = 5e-5;
+    Real dual_tol = 5e-5;
 
     // Step size (power iteration for spectral norm).
     Int sv_max_iter = 5000;
