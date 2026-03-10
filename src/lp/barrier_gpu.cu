@@ -727,12 +727,7 @@ struct GpuContext {
 
     // Compute mu = sum(z*s) / n on GPU.
     double gpuMu(double* d_z_in, double* d_s_in, int sz) {
-        kernelZS<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_z_in, d_s_in,
-                                                           d_tmp);
-        int blocks = std::max(gridSize(sz), 1);
-        kernelSumPartial<<<blocks, kBlockSize, 0, stream>>>(sz, d_tmp,
-                                                            d_reduce);
-        return downloadReduceSum(blocks, 0) / std::max(sz, 1);
+        return gpuDot(d_z_in, d_s_in, sz) / std::max(sz, 1);
     }
 
     // Compute min of vector.
