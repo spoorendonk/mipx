@@ -1142,10 +1142,11 @@ struct NormalEqSolver {
 };
 
 // ---------------------------------------------------------------------------
-// GpuBarrierImpl: the full GPU IPM implementation
+// GpuNormalEqBarrierImpl: the current GPU IPM implementation backed by
+// normal equations + cuDSS Cholesky.
 // ---------------------------------------------------------------------------
 
-struct GpuBarrierImpl {
+struct GpuNormalEqBarrierImpl {
     GpuContext ctx;
     NormalEqSolver ne_solver;
 
@@ -1557,6 +1558,37 @@ struct GpuBarrierImpl {
 };
 
 // ---------------------------------------------------------------------------
+// GpuAugmentedBarrierImpl: reserved slot for GPU augmented-system backend.
+// ---------------------------------------------------------------------------
+
+struct GpuAugmentedBarrierImpl {
+    std::string last_error;
+
+    bool init([[maybe_unused]] const SparseMatrix& aeq,
+              [[maybe_unused]] std::span<const Real> beq,
+              [[maybe_unused]] std::span<const Real> cstd) {
+        last_error =
+            "Barrier GPU augmented-system backend is not implemented yet.";
+        return false;
+    }
+
+    bool solve([[maybe_unused]] const BarrierOptions& opts,
+               [[maybe_unused]] Real std_obj_offset,
+               [[maybe_unused]] std::span<const Real> beq,
+               [[maybe_unused]] std::span<const Real> cstd,
+               [[maybe_unused]] std::vector<Real>& z,
+               [[maybe_unused]] std::vector<Real>& y,
+               [[maybe_unused]] std::vector<Real>& s,
+               [[maybe_unused]] Int& iters) {
+        if (last_error.empty()) {
+            last_error =
+                "Barrier GPU augmented-system backend is not implemented yet.";
+        }
+        return false;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Bridge function called from barrier.cpp
 // ---------------------------------------------------------------------------
 
@@ -1567,7 +1599,19 @@ bool gpuBarrierSolve(const SparseMatrix& aeq, std::span<const Real> beq,
                      std::vector<Real>& s, Int& iters,
                      bool& gpu_initialized, std::string& error_msg) {
     gpu_initialized = false;
-    GpuBarrierImpl impl;
+    if (opts.backend == BarrierBackend::Augmented) {
+        GpuAugmentedBarrierImpl impl;
+        if (!impl.init(aeq, beq, cstd)) {
+            error_msg = impl.last_error;
+            return false;
+        }
+        gpu_initialized = true;
+        bool ok = impl.solve(opts, std_obj_offset, beq, cstd, z, y, s, iters);
+        if (!ok) error_msg = impl.last_error;
+        return ok;
+    }
+
+    GpuNormalEqBarrierImpl impl;
     if (!impl.init(aeq, beq, cstd)) {
         error_msg = impl.last_error;
         return false;
