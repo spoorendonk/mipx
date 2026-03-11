@@ -167,6 +167,7 @@ __global__ void convergenceMetricsColKernel(
     const Real* __restrict__ pdhg_x, const Real* __restrict__ initial_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
     const Real* __restrict__ col_lower, const Real* __restrict__ col_upper,
+    const Real* __restrict__ dual_resid_scale,
     const Real* __restrict__ at_delta_y,
     Real primal_weight, Real step,
     GpuConvergenceMetrics* __restrict__ metrics)
@@ -202,8 +203,9 @@ __global__ void convergenceMetricsColKernel(
         } else {
             dr = grad;
         }
-        drsq = dr * dr;
-        drmax = fabs(dr);
+        Real dr_orig = dr * dual_resid_scale[j];
+        drsq = dr_orig * dr_orig;
+        drmax = fabs(dr_orig);
 
         Real pg = grad;
         if (!devIsFinite(lb)) pg = (pg < 0.0) ? pg : 0.0;
@@ -256,6 +258,7 @@ void launchConvergenceMetricsCol(
     const Real* pdhg_x, const Real* initial_x,
     const Real* cscaled, const Real* at_y,
     const Real* col_lower, const Real* col_upper,
+    const Real* dual_resid_scale,
     const Real* at_delta_y,
     Real primal_weight, Real step,
     GpuConvergenceMetrics* d_metrics,
@@ -263,7 +266,7 @@ void launchConvergenceMetricsCol(
 {
     if (n <= 0) return;
     convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper,
+        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper, dual_resid_scale,
         at_delta_y, primal_weight, step, d_metrics);
 }
 
@@ -276,6 +279,7 @@ __global__ void convergenceMetricsRowKernel(
     const Real* __restrict__ pdhg_y, const Real* __restrict__ initial_y,
     const Real* __restrict__ ax,
     const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
+    const Real* __restrict__ primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
 {
@@ -299,7 +303,7 @@ __global__ void convergenceMetricsRowKernel(
         Real clamped = axi;
         if (clamped < rl) clamped = rl;
         if (clamped > ru) clamped = ru;
-        Real violation = axi - clamped;
+        Real violation = (axi - clamped) * primal_resid_scale[i];
         presid = violation * violation;
         presid_max = fabs(violation);
 
@@ -351,13 +355,14 @@ void launchConvergenceMetricsRow(
     const Real* pdhg_y, const Real* initial_y,
     const Real* ax,
     const Real* row_lower, const Real* row_upper,
+    const Real* primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream)
 {
     if (m <= 0) return;
     convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, pdhg_y, initial_y, ax, row_lower, row_upper,
+        m, pdhg_y, initial_y, ax, row_lower, row_upper, primal_resid_scale,
         primal_weight, d_metrics);
 }
 

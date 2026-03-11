@@ -50,6 +50,7 @@ void launchConvergenceMetricsCol(
     const Real* pdhg_x, const Real* initial_x,
     const Real* cscaled, const Real* at_y,
     const Real* col_lower, const Real* col_upper,
+    const Real* dual_resid_scale,
     const Real* at_delta_y,
     Real primal_weight, Real step,
     GpuConvergenceMetrics* d_metrics,
@@ -60,6 +61,7 @@ void launchConvergenceMetricsRow(
     const Real* pdhg_y, const Real* initial_y,
     const Real* ax,
     const Real* row_lower, const Real* row_upper,
+    const Real* primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream);

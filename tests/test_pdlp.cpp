@@ -135,6 +135,38 @@ TEST_CASE("PdlpSolver: solves simple LP with default options", "[pdlp]") {
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
 }
 
+TEST_CASE("PdlpSolver: max_solve_seconds enforces time limit", "[pdlp][time_limit]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_solve_seconds = 0.0;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::TimeLimit);
+}
+
+TEST_CASE("PdlpSolver: linf norm mode solves simple LP", "[pdlp][linf]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 10000;
+    opts.optimality_norm = PdlpOptimalityNorm::LInf;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
 TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mip]") {
     auto lp = buildBranchingMip();
 

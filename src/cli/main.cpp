@@ -42,6 +42,7 @@ int main(int argc, char* argv[]) {
             "[--dual-lu-update-limit N] "
             "[--dual-lu-ft-drop-tol T] "
             "[--search-stable|--search-default|--search-aggressive] "
+            "[--pdlp-opt-norm l2|linf] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet] [--print-backend]\n");
@@ -63,6 +64,8 @@ int main(int argc, char* argv[]) {
     enum class LpMode { Dual, Barrier, Pdlp, Concurrent };
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
+    mipx::PdlpOptimalityNorm pdlp_optimality_norm =
+        mipx::PdlpOptimalityNorm::L2;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
@@ -216,6 +219,19 @@ int main(int argc, char* argv[]) {
             search_profile = mipx::SearchProfile::Default;
         } else if (arg == "--search-aggressive") {
             search_profile = mipx::SearchProfile::Aggressive;
+        } else if (arg == "--pdlp-opt-norm" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "l2") {
+                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
+            } else if (mode == "linf") {
+                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::LInf;
+            } else {
+                std::fprintf(stderr,
+                             "Invalid --pdlp-opt-norm value: %s "
+                             "(expected l2 or linf)\n",
+                             mode.c_str());
+                return 1;
+            }
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -394,6 +410,8 @@ int main(int argc, char* argv[]) {
                 popts.use_gpu = barrier_gpu;
                 popts.gpu_min_rows = barrier_gpu_min_rows;
                 popts.gpu_min_nnz = barrier_gpu_min_nnz;
+                popts.max_solve_seconds = time_limit;
+                popts.optimality_norm = pdlp_optimality_norm;
                 solver.setOptions(popts);
                 solver.load(working);
                 result = solver.solve();
