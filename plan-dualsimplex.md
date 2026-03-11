@@ -47,13 +47,31 @@ Netlib no-presolve target set, especially the large anchors.
   direction.
 
 ## Optimization Order
-1. Correctness-unblock `greenbea`, `pilot`, `ship12l`, and `sierra`.
-2. Implement hypersparse `FTRAN` / `BTRAN` and sparse pivot-row work where it
-   is benchmark-proven.
-3. Tighten pricing / candidate scans and partial-pricing policy for no-presolve
-   LPs.
-4. Retune reinvert / refactorization policy for large no-presolve LPs.
-5. Tune crash / restart behavior only if profiling shows it is a real bottleneck.
+Correctness on `greenbea`, `pilot`, `ship12l`, and `sierra` remains a mandatory
+gate, but the execution order for architecture work is:
+
+1. Build a proper sparse work-vector layer for dual simplex hot paths.
+   - Use a dense array plus touched-index list / sparse-state metadata so hot
+     vectors can be cleared and reused without full dense resets.
+   - Start by migrating dual-simplex scratch vectors that feed pricing, row
+     assembly, and basis solves.
+2. Replace the current pivot-row assembly path with a HiGHS-style hyper-sparse
+   row-price kernel that can switch to dense when fill-in justifies it.
+   - Do not bolt sparse tricks onto the current dense-oriented path and call it
+     done.
+3. Move `CHUZR` toward maintained sparse infeasibility state instead of full
+   row rescans each iteration.
+   - The goal is a dedicated leaving-row work object, not more ad hoc scan
+     tuning.
+4. Make basis solves and reinversion control more HFactor-like.
+   - Stage-specific sparse / hyper-sparse switching for lower and upper
+     `FTRAN` / `BTRAN`
+   - Density- and history-guided reinversion decisions, not one global
+     threshold
+5. Consider a DSE-first path with Devex fallback if iteration-count gaps remain
+   after the architecture work above.
+   - This is the largest algorithmic step in scope and should follow the
+     vector / pricing / NLA refactor rather than precede it.
 
 No other optimization track belongs in this plan unless explicitly discussed.
 

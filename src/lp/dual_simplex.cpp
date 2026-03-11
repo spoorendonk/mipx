@@ -1,4 +1,5 @@
 #include "mipx/dual_simplex.h"
+#include "mipx/sparse_work_vector.h"
 
 #include <algorithm>
 #include <cassert>
@@ -855,7 +856,7 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
-    std::vector<Real> pricing_reduced_cost(numVars(), 0.0);
+    SparseWorkVector pricing_reduced_cost(numVars());
     const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
     // Static entering-score normalization for primal-feasible/dual-infeasible phase:
     // score(k) = rc(k)^2 / col_norm_sq(k), where slacks have norm 1.
@@ -1100,6 +1101,7 @@ LpResult DualSimplexSolver::solve() {
             options_.dual_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.dual_perturbation_stall_pivots;
         if (use_dual_perturbation) {
+            pricing_reduced_cost.clear();
             for (Index k : nonbasic_) {
                 Real rc = reduced_cost_[k];
                 const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
@@ -1109,14 +1111,14 @@ LpResult DualSimplexSolver::solve() {
                 if (st == BasisStatus::AtLower) rc += eps;
                 else if (st == BasisStatus::AtUpper) rc -= eps;
                 else if (st == BasisStatus::Free) rc += ((k & 1) ? eps : -eps);
-                pricing_reduced_cost[static_cast<std::size_t>(k)] = rc;
+                pricing_reduced_cost.set(k, rc);
             }
         }
         auto reducedCostForPricing = [&](Index k) -> Real {
             if (!use_dual_perturbation) {
                 return reduced_cost_[k];
             }
-            return pricing_reduced_cost[static_cast<std::size_t>(k)];
+            return pricing_reduced_cost[k];
         };
         const Real* lower_perturb =
             bound_perturb_active_ ? lower_bound_perturb_.data() : nullptr;
