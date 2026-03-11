@@ -854,8 +854,12 @@ LpResult DualSimplexSolver::solve() {
               base_var_upper.begin() + static_cast<std::size_t>(num_cols_));
 
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
+    std::vector<Index> pivot_row_alpha_support;
+    pivot_row_alpha_support.reserve(static_cast<std::size_t>(numVars()));
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
+    std::vector<Index> work_support;
+    work_support.reserve(static_cast<std::size_t>(num_rows_));
     SparseWorkVector pricing_reduced_cost(numVars());
     const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
     // Static entering-score normalization for primal-feasible/dual-infeasible phase:
@@ -915,18 +919,47 @@ LpResult DualSimplexSolver::solve() {
             ++value;
         }
     };
-    auto buildPivotRowAlphaFromWork = [&]() {
-        std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
-        for (Index i = 0; i < num_rows_; ++i) {
+    auto buildPivotRowAlphaFromWork = [&](std::span<const Index> touched_rows) {
+        if (static_cast<Index>(pivot_row_alpha_support.size()) * 2 < numVars()) {
+            for (Index k : pivot_row_alpha_support) {
+                pivot_row_alpha[static_cast<std::size_t>(k)] = 0.0;
+            }
+        } else {
+            std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
+        }
+        pivot_row_alpha_support.clear();
+
+        auto accumulateRow = [&](Index i) {
             const Real rho_i = work[i];
-            if (std::abs(rho_i) < kZeroTol) continue;
+            if (std::abs(rho_i) < kZeroTol) return;
             auto rv = matrix_.row(i);
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
-                pivot_row_alpha[static_cast<std::size_t>(j)] += rho_i * rv.values[p];
+                Real& alpha = pivot_row_alpha[static_cast<std::size_t>(j)];
+                if (alpha == 0.0) {
+                    pivot_row_alpha_support.push_back(j);
+                }
+                alpha += rho_i * rv.values[p];
             }
             const Index slack = num_cols_ + i;
-            pivot_row_alpha[static_cast<std::size_t>(slack)] = -rho_i;
+            Real& slack_alpha = pivot_row_alpha[static_cast<std::size_t>(slack)];
+            if (slack_alpha == 0.0) {
+                pivot_row_alpha_support.push_back(slack);
+            }
+            slack_alpha = -rho_i;
+        };
+
+        const bool use_sparse_row_support =
+            !touched_rows.empty() &&
+            static_cast<Index>(touched_rows.size()) * 2 < num_rows_;
+        if (use_sparse_row_support) {
+            for (Index i : touched_rows) {
+                accumulateRow(i);
+            }
+            return;
+        }
+        for (Index i = 0; i < num_rows_; ++i) {
+            accumulateRow(i);
         }
     };
     auto resetPrimalFeasibleProgress = [&]() {
@@ -1506,11 +1539,11 @@ LpResult DualSimplexSolver::solve() {
             // BTRAN for dual update.
             std::fill(work.begin(), work.end(), 0.0);
             work[leaving_row_p] = 1.0;
-            lu_.btran(work);
+            lu_.btran(work, work_support);
 
             // Compute pivot row alphas (row-wise).
             work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-            buildPivotRowAlphaFromWork();
+            buildPivotRowAlphaFromWork(work_support);
 
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
@@ -1618,13 +1651,13 @@ LpResult DualSimplexSolver::solve() {
         // y = B^{-T} * e_{leaving_row}
         std::fill(work.begin(), work.end(), 0.0);
         work[leaving_row] = 1.0;
-        lu_.btran(work);
+        lu_.btran(work, work_support);
 
         // Compute alpha_j = rho^T * a_j for all nonbasic j.
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
         // This is much faster than column-wise when rho is sparse.
         work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-        buildPivotRowAlphaFromWork();
+        buildPivotRowAlphaFromWork(work_support);
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
@@ -1701,6 +1734,23 @@ LpResult DualSimplexSolver::solve() {
             }
         };
 
+        auto collectCandidatesFromAlphaSupport = [&](std::vector<BfrtCand>& out) {
+            for (Index k : pivot_row_alpha_support) {
+                const Index pos = nonbasic_pos_[k];
+                if (pos < 0) continue;
+                const Real alpha = pivot_row_alpha[static_cast<std::size_t>(k)];
+                if (!isEligible(k, alpha)) continue;
+                Real ratio = std::abs(reducedCostForPricing(k) / alpha);
+                Real gap = kInf;
+                if (need_bfrt_gap_scan) {
+                    Real lb = lowerBoundFast(k);
+                    Real ub = upperBoundFast(k);
+                    gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+                }
+                out.push_back({k, pos, ratio, alpha, gap});
+            }
+        };
+
         auto collectCandidates = [&](Index offset, Index count) {
 #ifdef MIPX_HAS_TBB
             if (options_.enable_sip_parallel_candidates &&
@@ -1732,6 +1782,9 @@ LpResult DualSimplexSolver::solve() {
         };
 
         bool did_partial_scan = false;
+        const bool use_sparse_candidate_scan =
+            !options_.enable_partial_pricing &&
+            static_cast<Index>(pivot_row_alpha_support.size()) * 2 < nnb;
         if (options_.enable_partial_pricing &&
             nnb > options_.partial_pricing_chunk_min &&
             options_.partial_pricing_full_scan_freq > 0 &&
@@ -1741,6 +1794,8 @@ LpResult DualSimplexSolver::solve() {
             collectCandidates(partial_price_offset, chunk);
             partial_price_offset = (partial_price_offset + chunk) % nnb;
             did_partial_scan = true;
+        } else if (use_sparse_candidate_scan) {
+            collectCandidatesFromAlphaSupport(bfrt_cands);
         } else {
             collectCandidates(0, nnb);
         }

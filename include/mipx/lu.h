@@ -32,6 +32,7 @@ public:
 
     /// Solve B^T*y = rhs in-place.
     void btran(std::span<Real> rhs) const;
+    void btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) const;
 
     /// Forrest-Tomlin rank-1 update: replace basis column at position `pivot_pos`
     /// with new column `entering_col` (given in terms of original row indices/values).
