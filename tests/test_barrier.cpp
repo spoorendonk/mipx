@@ -9,6 +9,7 @@
 #include "mipx/mip_solver.h"
 
 using namespace mipx;
+using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinAbs;
 
 namespace {
@@ -414,6 +415,78 @@ TEST_CASE("BarrierSolver: reports threshold gating explicitly", "[barrier]") {
     REQUIRE_THROWS_WITH(
         solver.solve(),
         Catch::Matchers::ContainsSubstring("Barrier GPU thresholds not met"));
+}
+
+TEST_CASE("BarrierSolver: reports augmented backend as unsupported", "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts = gpuBarrierOpts();
+    opts.backend = BarrierBackend::Augmented;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    REQUIRE_THROWS_WITH(solver.solve(),
+                        ContainsSubstring("augmented-system backend requested"));
+}
+
+TEST_CASE("BarrierSolver: reports AMD ordering as unsupported", "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    BarrierSolver solver;
+    BarrierOptions opts = gpuBarrierOpts();
+    opts.ordering = BarrierOrdering::Amd;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    REQUIRE_THROWS_WITH(solver.solve(),
+                        ContainsSubstring("AMD ordering requested"));
+}
+
+TEST_CASE("BarrierSolver: reports barrier preprocessing options as unsupported",
+          "[barrier]") {
+    auto lp = buildSimpleLp();
+
+    SECTION("dualize on") {
+        BarrierSolver solver;
+        BarrierOptions opts = gpuBarrierOpts();
+        opts.dualize = BarrierToggle::On;
+        solver.setOptions(opts);
+        solver.load(lp);
+        REQUIRE_THROWS_WITH(solver.solve(),
+                            ContainsSubstring("dualization requested"));
+    }
+
+    SECTION("folding on") {
+        BarrierSolver solver;
+        BarrierOptions opts = gpuBarrierOpts();
+        opts.folding = BarrierToggle::On;
+        solver.setOptions(opts);
+        solver.load(lp);
+        REQUIRE_THROWS_WITH(solver.solve(),
+                            ContainsSubstring("folding requested"));
+    }
+
+    SECTION("explicit dual initial point") {
+        BarrierSolver solver;
+        BarrierOptions opts = gpuBarrierOpts();
+        opts.dual_initial_point =
+            BarrierDualInitialPoint::LustigMarstenShanno;
+        solver.setOptions(opts);
+        solver.load(lp);
+        REQUIRE_THROWS_WITH(solver.solve(),
+                            ContainsSubstring("initial-point modes"));
+    }
+
+    SECTION("dense-column elimination") {
+        BarrierSolver solver;
+        BarrierOptions opts = gpuBarrierOpts();
+        opts.eliminate_dense_columns = true;
+        solver.setOptions(opts);
+        solver.load(lp);
+        REQUIRE_THROWS_WITH(solver.solve(),
+                            ContainsSubstring("dense-column elimination"));
+    }
 }
 
 #ifdef MIPX_HAS_CUDA

@@ -15,6 +15,77 @@
 #include "mipx/mip_solver.h"
 #include "mipx/presolve.h"
 
+namespace {
+
+bool parseBarrierBackend(const std::string& value,
+                         mipx::BarrierBackend& backend) {
+    if (value == "choose") {
+        backend = mipx::BarrierBackend::Choose;
+        return true;
+    }
+    if (value == "normaleq") {
+        backend = mipx::BarrierBackend::NormalEquations;
+        return true;
+    }
+    if (value == "augmented") {
+        backend = mipx::BarrierBackend::Augmented;
+        return true;
+    }
+    return false;
+}
+
+bool parseBarrierOrdering(const std::string& value,
+                          mipx::BarrierOrdering& ordering) {
+    if (value == "auto") {
+        ordering = mipx::BarrierOrdering::Auto;
+        return true;
+    }
+    if (value == "cudss") {
+        ordering = mipx::BarrierOrdering::CudssDefault;
+        return true;
+    }
+    if (value == "amd") {
+        ordering = mipx::BarrierOrdering::Amd;
+        return true;
+    }
+    return false;
+}
+
+bool parseBarrierToggle(const std::string& value, mipx::BarrierToggle& toggle) {
+    if (value == "auto") {
+        toggle = mipx::BarrierToggle::Auto;
+        return true;
+    }
+    if (value == "off") {
+        toggle = mipx::BarrierToggle::Off;
+        return true;
+    }
+    if (value == "on") {
+        toggle = mipx::BarrierToggle::On;
+        return true;
+    }
+    return false;
+}
+
+bool parseBarrierDualInitialPoint(const std::string& value,
+                                  mipx::BarrierDualInitialPoint& initial_point) {
+    if (value == "auto") {
+        initial_point = mipx::BarrierDualInitialPoint::Auto;
+        return true;
+    }
+    if (value == "lms") {
+        initial_point = mipx::BarrierDualInitialPoint::LustigMarstenShanno;
+        return true;
+    }
+    if (value == "least-squares") {
+        initial_point = mipx::BarrierDualInitialPoint::DualLeastSquares;
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::fprintf(stdout,
@@ -35,6 +106,12 @@ int main(int argc, char* argv[]) {
             "[--dual-idiot-crash|--dual-no-idiot-crash] "
             "[--search-stable|--search-default|--search-aggressive] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
+            "[--barrier-backend choose|normaleq|augmented] "
+            "[--barrier-ordering auto|cudss|amd] "
+            "[--barrier-dualize auto|off|on] "
+            "[--barrier-folding auto|off|on] "
+            "[--barrier-dual-initial-point auto|lms|least-squares] "
+            "[--barrier-eliminate-dense-columns|--barrier-no-eliminate-dense-columns] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
         return 1;
@@ -54,6 +131,13 @@ int main(int argc, char* argv[]) {
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
+    mipx::BarrierBackend barrier_backend = mipx::BarrierBackend::Choose;
+    mipx::BarrierOrdering barrier_ordering = mipx::BarrierOrdering::Auto;
+    mipx::BarrierToggle barrier_dualize = mipx::BarrierToggle::Auto;
+    mipx::BarrierToggle barrier_folding = mipx::BarrierToggle::Auto;
+    mipx::BarrierDualInitialPoint barrier_dual_initial_point =
+        mipx::BarrierDualInitialPoint::Auto;
+    bool barrier_eliminate_dense_columns = false;
     mipx::ParallelMode parallel_mode = mipx::ParallelMode::Deterministic;
     uint64_t heuristic_seed = 1;
     bool pre_root_lpfree = false;
@@ -188,6 +272,51 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--gpu-min-nnz" && i + 1 < argc) {
             barrier_gpu_min_nnz =
                 std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--barrier-backend" && i + 1 < argc) {
+            if (!parseBarrierBackend(argv[++i], barrier_backend)) {
+                std::fprintf(stderr,
+                             "Invalid --barrier-backend value: %s "
+                             "(expected choose, normaleq, or augmented)\n",
+                             argv[i]);
+                return 1;
+            }
+        } else if (arg == "--barrier-ordering" && i + 1 < argc) {
+            if (!parseBarrierOrdering(argv[++i], barrier_ordering)) {
+                std::fprintf(stderr,
+                             "Invalid --barrier-ordering value: %s "
+                             "(expected auto, cudss, or amd)\n",
+                             argv[i]);
+                return 1;
+            }
+        } else if (arg == "--barrier-dualize" && i + 1 < argc) {
+            if (!parseBarrierToggle(argv[++i], barrier_dualize)) {
+                std::fprintf(stderr,
+                             "Invalid --barrier-dualize value: %s "
+                             "(expected auto, off, or on)\n",
+                             argv[i]);
+                return 1;
+            }
+        } else if (arg == "--barrier-folding" && i + 1 < argc) {
+            if (!parseBarrierToggle(argv[++i], barrier_folding)) {
+                std::fprintf(stderr,
+                             "Invalid --barrier-folding value: %s "
+                             "(expected auto, off, or on)\n",
+                             argv[i]);
+                return 1;
+            }
+        } else if (arg == "--barrier-dual-initial-point" && i + 1 < argc) {
+            if (!parseBarrierDualInitialPoint(argv[++i],
+                                              barrier_dual_initial_point)) {
+                std::fprintf(stderr,
+                             "Invalid --barrier-dual-initial-point value: %s "
+                             "(expected auto, lms, or least-squares)\n",
+                             argv[i]);
+                return 1;
+            }
+        } else if (arg == "--barrier-eliminate-dense-columns") {
+            barrier_eliminate_dense_columns = true;
+        } else if (arg == "--barrier-no-eliminate-dense-columns") {
+            barrier_eliminate_dense_columns = false;
         } else if (arg == "--relax-integrality") {
             relax_integrality = true;
         } else {
@@ -224,6 +353,12 @@ int main(int argc, char* argv[]) {
             }
             solver.setBarrierUseGpu(barrier_gpu);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
+            solver.setBarrierBackend(barrier_backend);
+            solver.setBarrierOrdering(barrier_ordering);
+            solver.setBarrierDualize(barrier_dualize);
+            solver.setBarrierFolding(barrier_folding);
+            solver.setBarrierDualInitialPoint(barrier_dual_initial_point);
+            solver.setBarrierEliminateDenseColumns(barrier_eliminate_dense_columns);
             solver.setPdlpUseGpu(barrier_gpu);
             solver.setPdlpGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
@@ -329,6 +464,12 @@ int main(int argc, char* argv[]) {
                 bopts.use_gpu = barrier_gpu;
                 bopts.gpu_min_rows = barrier_gpu_min_rows;
                 bopts.gpu_min_nnz = barrier_gpu_min_nnz;
+                bopts.backend = barrier_backend;
+                bopts.ordering = barrier_ordering;
+                bopts.dualize = barrier_dualize;
+                bopts.folding = barrier_folding;
+                bopts.dual_initial_point = barrier_dual_initial_point;
+                bopts.eliminate_dense_columns = barrier_eliminate_dense_columns;
                 solver.setOptions(bopts);
                 solver.load(working);
                 result = solver.solve();

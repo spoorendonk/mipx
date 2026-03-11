@@ -11,11 +11,44 @@
 
 namespace mipx {
 
+enum class BarrierBackend {
+    Choose,
+    NormalEquations,
+    Augmented,
+};
+
+enum class BarrierOrdering {
+    Auto,
+    CudssDefault,
+    Amd,
+};
+
+enum class BarrierToggle {
+    Auto,
+    Off,
+    On,
+};
+
+enum class BarrierDualInitialPoint {
+    Auto,
+    LustigMarstenShanno,
+    DualLeastSquares,
+};
+
 struct BarrierOptions {
     Int max_iter = 100;
     Real primal_dual_tol = 1e-8;
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
+
+    // Barrier backend / preprocessing roadmap controls.
+    BarrierBackend backend = BarrierBackend::Choose;
+    BarrierOrdering ordering = BarrierOrdering::Auto;
+    BarrierToggle dualize = BarrierToggle::Auto;
+    BarrierToggle folding = BarrierToggle::Auto;
+    BarrierDualInitialPoint dual_initial_point =
+        BarrierDualInitialPoint::Auto;
+    bool eliminate_dense_columns = false;
 
     // GPU / Cholesky options.
     bool use_gpu = true;

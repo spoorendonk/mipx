@@ -3860,6 +3860,12 @@ MipResult MipSolver::solve() {
             opts.use_gpu = barrier_use_gpu_;
             opts.gpu_min_rows = barrier_gpu_min_rows_;
             opts.gpu_min_nnz = barrier_gpu_min_nnz_;
+            opts.backend = barrier_backend_;
+            opts.ordering = barrier_ordering_;
+            opts.dualize = barrier_dualize_;
+            opts.folding = barrier_folding_;
+            opts.dual_initial_point = barrier_dual_initial_point_;
+            opts.eliminate_dense_columns = barrier_eliminate_dense_columns_;
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);

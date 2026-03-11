@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "mipx/bnb_node.h"
+#include "mipx/barrier.h"
 #include "mipx/branching.h"
 #include "mipx/core.h"
 #include "mipx/cut_manager.h"
@@ -242,6 +243,24 @@ public:
         barrier_gpu_min_rows_ = std::max<Int>(0, min_rows);
         barrier_gpu_min_nnz_ = std::max<Int>(0, min_nnz);
     }
+    void setBarrierBackend(BarrierBackend backend) {
+        barrier_backend_ = backend;
+    }
+    void setBarrierOrdering(BarrierOrdering ordering) {
+        barrier_ordering_ = ordering;
+    }
+    void setBarrierDualize(BarrierToggle dualize) {
+        barrier_dualize_ = dualize;
+    }
+    void setBarrierFolding(BarrierToggle folding) {
+        barrier_folding_ = folding;
+    }
+    void setBarrierDualInitialPoint(BarrierDualInitialPoint initial_point) {
+        barrier_dual_initial_point_ = initial_point;
+    }
+    void setBarrierEliminateDenseColumns(bool enable) {
+        barrier_eliminate_dense_columns_ = enable;
+    }
     void setPdlpUseGpu(bool use_gpu) { pdlp_use_gpu_ = use_gpu; }
     void setPdlpGpuThresholds(Int min_rows, Int min_nnz) {
         pdlp_gpu_min_rows_ = std::max<Int>(0, min_rows);
@@ -422,6 +441,13 @@ private:
     bool barrier_use_gpu_ = true;
     Int barrier_gpu_min_rows_ = 512;
     Int barrier_gpu_min_nnz_ = 10000;
+    BarrierBackend barrier_backend_ = BarrierBackend::Choose;
+    BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
+    BarrierToggle barrier_dualize_ = BarrierToggle::Auto;
+    BarrierToggle barrier_folding_ = BarrierToggle::Auto;
+    BarrierDualInitialPoint barrier_dual_initial_point_ =
+        BarrierDualInitialPoint::Auto;
+    bool barrier_eliminate_dense_columns_ = false;
     bool pdlp_use_gpu_ = true;
     Int pdlp_gpu_min_rows_ = 512;
     Int pdlp_gpu_min_nnz_ = 10000;

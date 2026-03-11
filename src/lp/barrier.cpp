@@ -52,6 +52,34 @@ inline Real computeOriginalObjective(const LpProblem& problem,
     return obj;
 }
 
+std::string validateBarrierDispatchOptions(const BarrierOptions& opts) {
+    if (opts.backend == BarrierBackend::Augmented) {
+        return "Barrier augmented-system backend requested, but only the "
+               "normal-equations GPU backend is currently implemented.";
+    }
+    if (opts.ordering == BarrierOrdering::Amd) {
+        return "Barrier AMD ordering requested, but only cuDSS default "
+               "ordering is currently implemented.";
+    }
+    if (opts.dualize == BarrierToggle::On) {
+        return "Barrier dualization requested, but barrier dualization is "
+               "not implemented yet.";
+    }
+    if (opts.folding == BarrierToggle::On) {
+        return "Barrier folding requested, but barrier folding is not "
+               "implemented yet.";
+    }
+    if (opts.dual_initial_point != BarrierDualInitialPoint::Auto) {
+        return "Barrier dual initial point selection requested, but explicit "
+               "barrier initial-point modes are not implemented yet.";
+    }
+    if (opts.eliminate_dense_columns) {
+        return "Barrier dense-column elimination requested, but dense-column "
+               "elimination is not implemented yet.";
+    }
+    return {};
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -510,6 +538,9 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 
     // Detect dense columns.
     detectDenseColumns();
+
+    last_error_ = validateBarrierDispatchOptions(options_);
+    if (!last_error_.empty()) return false;
 
     if (!options_.use_gpu) {
         last_error_ =
