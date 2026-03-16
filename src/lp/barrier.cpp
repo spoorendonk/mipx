@@ -7,9 +7,9 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <utility>
 
-#include "mipx/dual_simplex.h"
 #include "newton_solver.h"
 
 namespace mipx {
@@ -30,6 +30,13 @@ inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     Real s = 0.0;
     for (Index i = 0; i < static_cast<Index>(a.size()); ++i) s += a[i] * b[i];
     return s;
+}
+
+inline Real computeOriginalObjective(const LpProblem& problem,
+                                     std::span<const Real> x) {
+    Real obj = problem.obj_offset;
+    for (Index j = 0; j < problem.num_cols; ++j) obj += problem.obj[j] * x[j];
+    return obj;
 }
 
 inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx,
@@ -626,11 +633,16 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     // GPU device-resident path: handles NE/Augmented internally with auto-switching.
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
         bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
+        std::string gpu_error;
         ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_,
-                             std_obj_offset_, prefer_aug, z, y, s, iters);
+                             std_obj_offset_, prefer_aug, z, y, s, iters, &gpu_error);
         if (ok) {
             used_gpu_ = true;
         } else {
+            if (options_.verbose && !gpu_error.empty()) {
+                std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
+                             gpu_error.c_str());
+            }
             // GPU failed — fall back to CPU.
             solver = use_augmented ? createCpuAugmentedSolver()
                                    : createCpuCholeskySolver();
@@ -717,43 +729,30 @@ LpResult BarrierSolver::solve() {
             iterations_ = iters;
             return {status_, objective_, iterations_, 0.0};
         }
-
-        // Dual-simplex fallback.
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
         dual_eq_.clear();
         reduced_costs_std_.clear();
-        return {status_, objective_, iterations_, fb.work_units};
+        primal_orig_.clear();
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        return {status_, objective_, iterations_, 0.0};
     }
 
     reconstructOriginalPrimals(z);
     if (!checkOriginalPrimalFeasibility(primal_orig_)) {
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
         dual_eq_.clear();
         reduced_costs_std_.clear();
-        return {status_, objective_, iterations_, fb.work_units};
+        primal_orig_.clear();
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        return {status_, objective_, iterations_, 0.0};
     }
 
     dual_eq_ = y;
     reduced_costs_std_ = s;
 
-    Real min_obj = scaled_obj_;
-    objective_ = (original_.sense == Sense::Minimize) ? min_obj : -min_obj;
+    objective_ = computeOriginalObjective(original_, primal_orig_);
     status_ = Status::Optimal;
     iterations_ = iters;
 

@@ -11,6 +11,10 @@ Files:
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
 - `mipx_pdlp_lp_netlib_small.csv`: mipx PDLP LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
+- `mipx_barrier_cpu_netlib_small.csv`: mipx barrier CPU baseline (Netlib LP set).
+- `mipx_barrier_gpu_netlib_small.csv`: mipx barrier GPU baseline (Netlib LP set; forced GPU path).
+- `barrier_gpu_stable_netlib_small.txt`: curated forced-GPU Netlib subset used by the
+  default barrier regression gate while broader GPU coverage is still under hardening.
 - `mipx_mip_regression_small_seed1_t1_stable.csv`: dedicated deterministic
   MIP regression baseline (seed=1, threads=1, search=stable corpus).
 - `mipx_mip_regression_small_seed1_t1_stable_meta.json`: metadata for the
@@ -38,6 +42,7 @@ python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
 python3 tests/perf/generate_dual_baselines.py
 python3 tests/perf/generate_mip_regression_baseline.py
+python3 tests/perf/generate_mipx_barrier_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```

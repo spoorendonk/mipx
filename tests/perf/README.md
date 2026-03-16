@@ -147,6 +147,7 @@ Generate and store HiGHS CLI + mipx wall-clock baselines:
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
 python3 tests/perf/generate_dual_baselines.py
+python3 tests/perf/generate_mipx_barrier_baselines.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
 ```
@@ -160,6 +161,8 @@ This writes:
 - `tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv`
 - `tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv`
 - `tests/perf/baselines/mipx_dual_lp_baseline_meta.json`
+- `tests/perf/baselines/mipx_barrier_cpu_netlib_small.csv`
+- `tests/perf/baselines/mipx_barrier_gpu_netlib_small.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib.csv`
 - `tests/perf/baselines/barrier_lp_compare_netlib_forced_gpu.csv`
 - `tests/perf/baselines/pdlp_lp_compare_netlib.csv`
@@ -374,6 +377,46 @@ To compare mipx against HiGHS CLI, use `--metric time_seconds` and one of
 the stored HiGHS baseline CSV files as `--baseline`.
 These comparisons are informational (cross-solver wall-clock), not strict
 no-regression gates.
+
+## Barrier Self-Regression Gate
+
+Dedicated barrier workflow (candidate vs baseline `mipx` binaries):
+
+```bash
+python3 tests/perf/run_barrier_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --instances-dir tests/data/netlib
+```
+
+Shell wrapper:
+
+```bash
+./tests/perf/run_barrier_lp_regression_gate.sh \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --instances-dir tests/data/netlib
+```
+
+Enforced by default:
+- algorithmic regression gate on `work_units` for:
+  - `mipx_barrier_cpu`
+  - `mipx_barrier_gpu`
+- default instance set is the curated forced-GPU stable subset:
+  - `adlittle, afiro, blend, sc50b, share2b, stocfor1`
+
+Opt-in checks:
+- separate wall-clock bands for:
+  - CPU barrier SIMD/AVX lane
+  - GPU barrier lane
+
+Key flags:
+- `--all-available-instances`: use all available selected instances instead of the curated GPU stable set
+- `--enable-wall-clock-bands`: enable the optional wall-clock regression checks
+- `--simd-wall-clock-max-regression-pct`
+- `--gpu-wall-clock-max-regression-pct`
+- `--work-min-common-instances`
+- `--wall-clock-min-common-instances`
 
 ## PDLP LP Comparison (mipx vs cuPDLPx vs HiGHS vs cuOpt)
 

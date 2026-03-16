@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "mipx/core.h"
@@ -110,7 +111,8 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
                      const BarrierOptions& opts, Real obj_offset,
                      bool prefer_augmented,
                      std::vector<Real>& z, std::vector<Real>& y,
-                     std::vector<Real>& s, Int& iters);
+                     std::vector<Real>& s, Int& iters,
+                     std::string* error_msg = nullptr);
 #endif
 
 }  // namespace mipx
