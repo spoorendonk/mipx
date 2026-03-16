@@ -25,6 +25,12 @@ PERF_DIR = ROOT_DIR / "tests" / "perf"
 DEFAULT_GPU_STABLE_SET = (
     ROOT_DIR / "tests" / "perf" / "baselines" / "barrier_gpu_stable_netlib_small.txt"
 )
+DEFAULT_GPU_BASELINE_CSV = (
+    ROOT_DIR / "tests" / "perf" / "baselines" / "mipx_barrier_gpu_netlib_small.csv"
+)
+DEFAULT_CPU_BASELINE_CSV = (
+    ROOT_DIR / "tests" / "perf" / "baselines" / "mipx_barrier_cpu_netlib_small.csv"
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +53,24 @@ class FilterStats:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--candidate-binary", required=True)
-    p.add_argument("--baseline-binary", required=True)
+    p.add_argument(
+        "--baseline-binary",
+        default="",
+        help=(
+            "Optional baseline binary for exploratory candidate-vs-binary comparisons. "
+            "If omitted, the committed barrier baseline CSVs are used."
+        ),
+    )
+    p.add_argument(
+        "--baseline-gpu-csv",
+        default=str(DEFAULT_GPU_BASELINE_CSV),
+        help="Committed GPU baseline CSV used by default for the GPU regression lane.",
+    )
+    p.add_argument(
+        "--baseline-cpu-csv",
+        default=str(DEFAULT_CPU_BASELINE_CSV),
+        help="Committed CPU baseline CSV used when CPU lanes are explicitly enabled.",
+    )
     p.add_argument("--instances-dir", default=str(ROOT_DIR / "tests" / "data" / "netlib"))
     p.add_argument("--instances", default="")
     p.add_argument("--max-instances", type=int, default=0)
@@ -217,7 +240,7 @@ def run_barrier_compare(binary: Path, output_csv: Path, args: argparse.Namespace
 def write_lane_metric_csv(
     input_csv: Path,
     output_csv: Path,
-    solver: str,
+    solver: str | None,
     metric: str,
 ) -> FilterStats:
     rows: dict[str, float] = {}
@@ -227,8 +250,9 @@ def write_lane_metric_csv(
 
     with input_csv.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
+        has_solver_column = reader.fieldnames is not None and "solver" in reader.fieldnames
         for row in reader:
-            if row.get("solver", "").strip() != solver:
+            if solver is not None and has_solver_column and row.get("solver", "").strip() != solver:
                 continue
             total_solver_rows += 1
 
@@ -274,7 +298,8 @@ def write_lane_metric_csv(
 
 def run_lane_gate(
     lane: GateLane,
-    baseline_compare_csv: Path,
+    baseline_csv: Path,
+    baseline_solver: str | None,
     candidate_compare_csv: Path,
     out_dir: Path,
 ) -> None:
@@ -283,7 +308,7 @@ def run_lane_gate(
     candidate_metric_csv = out_dir / f"candidate_{lane.solver}_{lane.metric}.csv"
 
     base_stats = write_lane_metric_csv(
-        baseline_compare_csv, baseline_metric_csv, lane.solver, lane.metric
+        baseline_csv, baseline_metric_csv, baseline_solver, lane.metric
     )
     cand_stats = write_lane_metric_csv(
         candidate_compare_csv, candidate_metric_csv, lane.solver, lane.metric
@@ -319,9 +344,15 @@ def main() -> int:
     args = parse_args()
 
     candidate_binary = Path(args.candidate_binary)
-    baseline_binary = Path(args.baseline_binary)
     ensure_executable(candidate_binary, "candidate binary")
-    ensure_executable(baseline_binary, "baseline binary")
+    baseline_binary = Path(args.baseline_binary) if args.baseline_binary else None
+    if baseline_binary is not None:
+        ensure_executable(baseline_binary, "baseline binary")
+
+    baseline_gpu_csv = Path(args.baseline_gpu_csv)
+    if not baseline_gpu_csv.is_file():
+        raise SystemExit(f"baseline GPU CSV not found: {baseline_gpu_csv}")
+    baseline_cpu_csv = Path(args.baseline_cpu_csv)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -332,13 +363,18 @@ def main() -> int:
     else:
         print("[barrier-gate] Effective instance set: all available (subject to --max-instances)")
 
-    baseline_compare_csv = out_dir / "baseline_barrier_compare.csv"
     candidate_compare_csv = out_dir / "candidate_barrier_compare.csv"
 
     print("[barrier-gate] Running candidate barrier compare...")
     run_barrier_compare(candidate_binary, candidate_compare_csv, args)
-    print("[barrier-gate] Running baseline barrier compare...")
-    run_barrier_compare(baseline_binary, baseline_compare_csv, args)
+
+    baseline_compare_csv: Path | None = None
+    if baseline_binary is not None:
+        baseline_compare_csv = out_dir / "baseline_barrier_compare.csv"
+        print("[barrier-gate] Running baseline barrier compare...")
+        run_barrier_compare(baseline_binary, baseline_compare_csv, args)
+    else:
+        print(f"[barrier-gate] Using committed GPU baseline CSV: {baseline_gpu_csv}")
 
     work_lanes = [
         GateLane(
@@ -350,6 +386,8 @@ def main() -> int:
         ),
     ]
     if args.enable_cpu_barrier_lanes:
+        if not baseline_cpu_csv.is_file():
+            raise SystemExit(f"baseline CPU CSV not found: {baseline_cpu_csv}")
         work_lanes.insert(
             0,
             GateLane(
@@ -363,7 +401,14 @@ def main() -> int:
 
     for lane in work_lanes:
         print(f"\n=== {lane.name} ===")
-        run_lane_gate(lane, baseline_compare_csv, candidate_compare_csv, out_dir)
+        if lane.solver == "mipx_barrier_gpu":
+            lane_baseline_csv = baseline_compare_csv or baseline_gpu_csv
+        else:
+            lane_baseline_csv = baseline_compare_csv or baseline_cpu_csv
+        baseline_solver = lane.solver if baseline_compare_csv is not None else None
+        run_lane_gate(
+            lane, lane_baseline_csv, baseline_solver, candidate_compare_csv, out_dir
+        )
 
     if args.enable_wall_clock_bands:
         time_lanes = [
@@ -388,7 +433,14 @@ def main() -> int:
             )
         for lane in time_lanes:
             print(f"\n=== {lane.name} ===")
-            run_lane_gate(lane, baseline_compare_csv, candidate_compare_csv, out_dir)
+            if lane.solver == "mipx_barrier_gpu":
+                lane_baseline_csv = baseline_compare_csv or baseline_gpu_csv
+            else:
+                lane_baseline_csv = baseline_compare_csv or baseline_cpu_csv
+            baseline_solver = lane.solver if baseline_compare_csv is not None else None
+            run_lane_gate(
+                lane, lane_baseline_csv, baseline_solver, candidate_compare_csv, out_dir
+            )
     else:
         print(
             "\n[barrier-gate] Wall-clock bands skipped "
@@ -396,7 +448,10 @@ def main() -> int:
         )
 
     print("\n[barrier-gate] PASS")
-    print(f"[barrier-gate] Baseline compare CSV: {baseline_compare_csv}")
+    if baseline_compare_csv is not None:
+        print(f"[barrier-gate] Baseline compare CSV: {baseline_compare_csv}")
+    else:
+        print(f"[barrier-gate] Baseline GPU CSV: {baseline_gpu_csv}")
     print(f"[barrier-gate] Candidate compare CSV: {candidate_compare_csv}")
     return 0
 

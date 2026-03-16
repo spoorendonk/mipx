@@ -380,12 +380,11 @@ no-regression gates.
 
 ## Barrier Self-Regression Gate
 
-Dedicated barrier workflow (candidate vs baseline `mipx` binaries):
+Dedicated barrier workflow (candidate vs committed barrier baselines):
 
 ```bash
 python3 tests/perf/run_barrier_lp_regression_gate.py \
   --candidate-binary ./build/mipx-solve \
-  --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --instances-dir tests/data/netlib
 ```
 
@@ -394,21 +393,32 @@ Shell wrapper:
 ```bash
 ./tests/perf/run_barrier_lp_regression_gate.sh \
   --candidate-binary ./build/mipx-solve \
+  --instances-dir tests/data/netlib
+```
+
+Exploratory candidate-vs-binary comparison remains available:
+
+```bash
+python3 tests/perf/run_barrier_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --instances-dir tests/data/netlib
 ```
 
 Enforced by default:
-- algorithmic regression gate on `work_units` for:
-  - `mipx_barrier_cpu`
-  - `mipx_barrier_gpu`
+- algorithmic regression gate on `work_units` for the committed GPU barrier lane
 - default instance set is the curated forced-GPU stable subset:
   - `adlittle, afiro, blend, sc50b, share2b, stocfor1`
+- default baseline source is `tests/perf/baselines/mipx_barrier_gpu_netlib_small.csv`
 
 Opt-in checks:
 - separate wall-clock bands for:
-  - CPU barrier SIMD/AVX lane
   - GPU barrier lane
+
+Current policy:
+- CUDA builds default to GPU barrier execution and do not fall back to CPU at runtime
+- non-CUDA builds may still use CPU barrier backends
+- CPU barrier regression lanes are not part of the default workflow until CPU baselines are usable
 
 Key flags:
 - `--all-available-instances`: use all available selected instances instead of the curated GPU stable set

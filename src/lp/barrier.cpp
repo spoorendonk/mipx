@@ -643,9 +643,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
                 std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
                              gpu_error.c_str());
             }
-            // GPU failed — fall back to CPU.
-            solver = use_augmented ? createCpuAugmentedSolver()
-                                   : createCpuCholeskySolver();
+            return false;
         }
     }
 #else
