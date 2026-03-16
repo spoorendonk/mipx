@@ -42,9 +42,10 @@ int main(int argc, char* argv[]) {
             "[--dual-lu-update-limit N] "
             "[--dual-lu-ft-drop-tol T] "
             "[--search-stable|--search-default|--search-aggressive] "
+            "[--pdlp-opt-norm l2|linf] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
-            "[--verbose|--quiet]\n");
+            "[--verbose|--quiet] [--print-backend]\n");
         return 1;
     }
 
@@ -54,6 +55,7 @@ int main(int argc, char* argv[]) {
     mipx::Int node_limit = 1000000;
     double gap_tol = 1e-4;
     bool verbose = true;
+    bool print_backend = false;
     bool presolve = true;
     bool presolve_forcing_rows = true;
     bool presolve_dual_fixing = true;
@@ -62,6 +64,8 @@ int main(int argc, char* argv[]) {
     enum class LpMode { Dual, Barrier, Pdlp, Concurrent };
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
+    mipx::PdlpOptimalityNorm pdlp_optimality_norm =
+        mipx::PdlpOptimalityNorm::L2;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
@@ -124,6 +128,8 @@ int main(int argc, char* argv[]) {
             verbose = true;
         } else if (arg == "--quiet") {
             verbose = false;
+        } else if (arg == "--print-backend") {
+            print_backend = true;
         } else if (arg == "--barrier") {
             lp_mode = LpMode::Barrier;
         } else if (arg == "--pdlp") {
@@ -213,6 +219,19 @@ int main(int argc, char* argv[]) {
             search_profile = mipx::SearchProfile::Default;
         } else if (arg == "--search-aggressive") {
             search_profile = mipx::SearchProfile::Aggressive;
+        } else if (arg == "--pdlp-opt-norm" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "l2") {
+                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
+            } else if (mode == "linf") {
+                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::LInf;
+            } else {
+                std::fprintf(stderr,
+                             "Invalid --pdlp-opt-norm value: %s "
+                             "(expected l2 or linf)\n",
+                             mode.c_str());
+                return 1;
+            }
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -405,6 +424,8 @@ int main(int argc, char* argv[]) {
                 popts.use_gpu = barrier_gpu;
                 popts.gpu_min_rows = barrier_gpu_min_rows;
                 popts.gpu_min_nnz = barrier_gpu_min_nnz;
+                popts.max_solve_seconds = time_limit;
+                popts.optimality_norm = pdlp_optimality_norm;
                 solver.setOptions(popts);
                 solver.load(working);
                 result = solver.solve();
@@ -440,10 +461,10 @@ int main(int argc, char* argv[]) {
             auto t1 = std::chrono::steady_clock::now();
             double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
 
-            if (lp_mode == LpMode::Barrier && verbose) {
+            if (lp_mode == LpMode::Barrier && (verbose || print_backend)) {
                 log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
-            if (lp_mode == LpMode::Pdlp && verbose) {
+            if (lp_mode == LpMode::Pdlp && (verbose || print_backend)) {
                 log.log("PDLP backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
             }
 

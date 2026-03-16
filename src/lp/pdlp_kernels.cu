@@ -17,6 +17,19 @@ __device__ inline bool devIsFinite(Real v) {
     return v > -kInf && v < kInf;
 }
 
+__device__ inline void atomicMaxReal(Real* addr, Real value) {
+    auto* addr_ull = reinterpret_cast<unsigned long long*>(addr);
+    unsigned long long old = *addr_ull;
+    while (value > __longlong_as_double(static_cast<long long>(old))) {
+        unsigned long long assumed = old;
+        old = atomicCAS(
+            addr_ull,
+            assumed,
+            static_cast<unsigned long long>(__double_as_longlong(value)));
+        if (old == assumed) break;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compute lambda on device
 // ---------------------------------------------------------------------------
@@ -154,6 +167,7 @@ __global__ void convergenceMetricsColKernel(
     const Real* __restrict__ pdhg_x, const Real* __restrict__ initial_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
     const Real* __restrict__ col_lower, const Real* __restrict__ col_upper,
+    const Real* __restrict__ dual_resid_scale,
     const Real* __restrict__ at_delta_y,
     Real primal_weight, Real step,
     GpuConvergenceMetrics* __restrict__ metrics)
@@ -161,6 +175,7 @@ __global__ void convergenceMetricsColKernel(
     __shared__ Real s_pobj[kBlockSize];
     __shared__ Real s_dobj_col[kBlockSize];
     __shared__ Real s_dual_resid_sq[kBlockSize];
+    __shared__ Real s_dual_resid_max[kBlockSize];
     __shared__ Real s_movement[kBlockSize];
     __shared__ Real s_interaction[kBlockSize];
     __shared__ Real s_dist_sq[kBlockSize];
@@ -168,7 +183,7 @@ __global__ void convergenceMetricsColKernel(
     int tid = threadIdx.x;
     int j = blockIdx.x * blockDim.x + tid;
 
-    Real pobj = 0.0, dobj_col = 0.0, drsq = 0.0;
+    Real pobj = 0.0, dobj_col = 0.0, drsq = 0.0, drmax = 0.0;
     Real mov = 0.0, interact = 0.0, dist = 0.0;
 
     if (j < n) {
@@ -188,7 +203,9 @@ __global__ void convergenceMetricsColKernel(
         } else {
             dr = grad;
         }
-        drsq = dr * dr;
+        Real dr_orig = dr * dual_resid_scale[j];
+        drsq = dr_orig * dr_orig;
+        drmax = fabs(dr_orig);
 
         Real pg = grad;
         if (!devIsFinite(lb)) pg = (pg < 0.0) ? pg : 0.0;
@@ -206,6 +223,7 @@ __global__ void convergenceMetricsColKernel(
     s_pobj[tid] = pobj;
     s_dobj_col[tid] = dobj_col;
     s_dual_resid_sq[tid] = drsq;
+    s_dual_resid_max[tid] = drmax;
     s_movement[tid] = mov;
     s_interaction[tid] = interact;
     s_dist_sq[tid] = dist;
@@ -216,6 +234,7 @@ __global__ void convergenceMetricsColKernel(
             s_pobj[tid] += s_pobj[tid + s];
             s_dobj_col[tid] += s_dobj_col[tid + s];
             s_dual_resid_sq[tid] += s_dual_resid_sq[tid + s];
+            s_dual_resid_max[tid] = fmax(s_dual_resid_max[tid], s_dual_resid_max[tid + s]);
             s_movement[tid] += s_movement[tid + s];
             s_interaction[tid] += s_interaction[tid + s];
             s_dist_sq[tid] += s_dist_sq[tid + s];
@@ -227,6 +246,7 @@ __global__ void convergenceMetricsColKernel(
         atomicAdd(&metrics->primal_obj, s_pobj[0]);
         atomicAdd(&metrics->dual_obj_col, s_dobj_col[0]);
         atomicAdd(&metrics->dual_resid_sq, s_dual_resid_sq[0]);
+        atomicMaxReal(&metrics->dual_resid_max, s_dual_resid_max[0]);
         atomicAdd(&metrics->fpe_movement, s_movement[0]);
         atomicAdd(&metrics->fpe_interaction, s_interaction[0]);
         atomicAdd(&metrics->primal_dist_sq, s_dist_sq[0]);
@@ -238,6 +258,7 @@ void launchConvergenceMetricsCol(
     const Real* pdhg_x, const Real* initial_x,
     const Real* cscaled, const Real* at_y,
     const Real* col_lower, const Real* col_upper,
+    const Real* dual_resid_scale,
     const Real* at_delta_y,
     Real primal_weight, Real step,
     GpuConvergenceMetrics* d_metrics,
@@ -245,7 +266,7 @@ void launchConvergenceMetricsCol(
 {
     if (n <= 0) return;
     convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper,
+        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper, dual_resid_scale,
         at_delta_y, primal_weight, step, d_metrics);
 }
 
@@ -258,10 +279,12 @@ __global__ void convergenceMetricsRowKernel(
     const Real* __restrict__ pdhg_y, const Real* __restrict__ initial_y,
     const Real* __restrict__ ax,
     const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
+    const Real* __restrict__ primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
 {
     __shared__ Real s_presid_sq[kBlockSize];
+    __shared__ Real s_presid_max[kBlockSize];
     __shared__ Real s_dobj_row[kBlockSize];
     __shared__ Real s_movement[kBlockSize];
     __shared__ Real s_dist_sq[kBlockSize];
@@ -269,7 +292,7 @@ __global__ void convergenceMetricsRowKernel(
     int tid = threadIdx.x;
     int i = blockIdx.x * blockDim.x + tid;
 
-    Real presid = 0.0, dobj_row = 0.0, mov = 0.0, dist = 0.0;
+    Real presid = 0.0, presid_max = 0.0, dobj_row = 0.0, mov = 0.0, dist = 0.0;
 
     if (i < m) {
         Real axi = ax[i];
@@ -280,8 +303,9 @@ __global__ void convergenceMetricsRowKernel(
         Real clamped = axi;
         if (clamped < rl) clamped = rl;
         if (clamped > ru) clamped = ru;
-        Real violation = axi - clamped;
+        Real violation = (axi - clamped) * primal_resid_scale[i];
         presid = violation * violation;
+        presid_max = fabs(violation);
 
         // Dual objective row contribution.
         Real yi = pdhg_y[i];
@@ -300,6 +324,7 @@ __global__ void convergenceMetricsRowKernel(
     }
 
     s_presid_sq[tid] = presid;
+    s_presid_max[tid] = presid_max;
     s_dobj_row[tid] = dobj_row;
     s_movement[tid] = mov;
     s_dist_sq[tid] = dist;
@@ -308,6 +333,7 @@ __global__ void convergenceMetricsRowKernel(
     for (int s = kBlockSize / 2; s > 0; s >>= 1) {
         if (tid < s) {
             s_presid_sq[tid] += s_presid_sq[tid + s];
+            s_presid_max[tid] = fmax(s_presid_max[tid], s_presid_max[tid + s]);
             s_dobj_row[tid] += s_dobj_row[tid + s];
             s_movement[tid] += s_movement[tid + s];
             s_dist_sq[tid] += s_dist_sq[tid + s];
@@ -317,6 +343,7 @@ __global__ void convergenceMetricsRowKernel(
 
     if (tid == 0) {
         atomicAdd(&metrics->primal_resid_sq, s_presid_sq[0]);
+        atomicMaxReal(&metrics->primal_resid_max, s_presid_max[0]);
         atomicAdd(&metrics->dual_obj_row, s_dobj_row[0]);
         atomicAdd(&metrics->fpe_movement, s_movement[0]);
         atomicAdd(&metrics->dual_dist_sq, s_dist_sq[0]);
@@ -328,13 +355,14 @@ void launchConvergenceMetricsRow(
     const Real* pdhg_y, const Real* initial_y,
     const Real* ax,
     const Real* row_lower, const Real* row_upper,
+    const Real* primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream)
 {
     if (m <= 0) return;
     convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, pdhg_y, initial_y, ax, row_lower, row_upper,
+        m, pdhg_y, initial_y, ax, row_lower, row_upper, primal_resid_scale,
         primal_weight, d_metrics);
 }
 

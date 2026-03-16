@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate LP PDLP comparison baseline CSVs for mipx/HiGHS/cuOpt."""
+"""Generate LP PDLP comparison baseline CSVs for mipx/cuPDLPx/HiGHS/cuOpt."""
 
 from __future__ import annotations
 
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -43,8 +44,13 @@ def resolve_highs_bin() -> str:
     return os.environ.get("HIGHS_BIN") or os.environ.get("HIGHS_BINARY") or "highs"
 
 
+def resolve_cupdlpx_bin() -> str:
+    return os.environ.get("MIPX_CUPDLPX_BINARY") or os.environ.get("CUPDLPX_BINARY") or "cupdlpx"
+
+
 def main() -> int:
     highs_bin = resolve_highs_bin()
+    cupdlpx_bin = resolve_cupdlpx_bin()
 
     if not BIN.is_file() or not os.access(BIN, os.X_OK):
         raise SystemExit(f"mipx binary not found/executable: {BIN}")
@@ -53,52 +59,33 @@ def main() -> int:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    common_cmd = [
+        sys.executable,
+        str(SCRIPT),
+        "--mipx-binary",
+        str(BIN),
+        "--highs-binary",
+        highs_bin,
+        "--instances-dir",
+        str(NETLIB_DIR),
+        "--repeats",
+        "3",
+        "--threads",
+        "1",
+        "--time-limit",
+        "120",
+        "--disable-presolve",
+    ]
+    if shutil.which(cupdlpx_bin) or Path(cupdlpx_bin).is_file():
+        common_cmd.extend(["--cupdlpx-binary", cupdlpx_bin])
+    else:
+        common_cmd.append("--no-cupdlpx")
+
     print("=== Generating Netlib PDLP comparison baseline (GPU auto) ===")
-    run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--mipx-binary",
-            str(BIN),
-            "--highs-binary",
-            highs_bin,
-            "--instances-dir",
-            str(NETLIB_DIR),
-            "--output",
-            str(OUT_NETLIB),
-            "--repeats",
-            "3",
-            "--threads",
-            "1",
-            "--time-limit",
-            "120",
-            "--disable-presolve",
-        ]
-    )
+    run(common_cmd + ["--output", str(OUT_NETLIB)])
 
     print("=== Generating Netlib PDLP comparison baseline (GPU forced) ===")
-    run(
-        [
-            sys.executable,
-            str(SCRIPT),
-            "--mipx-binary",
-            str(BIN),
-            "--highs-binary",
-            highs_bin,
-            "--instances-dir",
-            str(NETLIB_DIR),
-            "--output",
-            str(OUT_NETLIB_FORCED),
-            "--repeats",
-            "3",
-            "--threads",
-            "1",
-            "--time-limit",
-            "120",
-            "--disable-presolve",
-            "--force-mipx-gpu",
-        ]
-    )
+    run(common_cmd + ["--output", str(OUT_NETLIB_FORCED), "--force-mipx-gpu"])
 
     meta = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -106,6 +93,8 @@ def main() -> int:
         "platform": platform.platform(),
         "python_version": platform.python_version(),
         "cuopt_version": "",
+        "cupdlpx_binary": cupdlpx_bin,
+        "cupdlpx_version": "",
         "nvidia_smi": capture(
             [
                 "nvidia-smi",
@@ -119,6 +108,9 @@ def main() -> int:
     cuopt_ver = capture([sys.executable, "-m", "libcuopt._cli_wrapper", "--version"])
     if cuopt_ver:
         meta["cuopt_version"] = cuopt_ver
+    cupdlpx_ver = capture([cupdlpx_bin, "--help"])
+    if cupdlpx_ver:
+        meta["cupdlpx_version"] = cupdlpx_ver.splitlines()[0]
 
     OUT_META.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 

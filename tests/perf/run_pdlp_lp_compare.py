@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare LP PDLP performance across mipx, HiGHS, and cuOpt.
+"""Compare LP PDLP performance across mipx, cuPDLPx, HiGHS, and cuOpt.
 
 Example:
   python3 tests/perf/run_pdlp_lp_compare.py \
@@ -21,6 +21,7 @@ import re
 import shutil
 import statistics
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,6 +133,24 @@ def locate_highs_binary(explicit: str) -> str | None:
     return shutil.which("highs")
 
 
+def locate_cupdlpx_binary(explicit: str) -> str | None:
+    if explicit:
+        return explicit
+    for env_name in ("MIPX_CUPDLPX_BINARY", "CUPDLPX_BINARY"):
+        env = os.environ.get(env_name)
+        if env:
+            return env
+    return shutil.which("cupdlpx")
+
+
+def resolve_executable(candidate: str | None) -> str | None:
+    if not candidate:
+        return None
+    if os.path.isfile(candidate):
+        return candidate
+    return shutil.which(candidate)
+
+
 def write_highs_options_file(threads: int, relax_integrality: bool) -> str:
     import tempfile
 
@@ -154,27 +173,53 @@ class SolverResult:
     iterations: float | None = None
     objective: float | None = None
     work_units: float | None = None
+    backend: str | None = None
     error: str | None = None
 
 
-def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
+def run_cmd(cmd: list[str], timeout_seconds: float | None = None) -> tuple[int, str, float]:
     t0 = time.perf_counter()
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    elapsed = time.perf_counter() - t0
-    output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
-    return proc.returncode, output, elapsed
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds if timeout_seconds and timeout_seconds > 0.0 else None,
+        )
+        elapsed = time.perf_counter() - t0
+        output = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        return proc.returncode, output, elapsed
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.perf_counter() - t0
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        output = stdout + ("\n" + stderr if stderr else "")
+        return 124, output, elapsed
 
 
 def run_mipx_pdlp(
     binary: str,
     model: Path,
+    threads: int,
     use_gpu: bool,
     disable_presolve: bool,
     force_gpu: bool,
     time_limit: float,
     relax_integrality: bool,
 ) -> SolverResult:
-    cmd = [binary, str(model), "--pdlp", "--quiet"]
+    cmd = [
+        binary,
+        str(model),
+        "--pdlp",
+        "--quiet",
+        "--print-backend",
+        "--threads",
+        str(max(1, threads)),
+    ]
     if use_gpu:
         cmd.append("--gpu")
         if force_gpu:
@@ -188,7 +233,9 @@ def run_mipx_pdlp(
     if time_limit > 0:
         cmd.extend(["--time-limit", f"{time_limit:g}"])
 
-    code, out, elapsed = run_cmd(cmd)
+    code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+    if code == 124:
+        return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
     if code != 0:
         return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 
@@ -197,13 +244,19 @@ def run_mipx_pdlp(
     iterations = parse_first_float(r"^Iterations:\s*([\-+0-9.eE]+)\s*$", out)
     work = parse_first_float(r"^Work units:\s*([\-+0-9.eE]+)\s*$", out)
     solve_time = parse_first_float(r"^Time:\s*([\-+0-9.eE]+)s\s*$", out)
+    backend_match = re.search(r"^PDLP backend:\s*(GPU|CPU)\s*$", out, re.MULTILINE)
+    if solve_time is None or solve_time <= 0.0:
+        # The CLI time is printed with coarse precision on very fast solves.
+        # Fall back to wall time to keep regression metrics strictly positive.
+        solve_time = elapsed
 
     return SolverResult(
         status=status,
-        time_seconds=solve_time if solve_time is not None else elapsed,
+        time_seconds=solve_time,
         iterations=iterations,
         objective=objective,
         work_units=work,
+        backend=backend_match.group(1).lower() if backend_match else None,
     )
 
 
@@ -234,13 +287,17 @@ def run_highs(
         if time_limit > 0:
             cmd.extend(["--time_limit", f"{time_limit:g}"])
 
-        code, out, elapsed = run_cmd(cmd)
+        code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+        if code == 124:
+            return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
         solver_note = ""
         if code != 0 and requested_solver == "pdlp":
             fallback = cmd.copy()
             solver_idx = fallback.index("--solver") + 1
             fallback[solver_idx] = "ipx"
-            code, out, elapsed = run_cmd(fallback)
+            code, out, elapsed = run_cmd(fallback, timeout_seconds=time_limit)
+            if code == 124:
+                return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
             solver_note = "highs_pdlp_unavailable_fallback_ipx"
         if code != 0:
             return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
@@ -292,7 +349,9 @@ def run_cuopt_pdlp(
     if time_limit > 0:
         cmd.extend(["--time-limit", f"{time_limit:g}"])
 
-    code, out, elapsed = run_cmd(cmd)
+    code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+    if code == 124:
+        return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
     if code != 0:
         return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
 
@@ -317,6 +376,55 @@ def run_cuopt_pdlp(
     )
 
 
+def run_cupdlpx(
+    binary: str,
+    model: Path,
+    time_limit: float,
+    disable_presolve: bool,
+    relax_integrality: bool,
+) -> SolverResult:
+    if relax_integrality:
+        return SolverResult(
+            status="unsupported",
+            time_seconds=0.0,
+            error="cuPDLPx runner does not support --relax-integrality in this harness",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="mipx_cupdlpx_") as tmp_dir:
+        cmd = [
+            binary,
+            str(model),
+            tmp_dir,
+            "--eps_opt",
+            "1e-4",
+            "--eps_feas",
+            "1e-4",
+        ]
+        if disable_presolve:
+            cmd.append("--no_presolve")
+        if time_limit > 0:
+            cmd.extend(["--time_limit", f"{time_limit:g}"])
+
+        code, out, elapsed = run_cmd(cmd, timeout_seconds=time_limit)
+        if code == 124:
+            return SolverResult(status="time_limit", time_seconds=elapsed, error=out.strip())
+        if code != 0:
+            return SolverResult(status="solve_error", time_seconds=elapsed, error=out.strip())
+
+        raw_status = re.search(r"^\s*Status\s*:\s*(.+?)\s*$", out, re.MULTILINE)
+        status = normalize_status(raw_status.group(1)) if raw_status else "unknown"
+        objective = parse_first_float(r"^\s*Primal objective\s*:\s*([\-+0-9.eE]+)\s*$", out)
+        iterations = parse_first_float(r"^\s*Iterations\s*:\s*([\-+0-9.eE]+)\s*$", out)
+        solve_time = parse_first_float(r"^\s*Solve time\s*:\s*([\-+0-9.eE]+)\s+sec\s*$", out)
+
+        return SolverResult(
+            status=status,
+            time_seconds=solve_time if solve_time is not None else elapsed,
+            iterations=iterations,
+            objective=objective,
+        )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--mipx-binary", default="./build/mipx-solve")
@@ -330,9 +438,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disable-presolve", action="store_true")
     p.add_argument("--relax-integrality", action="store_true")
     p.add_argument("--force-mipx-gpu", action="store_true")
+    p.add_argument("--no-mipx-cpu", action="store_true")
+    p.add_argument("--no-mipx-gpu", action="store_true")
     p.add_argument("--no-highs", action="store_true")
     p.add_argument("--highs-binary", default="")
     p.add_argument("--highs-ipx", action="store_true", help="Use HiGHS IPX instead of PDLP.")
+    p.add_argument("--no-cupdlpx", action="store_true")
+    p.add_argument("--cupdlpx-binary", default="")
     p.add_argument("--no-cuopt", action="store_true")
     p.add_argument("--cuopt-cli", default="")
     p.add_argument("--cuopt-num-gpus", type=int, default=1)
@@ -370,6 +482,7 @@ def summarize_and_write(
                 "status",
                 "objective",
                 "work_units",
+                "backend",
                 "error",
             ],
         )
@@ -383,19 +496,26 @@ def summarize_and_write(
         by_instance.setdefault(row["instance"], []).append(row)
 
     print("\nPer-solver summary")
-    print("solver,rows,optimal,median_time,geomean_time,median_iterations")
+    print("solver,rows,optimal,median_time,geomean_time,median_iterations,backend_counts")
     for solver in sorted(by_solver):
         rows = by_solver[solver]
         times = [float(r["time_seconds"]) for r in rows if r["time_seconds"]]
         opt_rows = [r for r in rows if r["status"] == "optimal"]
         opt_times = [float(r["time_seconds"]) for r in opt_rows if r["time_seconds"]]
         opt_iters = [float(r["iterations"]) for r in opt_rows if r["iterations"]]
+        backend_counts: dict[str, int] = {}
+        for row in rows:
+            backend = row.get("backend", "").strip() or "-"
+            backend_counts[backend] = backend_counts.get(backend, 0) + 1
         med_time = median(times) if times else float("nan")
         gmean_time = geomean(opt_times) if opt_times else float("nan")
         med_iter = median(opt_iters) if opt_iters else float("nan")
+        backend_summary = ";".join(
+            f"{backend}:{backend_counts[backend]}" for backend in sorted(backend_counts)
+        )
         print(
             f"{solver},{len(rows)},{len(opt_rows)},"
-            f"{med_time:.6f},{gmean_time:.6f},{med_iter:.2f}"
+            f"{med_time:.6f},{gmean_time:.6f},{med_iter:.2f},{backend_summary}"
         )
 
     print("\nObjective agreement check (optimal-only)")
@@ -409,10 +529,12 @@ def summarize_and_write(
             continue
         vals = [v for _, v in objs]
         span = max(vals) - min(vals)
-        if abs(span) > objective_tol:
+        scale = max(1.0, *(abs(v) for v in vals))
+        rel_span = abs(span) / scale
+        if rel_span > objective_tol:
             disagreements += 1
             details = ", ".join(f"{s}={v:.9g}" for s, v in objs)
-            print(f"WARNING {inst}: span={span:.3e} :: {details}")
+            print(f"WARNING {inst}: rel_span={rel_span:.3e} abs_span={span:.3e} :: {details}")
     if disagreements == 0:
         print("No objective disagreements above tolerance.")
 
@@ -430,44 +552,64 @@ def main() -> int:
 
     instances = collect_instances(args.instances_dir, args.instances, args.max_instances)
     highs_binary = None if args.no_highs else locate_highs_binary(args.highs_binary)
+    highs_binary = resolve_executable(highs_binary)
     if not args.no_highs and not highs_binary:
         raise SystemExit("HiGHS binary not found. Set --highs-binary or HIGHS_BINARY.")
-    if highs_binary and not shutil.which(highs_binary) and not Path(highs_binary).is_file():
-        raise SystemExit(f"HiGHS binary not found: {highs_binary}")
+
+    cupdlpx_binary = None if args.no_cupdlpx else locate_cupdlpx_binary(args.cupdlpx_binary)
+    cupdlpx_binary = resolve_executable(cupdlpx_binary)
+    if args.cupdlpx_binary and not cupdlpx_binary:
+        raise SystemExit(f"cuPDLPx binary not found: {args.cupdlpx_binary}")
 
     cuopt_cli = None if args.no_cuopt else locate_cuopt_cli(args.cuopt_cli)
-    if cuopt_cli and not os.path.isfile(cuopt_cli):
-        cuopt_cli = shutil.which(cuopt_cli) or None
+    cuopt_cli = resolve_executable(cuopt_cli)
 
     solvers: list[tuple[str, Callable[[Path], SolverResult]]] = []
-    solvers.append(
-        (
-            "mipx_pdlp_cpu",
-            lambda p: run_mipx_pdlp(
-                args.mipx_binary,
-                p,
-                use_gpu=False,
-                disable_presolve=args.disable_presolve,
-                force_gpu=False,
-                time_limit=args.time_limit,
-                relax_integrality=args.relax_integrality,
-            ),
+    if not args.no_mipx_cpu:
+        solvers.append(
+            (
+                "mipx_pdlp_cpu",
+                lambda p: run_mipx_pdlp(
+                    args.mipx_binary,
+                    p,
+                    threads=args.threads,
+                    use_gpu=False,
+                    disable_presolve=args.disable_presolve,
+                    force_gpu=False,
+                    time_limit=args.time_limit,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
         )
-    )
-    solvers.append(
-        (
-            "mipx_pdlp_gpu",
-            lambda p: run_mipx_pdlp(
-                args.mipx_binary,
-                p,
-                use_gpu=True,
-                disable_presolve=args.disable_presolve,
-                force_gpu=args.force_mipx_gpu,
-                time_limit=args.time_limit,
-                relax_integrality=args.relax_integrality,
-            ),
+    if not args.no_mipx_gpu:
+        solvers.append(
+            (
+                "mipx_pdlp_gpu",
+                lambda p: run_mipx_pdlp(
+                    args.mipx_binary,
+                    p,
+                    threads=args.threads,
+                    use_gpu=True,
+                    disable_presolve=args.disable_presolve,
+                    force_gpu=args.force_mipx_gpu,
+                    time_limit=args.time_limit,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
         )
-    )
+    if cupdlpx_binary:
+        solvers.append(
+            (
+                "cupdlpx",
+                lambda p: run_cupdlpx(
+                    cupdlpx_binary,
+                    p,
+                    time_limit=args.time_limit,
+                    disable_presolve=args.disable_presolve,
+                    relax_integrality=args.relax_integrality,
+                ),
+            )
+        )
     if not args.no_highs:
         highs_solver = "highs_ipx" if args.highs_ipx else "highs_pdlp"
         solvers.append(
@@ -523,12 +665,14 @@ def main() -> int:
                 "status": status,
                 "objective": f"{median([float(x) for x in objs]):.12g}" if objs else "",
                 "work_units": f"{median([float(x) for x in works]):.6f}" if works else "",
+                "backend": run_results[0].backend or "",
                 "error": " | ".join(errors[:1]) if errors else "",
             }
             rows.append(row)
             print(
                 f"{name:16s} {solver_name:14s} status={status:14s} "
                 f"time={row['time_seconds'] or '-':>9s} "
+                f"backend={row['backend'] or '-':>3s} "
                 f"iter={row['iterations'] or '-':>6s}"
             )
 
