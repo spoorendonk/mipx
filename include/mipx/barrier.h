@@ -42,6 +42,10 @@ struct BarrierOptions {
     Real step_fraction = 0.995;
 
     // Barrier backend / preprocessing roadmap controls.
+    // Current semantics:
+    // - Choose/Auto preserve the current normal-equations GPU path.
+    // - Augmented and explicit preprocessing modes are roadmap hooks and may
+    //   fail explicitly until their algorithms are implemented.
     BarrierBackend backend = BarrierBackend::Choose;
     BarrierOrdering ordering = BarrierOrdering::Auto;
     BarrierToggle dualize = BarrierToggle::Auto;

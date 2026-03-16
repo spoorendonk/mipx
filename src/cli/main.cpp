@@ -113,7 +113,10 @@ int main(int argc, char* argv[]) {
             "[--barrier-dual-initial-point auto|lms|least-squares] "
             "[--barrier-eliminate-dense-columns|--barrier-no-eliminate-dense-columns] "
             "[--relax-integrality] "
-            "[--verbose|--quiet]\n");
+            "[--verbose|--quiet]\n"
+            "Barrier roadmap controls currently preserve the existing GPU normal-equations path in\n"
+            "`choose`/`auto` modes; explicit augmented/preprocessing selections are roadmap hooks and\n"
+            "may fail until their algorithms are implemented.\n");
         return 1;
     }
 
