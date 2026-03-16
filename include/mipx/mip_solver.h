@@ -260,6 +260,10 @@ public:
             : ParallelMode::Deterministic;
     }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
+    void setRootHeuristicThresholds(Int max_int_inf, Int max_int_vars) {
+        root_heuristic_max_int_inf_ = std::max<Int>(1, max_int_inf);
+        root_heuristic_max_int_vars_ = std::max<Int>(1, max_int_vars);
+    }
     void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
     void setPreRootLpFreeWorkBudget(double max_work_units) {
         pre_root_lp_free_work_budget_ = std::max(1.0, max_work_units);
@@ -298,6 +302,12 @@ public:
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
     }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    void setTreePresolveAutoTuning(bool enabled) {
+        tree_presolve_auto_tuning_enabled_ = enabled;
+        if (loaded_) {
+            refreshTreePresolveProfile();
+        }
+    }
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
     void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
         tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
@@ -311,6 +321,12 @@ public:
     [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
+    [[nodiscard]] bool isTreePresolveAutoTuningEnabled() const {
+        return tree_presolve_auto_tuning_enabled_;
+    }
+    [[nodiscard]] bool isTreePresolveBinaryLiteProfileActive() const {
+        return tree_presolve_binary_lite_profile_active_;
+    }
     const MipSymmetryStats& getSymmetryStats() const { return symmetry_stats_; }
     const MipExactRefinementStats& getExactRefinementStats() const {
         return exact_refinement_stats_;
@@ -318,6 +334,10 @@ public:
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
 
 private:
+    void refreshTreePresolveProfile();
+    [[nodiscard]] MipTreePresolveStats treePresolveStatsSnapshot() const;
+    void mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta);
+
     struct NodeWorkStats {
         double bound_apply_seconds = 0.0;
         double basis_set_seconds = 0.0;
@@ -391,7 +411,8 @@ private:
                      std::vector<Index>& touched_vars,
                      NodeScratch& node_scratch,
                      NodeWorkStats& node_stats,
-                     Int& int_inf_out);
+                     Int& int_inf_out,
+                     Int strong_branch_budget_override = -1);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);
@@ -446,6 +467,8 @@ private:
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
+    Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
+    Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;
     bool pre_root_lp_free_enabled_ = false;
     bool pre_root_lp_free_early_stop_ = true;
     Int pre_root_lp_free_max_rounds_ = 24;
@@ -459,12 +482,17 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
-    // Serial in-tree presolve is disabled by default while correctness hardening
-    // is in progress for benchmark regressions.
-    bool tree_presolve_enabled_ = false;
+    // Serial in-tree presolve is enabled by default because it materially
+    // improves hard MIP search on benchmark instances.
+    bool tree_presolve_enabled_ = true;
+    bool tree_presolve_auto_tuning_enabled_ = true;
     Int tree_presolve_max_depth_ = 24;
-    Int tree_presolve_min_frac_ = 4;
+    Int tree_presolve_min_frac_ = 8;
     Int tree_presolve_depth_frequency_ = 3;
+    bool tree_presolve_binary_lite_profile_active_ = false;
+    Int model_binary_vars_ = 0;
+    Int model_general_integer_vars_ = 0;
+    Int model_continuous_vars_ = 0;
     // Serial in-tree cuts are disabled by default while correctness hardening
     // is in progress for benchmark regressions.
     bool tree_cuts_enabled_ = false;
@@ -492,6 +520,7 @@ private:
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
+    mutable std::mutex tree_presolve_stats_mutex_;
     SymmetryManager symmetry_manager_;
     bool symmetry_enabled_ = true;
     mutable Logger log_;
@@ -523,6 +552,11 @@ private:
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
     static constexpr Real kHeurBudgetMaxWorkShare = 0.20;
     static constexpr Int kHeurBudgetMaxFrequencyScale = 8;
+    static constexpr Int kTreePresolveBinaryLiteMaxCols = 512;
+    static constexpr Int kTreePresolveBinaryLiteMaxRows = 512;
+    static constexpr Int kTreePresolveBinaryLiteMaxDepth = 8;
+    static constexpr Int kTreePresolveBinaryLiteMinFrac = 12;
+    static constexpr Int kTreePresolveBinaryLiteDepthFrequency = 6;
 };
 
 }  // namespace mipx

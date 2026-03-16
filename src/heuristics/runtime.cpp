@@ -216,11 +216,13 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
 
     {
         ++out.calls;
+        ++out.rounding_calls;
         ++stats_.calls;
         RoundingHeuristic rounding;
         auto hsol = rounding.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
         if (accept("rounding", hsol)) {
             ++stats_.improvements;
+            ++out.rounding_improvements;
         }
     }
     if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
@@ -228,6 +230,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
     if (run_root_lp_heuristics && incumbent == kInf &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;
+        ++out.auxobj_calls;
         AuxObjectiveHeuristic auxobj;
         auxobj.setSubproblemIterLimit(config_.root_auxobj_subproblem_iter_limit);
         auxobj.setMinActiveIntegerVars(config_.root_auxobj_min_active_integer_vars);
@@ -237,13 +240,16 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         out.work_units += auxobj.lastWorkUnits();
         stats_.lp_iterations += auxobj.lastLpIterations();
         const bool improved = accept("auxobj", hsol);
+        if (improved) ++out.auxobj_improvements;
         recordCall(0, auxobj.lastWorkUnits(), improved);
         if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
     }
 
-    if (run_root_lp_heuristics && incumbent == kInf &&
+    if (run_root_lp_heuristics &&
+        incumbent == kInf &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;
+        ++out.zeroobj_calls;
         ZeroObjectiveHeuristic zeroobj;
         zeroobj.setSubproblemIterLimit(config_.root_zeroobj_subproblem_iter_limit);
         auto hsol = zeroobj.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
@@ -252,13 +258,16 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         out.work_units += zeroobj.lastWorkUnits();
         stats_.lp_iterations += zeroobj.lastLpIterations();
         const bool improved = accept("zeroobj", hsol);
+        if (improved) ++out.zeroobj_improvements;
         recordCall(0, zeroobj.lastWorkUnits(), improved);
         if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
     }
 
-    if (run_root_lp_heuristics && incumbent == kInf &&
+    if (run_root_lp_heuristics &&
+        incumbent == kInf &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;
+        ++out.feaspump_calls;
         FeasibilityPumpHeuristic feaspump;
         feaspump.setMaxIterations(config_.root_feaspump_max_iter);
         feaspump.setSubproblemIterLimit(config_.root_feaspump_subproblem_iter_limit);
@@ -268,13 +277,16 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         out.work_units += feaspump.lastWorkUnits();
         stats_.lp_iterations += feaspump.lastLpIterations();
         const bool improved = accept("feaspump", hsol);
+        if (improved) ++out.feaspump_improvements;
         recordCall(0, feaspump.lastWorkUnits(), improved);
         if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
     }
 
-    if (run_root_lp_heuristics && incumbent == kInf &&
+    if (run_root_lp_heuristics &&
+        incumbent == kInf &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;
+        ++out.rens_calls;
         RensHeuristic rens;
         rens.setSubproblemIterLimit(config_.root_rens_subproblem_iter_limit);
         rens.setMinFixedVars(config_.root_rens_min_fixed_vars);
@@ -285,6 +297,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         out.work_units += rens.lastWorkUnits();
         stats_.lp_iterations += rens.lastLpIterations();
         const bool improved = accept("rens", hsol);
+        if (improved) ++out.rens_improvements;
         recordCall(0, rens.lastWorkUnits(), improved);
         if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
     }
@@ -294,6 +307,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         ctx.root_int_inf > 0 && ctx.root_int_inf <= config_.rins_max_int_inf_for_run &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;
+        ++out.rins_calls;
         RinsHeuristic rins;
         rins.setSubproblemIterLimit(config_.rins_subproblem_iter_limit);
         rins.setAgreementTol(config_.rins_agreement_tol);
@@ -305,6 +319,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         out.work_units += rins.lastWorkUnits();
         stats_.lp_iterations += rins.lastLpIterations();
         const bool improved = accept("rins", hsol);
+        if (improved) ++out.rins_improvements;
         recordCall(0, rins.lastWorkUnits(), improved);
         if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
     }
@@ -317,6 +332,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         for (Int k : kNeighborhoods) {
             if (!allowRootCall(ctx.total_work_units + out.work_units)) break;
             ++out.calls;
+            ++out.localbranching_calls;
 
             Int radius = config_.root_local_branching_neighborhood_small;
             if (k == 1) radius = config_.root_local_branching_neighborhood_medium;
@@ -334,6 +350,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
             out.work_units += local_branching.lastWorkUnits();
             stats_.lp_iterations += local_branching.lastLpIterations();
             const bool improved = accept("localbranching", hsol);
+            if (improved) ++out.localbranching_improvements;
             recordCall(0, local_branching.lastWorkUnits(), improved);
             if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
         }

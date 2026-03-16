@@ -88,6 +88,33 @@ static LpProblem buildLpLightProbeMip() {
     return lp;
 }
 
+static LpProblem buildSearchStagnationMip() {
+    constexpr Index n = 10;
+    LpProblem lp;
+    lp.name = "parallel_search_stagnation_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj.assign(n, 0.0);
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Binary);
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5",
+                    "x6", "x7", "x8", "x9", "x10"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {4.5};
+    lp.row_upper = {4.5};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips;
+    trips.reserve(n);
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({0, j, 1.0});
+    }
+    lp.matrix = SparseMatrix(1, n, std::move(trips));
+    return lp;
+}
+
 #ifdef MIPX_HAS_TBB
 // ---------------------------------------------------------------------------
 // Helper: Knapsack MIP
@@ -572,6 +599,34 @@ TEST_CASE("Parallel: deterministic mode reports reproducible work-units metric",
     CHECK_THAT(a.work_units, WithinAbs(b.work_units, 1e-9));
     CHECK(a.time_seconds >= 0.0);
     CHECK(b.time_seconds >= 0.0);
+}
+
+TEST_CASE("Parallel: deterministic aggressive search updates search controls",
+          "[parallel][tbb][search]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(4);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setSearchProfile(SearchProfile::Aggressive);
+    solver.setRestartsEnabled(true);
+    solver.setRestartControls(8, 2);
+    solver.setNodeLimit(300);
+    solver.setParallelMode(ParallelMode::Deterministic);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::Infeasible ||
+           result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& sstats = solver.getSearchStats();
+    CHECK(sstats.policy_switches >= 1);
+    CHECK(sstats.restarts >= 1);
+    CHECK(sstats.restart_nodes_dropped == 0);
+    CHECK(sstats.strong_budget_updates >= 1);
 }
 
 TEST_CASE("Parallel: MIPLIB gt2", "[parallel][tbb][miplib]") {

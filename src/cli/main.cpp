@@ -23,6 +23,13 @@ int main(int argc, char* argv[]) {
             "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
             "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
             "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
+            "[--conflicts|--no-conflicts] "
+            "[--tree-presolve|--no-tree-presolve] "
+            "[--tree-presolve-auto|--no-tree-presolve-auto] "
+            "[--tree-presolve-max-depth N] "
+            "[--tree-presolve-min-frac N] "
+            "[--tree-presolve-depth-frequency N] "
+            "[--tree-cuts|--no-tree-cuts] "
             "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
             "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
             "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
@@ -42,6 +49,7 @@ int main(int argc, char* argv[]) {
             "[--dual-lu-update-limit N] "
             "[--dual-lu-ft-drop-tol T] "
             "[--search-stable|--search-default|--search-aggressive] "
+            "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
             "[--pdlp-opt-norm l2|linf] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
@@ -71,13 +79,23 @@ int main(int argc, char* argv[]) {
     mipx::Int barrier_gpu_min_nnz = 10000;
     mipx::ParallelMode parallel_mode = mipx::ParallelMode::Deterministic;
     uint64_t heuristic_seed = 1;
+    mipx::Int root_heur_max_int_inf = 12;
+    mipx::Int root_heur_max_int_vars = 96;
     bool pre_root_lpfree = false;
     double pre_root_work = 5.0e4;
     mipx::Int pre_root_rounds = 24;
     bool pre_root_early_stop = true;
     bool pre_root_lplight = false;
     bool pre_root_portfolio = true;
+    bool conflicts_enabled = true;
+    bool tree_presolve_enabled = true;
+    bool tree_presolve_auto = true;
+    mipx::Int tree_presolve_max_depth = 24;
+    mipx::Int tree_presolve_min_frac = 8;
+    mipx::Int tree_presolve_depth_frequency = 3;
+    bool tree_cuts_enabled = false;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
+    bool search_profile_explicit = false;
     bool symmetry_enabled = true;
     mipx::ExactRefinementMode exact_refine_mode =
         mipx::ExactRefinementMode::Off;
@@ -112,6 +130,31 @@ int main(int argc, char* argv[]) {
             presolve = false;
         } else if (arg == "--presolve") {
             presolve = true;
+        } else if (arg == "--conflicts") {
+            conflicts_enabled = true;
+        } else if (arg == "--no-conflicts") {
+            conflicts_enabled = false;
+        } else if (arg == "--tree-presolve") {
+            tree_presolve_enabled = true;
+        } else if (arg == "--no-tree-presolve") {
+            tree_presolve_enabled = false;
+        } else if (arg == "--tree-presolve-auto") {
+            tree_presolve_auto = true;
+        } else if (arg == "--no-tree-presolve-auto") {
+            tree_presolve_auto = false;
+        } else if (arg == "--tree-presolve-max-depth" && i + 1 < argc) {
+            tree_presolve_max_depth =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-presolve-min-frac" && i + 1 < argc) {
+            tree_presolve_min_frac =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-presolve-depth-frequency" && i + 1 < argc) {
+            tree_presolve_depth_frequency =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--tree-cuts") {
+            tree_cuts_enabled = true;
+        } else if (arg == "--no-tree-cuts") {
+            tree_cuts_enabled = false;
         } else if (arg == "--presolve-forcing-rows") {
             presolve_forcing_rows = true;
         } else if (arg == "--no-presolve-forcing-rows") {
@@ -158,6 +201,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(
                 std::strtoull(argv[++i], nullptr, 10));
+        } else if (arg == "--root-heur-max-int-inf" && i + 1 < argc) {
+            root_heur_max_int_inf =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--root-heur-max-int-vars" && i + 1 < argc) {
+            root_heur_max_int_vars =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--pre-root-lpfree") {
             pre_root_lpfree = true;
         } else if (arg == "--no-pre-root-lpfree") {
@@ -215,10 +264,13 @@ int main(int argc, char* argv[]) {
             dual_lu_ft_drop_tolerance = std::atof(argv[++i]);
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
+            search_profile_explicit = true;
         } else if (arg == "--search-default") {
             search_profile = mipx::SearchProfile::Default;
+            search_profile_explicit = true;
         } else if (arg == "--search-aggressive") {
             search_profile = mipx::SearchProfile::Aggressive;
+            search_profile_explicit = true;
         } else if (arg == "--pdlp-opt-norm" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "l2") {
@@ -248,6 +300,10 @@ int main(int argc, char* argv[]) {
             std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
             return 1;
         }
+    }
+
+    if (!search_profile_explicit && num_threads > 1) {
+        search_profile = mipx::SearchProfile::Aggressive;
     }
 
     try {
@@ -286,12 +342,21 @@ int main(int argc, char* argv[]) {
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
+            solver.setRootHeuristicThresholds(root_heur_max_int_inf,
+                                              root_heur_max_int_vars);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
             solver.setPreRootLpFreeEarlyStop(pre_root_early_stop);
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
+            solver.setConflictsEnabled(conflicts_enabled);
+            solver.setTreePresolveEnabled(tree_presolve_enabled);
+            solver.setTreePresolveAutoTuning(tree_presolve_auto);
+            solver.setTreePresolveControls(tree_presolve_max_depth,
+                                           tree_presolve_min_frac,
+                                           tree_presolve_depth_frequency);
+            solver.setTreeCutsEnabled(tree_cuts_enabled);
             solver.setSymmetryEnabled(symmetry_enabled);
             solver.setExactRefinementMode(exact_refine_mode);
             solver.setExactRefinementRationalCheck(exact_rational_check);
@@ -313,11 +378,19 @@ int main(int argc, char* argv[]) {
             } else if (search_profile == mipx::SearchProfile::Aggressive) {
                 search_profile_name = "aggressive";
             }
-            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s\n",
+            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s "
+                    "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
+                    "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s\n",
                     parallel_mode_name,
                     static_cast<unsigned long long>(heuristic_seed),
                     num_threads,
-                    search_profile_name);
+                    search_profile_name,
+                    conflicts_enabled ? "on" : "off",
+                    tree_presolve_enabled ? "on" : "off",
+                    tree_presolve_min_frac,
+                    tree_presolve_depth_frequency,
+                    tree_presolve_auto ? "on" : "off",
+                    tree_cuts_enabled ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal &&
                 result.gap_limit_reached) {

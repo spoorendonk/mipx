@@ -573,6 +573,24 @@ python3 tests/perf/run_mittelman_gate.py \
   --max-regression-pct 100000
 ```
 
+### Bounded MIP Gap Summary
+
+For a quick bounded mipx-vs-HiGHS MIP summary on the same Mittelman subset:
+
+```bash
+python3 tests/perf/run_mip_gap_summary.py \
+  --binary ./build/mipx-solve \
+  --threads 8 \
+  --time-limit 15 \
+  --solver-arg --quiet
+```
+
+The default bounded corpus is:
+`air04,air05,blend2,dcmulti,flugpl,gen,glass4,gt2,p0201,supportcase16,stein45inf`
+
+This writes matching mipx/HiGHS CSVs plus `summary.md` and `summary.json`
+to `/tmp/mipx_mip_gap_summary` by default.
+
 ### Generate Mittelman Baselines
 
 ```bash

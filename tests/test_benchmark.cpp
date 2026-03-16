@@ -421,6 +421,45 @@ TEST_CASE("MIPLIB: p0201 objective matches .solu across root LP policies",
     }
 }
 
+TEST_CASE("MIPLIB: gen objective matches .solu without mixed tree presolve",
+          "[benchmark][miplib][solve][treepresolve]") {
+    const std::string miplib_dir = testDataDir() + "/miplib";
+    const std::string path = miplib_dir + "/gen.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("gen not downloaded. Run tests/data/download_miplib.sh");
+    }
+
+    const std::string solu_file = miplib_dir + "/miplib.solu";
+    if (!fs::exists(solu_file)) {
+        SKIP("miplib.solu not found");
+    }
+
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "gen");
+    if (entry == nullptr || entry->is_infeasible) {
+        SKIP("No finite gen objective in miplib.solu");
+    }
+
+    auto problem = readMps(path);
+    REQUIRE(problem.hasIntegers());
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setTimeLimit(20.0);
+    solver.setNodeLimit(300000);
+    solver.setGapTolerance(1e-4);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(1);
+    solver.setSearchProfile(SearchProfile::Stable);
+    solver.load(problem);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+    CHECK(solver.getTreePresolveStats().attempts == 0);
+}
+
 TEST_CASE("MIPLIB: p0201 objective matches .solu with pre-root heuristics",
           "[benchmark][miplib][solve][preroot]") {
     const std::string miplib_dir = testDataDir() + "/miplib";

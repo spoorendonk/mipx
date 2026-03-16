@@ -80,6 +80,7 @@ public:
     void setReliabilityThreshold(Int t) { reliability_threshold_ = std::max<Int>(1, t); }
     void setStrongBranchMaxCandidates(Int c) { strong_branch_max_candidates_ = std::max<Int>(1, c); }
     void setStrongBranchProbeBudget(Int b) { strong_branch_probe_budget_ = std::max<Int>(2, b); }
+    [[nodiscard]] Int strongBranchProbeBudget() const { return strong_branch_probe_budget_; }
     void setStrongBranchIterLimit(Int iters) { strong_branch_iter_limit_ = std::max<Int>(1, iters); }
     void setPseudocostFallback(Real fallback) { pseudocost_fallback_ = std::max<Real>(1e-8, fallback); }
     void setSymmetryManager(const SymmetryManager* manager) { symmetry_manager_ = manager; }

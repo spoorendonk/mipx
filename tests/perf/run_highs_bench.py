@@ -200,6 +200,13 @@ def run_highs_once(
     runtime = parse_runtime(output)
     if runtime is None:
         runtime = elapsed
+    ok_statuses = {
+        "optimal",
+        "time_limit",
+        "iteration_limit",
+        "infeasible",
+        "unbounded",
+    }
 
     return SolveResult(
         status=status,
@@ -207,7 +214,7 @@ def run_highs_once(
         simplex_iterations=parse_iterations(mode, output),
         nodes=parse_nodes(output) if mode == "mip" else None,
         objective=parse_objective(mode, output),
-        ok=proc.returncode == 0,
+        ok=proc.returncode == 0 or status in ok_statuses,
     )
 
 
