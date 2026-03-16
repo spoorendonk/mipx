@@ -139,6 +139,20 @@ struct RootHeuristicOutcome {
     Int improvements = 0;
     Int lp_iterations = 0;
     double work_units = 0.0;
+    Int rounding_calls = 0;
+    Int rounding_improvements = 0;
+    Int auxobj_calls = 0;
+    Int auxobj_improvements = 0;
+    Int zeroobj_calls = 0;
+    Int zeroobj_improvements = 0;
+    Int feaspump_calls = 0;
+    Int feaspump_improvements = 0;
+    Int rens_calls = 0;
+    Int rens_improvements = 0;
+    Int rins_calls = 0;
+    Int rins_improvements = 0;
+    Int localbranching_calls = 0;
+    Int localbranching_improvements = 0;
 };
 
 struct WorkerHeuristicContext {

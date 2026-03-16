@@ -260,6 +260,10 @@ public:
             : ParallelMode::Deterministic;
     }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
+    void setRootHeuristicThresholds(Int max_int_inf, Int max_int_vars) {
+        root_heuristic_max_int_inf_ = std::max<Int>(1, max_int_inf);
+        root_heuristic_max_int_vars_ = std::max<Int>(1, max_int_vars);
+    }
     void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
     void setPreRootLpFreeWorkBudget(double max_work_units) {
         pre_root_lp_free_work_budget_ = std::max(1.0, max_work_units);
@@ -463,6 +467,8 @@ private:
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
+    Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
+    Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;
     bool pre_root_lp_free_enabled_ = false;
     bool pre_root_lp_free_early_stop_ = true;
     Int pre_root_lp_free_max_rounds_ = 24;

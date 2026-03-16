@@ -1218,8 +1218,8 @@ HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     config.rins_min_fixed_vars = kRinsMinFixedVars;
     config.rins_min_fixed_rate = kRinsMinFixedRate;
     config.rins_max_relative_gap_for_run = kRinsMaxRelativeGapForRun;
-    config.root_max_int_inf = kRootHeuristicMaxIntInf;
-    config.root_max_int_vars = kRootHeuristicMaxIntVars;
+    config.root_max_int_inf = root_heuristic_max_int_inf_;
+    config.root_max_int_vars = root_heuristic_max_int_vars_;
     config.root_feaspump_max_iter = kRootFeasPumpMaxIter;
     config.root_feaspump_subproblem_iter_limit = kRootFeasPumpSubproblemIterLimit;
     config.root_auxobj_subproblem_iter_limit = kRootAuxObjSubproblemIterLimit;
@@ -4577,6 +4577,33 @@ MipResult MipSolver::solve() {
         root_runtime.runRootPortfolio(root_ctx, incumbent, best_solution);
     total_lp_iters += root_heur_outcome.lp_iterations;
     total_work += root_heur_outcome.work_units;
+    if (verbose_) {
+        log_.log(
+            "Root heuristics: int_inf=%d/%d int_vars=%d/%d calls=%d wins=%d "
+            "round=%d/%d aux=%d/%d zero=%d/%d "
+            "fp=%d/%d rens=%d/%d rins=%d/%d lb=%d/%d work=%.3f\n",
+            root_int_inf,
+            runtime_config.root_max_int_inf,
+            root_int_vars,
+            runtime_config.root_max_int_vars,
+            root_heur_outcome.calls,
+            root_heur_outcome.improvements,
+            root_heur_outcome.rounding_calls,
+            root_heur_outcome.rounding_improvements,
+            root_heur_outcome.auxobj_calls,
+            root_heur_outcome.auxobj_improvements,
+            root_heur_outcome.zeroobj_calls,
+            root_heur_outcome.zeroobj_improvements,
+            root_heur_outcome.feaspump_calls,
+            root_heur_outcome.feaspump_improvements,
+            root_heur_outcome.rens_calls,
+            root_heur_outcome.rens_improvements,
+            root_heur_outcome.rins_calls,
+            root_heur_outcome.rins_improvements,
+            root_heur_outcome.localbranching_calls,
+            root_heur_outcome.localbranching_improvements,
+            root_heur_outcome.work_units);
+    }
 
     const bool root_basis_dirty = root_heur_outcome.basis_dirty;
     if (root_basis_dirty && !root_basis.empty()) {

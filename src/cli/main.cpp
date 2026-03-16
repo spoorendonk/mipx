@@ -49,6 +49,7 @@ int main(int argc, char* argv[]) {
             "[--dual-lu-update-limit N] "
             "[--dual-lu-ft-drop-tol T] "
             "[--search-stable|--search-default|--search-aggressive] "
+            "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
             "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
             "[--relax-integrality] "
             "[--verbose|--quiet]\n");
@@ -74,6 +75,8 @@ int main(int argc, char* argv[]) {
     mipx::Int barrier_gpu_min_nnz = 10000;
     mipx::ParallelMode parallel_mode = mipx::ParallelMode::Deterministic;
     uint64_t heuristic_seed = 1;
+    mipx::Int root_heur_max_int_inf = 12;
+    mipx::Int root_heur_max_int_vars = 96;
     bool pre_root_lpfree = false;
     double pre_root_work = 5.0e4;
     mipx::Int pre_root_rounds = 24;
@@ -192,6 +195,12 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(
                 std::strtoull(argv[++i], nullptr, 10));
+        } else if (arg == "--root-heur-max-int-inf" && i + 1 < argc) {
+            root_heur_max_int_inf =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--root-heur-max-int-vars" && i + 1 < argc) {
+            root_heur_max_int_vars =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--pre-root-lpfree") {
             pre_root_lpfree = true;
         } else if (arg == "--no-pre-root-lpfree") {
@@ -314,6 +323,8 @@ int main(int argc, char* argv[]) {
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
+            solver.setRootHeuristicThresholds(root_heur_max_int_inf,
+                                              root_heur_max_int_vars);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);

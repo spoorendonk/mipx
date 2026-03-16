@@ -66,6 +66,13 @@ These are already in place and should be treated as baseline infrastructure, not
   - common-solved geomean wall-clock ratio: about `0.924x` mipx/HiGHS
   - median wall-clock ratio: about `0.599x` mipx/HiGHS
   - major remaining loss bucket: `gen`
+- `gen` loss-bucket update from 2026-03-11:
+  - root heuristic gate is blocking the LP-based root portfolio entirely:
+    `root_int_inf=22` vs gate `12`, `root_int_vars=113` vs gate `96`
+  - widening that gate to `64/192` or `128/256` makes `gen` materially worse;
+    the existing root portfolio is not the right primitive for this bucket
+  - conclusion: `gen` needs a new cheap large-root heuristic or stronger
+    propagation, not a broader version of the current root LP heuristic pack
 - `gen` also exposed an important correctness boundary: mixed-model in-tree
   presolve was unsound and is now fenced off. Any future propagation/presolve
   work on mixed MIPs must ship with explicit `.solu` parity coverage.
@@ -244,9 +251,10 @@ and that we either do not have at all, or only have in a much weaker form.
 - Benchmark wins that come from incorrect results do not count.
 
 ## Immediate Next Sequence
-1. Finish a per-instance loss bucket table on the expanded bounded Mittelman slice, starting with `gen`.
-2. Build the first real implication/VUB/VLB subsystem and wire it into propagation and cut generation.
-3. Add a persistent clique table with clique propagation before adding more tree-presolve complexity.
-4. Add reduced-cost fixing and objective propagation as standalone engines, not ad hoc local tightenings.
-5. Expand the primal heuristic portfolio with one cheap new winner candidate: feasibility jump or root reduced-cost heuristic.
-6. Keep or revert direction based on benchmark outcome, not theory alone.
+1. Finish the `gen` loss bucket with exact root-stage telemetry and a candidate list of cheap large-root heuristics.
+2. Do not widen the existing root LP heuristic gate by default; that path is now measured and known-bad on `gen`.
+3. Build the first real implication/VUB/VLB subsystem and wire it into propagation and cut generation.
+4. Add a persistent clique table with clique propagation before adding more tree-presolve complexity.
+5. Add reduced-cost fixing and objective propagation as standalone engines, not ad hoc local tightenings.
+6. Expand the primal heuristic portfolio with one cheap new winner candidate that is specifically suitable for large mixed roots.
+7. Keep or revert direction based on benchmark outcome, not theory alone.
