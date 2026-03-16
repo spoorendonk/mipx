@@ -308,7 +308,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
     return selection;
 }
 
-std::pair<BnbNode, BnbNode> createChildren(const BnbNode& parent,
+std::pair<BnbNode, BnbNode> createChildren(BnbNode parent,
                                             Index branch_var,
                                             Real branch_val) {
     Real floor_val = std::floor(branch_val);
@@ -328,13 +328,13 @@ std::pair<BnbNode, BnbNode> createChildren(const BnbNode& parent,
     BnbNode right;
     right.parent_id = parent.id;
     right.depth = parent.depth + 1;
-    right.basis = parent.basis;
+    right.basis = std::move(parent.basis);
     right.estimate = parent.estimate;
     right.basis_rows = parent.basis_rows;
     right.branch = {branch_var, ceil_val, false};  // x_j >= ceil(v)
-    right.bound_changes = parent.bound_changes;
+    right.bound_changes = std::move(parent.bound_changes);
     right.bound_changes.push_back(right.branch);
-    right.local_cuts = parent.local_cuts;
+    right.local_cuts = std::move(parent.local_cuts);
 
     return {std::move(left), std::move(right)};
 }

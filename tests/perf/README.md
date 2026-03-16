@@ -2,9 +2,15 @@
 
 Use the benchmark scripts + `check_regression.py` to enforce no-regression policy.
 
-Required CSV columns:
-- `instance`
-- metric column (default `work_units`)
+`run_full_gate.py` now follows a dual-metric policy:
+- Algorithmic regression: strict gate on `work_units` (default `0.0%` allowed).
+- Runtime regression: looser tracking on `time_seconds` (non-fatal by default).
+
+Deterministic contract defaults in `run_full_gate.py`:
+- `--parallel-mode deterministic`
+- fixed `--seed`
+- fixed `--threads`
+- `--search-stable`
 
 Recommended LP metadata columns (used by dual-simplex gate/reporting):
 - `status`
@@ -20,10 +26,17 @@ python3 tests/perf/run_full_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --miplib-dir ./tests/data/miplib \
+  --threads 4 \
+  --seed 1 \
+  --algorithmic-metric work_units \
+  --algorithmic-max-regression-pct 0 \
+  --wall-metric time_seconds \
+  --wall-max-regression-pct 35 \
   --solver-arg --quiet
 ```
 
 ## Dual Simplex Perf Gate (Netlib Anchors + LPopt-Style Curated Corpus)
+Use `--enforce-wall-clock` if wall-clock regression should be fatal.
 
 This gate is dual-simplex specific and enforces a **work-units-first**
 regression policy:
@@ -193,6 +206,41 @@ python3 tests/perf/check_regression.py \
 The regression gate fails if the median candidate metric regresses by more
 than the configured percentage. Default gate is strict: `0.0%` allowed median
 regression.
+
+## Dedicated MIP Baseline + Gate
+
+For a focused MIP-only regression loop (similar to dual-focused flows), use the
+committed regression corpus at `tests/perf/mip_regression_corpus.csv` and the
+dedicated scripts below.
+
+Generate/update the committed MIP baseline CSV:
+
+```bash
+python3 tests/perf/generate_mip_regression_baseline.py \
+  --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib
+```
+
+Default outputs:
+- `tests/perf/baselines/mipx_mip_regression_small_seed1_t1_stable.csv`
+- `tests/perf/baselines/mipx_mip_regression_small_seed1_t1_stable_meta.json`
+
+Run MIP self-regression gate against committed baseline (strict `work_units`):
+
+```bash
+python3 tests/perf/run_mip_regression_gate.py \
+  --candidate-binary ./build/mipx-solve
+```
+
+Or compare candidate vs a baseline binary instead of committed CSV:
+
+```bash
+python3 tests/perf/run_mip_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve
+```
+
+When `--baseline-binary` is provided, it takes precedence over `--baseline-csv`.
 
 ## Determinism Suite
 
