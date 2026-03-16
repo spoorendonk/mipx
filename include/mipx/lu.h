@@ -32,6 +32,7 @@ public:
 
     /// Solve B^T*y = rhs in-place.
     void btran(std::span<Real> rhs) const;
+    void btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) const;
 
     /// Forrest-Tomlin rank-1 update: replace basis column at position `pivot_pos`
     /// with new column `entering_col` (given in terms of original row indices/values).
@@ -67,6 +68,8 @@ private:
 
     /// Apply Forrest-Tomlin update etas in reverse.
     void applyFTTranspose(std::span<Real> x) const;
+
+    void btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const;
 
     /// Backward solve with U (upper triangular, row-wise).
     void solveU(std::span<Real> x) const;

@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--binary", required=True)
     p.add_argument("--mittelman-dir", default=str(ROOT_DIR / "tests" / "data" / "mittelman_lp"))
+    p.add_argument("--miplib-dir", default=str(ROOT_DIR / "tests" / "data" / "miplib"))
     p.add_argument("--netlib-dir", default=str(ROOT_DIR / "tests" / "data" / "netlib"))
     p.add_argument("--output", required=True)
     p.add_argument("--repeats", type=int, default=3)
@@ -115,17 +116,23 @@ def main() -> int:
     args = parse_args()
     bin_path = Path(args.binary)
     mittelman_dir = Path(args.mittelman_dir)
+    miplib_dir = Path(args.miplib_dir)
     netlib_dir = Path(args.netlib_dir)
     out_path = Path(args.output)
 
     if not bin_path.is_file() or not bin_path.stat().st_mode & 0o111:
         raise SystemExit(f"Binary not executable: {bin_path}")
 
-    # Dedupe by name, prefer Mittelman dir over Netlib.
+    # Dedupe by name, preferring the LPopt-specific directory first, then MIPLIB
+    # LP-relaxation anchors, then Netlib fallback names.
     instance_map: dict[str, Path] = {}
     if mittelman_dir.is_dir():
         for f in sorted(mittelman_dir.glob("*.mps.gz")):
             instance_map[f.name.removesuffix(".mps.gz")] = f
+    if miplib_dir.is_dir():
+        for f in sorted(miplib_dir.glob("*.mps.gz")):
+            key = f.name.removesuffix(".mps.gz")
+            instance_map.setdefault(key, f)
     if netlib_dir.is_dir():
         for f in sorted(netlib_dir.glob("*.mps.gz")):
             key = f.name.removesuffix(".mps.gz")
@@ -163,7 +170,7 @@ def main() -> int:
                     break
 
                 t = parse_solve_time(out)
-                if t is None:
+                if t is None or (t <= 0.0 and elapsed > 0.0):
                     t = elapsed
                 wu = parse_work_units(out)
                 if wu is None:

@@ -35,9 +35,8 @@ python3 tests/perf/run_full_gate.py \
   --solver-arg --quiet
 ```
 
+## Dual Simplex Perf Gate (Netlib Anchors + LPopt-Style Curated Corpus)
 Use `--enforce-wall-clock` if wall-clock regression should be fatal.
-
-## Dual Simplex Perf Gate (Netlib Anchors + Mittelman Curated)
 
 This gate is dual-simplex specific and enforces a **work-units-first**
 regression policy:
@@ -47,7 +46,12 @@ regression policy:
 Default solver policy in this gate:
 - `--dual`
 - `--no-presolve`
+- `--relax-integrality`
 - `--quiet`
+
+The second corpus keeps the historical `mittelman_dual_corpus.csv` name, but it
+is currently curated from LPopt-style MIPLIB LP relaxations so the gate stays
+deterministic and comparable in CI.
 
 Correctness precheck (before perf comparison, default `fail` mode):
 - Runs `run_dual_correctness_investigation.py` on the Netlib dual corpus.
@@ -62,6 +66,7 @@ python3 tests/perf/run_dual_perf_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --mittelman-dir ./tests/data/mittelman_lp \
+  --miplib-dir ./tests/data/miplib \
   --max-work-regression-pct 0 \
   --max-work-instance-regression-pct 20 \
   --time-regression-mode warn \
@@ -82,13 +87,15 @@ python3 tests/perf/generate_dual_baselines.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --mittelman-dir ./tests/data/mittelman_lp \
+  --miplib-dir ./tests/data/miplib \
   --netlib-time-limit 60 \
-  --mittelman-time-limit 60
+  --mittelman-time-limit 20
 ```
 
 Corpora:
 - Netlib anchors: `tests/perf/netlib_dual_corpus.csv`
-- Mittelman curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+- LPopt-style curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+  - Current source: MIPLIB LP relaxations downloaded by `./tests/data/download_miplib.sh --small`
 
 SOTA guard policy for dual-simplex work:
 - Keep changes aligned with modern HiGHS-style mechanisms.
@@ -480,7 +487,11 @@ faster testing (instances HiGHS can solve in <30 min).
 # LP benchmark (Mittelman LPopt-style):
 python3 tests/perf/run_mittelman_lp_bench.py \
   --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
   --output /tmp/mittelman_lp.csv \
+  --solver-arg --dual \
+  --solver-arg --no-presolve \
+  --solver-arg --relax-integrality \
   --solver-arg --quiet
 
 # MIP benchmark (Mittelman MILP-style):

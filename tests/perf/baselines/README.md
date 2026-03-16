@@ -15,6 +15,10 @@ Files:
 - `mipx_mip_regression_small_seed1_t1_stable_meta.json`: metadata for the
   dedicated deterministic MIP regression baseline workflow.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
+- `mipx_dual_lp_netlib_anchors.csv`: stored dual-simplex Netlib anchor baseline.
+- `mipx_dual_lp_mittelman_curated.csv`: stored LPopt-style curated LP baseline
+  (currently MIPLIB LP relaxations).
+- `mipx_dual_lp_baseline_meta.json`: generation metadata for the dual LP baselines.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).
 - `barrier_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
@@ -31,6 +35,7 @@ Regenerate with (canonical Python entrypoints):
 ```bash
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_dual_baselines.py
 python3 tests/perf/generate_mip_regression_baseline.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
