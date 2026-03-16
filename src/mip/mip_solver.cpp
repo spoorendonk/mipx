@@ -2719,14 +2719,15 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                             det_log_next_tick += kDetLogQuantumTicks;
                         }
                     }
-                    if (!emit_log) continue;
-                    const Real log_best_bound = queue.empty()
-                        ? (incumbent < kInf ? incumbent : root_bound)
-                        : queue.bestBound();
-                    logProgress(nodes_explored, queue.size(), total_lp_iters,
-                                incumbent, log_best_bound,
-                                static_cast<double>(cur_ticks) * 1e-6,
-                                found_incumbent, task.node_int_inf);
+                    if (emit_log) {
+                        const Real log_best_bound = queue.empty()
+                            ? (incumbent < kInf ? incumbent : root_bound)
+                            : queue.bestBound();
+                        logProgress(nodes_explored, queue.size(), total_lp_iters,
+                                    incumbent, log_best_bound,
+                                    static_cast<double>(cur_ticks) * 1e-6,
+                                    found_incumbent, task.node_int_inf);
+                    }
                 }
 
                 if (found_incumbent) {

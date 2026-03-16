@@ -19,7 +19,12 @@ DEFAULT_INSTANCES = (
     "air04,air05,blend2,dcmulti,flugpl,gen,glass4,gt2,p0201,"
     "supportcase16,stein45inf"
 )
-SOLVED_STATUSES = {"optimal", "gap_limit"}
+SOLVED_STATUSES = {
+    "optimal",
+    "gap_limit",
+    "infeasible",
+    "unbounded",
+}
 
 
 def normalize_solver_arg_tokens(argv: list[str]) -> list[str]:
