@@ -10,6 +10,33 @@ The dual perf gate exists to prevent regressions, not to define success.
 Success is defined by head-to-head no-presolve performance against HiGHS on the
 primary Netlib scorecard.
 
+## Current Status
+- Infrastructure
+  - Dual perf gate is implemented and wired into CI.
+  - Stored dual baselines and the LPopt-style curated LP corpus are in place.
+- Solver changes already landed on this branch
+  - Preserve Devex weights across pure LU reinversion.
+  - Retune automatic LU update budget by basis size.
+  - Add a sparse dual-simplex work-vector utility and use it for perturbation
+    pricing scratch state.
+  - Reuse `BTRAN` row support in dual row pricing, track pivot-row alpha
+    support explicitly, and clear that support with sparse-state fallback.
+  - Fix the row-pricing support path so support stays deduplicated and plain
+    `btran(rhs)` does not pay support-extraction overhead.
+- Current large-anchor scorecard at `--timeout 10`
+  - `greenbea`: `mipx 1.97s`, `12563` iterations vs `HiGHS 0.58s`, `5109`
+    iterations
+  - `pilot`: `mipx` still `time_limit 10.00s` vs `HiGHS 0.93s`
+  - `ship12l`: `mipx 0.05s`, `1287` iterations vs `HiGHS 0.02s`, `1215`
+    iterations
+  - `sierra`: `mipx 0.03s`, `762` iterations vs `HiGHS 0.01s`, `602`
+    iterations
+- Current read
+  - `greenbea` moved materially in the right direction.
+  - `pilot` remains the dominant blocker by a wide margin.
+  - The next meaningful gains are more likely to come from LU internals than
+    from more dual-loop plumbing.
+
 ## Objectives
 - Beat HiGHS `simplex --presolve off --parallel off` with
   `mipx --dual --no-presolve`.
@@ -55,23 +82,56 @@ gate, but the execution order for architecture work is:
      vectors can be cleared and reused without full dense resets.
    - Start by migrating dual-simplex scratch vectors that feed pricing, row
      assembly, and basis solves.
+   - Status: started
+     - `pricing_reduced_cost` uses sparse touched clearing.
+     - A generic `SparseWorkVector` utility exists with unit coverage.
 2. Replace the current pivot-row assembly path with a HiGHS-style hyper-sparse
    row-price kernel that can switch to dense when fill-in justifies it.
    - Do not bolt sparse tricks onto the current dense-oriented path and call it
      done.
+   - Status: partially done
+     - `BTRAN` row support is now reused when building the pivot row.
+     - Candidate collection already uses pivot-row alpha support with dense
+       fallback.
+   - Next step still required
+     - Stop rebuilding the full dense alpha row on cases where a real sparse
+       row-price kernel can stay sparse deeper into CHUZC / BFRT.
 3. Move `CHUZR` toward maintained sparse infeasibility state instead of full
    row rescans each iteration.
    - The goal is a dedicated leaving-row work object, not more ad hoc scan
      tuning.
+   - Status: not started
 4. Make basis solves and reinversion control more HFactor-like.
    - Stage-specific sparse / hyper-sparse switching for lower and upper
      `FTRAN` / `BTRAN`
    - Density- and history-guided reinversion decisions, not one global
      threshold
+   - Status: partially done
+     - Reinversion budget tuning landed.
+     - The next blocker is no longer generic reinversion policy; it is LU
+       runtime inside `factorize()` and the FT update path.
 5. Consider a DSE-first path with Devex fallback if iteration-count gaps remain
    after the architecture work above.
    - This is the largest algorithmic step in scope and should follow the
      vector / pricing / NLA refactor rather than precede it.
+   - Status: not started
+
+## Next Steps
+1. Attack `SparseLU::factorize()` directly.
+   - This is still the dominant `pilot` hotspot.
+   - Focus on pivot search and active-submatrix maintenance before trying more
+     dual-loop tweaks.
+2. Reduce `applyFTTranspose()` / `BTRAN` cost with proven stage-specific logic.
+   - Keep this HFactor-style and measurement-driven.
+   - Do not keep speculative sparse-support paths unless they improve `pilot`
+     and preserve the current `greenbea` win.
+3. Add explicit regression coverage for the row-pricing support path.
+   - Include a unit/regression case that exercises support deduplication under
+     cancellation / re-touch so the recent bug cannot return.
+4. Move `CHUZR` to maintained sparse infeasibility state once LU-side wins are
+   exhausted.
+   - That remains the clearest next architectural gap on the dual-simplex side
+     outside LU.
 
 No other optimization track belongs in this plan unless explicitly discussed.
 
