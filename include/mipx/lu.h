@@ -69,6 +69,8 @@ private:
     /// Apply Forrest-Tomlin update etas in reverse.
     void applyFTTranspose(std::span<Real> x) const;
 
+    void btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const;
+
     /// Backward solve with U (upper triangular, row-wise).
     void solveU(std::span<Real> x) const;
 

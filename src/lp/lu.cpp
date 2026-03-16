@@ -924,11 +924,15 @@ void SparseLU::ftran(std::span<Real> rhs) const {
 }
 
 void SparseLU::btran(std::span<Real> rhs) const {
-    static thread_local std::vector<Index> tl_unused_nonzero_rows;
-    btran(rhs, tl_unused_nonzero_rows);
+    btranImpl(rhs, nullptr);
 }
 
 void SparseLU::btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) const {
+    btranImpl(rhs, &nonzero_rows);
+}
+
+void SparseLU::btranImpl(std::span<Real> rhs,
+                         std::vector<Index>* nonzero_rows) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
     // Count work: same structure as ftran.
@@ -1051,12 +1055,14 @@ void SparseLU::btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) cons
     // Actually P^T: y[i] = work[row_perm_inv[i]].
     // But we want: for each step, rhs[row_perm[step]] = work[step].
     // That's P^{-1} = P^T since P is a permutation.
-    nonzero_rows.clear();
+    if (nonzero_rows != nullptr) {
+        nonzero_rows->clear();
+    }
     for (Index step = 0; step < dim_; ++step) {
         const Real value = work[step];
         rhs[row_perm_[step]] = value;
-        if (std::abs(value) > kZeroTol) {
-            nonzero_rows.push_back(row_perm_[step]);
+        if (nonzero_rows != nullptr && std::abs(value) > kZeroTol) {
+            nonzero_rows->push_back(row_perm_[step]);
         }
     }
 }

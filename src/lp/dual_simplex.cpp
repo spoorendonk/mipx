@@ -856,6 +856,8 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
     std::vector<Index> pivot_row_alpha_support;
     pivot_row_alpha_support.reserve(static_cast<std::size_t>(numVars()));
+    std::vector<uint32_t> pivot_row_alpha_epoch(static_cast<std::size_t>(numVars()), 0U);
+    uint32_t pivot_row_alpha_epoch_id = 1U;
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
     std::vector<Index> work_support;
@@ -928,6 +930,20 @@ LpResult DualSimplexSolver::solve() {
             std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
         }
         pivot_row_alpha_support.clear();
+        ++pivot_row_alpha_epoch_id;
+        if (pivot_row_alpha_epoch_id == 0U) {
+            std::fill(pivot_row_alpha_epoch.begin(), pivot_row_alpha_epoch.end(), 0U);
+            pivot_row_alpha_epoch_id = 1U;
+        }
+
+        auto markPivotRowAlphaSupport = [&](Index k) {
+            auto& epoch = pivot_row_alpha_epoch[static_cast<std::size_t>(k)];
+            if (epoch == pivot_row_alpha_epoch_id) {
+                return;
+            }
+            epoch = pivot_row_alpha_epoch_id;
+            pivot_row_alpha_support.push_back(k);
+        };
 
         auto accumulateRow = [&](Index i) {
             const Real rho_i = work[i];
@@ -936,16 +952,12 @@ LpResult DualSimplexSolver::solve() {
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
                 Real& alpha = pivot_row_alpha[static_cast<std::size_t>(j)];
-                if (alpha == 0.0) {
-                    pivot_row_alpha_support.push_back(j);
-                }
+                markPivotRowAlphaSupport(j);
                 alpha += rho_i * rv.values[p];
             }
             const Index slack = num_cols_ + i;
             Real& slack_alpha = pivot_row_alpha[static_cast<std::size_t>(slack)];
-            if (slack_alpha == 0.0) {
-                pivot_row_alpha_support.push_back(slack);
-            }
+            markPivotRowAlphaSupport(slack);
             slack_alpha = -rho_i;
         };
 
