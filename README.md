@@ -208,6 +208,23 @@ python3 tests/perf/check_regression.py \
   --candidate /tmp/netlib_candidate.csv
 ```
 
+Dual-simplex-specific LP gate (Netlib anchors + LPopt-style curated LP
+relaxations):
+
+```bash
+# Full Netlib anchors + small MIPLIB set for LP relaxations
+./tests/data/download_netlib.sh
+./tests/data/download_miplib.sh --small
+
+python3 tests/perf/run_dual_perf_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --highs-binary highs \
+  --netlib-dir ./tests/data/netlib \
+  --miplib-dir ./tests/data/miplib \
+  --baseline-netlib-csv ./tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv \
+  --baseline-mittelman-csv ./tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv
+```
+
 Generate reproducible HiGHS CLI and mipx wall-clock baselines:
 
 ```bash

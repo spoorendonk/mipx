@@ -1,7 +1,10 @@
 instance,time_seconds,work_units,status,objective,iterations
-neos-5052403-cygnet,,,time_limit,,
-qap15,,,time_limit,,
-s250r10,,,time_limit,,
-s100,,,time_limit,,
-square41,,,time_limit,,
-ex10,,,time_limit,,
+air04,2.570000,1128.980000,optimal,55535.436388,5302
+blend2,0.010000,3.050000,optimal,6.915675114,541
+dcmulti,0.017610,2.210000,optimal,183975.53969,408
+gt2,0.013123,0.040000,optimal,13460.233074,56
+mod010,0.060000,29.470000,optimal,6532.0833333,1847
+noswot,0.013065,0.150000,optimal,-43,58
+p0201,0.013642,0.530000,optimal,6875,111
+pk1,0.012478,0.160000,optimal,0,73
+ran13x13,0.014175,1.190000,optimal,2691.4394689,320

@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--netlib-dir", default=str(ROOT_DIR / "tests" / "data" / "netlib"))
     p.add_argument("--mittelman-dir", default=str(ROOT_DIR / "tests" / "data" / "mittelman_lp"))
+    p.add_argument("--miplib-dir", default=str(ROOT_DIR / "tests" / "data" / "miplib"))
     p.add_argument("--netlib-corpus", default=str(PERF_DIR / "netlib_dual_corpus.csv"))
     p.add_argument("--mittelman-corpus", default=str(PERF_DIR / "mittelman_dual_corpus.csv"))
 
@@ -97,8 +98,9 @@ def ensure_executable(path: Path, label: str) -> None:
 
 
 def solver_args_tokens(extra_args: list[str]) -> list[str]:
-    # Dual perf gate always runs deterministic dual-simplex policy with presolve off.
-    fixed = ["--dual", "--no-presolve", "--quiet"]
+    # Always solve the LP relaxation deterministically. For pure LPs this leaves
+    # the model unchanged; for MIPLIB-based LPopt anchors it forces relaxation.
+    fixed = ["--dual", "--no-presolve", "--relax-integrality", "--quiet"]
     merged = [*fixed, *extra_args]
     out: list[str] = []
     for arg in merged:
@@ -114,6 +116,7 @@ def run_lp_bench(
     instances: list[str],
     netlib_dir: Path,
     mittelman_dir: Path,
+    miplib_dir: Path,
     repeats: int,
     time_limit: float,
     extra_solver_args: list[str],
@@ -137,6 +140,8 @@ def run_lp_bench(
             [
                 "--mittelman-dir",
                 str(mittelman_dir),
+                "--miplib-dir",
+                str(miplib_dir),
                 "--netlib-dir",
                 str(netlib_dir),
                 "--time-limit",
@@ -347,6 +352,7 @@ def main() -> int:
 
     netlib_dir = Path(args.netlib_dir)
     mittelman_dir = Path(args.mittelman_dir)
+    miplib_dir = Path(args.miplib_dir)
     netlib_corpus = Path(args.netlib_corpus)
     mittelman_corpus = Path(args.mittelman_corpus)
 
@@ -417,6 +423,7 @@ def main() -> int:
             instances=netlib_instances,
             netlib_dir=netlib_dir,
             mittelman_dir=mittelman_dir,
+            miplib_dir=miplib_dir,
             repeats=args.repeats,
             time_limit=args.time_limit,
             extra_solver_args=args.solver_arg,
@@ -431,6 +438,7 @@ def main() -> int:
             instances=mittelman_instances,
             netlib_dir=netlib_dir,
             mittelman_dir=mittelman_dir,
+            miplib_dir=miplib_dir,
             repeats=args.repeats,
             time_limit=args.time_limit,
             extra_solver_args=args.solver_arg,
@@ -455,6 +463,7 @@ def main() -> int:
             instances=netlib_instances,
             netlib_dir=netlib_dir,
             mittelman_dir=mittelman_dir,
+            miplib_dir=miplib_dir,
             repeats=args.repeats,
             time_limit=args.time_limit,
             extra_solver_args=args.solver_arg,
@@ -469,6 +478,7 @@ def main() -> int:
             instances=mittelman_instances,
             netlib_dir=netlib_dir,
             mittelman_dir=mittelman_dir,
+            miplib_dir=miplib_dir,
             repeats=args.repeats,
             time_limit=args.time_limit,
             extra_solver_args=args.solver_arg,

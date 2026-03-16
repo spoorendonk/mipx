@@ -9,28 +9,34 @@ Files:
 - `highs_baseline_meta.json`: generation metadata (timestamp, HiGHS version,
   host CPU/platform).
 - `mipx_lp_netlib_small.csv`: mipx LP baseline for strict work-unit gating.
+- `mipx_pdlp_lp_netlib_small.csv`: mipx PDLP LP baseline for strict work-unit gating.
 - `mipx_mip_miplib_small.csv`: mipx MIP baseline for strict work-unit gating.
 - `mipx_mip_regression_small_seed1_t1_stable.csv`: dedicated deterministic
   MIP regression baseline (seed=1, threads=1, search=stable corpus).
 - `mipx_mip_regression_small_seed1_t1_stable_meta.json`: metadata for the
   dedicated deterministic MIP regression baseline workflow.
 - `mipx_baseline_meta.json`: generation metadata for mipx baseline snapshots.
+- `mipx_dual_lp_netlib_anchors.csv`: stored dual-simplex Netlib anchor baseline.
+- `mipx_dual_lp_mittelman_curated.csv`: stored LPopt-style curated LP baseline
+  (currently MIPLIB LP relaxations).
+- `mipx_dual_lp_baseline_meta.json`: generation metadata for the dual LP baselines.
 - `barrier_lp_compare_netlib.csv`: LP barrier comparison on Netlib
   (`mipx_barrier_cpu`, `mipx_barrier_gpu`, `highs_ipx`, `cuopt_barrier`).
 - `barrier_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
 - `barrier_lp_compare_meta.json`: barrier comparison generation metadata
   (tool versions, GPU/driver info).
 - `pdlp_lp_compare_netlib.csv`: LP PDLP comparison on Netlib
-  (`mipx_pdlp_cpu`, `mipx_pdlp_gpu`, `highs_pdlp` or `highs_ipx`, `cuopt_pdlp`).
+  (`mipx_pdlp_cpu`, `mipx_pdlp_gpu`, optional `cupdlpx`, `highs_pdlp` or `highs_ipx`, `cuopt_pdlp`).
 - `pdlp_lp_compare_netlib_forced_gpu.csv`: same as above, but forcing mipx GPU path.
 - `pdlp_lp_compare_meta.json`: PDLP comparison generation metadata
-  (tool versions, GPU/driver info).
+  (tool versions, including optional `cuPDLPx`, GPU/driver info).
 
 Regenerate with (canonical Python entrypoints):
 
 ```bash
 python3 tests/perf/generate_highs_baselines.py
 python3 tests/perf/generate_mipx_baselines.py
+python3 tests/perf/generate_dual_baselines.py
 python3 tests/perf/generate_mip_regression_baseline.py
 python3 tests/perf/generate_barrier_lp_baselines.py
 python3 tests/perf/generate_pdlp_lp_baselines.py
@@ -62,5 +68,7 @@ Shell wrapper equivalent:
 Notes:
 - These are machine-specific wall-clock references.
 - Use `work_units`-based gates for strict no-regression checks.
+- `cuPDLPx` rows are included when `--cupdlpx-binary` or
+  `MIPX_CUPDLPX_BINARY` is available during generation.
 - Mittelman LP params: 15000s time limit, 1 thread (simplex).
 - Mittelman MIP params: 7200s time limit, 8 threads, 1e-4 gap tolerance.

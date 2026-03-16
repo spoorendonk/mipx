@@ -1,5 +1,6 @@
 add_executable(mipx-tests
     test_core.cpp
+    test_sparse_work_vector.cpp
     test_sparse_matrix.cpp
     test_lp_problem.cpp
     test_benchmark.cpp

@@ -35,9 +35,8 @@ python3 tests/perf/run_full_gate.py \
   --solver-arg --quiet
 ```
 
+## Dual Simplex Perf Gate (Netlib Anchors + LPopt-Style Curated Corpus)
 Use `--enforce-wall-clock` if wall-clock regression should be fatal.
-
-## Dual Simplex Perf Gate (Netlib Anchors + Mittelman Curated)
 
 This gate is dual-simplex specific and enforces a **work-units-first**
 regression policy:
@@ -47,7 +46,12 @@ regression policy:
 Default solver policy in this gate:
 - `--dual`
 - `--no-presolve`
+- `--relax-integrality`
 - `--quiet`
+
+The second corpus keeps the historical `mittelman_dual_corpus.csv` name, but it
+is currently curated from LPopt-style MIPLIB LP relaxations so the gate stays
+deterministic and comparable in CI.
 
 Correctness precheck (before perf comparison, default `fail` mode):
 - Runs `run_dual_correctness_investigation.py` on the Netlib dual corpus.
@@ -62,6 +66,7 @@ python3 tests/perf/run_dual_perf_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --mittelman-dir ./tests/data/mittelman_lp \
+  --miplib-dir ./tests/data/miplib \
   --max-work-regression-pct 0 \
   --max-work-instance-regression-pct 20 \
   --time-regression-mode warn \
@@ -82,13 +87,15 @@ python3 tests/perf/generate_dual_baselines.py \
   --binary ./build/mipx-solve \
   --netlib-dir ./tests/data/netlib \
   --mittelman-dir ./tests/data/mittelman_lp \
+  --miplib-dir ./tests/data/miplib \
   --netlib-time-limit 60 \
-  --mittelman-time-limit 60
+  --mittelman-time-limit 20
 ```
 
 Corpora:
 - Netlib anchors: `tests/perf/netlib_dual_corpus.csv`
-- Mittelman curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+- LPopt-style curated LP anchors: `tests/perf/mittelman_dual_corpus.csv`
+  - Current source: MIPLIB LP relaxations downloaded by `./tests/data/download_miplib.sh --small`
 
 SOTA guard policy for dual-simplex work:
 - Keep changes aligned with modern HiGHS-style mechanisms.
@@ -148,6 +155,7 @@ This writes:
 - `tests/perf/baselines/highs_lp_netlib_small.csv`
 - `tests/perf/baselines/highs_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_lp_netlib_small.csv`
+- `tests/perf/baselines/mipx_pdlp_lp_netlib_small.csv`
 - `tests/perf/baselines/mipx_mip_miplib_small.csv`
 - `tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv`
 - `tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv`
@@ -174,6 +182,25 @@ python3 tests/perf/run_netlib_lp_bench.py \
 python3 tests/perf/check_regression.py \
   --baseline benchmarks/baseline_v1.csv \
   --candidate benchmarks/pr_step2.csv \
+  --metric work_units
+```
+
+PDLP LP example (Netlib CPU PDLP, gate on `work_units`):
+
+```bash
+python3 tests/perf/run_netlib_pdlp_lp_bench.py \
+  --binary ./build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --output /tmp/mipx_pdlp_candidate.csv \
+  --repeats 3 \
+  --threads 1 \
+  --time-limit 60 \
+  --disable-presolve \
+  --solver-arg --quiet
+
+python3 tests/perf/check_regression.py \
+  --baseline tests/perf/baselines/mipx_pdlp_lp_netlib_small.csv \
+  --candidate /tmp/mipx_pdlp_candidate.csv \
   --metric work_units
 ```
 
@@ -348,13 +375,16 @@ the stored HiGHS baseline CSV files as `--baseline`.
 These comparisons are informational (cross-solver wall-clock), not strict
 no-regression gates.
 
-## PDLP LP Comparison (mipx vs HiGHS vs cuOpt)
+## PDLP LP Comparison (mipx vs cuPDLPx vs HiGHS vs cuOpt)
 
-For LP PDLP-focused comparisons (CPU/GPU and cross-solver):
+For LP PDLP-focused comparisons, `cuPDLPx` is the primary external reference.
+The tracked compare harness supports CPU/GPU `mipx` rows plus optional
+`cuPDLPx`, HiGHS, and cuOpt rows:
 
 ```bash
 python3 tests/perf/run_pdlp_lp_compare.py \
   --mipx-binary ./build/mipx-solve \
+  --cupdlpx-binary /path/to/cupdlpx \
   --instances-dir tests/data/netlib \
   --output /tmp/pdlp_lp_compare.csv \
   --repeats 3 \
@@ -365,14 +395,19 @@ python3 tests/perf/run_pdlp_lp_compare.py \
 ```
 
 This emits one CSV row per `(instance, solver)` with:
-- `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, highs_pdlp|highs_ipx, cuopt_pdlp}`
-- `time_seconds, iterations, status, objective, work_units`
+- `solver in {mipx_pdlp_cpu, mipx_pdlp_gpu, cupdlpx, highs_pdlp|highs_ipx, cuopt_pdlp}`
+- `time_seconds, iterations, status, objective, work_units, backend`
 
 Notes:
+- `--cupdlpx-binary` or `MIPX_CUPDLPX_BINARY` enables standalone `cuPDLPx` rows.
+- If `cuPDLPx` is not configured, the generic compare run skips it cleanly.
+- `--time-limit` is enforced as an external wall-clock cap by the harness so cross-solver PDLP runs remain comparable even though `mipx` PDLP CLI time-limit plumbing is still incomplete.
+- `backend` records actual `mipx` PDLP execution (`cpu` or `gpu`) when available, so the auto-GPU lane can be separated from threshold-driven CPU fallback.
+- `--no-mipx-cpu` or `--no-mipx-gpu` lets you benchmark only the relevant lane.
 - `--disable-presolve` isolates PDLP-kernel behavior and avoids presolve skew.
 - `--force-mipx-gpu` sets `--gpu-min-rows 0 --gpu-min-nnz 0` so the GPU path is always exercised.
 - `--highs-ipx` forces HiGHS IPX instead of attempting HiGHS PDLP.
-- `--relax-integrality` solves LP relaxations for MIP instances (e.g., MIPLIB `.mps.gz`) in all solvers.
+- `--relax-integrality` is supported for `mipx`, HiGHS, and cuOpt. The standalone `cuPDLPx` lane in this harness is LP-only.
 
 PDLP self-regression gate (candidate vs baseline mipx binaries):
 
@@ -382,6 +417,26 @@ python3 tests/perf/run_pdlp_lp_regression_gate.py \
   --baseline-binary /tmp/mipx_main/build/mipx-solve \
   --netlib-dir ./tests/data/netlib
 ```
+
+This default run enforces strict PDLP algorithmic regression (`work_units`) on:
+- `mipx_pdlp_cpu`
+- `mipx_pdlp_gpu` (forced GPU thresholds)
+
+Enable wall-clock gates (SIMD/AVX proxy, multithread probe, GPU):
+
+```bash
+python3 tests/perf/run_pdlp_lp_regression_gate.py \
+  --candidate-binary ./build/mipx-solve \
+  --baseline-binary /tmp/mipx_main/build/mipx-solve \
+  --netlib-dir ./tests/data/netlib \
+  --wall-clock-gate \
+  --wall-mt-threads 8
+```
+
+Wall-clock notes:
+- CPU single-thread gate uses `time_seconds` as a SIMD/AVX proxy.
+- CPU multi-thread gate is auto-skipped if the PDLP LP path reports single-thread execution.
+- Forced-GPU gate is auto-skipped if backend probing does not report `PDLP backend: GPU`.
 
 MIP comparison example (same instance set as HiGHS MIP baseline):
 
@@ -480,7 +535,11 @@ faster testing (instances HiGHS can solve in <30 min).
 # LP benchmark (Mittelman LPopt-style):
 python3 tests/perf/run_mittelman_lp_bench.py \
   --binary ./build/mipx-solve \
+  --miplib-dir ./tests/data/miplib \
   --output /tmp/mittelman_lp.csv \
+  --solver-arg --dual \
+  --solver-arg --no-presolve \
+  --solver-arg --relax-integrality \
   --solver-arg --quiet
 
 # MIP benchmark (Mittelman MILP-style):

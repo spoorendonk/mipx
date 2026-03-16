@@ -1,4 +1,5 @@
 #include "mipx/dual_simplex.h"
+#include "mipx/sparse_work_vector.h"
 
 #include <algorithm>
 #include <cassert>
@@ -748,9 +749,9 @@ LpResult DualSimplexSolver::solve() {
     // full reinversions and update-drift stalls.
     Int lu_update_limit = options_.lu_update_limit;
     if (lu_update_limit <= 0) {
-        // Wall-clock tuned default for no-presolve dual simplex:
-        // keep FT updates longer before reinversion.
-        lu_update_limit = 150;
+        // Narrower bases benefit from earlier reinversion, while larger bases
+        // still prefer a deeper Forrest-Tomlin update chain.
+        lu_update_limit = (num_rows_ < 2000) ? 75 : 150;
     }
     lu_.setMaxUpdates(lu_update_limit);
     Real lu_ft_drop_tol = options_.lu_ft_drop_tolerance;
@@ -853,9 +854,15 @@ LpResult DualSimplexSolver::solve() {
               base_var_upper.begin() + static_cast<std::size_t>(num_cols_));
 
     std::vector<Real> pivot_row_alpha(numVars(), 0.0);
+    std::vector<Index> pivot_row_alpha_support;
+    pivot_row_alpha_support.reserve(static_cast<std::size_t>(numVars()));
+    std::vector<uint32_t> pivot_row_alpha_epoch(static_cast<std::size_t>(numVars()), 0U);
+    uint32_t pivot_row_alpha_epoch_id = 1U;
     std::vector<Real> pivot_col(num_rows_, 0.0);
     std::vector<Real> work(num_rows_, 0.0);
-    std::vector<Real> pricing_reduced_cost(numVars(), 0.0);
+    std::vector<Index> work_support;
+    work_support.reserve(static_cast<std::size_t>(num_rows_));
+    SparseWorkVector pricing_reduced_cost(numVars());
     const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
     // Static entering-score normalization for primal-feasible/dual-infeasible phase:
     // score(k) = rc(k)^2 / col_norm_sq(k), where slacks have norm 1.
@@ -914,18 +921,57 @@ LpResult DualSimplexSolver::solve() {
             ++value;
         }
     };
-    auto buildPivotRowAlphaFromWork = [&]() {
-        std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
-        for (Index i = 0; i < num_rows_; ++i) {
+    auto buildPivotRowAlphaFromWork = [&](std::span<const Index> touched_rows) {
+        if (static_cast<Index>(pivot_row_alpha_support.size()) * 2 < numVars()) {
+            for (Index k : pivot_row_alpha_support) {
+                pivot_row_alpha[static_cast<std::size_t>(k)] = 0.0;
+            }
+        } else {
+            std::fill(pivot_row_alpha.begin(), pivot_row_alpha.end(), 0.0);
+        }
+        pivot_row_alpha_support.clear();
+        ++pivot_row_alpha_epoch_id;
+        if (pivot_row_alpha_epoch_id == 0U) {
+            std::fill(pivot_row_alpha_epoch.begin(), pivot_row_alpha_epoch.end(), 0U);
+            pivot_row_alpha_epoch_id = 1U;
+        }
+
+        auto markPivotRowAlphaSupport = [&](Index k) {
+            auto& epoch = pivot_row_alpha_epoch[static_cast<std::size_t>(k)];
+            if (epoch == pivot_row_alpha_epoch_id) {
+                return;
+            }
+            epoch = pivot_row_alpha_epoch_id;
+            pivot_row_alpha_support.push_back(k);
+        };
+
+        auto accumulateRow = [&](Index i) {
             const Real rho_i = work[i];
-            if (std::abs(rho_i) < kZeroTol) continue;
+            if (std::abs(rho_i) < kZeroTol) return;
             auto rv = matrix_.row(i);
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
-                pivot_row_alpha[static_cast<std::size_t>(j)] += rho_i * rv.values[p];
+                Real& alpha = pivot_row_alpha[static_cast<std::size_t>(j)];
+                markPivotRowAlphaSupport(j);
+                alpha += rho_i * rv.values[p];
             }
             const Index slack = num_cols_ + i;
-            pivot_row_alpha[static_cast<std::size_t>(slack)] = -rho_i;
+            Real& slack_alpha = pivot_row_alpha[static_cast<std::size_t>(slack)];
+            markPivotRowAlphaSupport(slack);
+            slack_alpha = -rho_i;
+        };
+
+        const bool use_sparse_row_support =
+            !touched_rows.empty() &&
+            static_cast<Index>(touched_rows.size()) * 2 < num_rows_;
+        if (use_sparse_row_support) {
+            for (Index i : touched_rows) {
+                accumulateRow(i);
+            }
+            return;
+        }
+        for (Index i = 0; i < num_rows_; ++i) {
+            accumulateRow(i);
         }
     };
     auto resetPrimalFeasibleProgress = [&]() {
@@ -1100,6 +1146,7 @@ LpResult DualSimplexSolver::solve() {
             options_.dual_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.dual_perturbation_stall_pivots;
         if (use_dual_perturbation) {
+            pricing_reduced_cost.clear();
             for (Index k : nonbasic_) {
                 Real rc = reduced_cost_[k];
                 const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
@@ -1109,14 +1156,14 @@ LpResult DualSimplexSolver::solve() {
                 if (st == BasisStatus::AtLower) rc += eps;
                 else if (st == BasisStatus::AtUpper) rc -= eps;
                 else if (st == BasisStatus::Free) rc += ((k & 1) ? eps : -eps);
-                pricing_reduced_cost[static_cast<std::size_t>(k)] = rc;
+                pricing_reduced_cost.set(k, rc);
             }
         }
         auto reducedCostForPricing = [&](Index k) -> Real {
             if (!use_dual_perturbation) {
                 return reduced_cost_[k];
             }
-            return pricing_reduced_cost[static_cast<std::size_t>(k)];
+            return pricing_reduced_cost[k];
         };
         const Real* lower_perturb =
             bound_perturb_active_ ? lower_bound_perturb_.data() : nullptr;
@@ -1236,7 +1283,6 @@ LpResult DualSimplexSolver::solve() {
         } else {
             ++iters_since_pinf_improve;
         }
-
         if (leaving_row < 0) {
             // All basic variables are primal feasible.
 
@@ -1505,11 +1551,11 @@ LpResult DualSimplexSolver::solve() {
             // BTRAN for dual update.
             std::fill(work.begin(), work.end(), 0.0);
             work[leaving_row_p] = 1.0;
-            lu_.btran(work);
+            lu_.btran(work, work_support);
 
             // Compute pivot row alphas (row-wise).
             work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-            buildPivotRowAlphaFromWork();
+            buildPivotRowAlphaFromWork(work_support);
 
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
@@ -1599,8 +1645,6 @@ LpResult DualSimplexSolver::solve() {
                 degenerate_pivot_streak = 0;
                 resetPrimalFeasibleProgress();
                 primal_feasible_pivots_since_refactor = 0;
-                std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-                devex_reset_count_ = 0;
             }
 
             ++iterations_;
@@ -1619,13 +1663,13 @@ LpResult DualSimplexSolver::solve() {
         // y = B^{-T} * e_{leaving_row}
         std::fill(work.begin(), work.end(), 0.0);
         work[leaving_row] = 1.0;
-        lu_.btran(work);
+        lu_.btran(work, work_support);
 
         // Compute alpha_j = rho^T * a_j for all nonbasic j.
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
         // This is much faster than column-wise when rho is sparse.
         work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
-        buildPivotRowAlphaFromWork();
+        buildPivotRowAlphaFromWork(work_support);
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
@@ -1702,6 +1746,23 @@ LpResult DualSimplexSolver::solve() {
             }
         };
 
+        auto collectCandidatesFromAlphaSupport = [&](std::vector<BfrtCand>& out) {
+            for (Index k : pivot_row_alpha_support) {
+                const Index pos = nonbasic_pos_[k];
+                if (pos < 0) continue;
+                const Real alpha = pivot_row_alpha[static_cast<std::size_t>(k)];
+                if (!isEligible(k, alpha)) continue;
+                Real ratio = std::abs(reducedCostForPricing(k) / alpha);
+                Real gap = kInf;
+                if (need_bfrt_gap_scan) {
+                    Real lb = lowerBoundFast(k);
+                    Real ub = upperBoundFast(k);
+                    gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
+                }
+                out.push_back({k, pos, ratio, alpha, gap});
+            }
+        };
+
         auto collectCandidates = [&](Index offset, Index count) {
 #ifdef MIPX_HAS_TBB
             if (options_.enable_sip_parallel_candidates &&
@@ -1733,6 +1794,9 @@ LpResult DualSimplexSolver::solve() {
         };
 
         bool did_partial_scan = false;
+        const bool use_sparse_candidate_scan =
+            !options_.enable_partial_pricing &&
+            static_cast<Index>(pivot_row_alpha_support.size()) * 2 < nnb;
         if (options_.enable_partial_pricing &&
             nnb > options_.partial_pricing_chunk_min &&
             options_.partial_pricing_full_scan_freq > 0 &&
@@ -1742,6 +1806,8 @@ LpResult DualSimplexSolver::solve() {
             collectCandidates(partial_price_offset, chunk);
             partial_price_offset = (partial_price_offset + chunk) % nnb;
             did_partial_scan = true;
+        } else if (use_sparse_candidate_scan) {
+            collectCandidatesFromAlphaSupport(bfrt_cands);
         } else {
             collectCandidates(0, nnb);
         }
@@ -2104,10 +2170,6 @@ LpResult DualSimplexSolver::solve() {
             degenerate_pivot_streak = 0;
             resetPrimalFeasibleProgress();
             primal_feasible_pivots_since_refactor = 0;
-
-            // Reset Devex weights after refactorization.
-            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-            devex_reset_count_ = 0;
 
             // Re-apply cost shifts if still active.
             if (has_cost_shift) {
