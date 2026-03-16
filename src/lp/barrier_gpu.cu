@@ -4,7 +4,7 @@
 //   - Auto-switching NE↔Augmented on factorize failure
 //   - Iterate backup/rollback and adaptive regularization
 //
-// Only compiled when MIPX_USE_CUDA=ON and cuDSS is found.
+// Only compiled when GPU support is enabled and cuDSS is found.
 
 #include <algorithm>
 #include <cassert>
@@ -972,6 +972,7 @@ struct NormalEqSolver {
     // Returns false if NE is too dense.
     bool analyze(int a_m, int a_n,
                  const int* h_row_starts, const int* h_col_indices,
+                 double dense_col_fraction,
                  GpuContext* context) {
         ctx = context;
         ne_m = a_m;
@@ -980,7 +981,28 @@ struct NormalEqSolver {
         std::vector<std::vector<int>> ne_cols(a_m);
         for (int i = 0; i < a_m; ++i) ne_cols[i].push_back(i);
 
+        const int dense_threshold =
+            std::max(1, static_cast<int>(dense_col_fraction * std::max(a_m, 1)));
+        std::vector<int> col_counts(a_n, 0);
+        for (int i = 0; i < a_m; ++i) {
+            for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p) {
+                ++col_counts[h_col_indices[p]];
+            }
+        }
+        for (int k = 0; k < a_n; ++k) {
+            if (col_counts[k] > dense_threshold) {
+                g_last_barrier_error =
+                    "Barrier GPU normal-equation pattern has dense column " +
+                    std::to_string(k) + " with " + std::to_string(col_counts[k]) +
+                    " entries (threshold " + std::to_string(dense_threshold) + ").";
+                return false;
+            }
+        }
+
         std::vector<std::vector<int>> col_rows(a_n);
+        for (int k = 0; k < a_n; ++k) {
+            col_rows[k].reserve(static_cast<size_t>(col_counts[k]));
+        }
         for (int i = 0; i < a_m; ++i) {
             for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p)
                 col_rows[h_col_indices[p]].push_back(i);
@@ -1008,7 +1030,11 @@ struct NormalEqSolver {
         h_ne_row_starts[a_m] = ne_nnz;
 
         double avg_density = static_cast<double>(ne_nnz) / std::max(a_m, 1);
-        if (avg_density > 20.0) return false;
+        if (avg_density > 20.0) {
+            g_last_barrier_error =
+                "Barrier GPU normal-equation pattern is too dense for the NE backend.";
+            return false;
+        }
 
         std::vector<int> h_ne_col_indices(ne_nnz);
         int pos = 0;
@@ -1427,7 +1453,8 @@ struct GpuBarrierImpl {
     bool init(int m, int n, int nnz,
               const int* rows, const int* cols, const double* vals,
               const double* b, const double* c,
-              bool prefer_augmented) {
+              bool prefer_augmented,
+              double dense_col_fraction) {
         h_row_starts.assign(rows, rows + m + 1);
         h_col_indices.assign(cols, cols + nnz);
         stored_nnz = nnz;
@@ -1439,12 +1466,14 @@ struct GpuBarrierImpl {
 
         if (!prefer_augmented) {
             // Try NE first.
-            ne_available = ne_solver.analyze(m, n, rows, cols, &ctx);
+            ne_available = ne_solver.analyze(m, n, rows, cols, dense_col_fraction, &ctx);
             if (ne_available) {
                 active_backend = Backend::NE;
             } else {
                 g_last_barrier_error =
-                    "Barrier GPU normal-equations analysis unavailable; trying augmented backend.";
+                    g_last_barrier_error.empty()
+                        ? "Barrier GPU normal-equations analysis unavailable; trying augmented backend."
+                        : g_last_barrier_error + " Trying augmented backend.";
                 // NE too dense, use Augmented.
                 aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
                 if (!aug_available) {
@@ -1511,7 +1540,7 @@ struct GpuBarrierImpl {
     // Compute s0, shift z/s to positivity, and apply Mehrotra correction.
     // Assumes d_y and d_z contain initial y0 and z0 (or z0 = A'y0).
     bool computeStartingPointS() {
-        int m = ctx.m, n = ctx.n;
+        int n = ctx.n;
 
         // s0 = c - A'y0. Recompute A'y into d_z, then s = c - z.
         if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) {
@@ -1978,13 +2007,15 @@ bool gpuSolveBarrier(
     int ir_steps, bool verbose,
     const void* stop_flag,
     bool prefer_augmented,
+    double dense_col_fraction,
     double obj_offset,
     double* out_z, double* out_y, double* out_s,
     double* out_obj, int* out_status, int* out_iters) {
     g_last_barrier_error.clear();
 
     GpuBarrierImpl impl;
-    if (!impl.init(m, n, nnz, rows, cols, vals, b, c, prefer_augmented)) {
+    if (!impl.init(m, n, nnz, rows, cols, vals, b, c, prefer_augmented,
+                   dense_col_fraction)) {
         if (g_last_barrier_error.empty()) {
             g_last_barrier_error = "Barrier GPU initialization failed.";
         }

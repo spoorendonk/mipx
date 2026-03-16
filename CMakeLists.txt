@@ -1,13 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(mipx LANGUAGES CXX)
 
-# Enable CUDA language if toolkit is available (must happen before options).
 find_package(CUDAToolkit QUIET)
-if(CUDAToolkit_FOUND)
-    enable_language(CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,7 +20,19 @@ option(MIPX_USE_BZIP2 "Enable bzip2 decompression for .mps.bz2 files" ${BZIP2_FO
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
-option(MIPX_USE_CUDA "Enable CUDA acceleration" ${CUDAToolkit_FOUND})
+set(_mipx_use_gpu_default ${CUDAToolkit_FOUND})
+if(DEFINED MIPX_USE_CUDA AND NOT DEFINED MIPX_USE_GPU)
+    set(_mipx_use_gpu_default "${MIPX_USE_CUDA}")
+endif()
+option(MIPX_USE_GPU "Enable GPU acceleration" ${_mipx_use_gpu_default})
+if(DEFINED MIPX_USE_CUDA)
+    message(WARNING "MIPX_USE_CUDA is deprecated; use MIPX_USE_GPU instead.")
+    if(NOT "${MIPX_USE_GPU}" STREQUAL "${MIPX_USE_CUDA}")
+        message(FATAL_ERROR
+                "MIPX_USE_GPU (${MIPX_USE_GPU}) and deprecated MIPX_USE_CUDA "
+                "(${MIPX_USE_CUDA}) disagree")
+    endif()
+endif()
 option(MIPX_ENABLE_LP_LIGHT_HEURISTICS
        "Enable LP-light heuristic adapter and optional LP-assisted pre-root arms"
        ON)
@@ -37,24 +43,39 @@ option(MIPX_BUILD_CLI "Build mipx CLI executable" ON)
 option(MIPX_BUILD_TESTS "Build and run C++ test suite" ON)
 option(MIPX_BUILD_PYTHON "Build Python nanobind extension module" OFF)
 
-if(MIPX_USE_CUDA AND NOT CUDAToolkit_FOUND)
-    message(FATAL_ERROR "MIPX_USE_CUDA=ON but CUDAToolkit was not found")
-endif()
+set(MIPX_CUDA_BACKEND_ENABLED OFF)
+set(MIPX_HAS_CUDSS OFF)
+if(MIPX_USE_GPU)
+    if(CUDAToolkit_FOUND)
+        enable_language(CUDA)
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+        set(MIPX_CUDA_BACKEND_ENABLED ON)
 
-if(MIPX_USE_CUDA)
-    enable_language(CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-    # Find cuDSS (system-installed).
-    find_library(CUDSS_LIBRARY cudss)
-    find_path(CUDSS_INCLUDE_DIR cudss.h)
-    if(CUDSS_LIBRARY AND CUDSS_INCLUDE_DIR)
-        set(MIPX_HAS_CUDSS ON)
-        message(STATUS "Found cuDSS: ${CUDSS_LIBRARY}")
+        find_library(CUDSS_LIBRARY
+                     NAMES cudss
+                     HINTS
+                         /usr/lib/x86_64-linux-gnu
+                         /lib/x86_64-linux-gnu
+                         ${CUDAToolkit_LIBRARY_DIR}
+                         ${CUDAToolkit_LIBRARY_ROOT}
+                     PATH_SUFFIXES lib lib64)
+        find_path(CUDSS_INCLUDE_DIR
+                  NAMES cudss.h
+                  HINTS
+                      /usr/include
+                      /usr/local/include
+                      ${CUDAToolkit_INCLUDE_DIRS})
+        if(CUDSS_LIBRARY AND CUDSS_INCLUDE_DIR)
+            set(MIPX_HAS_CUDSS ON)
+            message(STATUS "Found cuDSS: ${CUDSS_LIBRARY}")
+        else()
+            message(WARNING
+                    "MIPX_USE_GPU=ON but cuDSS was not found; GPU barrier backends will be disabled.")
+        endif()
     else()
-        message(WARNING "cuDSS not found — GPU barrier backends disabled")
-        set(MIPX_HAS_CUDSS OFF)
+        message(WARNING
+                "MIPX_USE_GPU=ON but CUDAToolkit was not found; building CPU-only.")
     endif()
 endif()
 

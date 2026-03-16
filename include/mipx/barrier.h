@@ -62,6 +62,7 @@ public:
     void setOptions(const BarrierOptions& options) { options_ = options; }
     [[nodiscard]] const BarrierOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:
     struct OriginalColExpr {
@@ -102,6 +103,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+    std::string last_error_;
 };
 
 // GPU device-resident barrier solver (available when compiled with MIPX_HAS_CUDSS).

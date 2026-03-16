@@ -479,6 +479,7 @@ int main(int argc, char* argv[]) {
             mipx::LpResult result;
             std::vector<mipx::Real> primals;
             bool used_gpu_backend = false;
+            std::string lp_error_message;
             if (lp_mode == LpMode::Barrier) {
                 mipx::BarrierSolver solver;
                 mipx::BarrierOptions bopts;
@@ -490,6 +491,7 @@ int main(int argc, char* argv[]) {
                 result = solver.solve();
                 primals = solver.getPrimalValues();
                 used_gpu_backend = solver.usedGpu();
+                lp_error_message = solver.lastError();
             } else if (lp_mode == LpMode::Pdlp) {
                 mipx::PdlpSolver solver;
                 mipx::PdlpOptions popts;
@@ -578,6 +580,9 @@ int main(int argc, char* argv[]) {
                 default:
                     status_text = "Error";
                     log.log("Status: Error\n");
+                    if (!lp_error_message.empty()) {
+                        log.log("Error detail: %s\n", lp_error_message.c_str());
+                    }
                     break;
             }
             // Stable summary lines consumed by benchmark scripts.

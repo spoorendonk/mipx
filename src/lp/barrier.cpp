@@ -317,6 +317,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     objective_ = 0.0;
     scaled_obj_ = 0.0;
     iterations_ = 0;
+    last_error_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_eq_.clear();
     reduced_costs_std_.clear();
@@ -639,6 +640,11 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         if (ok) {
             used_gpu_ = true;
         } else {
+            if (!gpu_error.empty()) {
+                last_error_ = gpu_error;
+            } else {
+                last_error_ = "Barrier GPU solve failed.";
+            }
             if (options_.verbose && !gpu_error.empty()) {
                 std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
                              gpu_error.c_str());
@@ -670,10 +676,18 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 
     if (solver) {
         if (!solver->setup(aeq_, m, n, options_)) {
+            if (last_error_.empty()) {
+                last_error_ = "Barrier backend setup failed.";
+            }
             return false;
         }
         ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
                              std_obj_offset_, z, y, s, iters);
+        if (!ok && last_error_.empty() &&
+            !(options_.stop_flag != nullptr &&
+              options_.stop_flag->load(std::memory_order_relaxed))) {
+            last_error_ = "Barrier solve failed.";
+        }
     }
 
     // Compute objective while z is still in scaled space.
@@ -702,8 +716,10 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 // ============================================================================
 
 LpResult BarrierSolver::solve() {
+    last_error_.clear();
     if (!loaded_) {
         status_ = Status::Error;
+        last_error_ = "Barrier solver has no loaded problem.";
         return {status_, 0.0, 0, 0.0};
     }
 
@@ -711,6 +727,9 @@ LpResult BarrierSolver::solve() {
 
     if (!transformed_ok_) {
         status_ = transformed_infeasible_ ? Status::Infeasible : Status::Error;
+        if (status_ == Status::Error) {
+            last_error_ = "Barrier standard-form transformation failed.";
+        }
         return {status_, 0.0, 0, 0.0};
     }
 
@@ -725,6 +744,7 @@ LpResult BarrierSolver::solve() {
             status_ = Status::IterLimit;
             objective_ = 0.0;
             iterations_ = iters;
+            last_error_.clear();
             return {status_, objective_, iterations_, 0.0};
         }
         dual_eq_.clear();
@@ -733,6 +753,9 @@ LpResult BarrierSolver::solve() {
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
+        if (last_error_.empty()) {
+            last_error_ = "Barrier solve failed.";
+        }
         return {status_, objective_, iterations_, 0.0};
     }
 
@@ -744,6 +767,7 @@ LpResult BarrierSolver::solve() {
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
+        last_error_ = "Barrier produced a primal-infeasible solution.";
         return {status_, objective_, iterations_, 0.0};
     }
 
@@ -753,6 +777,7 @@ LpResult BarrierSolver::solve() {
     objective_ = computeOriginalObjective(original_, primal_orig_);
     status_ = Status::Optimal;
     iterations_ = iters;
+    last_error_.clear();
 
     double seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();

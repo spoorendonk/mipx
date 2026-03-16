@@ -51,7 +51,7 @@ if(MIPX_USE_TBB)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_TBB)
 endif()
 
-if(MIPX_USE_CUDA)
+if(MIPX_CUDA_BACKEND_ENABLED)
     target_sources(mipx PRIVATE
         lp/pdlp_kernels.cu
     )

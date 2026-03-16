@@ -20,6 +20,7 @@ bool gpuSolveBarrier(
     int ir_steps, bool verbose,
     const void* stop_flag,
     bool prefer_augmented,
+    double dense_col_fraction,
     double obj_offset,
     double* out_z, double* out_y, double* out_s,
     double* out_obj, int* out_status, int* out_iters);
@@ -58,6 +59,7 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
         opts.ir_steps, opts.verbose,
         static_cast<const void*>(opts.stop_flag),
         prefer_augmented,
+        opts.dense_col_fraction,
         obj_offset,
         z.data(), y.data(), s.data(),
         &out_obj, &out_status, &out_iters);

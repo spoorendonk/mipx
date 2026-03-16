@@ -4021,6 +4021,7 @@ MipResult MipSolver::solve() {
         LpResult lp_result{};
         std::vector<Real> primals;
         std::vector<BasisStatus> basis;
+        std::string error_message;
         bool used_gpu = false;
         double seconds = 0.0;
     };
@@ -4085,6 +4086,7 @@ MipResult MipSolver::solve() {
             solver.load(problem_);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
+            out.error_message = solver.lastError();
             out.used_gpu = solver.usedGpu();
         } else {
             PdlpSolver solver;
@@ -4124,6 +4126,9 @@ MipResult MipSolver::solve() {
         root_backend_used = "barrier";
         if (verbose_) {
             log_.log("Root barrier mode%s.\n", result.used_gpu ? " (GPU backend)" : "");
+            if (!result.error_message.empty()) {
+                log_.log("Root barrier error: %s\n", result.error_message.c_str());
+            }
         }
     } else if (root_lp_policy_ == RootLpPolicy::PdlpRoot) {
         root_used_dual = false;
@@ -4236,13 +4241,25 @@ MipResult MipSolver::solve() {
 
         if (verbose_) {
             for (const auto& candidate : race_results) {
-                log_.log("Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s\n",
-                         backendName(candidate.backend),
-                         static_cast<int>(candidate.lp_result.status),
-                         candidate.lp_result.objective,
-                         candidate.lp_result.iterations,
-                         candidate.seconds,
-                         candidate.used_gpu ? " gpu" : "");
+                if (!candidate.error_message.empty()) {
+                    log_.log(
+                        "Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s err=\"%s\"\n",
+                        backendName(candidate.backend),
+                        static_cast<int>(candidate.lp_result.status),
+                        candidate.lp_result.objective,
+                        candidate.lp_result.iterations,
+                        candidate.seconds,
+                        candidate.used_gpu ? " gpu" : "",
+                        candidate.error_message.c_str());
+                } else {
+                    log_.log("Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s\n",
+                             backendName(candidate.backend),
+                             static_cast<int>(candidate.lp_result.status),
+                             candidate.lp_result.objective,
+                             candidate.lp_result.iterations,
+                             candidate.seconds,
+                             candidate.used_gpu ? " gpu" : "");
+                }
             }
             log_.log("Root race winner=%s time=%.4fs\n",
                      root_backend_used,
