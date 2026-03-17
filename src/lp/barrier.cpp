@@ -618,6 +618,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     std::unique_ptr<NewtonSolver> solver;
     auto algo = options_.algorithm;
 
+    const auto requested_algo = options_.algorithm;
     if (algo == BarrierAlgorithm::Auto) {
 #ifdef MIPX_HAS_CUDSS
         algo = use_augmented ? BarrierAlgorithm::GpuAugmented
@@ -629,6 +630,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     }
 
     bool ok = false;
+    std::string gpu_fallback_error;
 
 #ifdef MIPX_HAS_CUDSS
     // GPU device-resident path: handles NE/Augmented internally with auto-switching.
@@ -640,16 +642,25 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         if (ok) {
             used_gpu_ = true;
         } else {
-            if (!gpu_error.empty()) {
-                last_error_ = gpu_error;
-            } else {
-                last_error_ = "Barrier GPU solve failed.";
-            }
+            gpu_fallback_error =
+                gpu_error.empty() ? "Barrier GPU solve failed." : gpu_error;
             if (options_.verbose && !gpu_error.empty()) {
-                std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
-                             gpu_error.c_str());
+                if (requested_algo == BarrierAlgorithm::Auto) {
+                    std::fprintf(stderr,
+                                 "Barrier GPU backend failed, falling back to CPU: %s\n",
+                                 gpu_error.c_str());
+                } else {
+                    std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
+                                 gpu_error.c_str());
+                }
             }
-            return false;
+            if (requested_algo == BarrierAlgorithm::Auto) {
+                algo = use_augmented ? BarrierAlgorithm::CpuAugmented
+                                     : BarrierAlgorithm::CpuCholesky;
+            } else {
+                last_error_ = gpu_fallback_error;
+                return false;
+            }
         }
     }
 #else
@@ -686,7 +697,12 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         if (!ok && last_error_.empty() &&
             !(options_.stop_flag != nullptr &&
               options_.stop_flag->load(std::memory_order_relaxed))) {
-            last_error_ = "Barrier solve failed.";
+            if (!gpu_fallback_error.empty()) {
+                last_error_ =
+                    gpu_fallback_error + " CPU fallback also failed.";
+            } else {
+                last_error_ = "Barrier solve failed.";
+            }
         }
     }
 

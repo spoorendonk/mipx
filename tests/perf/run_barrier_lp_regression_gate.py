@@ -350,9 +350,9 @@ def main() -> int:
         ensure_executable(baseline_binary, "baseline binary")
 
     baseline_gpu_csv = Path(args.baseline_gpu_csv)
-    if not baseline_gpu_csv.is_file():
-        raise SystemExit(f"baseline GPU CSV not found: {baseline_gpu_csv}")
     baseline_cpu_csv = Path(args.baseline_cpu_csv)
+    if baseline_binary is None and not baseline_gpu_csv.is_file():
+        raise SystemExit(f"baseline GPU CSV not found: {baseline_gpu_csv}")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -386,7 +386,7 @@ def main() -> int:
         ),
     ]
     if args.enable_cpu_barrier_lanes:
-        if not baseline_cpu_csv.is_file():
+        if baseline_binary is None and not baseline_cpu_csv.is_file():
             raise SystemExit(f"baseline CPU CSV not found: {baseline_cpu_csv}")
         work_lanes.insert(
             0,

@@ -151,7 +151,7 @@ run_set() {
     load_solu "$solu_file"
     print_header
 
-    local mipx_pass=0 mipx_fail=0 mipx_faster_h=0 mipx_faster_c=0 total=0 solved=0
+    local mipx_pass=0 mipx_fail=0 mipx_faster_h=0 mipx_faster_c=0 total=0 solved_h=0 solved_c=0
     local mipx_total_time=0 highs_total_time=0 cuopt_total_time=0
 
     for mps in "$dir"/*.mps.gz; do
@@ -223,11 +223,12 @@ run_set() {
 
         # Track fastest vs HiGHS
         if [[ "$m_status" == "Optimal" && "$h_status" == "Optimal" && "$m_time" != "NA" && "$h_time" != "NA" && -n "$m_time" && -n "$h_time" ]]; then
-            solved=$((solved + 1))
+            solved_h=$((solved_h + 1))
             python3 -c "exit(0 if float('$m_time') < float('$h_time') else 1)" 2>/dev/null && mipx_faster_h=$((mipx_faster_h + 1))
         fi
         # Track fastest vs cuOpt
         if [[ "$m_status" == "Optimal" && "$c_status" == "Optimal" && "$m_time" != "NA" && "$c_time" != "NA" && -n "$m_time" && -n "$c_time" ]]; then
+            solved_c=$((solved_c + 1))
             python3 -c "exit(0 if float('$m_time') < float('$c_time') else 1)" 2>/dev/null && mipx_faster_c=$((mipx_faster_c + 1))
         fi
 
@@ -246,16 +247,17 @@ run_set() {
         "TOTAL TIME" "${mipx_total_time}s" "${highs_total_time}s" "${cuopt_total_time}s"
     echo ""
     echo "Correctness: $mipx_pass/$total objectives match"
-    echo "mipx faster than HiGHS:  $mipx_faster_h/$solved"
-    echo "mipx faster than cuOpt:  $mipx_faster_c/$solved"
-    if [[ "$solved" -gt 0 ]]; then
+    echo "mipx faster than HiGHS:  $mipx_faster_h/$solved_h"
+    echo "mipx faster than cuOpt:  $mipx_faster_c/$solved_c"
+    if [[ "$solved_h" -gt 0 ]]; then
         local ratio
         ratio=$(python3 -c "print(f'{$highs_total_time / max($mipx_total_time, 0.01):.2f}')")
         echo "Overall speedup vs HiGHS: ${ratio}x"
-        if python3 -c "exit(0 if $cuopt_total_time > 0 else 1)" 2>/dev/null; then
-            ratio=$(python3 -c "print(f'{$cuopt_total_time / max($mipx_total_time, 0.01):.2f}')")
-            echo "Overall speedup vs cuOpt: ${ratio}x"
-        fi
+    fi
+    if [[ "$solved_c" -gt 0 ]] && python3 -c "exit(0 if $cuopt_total_time > 0 else 1)" 2>/dev/null; then
+        local ratio
+        ratio=$(python3 -c "print(f'{$cuopt_total_time / max($mipx_total_time, 0.01):.2f}')")
+        echo "Overall speedup vs cuOpt: ${ratio}x"
     fi
     echo ""
 }

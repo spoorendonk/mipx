@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import sys
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = (
@@ -78,6 +79,46 @@ class BarrierRegressionGateCsvTest(unittest.TestCase):
                 out_csv.read_text(encoding="utf-8").strip(),
                 "instance,work_units\nafiro,8622",
             )
+
+
+class BarrierRegressionGateMainTest(unittest.TestCase):
+    def test_baseline_binary_mode_does_not_require_committed_baselines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            candidate = tmpdir / "candidate.sh"
+            baseline = tmpdir / "baseline.sh"
+            instances = tmpdir / "instances"
+            out_dir = tmpdir / "out"
+            candidate.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            baseline.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            candidate.chmod(0o755)
+            baseline.chmod(0o755)
+            instances.mkdir()
+
+            argv = [
+                "run_barrier_lp_regression_gate.py",
+                "--candidate-binary",
+                str(candidate),
+                "--baseline-binary",
+                str(baseline),
+                "--baseline-gpu-csv",
+                str(tmpdir / "missing_gpu.csv"),
+                "--baseline-cpu-csv",
+                str(tmpdir / "missing_cpu.csv"),
+                "--instances-dir",
+                str(instances),
+                "--out-dir",
+                str(out_dir),
+            ]
+
+            with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(gate, "run_barrier_compare") as run_compare, \
+                mock.patch.object(gate, "run_lane_gate") as run_lane_gate:
+                exit_code = gate.main()
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(run_compare.call_count, 2)
+            self.assertEqual(run_lane_gate.call_count, 1)
 
     def test_write_lane_metric_csv_filters_solver_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
