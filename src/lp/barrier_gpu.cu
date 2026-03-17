@@ -4,13 +4,14 @@
 //   - Auto-switching NE↔Augmented on factorize failure
 //   - Iterate backup/rollback and adaptive regularization
 //
-// Only compiled when MIPX_USE_CUDA=ON and cuDSS is found.
+// Only compiled when GPU support is enabled and cuDSS is found.
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -24,6 +25,12 @@ using Int = int;
 
 namespace mipx {
 namespace gpu_detail {
+
+thread_local std::string g_last_barrier_error;
+
+const char* gpuLastBarrierError() {
+    return g_last_barrier_error.empty() ? nullptr : g_last_barrier_error.c_str();
+}
 
 // ---------------------------------------------------------------------------
 // Error checking helpers
@@ -965,6 +972,7 @@ struct NormalEqSolver {
     // Returns false if NE is too dense.
     bool analyze(int a_m, int a_n,
                  const int* h_row_starts, const int* h_col_indices,
+                 double dense_col_fraction,
                  GpuContext* context) {
         ctx = context;
         ne_m = a_m;
@@ -973,7 +981,28 @@ struct NormalEqSolver {
         std::vector<std::vector<int>> ne_cols(a_m);
         for (int i = 0; i < a_m; ++i) ne_cols[i].push_back(i);
 
+        const int dense_threshold =
+            std::max(1, static_cast<int>(dense_col_fraction * std::max(a_m, 1)));
+        std::vector<int> col_counts(a_n, 0);
+        for (int i = 0; i < a_m; ++i) {
+            for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p) {
+                ++col_counts[h_col_indices[p]];
+            }
+        }
+        for (int k = 0; k < a_n; ++k) {
+            if (col_counts[k] > dense_threshold) {
+                g_last_barrier_error =
+                    "Barrier GPU normal-equation pattern has dense column " +
+                    std::to_string(k) + " with " + std::to_string(col_counts[k]) +
+                    " entries (threshold " + std::to_string(dense_threshold) + ").";
+                return false;
+            }
+        }
+
         std::vector<std::vector<int>> col_rows(a_n);
+        for (int k = 0; k < a_n; ++k) {
+            col_rows[k].reserve(static_cast<size_t>(col_counts[k]));
+        }
         for (int i = 0; i < a_m; ++i) {
             for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p)
                 col_rows[h_col_indices[p]].push_back(i);
@@ -1001,7 +1030,11 @@ struct NormalEqSolver {
         h_ne_row_starts[a_m] = ne_nnz;
 
         double avg_density = static_cast<double>(ne_nnz) / std::max(a_m, 1);
-        if (avg_density > 20.0) return false;
+        if (avg_density > 20.0) {
+            g_last_barrier_error =
+                "Barrier GPU normal-equation pattern is too dense for the NE backend.";
+            return false;
+        }
 
         std::vector<int> h_ne_col_indices(ne_nnz);
         int pos = 0;
@@ -1081,7 +1114,7 @@ struct NormalEqSolver {
         cudaStreamSynchronize(ctx->stream);
         analyzed = true;
         analyzed_f32 = true;
-        use_fp32 = true;  // Default to FP32 with IR.
+        use_fp32 = false;  // Prefer FP64 stability; re-enable FP32 selectively later.
         ok = true;
         return true;
     }
@@ -1420,31 +1453,54 @@ struct GpuBarrierImpl {
     bool init(int m, int n, int nnz,
               const int* rows, const int* cols, const double* vals,
               const double* b, const double* c,
-              bool prefer_augmented) {
+              bool prefer_augmented,
+              double dense_col_fraction) {
         h_row_starts.assign(rows, rows + m + 1);
         h_col_indices.assign(cols, cols + nnz);
         stored_nnz = nnz;
 
-        if (!ctx.init(m, n, nnz, rows, cols, vals, b, c))
+        if (!ctx.init(m, n, nnz, rows, cols, vals, b, c)) {
+            g_last_barrier_error = "Barrier GPU context initialization failed.";
             return false;
+        }
 
         if (!prefer_augmented) {
             // Try NE first.
-            ne_available = ne_solver.analyze(m, n, rows, cols, &ctx);
+            ne_available = ne_solver.analyze(m, n, rows, cols, dense_col_fraction, &ctx);
             if (ne_available) {
                 active_backend = Backend::NE;
             } else {
+                g_last_barrier_error =
+                    g_last_barrier_error.empty()
+                        ? "Barrier GPU normal-equations analysis unavailable; trying augmented backend."
+                        : g_last_barrier_error + " Trying augmented backend.";
                 // NE too dense, use Augmented.
                 aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
-                if (!aug_available) return false;
-                if (!ctx.allocAugIRBuffers()) return false;
+                if (!aug_available) {
+                    g_last_barrier_error =
+                        "Barrier GPU augmented analysis failed during initialization.";
+                    return false;
+                }
+                if (!ctx.allocAugIRBuffers()) {
+                    g_last_barrier_error =
+                        "Barrier GPU augmented IR buffer allocation failed.";
+                    return false;
+                }
                 active_backend = Backend::Augmented;
             }
         } else {
             // Prefer augmented.
             aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
-            if (!aug_available) return false;
-            if (!ctx.allocAugIRBuffers()) return false;
+            if (!aug_available) {
+                g_last_barrier_error =
+                    "Barrier GPU augmented analysis failed during initialization.";
+                return false;
+            }
+            if (!ctx.allocAugIRBuffers()) {
+                g_last_barrier_error =
+                    "Barrier GPU augmented IR buffer allocation failed.";
+                return false;
+            }
             active_backend = Backend::Augmented;
         }
 
@@ -1455,15 +1511,28 @@ struct GpuBarrierImpl {
     bool switchToAugmented() {
         if (aug_available) {
             active_backend = Backend::Augmented;
-            return ctx.allocAugIRBuffers();
+            if (!ctx.allocAugIRBuffers()) {
+                g_last_barrier_error =
+                    "Barrier GPU augmented IR buffer allocation failed.";
+                return false;
+            }
+            return true;
         }
         // Lazy init augmented.
         int m = ctx.m, n = ctx.n;
         aug_available = aug_solver.analyze(m, n, h_row_starts.data(),
                                            h_col_indices.data(),
                                            stored_nnz, &ctx);
-        if (!aug_available) return false;
-        if (!ctx.allocAugIRBuffers()) return false;
+        if (!aug_available) {
+            g_last_barrier_error =
+                "Barrier GPU augmented analysis failed during backend switch.";
+            return false;
+        }
+        if (!ctx.allocAugIRBuffers()) {
+            g_last_barrier_error =
+                "Barrier GPU augmented IR buffer allocation failed during backend switch.";
+            return false;
+        }
         active_backend = Backend::Augmented;
         return true;
     }
@@ -1471,10 +1540,14 @@ struct GpuBarrierImpl {
     // Compute s0, shift z/s to positivity, and apply Mehrotra correction.
     // Assumes d_y and d_z contain initial y0 and z0 (or z0 = A'y0).
     bool computeStartingPointS() {
-        int m = ctx.m, n = ctx.n;
+        int n = ctx.n;
 
         // s0 = c - A'y0. Recompute A'y into d_z, then s = c - z.
-        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) return false;
+        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) {
+            g_last_barrier_error =
+                "Barrier GPU starting-point transpose multiply failed.";
+            return false;
+        }
 
         kernelVecSub<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
             n, ctx.d_c, ctx.d_z, ctx.d_s);
@@ -1518,12 +1591,18 @@ struct GpuBarrierImpl {
         if (active_backend == Backend::NE) {
             factor_ok = ne_solver.factorize(reg);
             if (factor_ok) {
-                if (!ne_solver.solveFp64(ctx.d_b, ctx.d_y)) return false;
+                if (!ne_solver.solveRefined(ctx.d_b, ctx.d_y, ir_steps_)) {
+                    g_last_barrier_error =
+                        "Barrier GPU normal-equation starting-point solve failed.";
+                    return false;
+                }
             }
         }
 
         if (!factor_ok && active_backend == Backend::NE) {
             // Try augmented for starting point.
+            g_last_barrier_error =
+                "Barrier GPU normal-equation starting-point factorization failed; switching to augmented.";
             if (!switchToAugmented()) return false;
         }
 
@@ -1532,12 +1611,20 @@ struct GpuBarrierImpl {
             kernelFillOnes<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(n, ctx.d_z);
             kernelFillOnes<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(n, ctx.d_s);
             // For starting point with augmented: factorize and solve.
-            if (!aug_solver.factorize(reg, reg)) return false;
+            if (!aug_solver.factorize(reg, reg)) {
+                g_last_barrier_error =
+                    "Barrier GPU augmented starting-point factorization failed.";
+                return false;
+            }
             // Set up RHS: [0; b] for augmented system.
             cudaMemsetAsync(ctx.d_aug_rhs, 0, sizeof(double) * n, ctx.stream);
             cudaMemcpyAsync(ctx.d_aug_rhs + n, ctx.d_b, sizeof(double) * m,
                             cudaMemcpyDeviceToDevice, ctx.stream);
-            if (!aug_solver.solve(ctx.d_aug_rhs, ctx.d_aug_sol)) return false;
+            if (!aug_solver.solve(ctx.d_aug_rhs, ctx.d_aug_sol)) {
+                g_last_barrier_error =
+                    "Barrier GPU augmented starting-point solve failed.";
+                return false;
+            }
             // Extract z0 from first n, y0 from last m.
             cudaMemcpyAsync(ctx.d_z, ctx.d_aug_sol, sizeof(double) * n,
                             cudaMemcpyDeviceToDevice, ctx.stream);
@@ -1547,7 +1634,11 @@ struct GpuBarrierImpl {
         }
 
         // NE path: z0 = A' * y0.
-        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) return false;
+        if (!ctx.multiplyAT(ctx.d_y, ctx.d_z)) {
+            g_last_barrier_error =
+                "Barrier GPU starting-point transpose multiply failed.";
+            return false;
+        }
         return computeStartingPointS();
     }
 
@@ -1724,7 +1815,7 @@ struct GpuBarrierImpl {
                                 cudaMemcpyDeviceToDevice, ctx.stream);
                 cudaStreamSynchronize(ctx.stream);
 
-                double relaxed_tol = tol * 10.0;
+                double relaxed_tol = tol * 50.0;
                 if (prev_pinf < relaxed_tol && prev_dinf < relaxed_tol &&
                     prev_gap < relaxed_tol) {
                     if (verbose) {
@@ -1776,6 +1867,13 @@ struct GpuBarrierImpl {
             // Factorize.
             bool factorized = false;
             double cur_reg = reg_primal;
+
+            if (active_backend == Backend::NE && gap < 1e-4) {
+                cur_reg *= 100.0;
+                if (gap < 5e-5) {
+                    cur_reg *= 10.0;
+                }
+            }
 
             if (active_backend == Backend::NE) {
                 for (int attempt = 0; attempt < 3; ++attempt) {
@@ -1909,18 +2007,33 @@ bool gpuSolveBarrier(
     int ir_steps, bool verbose,
     const void* stop_flag,
     bool prefer_augmented,
+    double dense_col_fraction,
     double obj_offset,
     double* out_z, double* out_y, double* out_s,
     double* out_obj, int* out_status, int* out_iters) {
+    g_last_barrier_error.clear();
 
     GpuBarrierImpl impl;
-    if (!impl.init(m, n, nnz, rows, cols, vals, b, c, prefer_augmented))
+    if (!impl.init(m, n, nnz, rows, cols, vals, b, c, prefer_augmented,
+                   dense_col_fraction)) {
+        if (g_last_barrier_error.empty()) {
+            g_last_barrier_error = "Barrier GPU initialization failed.";
+        }
         return false;
+    }
 
     std::vector<Real> z_vec, y_vec, s_vec;
     bool ok = impl.solve(max_iter, tol, step_fraction, reg, ir_steps, verbose,
                           stop_flag, obj_offset, b, c, n, m,
                           z_vec, y_vec, s_vec, out_obj, out_status, out_iters);
+
+    if (!ok && g_last_barrier_error.empty()) {
+        if (*out_status == 2) {
+            g_last_barrier_error = "Barrier GPU reached the iteration limit.";
+        } else {
+            g_last_barrier_error = "Barrier GPU solve failed.";
+        }
+    }
 
     if (ok || *out_status == 0) {
         std::copy(z_vec.begin(), z_vec.end(), out_z);

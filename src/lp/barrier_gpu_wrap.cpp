@@ -20,10 +20,12 @@ bool gpuSolveBarrier(
     int ir_steps, bool verbose,
     const void* stop_flag,
     bool prefer_augmented,
+    double dense_col_fraction,
     double obj_offset,
     double* out_z, double* out_y, double* out_s,
     double* out_obj, int* out_status, int* out_iters);
 }
+const char* gpuLastBarrierError();
 }  // namespace gpu_detail
 
 bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
@@ -31,7 +33,8 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
                      const BarrierOptions& opts, Real obj_offset,
                      bool prefer_augmented,
                      std::vector<Real>& z, std::vector<Real>& y,
-                     std::vector<Real>& s, Int& iters) {
+                     std::vector<Real>& s, Int& iters,
+                     std::string* error_msg) {
     auto rows = A.csr_row_starts();
     auto cols = A.csr_col_indices();
     auto vals = A.csr_values();
@@ -56,11 +59,19 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
         opts.ir_steps, opts.verbose,
         static_cast<const void*>(opts.stop_flag),
         prefer_augmented,
+        opts.dense_col_fraction,
         obj_offset,
         z.data(), y.data(), s.data(),
         &out_obj, &out_status, &out_iters);
 
     iters = out_iters;
+    if (!ok && out_status != 0 && error_msg != nullptr && error_msg->empty()) {
+        if (const char* gpu_error = gpu_detail::gpuLastBarrierError()) {
+            *error_msg = gpu_error;
+        } else {
+            *error_msg = "Barrier GPU solve failed before convergence.";
+        }
+    }
     return ok || out_status == 0;
 }
 

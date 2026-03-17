@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "mipx/core.h"
@@ -61,6 +62,7 @@ public:
     void setOptions(const BarrierOptions& options) { options_ = options; }
     [[nodiscard]] const BarrierOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:
     struct OriginalColExpr {
@@ -101,6 +103,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+    std::string last_error_;
 };
 
 // GPU device-resident barrier solver (available when compiled with MIPX_HAS_CUDSS).
@@ -110,7 +113,8 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
                      const BarrierOptions& opts, Real obj_offset,
                      bool prefer_augmented,
                      std::vector<Real>& z, std::vector<Real>& y,
-                     std::vector<Real>& s, Int& iters);
+                     std::vector<Real>& s, Int& iters,
+                     std::string* error_msg = nullptr);
 #endif
 
 }  // namespace mipx

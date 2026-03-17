@@ -7,9 +7,9 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <utility>
 
-#include "mipx/dual_simplex.h"
 #include "newton_solver.h"
 
 namespace mipx {
@@ -30,6 +30,13 @@ inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     Real s = 0.0;
     for (Index i = 0; i < static_cast<Index>(a.size()); ++i) s += a[i] * b[i];
     return s;
+}
+
+inline Real computeOriginalObjective(const LpProblem& problem,
+                                     std::span<const Real> x) {
+    Real obj = problem.obj_offset;
+    for (Index j = 0; j < problem.num_cols; ++j) obj += problem.obj[j] * x[j];
+    return obj;
 }
 
 inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx,
@@ -310,6 +317,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     objective_ = 0.0;
     scaled_obj_ = 0.0;
     iterations_ = 0;
+    last_error_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_eq_.clear();
     reduced_costs_std_.clear();
@@ -610,6 +618,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     std::unique_ptr<NewtonSolver> solver;
     auto algo = options_.algorithm;
 
+    const auto requested_algo = options_.algorithm;
     if (algo == BarrierAlgorithm::Auto) {
 #ifdef MIPX_HAS_CUDSS
         algo = use_augmented ? BarrierAlgorithm::GpuAugmented
@@ -621,19 +630,37 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     }
 
     bool ok = false;
+    std::string gpu_fallback_error;
 
 #ifdef MIPX_HAS_CUDSS
     // GPU device-resident path: handles NE/Augmented internally with auto-switching.
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
         bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
+        std::string gpu_error;
         ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_,
-                             std_obj_offset_, prefer_aug, z, y, s, iters);
+                             std_obj_offset_, prefer_aug, z, y, s, iters, &gpu_error);
         if (ok) {
             used_gpu_ = true;
         } else {
-            // GPU failed — fall back to CPU.
-            solver = use_augmented ? createCpuAugmentedSolver()
-                                   : createCpuCholeskySolver();
+            gpu_fallback_error =
+                gpu_error.empty() ? "Barrier GPU solve failed." : gpu_error;
+            if (options_.verbose && !gpu_error.empty()) {
+                if (requested_algo == BarrierAlgorithm::Auto) {
+                    std::fprintf(stderr,
+                                 "Barrier GPU backend failed, falling back to CPU: %s\n",
+                                 gpu_error.c_str());
+                } else {
+                    std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
+                                 gpu_error.c_str());
+                }
+            }
+            if (requested_algo == BarrierAlgorithm::Auto) {
+                algo = use_augmented ? BarrierAlgorithm::CpuAugmented
+                                     : BarrierAlgorithm::CpuCholesky;
+            } else {
+                last_error_ = gpu_fallback_error;
+                return false;
+            }
         }
     }
 #else
@@ -660,10 +687,23 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 
     if (solver) {
         if (!solver->setup(aeq_, m, n, options_)) {
+            if (last_error_.empty()) {
+                last_error_ = "Barrier backend setup failed.";
+            }
             return false;
         }
         ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
                              std_obj_offset_, z, y, s, iters);
+        if (!ok && last_error_.empty() &&
+            !(options_.stop_flag != nullptr &&
+              options_.stop_flag->load(std::memory_order_relaxed))) {
+            if (!gpu_fallback_error.empty()) {
+                last_error_ =
+                    gpu_fallback_error + " CPU fallback also failed.";
+            } else {
+                last_error_ = "Barrier solve failed.";
+            }
+        }
     }
 
     // Compute objective while z is still in scaled space.
@@ -692,8 +732,10 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 // ============================================================================
 
 LpResult BarrierSolver::solve() {
+    last_error_.clear();
     if (!loaded_) {
         status_ = Status::Error;
+        last_error_ = "Barrier solver has no loaded problem.";
         return {status_, 0.0, 0, 0.0};
     }
 
@@ -701,6 +743,9 @@ LpResult BarrierSolver::solve() {
 
     if (!transformed_ok_) {
         status_ = transformed_infeasible_ ? Status::Infeasible : Status::Error;
+        if (status_ == Status::Error) {
+            last_error_ = "Barrier standard-form transformation failed.";
+        }
         return {status_, 0.0, 0, 0.0};
     }
 
@@ -715,47 +760,40 @@ LpResult BarrierSolver::solve() {
             status_ = Status::IterLimit;
             objective_ = 0.0;
             iterations_ = iters;
+            last_error_.clear();
             return {status_, objective_, iterations_, 0.0};
         }
-
-        // Dual-simplex fallback.
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
         dual_eq_.clear();
         reduced_costs_std_.clear();
-        return {status_, objective_, iterations_, fb.work_units};
+        primal_orig_.clear();
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        if (last_error_.empty()) {
+            last_error_ = "Barrier solve failed.";
+        }
+        return {status_, objective_, iterations_, 0.0};
     }
 
     reconstructOriginalPrimals(z);
     if (!checkOriginalPrimalFeasibility(primal_orig_)) {
-        DualSimplexSolver fallback;
-        fallback.load(original_);
-        fallback.setVerbose(false);
-        auto fb = fallback.solve();
-
-        status_ = fb.status;
-        objective_ = fb.objective;
-        iterations_ = fb.iterations;
-        primal_orig_ = fallback.getPrimalValues();
         dual_eq_.clear();
         reduced_costs_std_.clear();
-        return {status_, objective_, iterations_, fb.work_units};
+        primal_orig_.clear();
+        status_ = Status::Error;
+        objective_ = 0.0;
+        iterations_ = iters;
+        last_error_ = "Barrier produced a primal-infeasible solution.";
+        return {status_, objective_, iterations_, 0.0};
     }
 
     dual_eq_ = y;
     reduced_costs_std_ = s;
 
-    Real min_obj = scaled_obj_;
-    objective_ = (original_.sense == Sense::Minimize) ? min_obj : -min_obj;
+    objective_ = computeOriginalObjective(original_, primal_orig_);
     status_ = Status::Optimal;
     iterations_ = iters;
+    last_error_.clear();
 
     double seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t0).count();
