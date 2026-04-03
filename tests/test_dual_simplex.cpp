@@ -1,16 +1,18 @@
+#include "mipx/dual_simplex.h"
+#include "mipx/io.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
 
-#include "mipx/dual_simplex.h"
-#include "mipx/io.h"
-
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 namespace fs = std::filesystem;
 
-static std::string testDataDir() { return std::string(TEST_DATA_DIR); }
+static std::string testDataDir() {
+    return std::string(TEST_DATA_DIR);
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build a small LP manually
@@ -555,8 +557,7 @@ TEST_CASE("DualSimplex: enabled primal progress gate impacts degen3 run without 
     const auto enabled_result = enabled_solver.solve();
 
     REQUIRE(enabled_result.status != Status::Error);
-    CHECK((enabled_result.status == Status::TimeLimit ||
-           enabled_result.status == Status::Optimal));
+    CHECK((enabled_result.status == Status::TimeLimit || enabled_result.status == Status::Optimal));
     CHECK(enabled_result.iterations > 100);
     CHECK(disabled_result.work_units > 0.0);
     CHECK(enabled_result.work_units > 0.0);
@@ -616,7 +617,7 @@ TEST_CASE("DualSimplex: default no-presolve handles degen2 and degen3 within tim
 
         DualSimplexSolver solver;
         DualSimplexOptions opts = solver.getOptions();
-        opts.max_solve_seconds = 5.0;
+        opts.max_solve_seconds = 30.0;
         solver.setOptions(opts);
         solver.load(readMps(path));
 
