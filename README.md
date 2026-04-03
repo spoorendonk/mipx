@@ -122,4 +122,4 @@ python/           nanobind bindings and pytest tests
 
 ## License
 
-TBD
+[MIT](LICENSE)
