@@ -211,9 +211,8 @@ TEST_CASE("MIPLIB: parse subset of instances", "[benchmark][miplib]") {
         }
     }
 
-    std::cout << std::format(
-        "\nParsed: {}/{}, Failed: {}, Skipped (>50MB): {}, With integers: {}\n", parsed,
-        instances.size(), failed, skipped, with_integers);
+    std::cout << std::format("\nParsed: {}/{}, Failed: {}, Skipped (>5MB): {}, With integers: {}\n",
+                             parsed, instances.size(), failed, skipped, with_integers);
 
     CHECK(failed == 0);
 }
