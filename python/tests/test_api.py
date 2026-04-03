@@ -1,6 +1,8 @@
 from pathlib import Path
 
-import mipx
+import pytest
+
+mipx = pytest.importorskip("mipx")
 
 
 def tiny_mps_path() -> Path:

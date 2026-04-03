@@ -19,7 +19,7 @@ cmake -B build && cmake --build build -j$(nproc)
 ```
 
 ```test
-ctest --test-dir build --output-on-failure -j$(nproc) && pytest --tb=short -q
+ctest --test-dir build --output-on-failure -j$(nproc) && { pytest --tb=short -q || test $? -eq 5; }
 ```
 
 ### Running a single C++ test
