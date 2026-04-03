@@ -9,6 +9,12 @@ description = "MIPX branch-and-cut solver Python bindings"
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "mipx contributors" }]
+license = "MIT"
+
+[project.urls]
+Homepage = "https://github.com/spoorendonk/mipx"
+Repository = "https://github.com/spoorendonk/mipx"
+Issues = "https://github.com/spoorendonk/mipx/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
