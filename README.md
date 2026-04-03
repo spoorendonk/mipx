@@ -1,144 +1,86 @@
 # mipx
 
-Exact MIP solver (branch-and-cut) built from scratch in C++23. Dual simplex,
-barrier, and PDLP LP modes, cutting planes, presolve, and a native heuristic runtime.
+A branch-and-cut MIP solver built from scratch in C++23 with Python bindings.
 
-> **Disclaimer:** This project is developed entirely through [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+> **Work in progress.** This project is under active development.
+> Built entirely with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-## Components
+## Performance
+
+On Netlib LP instances, mipx is roughly 2-5x slower than HiGHS on medium problems and 10-40x on the hardest ones. On easy MIPLIB MIPs, it's typically 2-8x slower.
+
+## Features
 
 | Component | Description |
 |-----------|-------------|
-| **Dual simplex** | Phase 1+2, steepest-edge pricing, sparse LU with rank-1 updates |
-| **Barrier / PDLP** | Optional root/LP solve modes with GPU SpMV acceleration + CPU fallback |
-| **Branch-and-bound** | Best-first/depth-first node selection, most-fractional/first-fractional branching |
-| **Cutting planes** | Gomory MIR, cut pool with aging and parallelism filtering |
-| **Presolve** | Singleton, dominated, probing reductions + postsolve stack |
-| **Primal heuristics** | Rounding, diving, RINS, RENS, Feasibility Pump, local branching |
-| **Heuristic runtime** | Deterministic/opportunistic heuristic execution, restart engine, incumbent sharing pool |
-| **Pre-root LP-free stage** | Optional FeasJump/FPR/Local-MIP style incumbent search before root LP |
-| **Pre-root LP-light arms** | Optional LP-guided FPR/diving arms behind capability/build gates |
-| **Adaptive pre-root portfolio** | Thompson-sampling arm scheduler with deterministic mode and arm-level telemetry |
-| **Symmetry handling** | Column orbit detection, symmetry-breaking cuts, and orbital bound fixing to enforce canonical order |
-| **Exact LP refinement** | Optional root-certificate refinement (`off/auto/on`), long-double checks, and scaled-rational verification |
-| **Python API** | Nanobind bindings for model I/O and MIP solve flow (`LpProblem`, `MipSolver`) |
-| **Concurrent root racing** | Optional dual/barrier/PDLP root race with cooperative stop and winner telemetry |
-| **Parallel tree search** | Optional TBB-parallel node processing |
+| **Dual simplex** | Devex pricing, bound-flipping ratio test, Forrest-Tomlin LU, SIMD kernels |
+| **Barrier** | Interior-point with CPU and GPU (cuDSS) backends |
+| **PDLP** | First-order primal-dual method with CPU and CUDA paths |
+| **Branch-and-bound** | Best-first / depth-first node selection, reliability branching with pseudocosts |
+| **Cutting planes** | Gomory MIR, cover, clique, zero-half, implied bound, mixing cuts |
+| **Presolve** | Variable fixing, singleton elimination, dual fixing, coefficient tightening, bounds propagation |
+| **Heuristics** | Rounding, diving, feasibility pump, RINS, RENS, local branching |
+| **Parallel search** | TBB-based tree exploration with deterministic and opportunistic modes |
+| **Symmetry** | Orbit detection, symmetry-breaking constraints, canonical branching |
+| **Exact refinement** | Optional rational-arithmetic LP repair for numerical certification |
+| **Concurrent root** | Race dual simplex, barrier, and PDLP at root with cooperative stop |
+| **Python API** | nanobind bindings for model I/O and solve |
 
 ## Build
 
-Requires C++23 and CMake 3.25+. TBB and CUDA are optional.
+Requires C++23 and CMake 3.25+.
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake -B build && cmake --build build -j$(nproc)
 ```
 
-SIMD build defaults:
-- `MIPX_SIMD_ISA=native` by default (max local tuning, `-march=native`)
-- `MIPX_SIMD_ISA=avx2` for standardized non-AVX512 x86_64 distribution targets
-- `MIPX_SIMD_ISA=off` for scalar fallback
+Optional dependencies:
 
 ```bash
-# Default local-machine tuning
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_SIMD_ISA=native
+# TBB for parallel tree search
+cmake -B build -DMIPX_USE_TBB=ON && cmake --build build -j$(nproc)
 
-# Standardized AVX2 target
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_SIMD_ISA=avx2
+# CUDA for GPU-accelerated barrier and PDLP
+cmake -B build -DMIPX_USE_CUDA=ON && cmake --build build -j$(nproc)
 ```
-
-You can inspect host SIMD support with:
-
-```bash
-lscpu | grep -E "Flags|avx2|avx512"
-```
-
-Optional TBB support:
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
-```
-
-Disable optional LP-light heuristic arms at build time:
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_ENABLE_LP_LIGHT_HEURISTICS=OFF
-```
-
-## Python API
-
-Build and install the Python package with scikit-build-core:
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install .[test]
-```
-
-Quick smoke test:
-
-```bash
-.venv/bin/python -c "import mipx; r = mipx.solve_mps('tests/data/tiny.mps', verbose=False); print(r.status)"
-```
-
-The wheel build uses a portable configuration (`abi3`, no `-march=native`) and
-is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 
 ## Usage
 
 ```bash
-# Solve a MIP instance
 ./build/mipx-solve instance.mps
-
-# With options
-./build/mipx-solve instance.mps --time-limit 300 --threads 4 --presolve
+./build/mipx-solve instance.mps --time-limit 300 --threads 4
 ```
 
-### CLI Options
+Key options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--time-limit <seconds>` | 3600 (MIP) | Wall-clock time limit for MIP solves |
-| `--threads <n>` | 1 | Number of parallel tree-search threads (MIP mode) |
-| `--presolve` | on | Enable presolve reductions |
-| `--no-presolve` | — | Disable presolve |
-| `--cuts` | on | Enable cutting planes |
-| `--no-cuts` | — | Disable cutting planes |
-| `--gap-tol <g>` | 1e-4 | Relative gap tolerance for optimality |
-| `--node-limit <n>` | 1000000 | Maximum nodes to explore (MIP mode) |
-| `--dual` | on | Use dual simplex for LP/root LP solve |
-| `--barrier` | off | Use barrier for LP/root LP solve |
-| `--pdlp` | off | Use PDLP for LP/root LP solve |
-| `--concurrent-root` | off | Race dual/barrier/PDLP at root (deterministic or opportunistic policy mode) |
-| `--parallel-mode <deterministic|opportunistic>` | deterministic | Parallel scheduling mode (`deterministic` is reproducible; pre-root adaptive portfolio is forced to fixed schedule when `--threads > 1`) |
-| `--seed <n>` | 1 | Seed for heuristic runtime restart scheduling |
-| `--pre-root-lpfree` | off | Enable LP-free pre-root incumbent stage |
-| `--no-pre-root-lpfree` | — | Disable LP-free pre-root stage |
-| `--pre-root-work <w>` | 50000 | Work-unit budget for pre-root LP-free stage |
-| `--pre-root-rounds <n>` | 24 | Max pre-root LP-free rounds across workers |
-| `--pre-root-no-early-stop` | off | Do not stop pre-root stage after first feasible |
-| `--pre-root-lplight` | off | Enable LP-light pre-root arms (requires LP-light capability) |
-| `--no-pre-root-lplight` | — | Disable LP-light pre-root arms |
-| `--pre-root-portfolio` | on | Enable adaptive pre-root arm scheduler (Thompson sampling) |
-| `--pre-root-fixed` | off | Use fixed pre-root arm schedule (disable adaptive portfolio) |
-| `--no-symmetry` | off | Disable symmetry detection and canonical branch selection |
-| `--exact-refine-off` | on | Disable exact LP refinement checks (default behavior) |
-| `--exact-refine-auto` | off | Trigger exact refinement only on numerical warning thresholds |
-| `--exact-refine-on` | off | Force exact refinement pipeline at root LP |
-| `--exact-rational-check` | off | Enable scaled-rational certificate verification |
-| `--exact-no-rational-check` | — | Disable scaled-rational certificate verification |
-| `--exact-warning-tol <t>` | 1e-7 | Warning threshold for auto-triggered exact refinement |
-| `--exact-cert-tol <t>` | 1e-8 | Certificate tolerance for refinement checks |
-| `--exact-max-rounds <n>` | 2 | Maximum exact refinement rounds |
-| `--exact-repair-passes <n>` | 2 | Deterministic primal repair passes per refinement round |
-| `--exact-rational-scale <s>` | 1e6 | Scaling factor used in rationalized verification |
-| `--gpu` | on | Enable GPU backend for barrier/PDLP when worthwhile |
-| `--no-gpu` | — | Force CPU backend for barrier/PDLP |
-| `--gpu-min-rows <n>` | 512 | Minimum rows before GPU backend is considered |
-| `--gpu-min-nnz <n>` | 10000 | Minimum nonzeros before GPU backend is considered |
-| `--relax-integrality` | off | Treat integer variables as continuous (LP relaxation mode) |
-| `--verbose` | on | Enable verbose output |
-| `--quiet` | off | Suppress verbose progress output |
+| `--time-limit <s>` | 3600 | Wall-clock time limit |
+| `--threads <n>` | 1 | Parallel tree-search threads |
+| `--gap-tol <g>` | 1e-4 | Relative optimality gap tolerance |
+| `--node-limit <n>` | 1000000 | Maximum branch-and-bound nodes |
+| `--presolve` / `--no-presolve` | on | Presolve reductions |
+| `--cuts` / `--no-cuts` | on | Cutting planes |
+| `--barrier` | off | Use barrier for root LP |
+| `--pdlp` | off | Use PDLP for root LP |
+| `--concurrent-root` | off | Race LP solvers at root |
+| `--quiet` | off | Suppress progress output |
+
+Run `./build/mipx-solve --help` for the full list.
+
+## Python API
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install .[test]
+```
+
+```python
+import mipx
+
+result = mipx.solve_mps("instance.mps", time_limit=60, verbose=False)
+print(result.status, result.objective)
+```
 
 ## Tests
 
@@ -146,198 +88,37 @@ is wired to cibuildwheel for Linux x86_64/aarch64, macOS arm64, and Windows x64.
 ctest --test-dir build -j$(nproc)
 ```
 
-Netlib and MIPLIB instances are not included in the repo. Download them before running benchmarks:
+Netlib and MIPLIB instances are not in the repo. Download them for benchmark tests:
 
 ```bash
-./tests/data/download_test_instances.sh   # small Netlib + small MIPLIB (recommended)
-./tests/data/download_netlib.sh          # full Netlib LP set
-./tests/data/download_netlib.sh --small  # curated small subset (CI)
-./tests/data/download_miplib.sh          # MIPLIB 2017 collection
-./tests/data/download_miplib.sh --small  # curated small subset (CI)
+./tests/data/download_netlib.sh           # full Netlib LP set
+./tests/data/download_miplib.sh --small   # curated MIPLIB subset
 ```
 
 Tests that require missing instances are skipped automatically.
 
-Post-Step-29 janitor correctness/E2E checks (objective validation against
-curated `.solu` references, including root-policy variants):
-
-```bash
-ctest --test-dir build -R "benchmark.*solve" --output-on-failure
-```
-
-## Benchmarking
-
-Run perf gates on Netlib LP and MIPLIB MIP with deterministic `work_units`:
-
-```bash
-# Download datasets (small sets recommended for local gating)
-./tests/data/download_test_instances.sh
-
-# Full LP+MIP gate (strict: 0% median regression by default)
-python3 tests/perf/run_full_gate.py \
-  --candidate-binary ./build/mipx-solve \
-  --baseline-binary /tmp/mipx_main/build/mipx-solve \
-  --netlib-dir ./tests/data/netlib \
-  --miplib-dir ./tests/data/miplib \
-  --solver-arg --quiet
-
-# Optional: run LP/MIP gates separately
-
-# LP gate input (Netlib)
-python3 tests/perf/run_netlib_lp_bench.py \
-  --binary ./build/mipx-solve \
-  --netlib-dir ./tests/data/netlib \
-  --output /tmp/netlib_candidate.csv \
-  --repeats 3 \
-  --solver-arg --quiet
-
-# MIP gate input (MIPLIB)
-python3 tests/perf/run_miplib_mip_bench.py \
-  --binary ./build/mipx-solve \
-  --miplib-dir ./tests/data/miplib \
-  --output /tmp/miplib_candidate.csv \
-  --repeats 1 \
-  --threads 1 \
-  --time-limit 30 \
-  --instances p0201,pk1,gt2 \
-  --solver-arg --quiet
-
-# Regression check (default metric is work_units)
-python3 tests/perf/check_regression.py \
-  --baseline /path/to/baseline.csv \
-  --candidate /tmp/netlib_candidate.csv
-```
-
-Dual-simplex-specific LP gate (Netlib anchors + LPopt-style curated LP
-relaxations):
-
-```bash
-# Full Netlib anchors + small MIPLIB set for LP relaxations
-./tests/data/download_netlib.sh
-./tests/data/download_miplib.sh --small
-
-python3 tests/perf/run_dual_perf_gate.py \
-  --candidate-binary ./build/mipx-solve \
-  --highs-binary highs \
-  --netlib-dir ./tests/data/netlib \
-  --miplib-dir ./tests/data/miplib \
-  --baseline-netlib-csv ./tests/perf/baselines/mipx_dual_lp_netlib_anchors.csv \
-  --baseline-mittelman-csv ./tests/perf/baselines/mipx_dual_lp_mittelman_curated.csv
-```
-
-Generate reproducible HiGHS CLI and mipx wall-clock baselines:
-
-```bash
-python3 tests/perf/generate_highs_baselines.py
-python3 tests/perf/generate_mipx_baselines.py
-```
-
-Baselines are stored in `tests/perf/baselines/`.
-Shell wrappers remain available for compatibility:
-`./tests/perf/generate_highs_baselines.sh` and
-`./tests/perf/generate_mipx_baselines.sh`.
-
-Step-29 reproducibility/tuning tooling:
-
-```bash
-# Determinism checks (single-thread + configured multi-thread deterministic mode)
-python3 tests/perf/run_determinism_suite.py \
-  --binary ./build/mipx-solve \
-  --miplib-dir ./tests/data/miplib \
-  --instances p0201,gt2,flugpl \
-  --runs 5 \
-  --single-threads 1 \
-  --multi-threads 4 \
-  --solver-arg --quiet
-
-# Note: determinism checks use objective/nodes/LP-iterations/work-units.
-# Wall-clock Time remains telemetry-only and is excluded from stability checks.
-
-# Benchmark matrix artifacts (solver x time x threads x mode)
-python3 tests/perf/run_benchmark_matrix.py \
-  --mipx-binary ./build/mipx-solve \
-  --miplib-dir ./tests/data/miplib \
-  --solvers mipx \
-  --modes deterministic,opportunistic \
-  --threads 1,4 \
-  --time-limits 30,120 \
-  --instances p0201,gt2,flugpl \
-  --solver-arg --quiet
-
-# Parameter sweep artifacts (CSV + Markdown ranking)
-python3 tests/perf/run_param_sweep.py \
-  --binary ./build/mipx-solve \
-  --miplib-dir ./tests/data/miplib \
-  --instances p0201,gt2,flugpl \
-  --search-profiles stable,default,aggressive \
-  --parallel-modes deterministic,opportunistic \
-  --cuts on,off \
-  --presolve on,off \
-  --solver-arg --quiet
-
-# Presolve consistency/perf matrix (light smoke profile)
-python3 tests/perf/run_presolve_matrix.py \
-  --profile ci-smoke \
-  --mipx-binary ./build/mipx-solve \
-  --netlib-dir ./tests/data/netlib \
-  --miplib-dir ./tests/data/miplib \
-  --out-dir /tmp/mipx_presolve_smoke
-
-# Broader internal presolve profile (optimization loops)
-python3 tests/perf/run_presolve_matrix.py \
-  --profile internal \
-  --mipx-binary ./build/mipx-solve \
-  --netlib-dir ./tests/data/netlib \
-  --miplib-dir ./tests/data/miplib \
-  --out-dir /tmp/mipx_presolve_internal \
-  --mipx-arg=--quiet
-```
-
-Example comparison against stored HiGHS LP baseline:
-
-```bash
-python3 tests/perf/run_netlib_lp_bench.py \
-  --binary ./build/mipx-solve \
-  --netlib-dir ./tests/data/netlib \
-  --output /tmp/netlib_candidate.csv \
-  --repeats 3 \
-  --solver-arg --quiet
-
-python3 tests/perf/check_regression.py \
-  --baseline tests/perf/baselines/highs_lp_netlib_small.csv \
-  --candidate /tmp/netlib_candidate.csv \
-  --metric time_seconds \
-  --max-regression-pct 100000
-```
-
-Use `--metric time_seconds` if you need wall-clock gating instead of
-deterministic work-unit gating.
-Use `--max-regression-pct` to relax the gate; default is strict `0.0%`.
-
-## Project Structure
+## Project structure
 
 ```
 include/mipx/     Public headers
 src/
-  lp/             Sparse matrix, LU factorization, dual simplex
-  mip/            Branch-and-bound, node queue, branching
-  cuts/           Cut pool, Gomory MIR separation
+  lp/             Dual simplex, barrier, PDLP, LU factorization, sparse matrix
+  mip/            Branch-and-bound, node queue, branching, domain propagation
+  cuts/           Cut pool, separators, cut manager
   presolve/       Reductions and postsolve stack
-  heuristics/     Heuristic arms + runtime orchestration
+  heuristics/     Primal heuristics and runtime orchestration
   io/             MPS/LP readers, solution file I/O
   cli/            Command-line interface
-tests/             Catch2 tests and MIPLIB benchmarks
-python/            Nanobind bindings, Python package, and Python tests
-.github/workflows/ CI, wheel build, and tagged PyPI publish workflows
-docs/              Documentation and roadmap
+tests/            Catch2 tests and benchmark instances
+python/           nanobind bindings and pytest tests
 ```
 
 ## References
 
-- [HiGHS](https://github.com/ERGO-Code/HiGHS) — high-performance LP/MIP solver
-- [SCIP](https://scipopt.org/) — constraint integer programming framework
-- [Achterberg (2007)](https://doi.org/10.1007/s10107-006-0023-0) — branch-and-cut thesis
-- [Maros (2003)](https://doi.org/10.1007/978-1-4615-0257-9) — simplex textbook
+- [HiGHS](https://github.com/ERGO-Code/HiGHS) -- high-performance LP/MIP solver
+- [SCIP](https://scipopt.org/) -- constraint integer programming framework
+- [Achterberg (2007)](https://doi.org/10.1007/s10107-006-0023-0) -- branch-and-cut thesis
+- [Maros (2003)](https://doi.org/10.1007/978-1-4615-0257-9) -- simplex textbook
 
 ## License
 
