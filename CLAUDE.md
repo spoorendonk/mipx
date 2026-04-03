@@ -1,115 +1,102 @@
-# mip-exact — Branch-and-Cut MIP Solver
+# CLAUDE.md
 
-## Git Workflow
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-- **Never commit directly to main.** Always create a feature branch, push, and open a PR.
-- **If user says "commit" while on main**: create a feature branch, commit there, push, and open a PR automatically.
-- **Linear history only.** Merge PRs with squash or rebase (no merge commits).
-- **No force-push to main.**
+@.devkit/standards/nanobind.md
 
-## Build
+# Project: mipx
 
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+A from-scratch branch-and-cut MIP solver in C++23 with Python bindings via nanobind.
+
+## Build & Test
+
+```clean
+rm -rf build
 ```
 
-Optional TBB:
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DMIPX_USE_TBB=ON
+```build
+cmake -B build && cmake --build build -j$(nproc)
 ```
 
-## Test
+```test
+ctest --test-dir build --output-on-failure -j$(nproc) && pytest --tb=short -q
+```
+
+### Running a single C++ test
 
 ```bash
-ctest --test-dir build -j$(nproc)
+ctest --test-dir build -R "test_name_regex" --output-on-failure
 ```
+
+All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also run it directly:
+
+```bash
+./build/tests/mipx-tests "test name or tag"
+```
+
+### CMake options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `MIPX_USE_TBB` | auto-detect | Parallel tree search (`apt install libtbb-dev`) |
+| `MIPX_USE_CUDA` | ON | GPU acceleration (barrier, PDLP) |
+| `MIPX_BUILD_PYTHON` | OFF | Build nanobind Python extension |
+| `MIPX_BUILD_CLI` | ON | Build `mipx-solve` CLI |
+| `MIPX_SIMD_ISA` | native | SIMD codegen: `off`, `avx2`, `native` |
+| `MIPX_STRICT_WARNINGS` | ON | `-Werror` |
+
+### Test data
 
 Netlib/MIPLIB instances are not in git. Download before running benchmarks:
+
 ```bash
-./tests/data/download_miplib.sh          # full MIPLIB 2017 benchmark set
+./tests/data/download_miplib.sh          # full MIPLIB 2017 set
 ./tests/data/download_miplib.sh --small  # curated small subset
 ```
+
 Tests skip automatically when instances are missing.
-
-## Dependencies
-
-- GCC 14, C++23
-- CMake 3.25+
-- Catch2: fetched via CMake FetchContent
-- zlib: for gzipped MPS files
-- `apt install libtbb-dev` (optional, enables parallel tree search)
 
 ## Architecture
 
-```
-include/mipx/      — public headers
-src/
-  lp/              — sparse matrix, LU factorization, dual simplex
-  mip/             — branch-and-bound, node queue, branching
-  cuts/            — cut pool, Gomory MIR separation
-  presolve/        — reductions and postsolve stack
-  heuristics/      — rounding, diving, RINS
-  io/              — MPS/LP readers, solution file I/O
-  cli/             — CLI tool (mipx-solve)
-tests/              — Catch2 tests and MIPLIB benchmarks
-  data/             — benchmark instances (downloaded, not in git)
-docs/               — documentation and roadmap
-```
+All code under `mipx::` namespace. Key type aliases: `Real` = `double`, `Int` = `int`, `Index` = `int`.
 
-## Namespace
+### Core modules (`src/`)
 
-All code under `mipx::` namespace.
+- **`lp/`** — LP solvers: dual simplex (Devex pricing + BFRT), Forrest-Tomlin LU factorization, interior-point barrier (CPU + GPU/cuDSS), PDLP (CPU + CUDA kernels), exact iterative refinement
+- **`mip/`** — Branch-and-bound: node queue, domain propagation, branching strategies
+- **`cuts/`** — Cut pool, Gomory MIR separation, cut manager, custom separators
+- **`presolve/`** — Reductions and postsolve stack
+- **`heuristics/`** — Rounding, diving, RINS, RENS, feasibility pump, local branching, symmetry-aware, budget management
+- **`io/`** — MPS/LP readers (mmap + bulk decompress), MPS writer, solution file reader
+- **`cli/`** — `mipx-solve` CLI entry point
 
-## Key Types
+### Key types
 
-- `mipx::SparseMatrix` — CSR storage with lazy CSC transpose
-- `mipx::LpProblem` — LP/MIP problem data (objective, bounds, constraints, integrality)
-- `mipx::LpSolver` — Abstract LP solver interface (dual simplex, later barrier/PDLP)
-- `mipx::MipSolver` — Branch-and-cut MIP solver
-- `mipx::Real` = `double`, `mipx::Int` = `int`, `mipx::Index` = `int`
+- `SparseMatrix` — CSR-primary storage with lazy CSC transpose built on demand
+- `LpProblem` — LP/MIP problem data (objective, bounds, constraints, integrality)
+- `LpSolver` — Abstract LP solver interface (dual simplex, barrier, PDLP backends)
+- `MipSolver` — Branch-and-cut MIP solver orchestrating all components
 
-## Coding Conventions
+### Python bindings (`python/`)
 
-- C++23 standard, compiled with `-Wall -Wextra -Werror`
-- Sanitizers enabled in debug builds (ASan, UBSan)
-- Prefer `std::span`, `std::ranges`, `std::format` where appropriate
-- No external solver dependencies — everything from scratch
-- CSR-primary sparse storage; lazy CSC built on demand
-- Forrest-Tomlin LU updates (not product-form)
-- Devex pricing + bound flipping ratio test (BFRT) in dual simplex
+- `python/src/bindings.cpp` — nanobind module exposing core API
+- `python/tests/test_api.py` — pytest tests for the Python interface
+- Build with `-DMIPX_BUILD_PYTHON=ON`
 
-## Documentation
+### Performance benchmarks (`tests/perf/`)
 
-- `README.md` — project overview, build, usage
-- `docs/roadmap.md` — implementation plan with dependency graph and technical notes
-- `CLAUDE.md` — this file
+Regression gates and benchmark scripts for Netlib LP, MIPLIB MIP, Mittelman, and dual simplex. Key scripts:
 
-## Agent Coordination
+- `run_full_gate.sh` — full performance gate
+- `run_dual_perf_gate.sh` — dual simplex regression gate
+- `run_mip_regression_gate.sh` — MIP regression gate
+- `check_regression.py` — shared regression checking logic
 
-The roadmap (docs/roadmap.md) defines steps 1–15 with explicit dependencies and
-parallel opportunities marked with ⚡.
+## Project-specific conventions
 
-**Before suggesting or starting any step:**
-1. Check open branches: `git branch -a`
-2. Check open PRs: `gh pr list`
-3. Check for running agents on this machine (background tasks, worktrees)
-4. Never start a step that another agent has an open branch or PR for
-5. Prefer the lowest-numbered unblocked, unclaimed step
-6. When multiple steps can run in parallel, suggest launching them concurrently
-
-## Fullgate
-
-When the user says **"fullgate"**, run this sequence in order:
-
-1. **Feature branch** — create one if not already on a feature branch
-2. **Create PR** — if no PR exists for the current branch
-3. **Sync main** — pull latest main and merge into the current feature branch, resolve conflicts
-4. **Tests** — check if new/updated tests are needed and add them
-5. **Update docs** — update docs/roadmap.md, README.md as needed
-6. **Push & update PR**
-7. **Review** — thoroughly review the PR (code quality, correctness, style, tests, performance)
-8. **Build** — `cmake --build build -j$(nproc)`
-9. **Test** — `ctest --test-dir build -j$(nproc)`
-10. **Push & update PR** again with any fixes
-11. **Finalize** — if nothing more to do: squash-merge the PR, delete feature branch (local + remote), pull main, switch to main
+- CSR-primary sparse storage; lazy CSC built on demand — never store both eagerly.
+- Forrest-Tomlin LU updates, not product-form inverse.
+- Dual simplex uses Devex pricing + bound flipping ratio test (BFRT).
+- Debug builds enable ASan + UBSan automatically.
+- No external solver dependencies — everything from scratch.
+- CUDA code lives alongside CPU code in the same directories (`.cu` files).
