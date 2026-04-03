@@ -1,17 +1,17 @@
 #pragma once
 
+#include "mipx/bnb_node.h"
+#include "mipx/core.h"
+#include "mipx/dual_simplex.h"
+#include "mipx/lp_problem.h"
+#include "mipx/symmetry.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <span>
 #include <utility>
 #include <vector>
-
-#include "mipx/bnb_node.h"
-#include "mipx/core.h"
-#include "mipx/dual_simplex.h"
-#include "mipx/lp_problem.h"
-#include "mipx/symmetry.h"
 
 namespace mipx {
 
@@ -32,8 +32,7 @@ public:
 
     /// Select a fractional integer variable to branch on.
     /// Returns the variable index, or -1 if all integer variables are integral.
-    virtual Index select(std::span<const Real> primal_values,
-                         std::span<const VarType> var_types,
+    virtual Index select(std::span<const Real> primal_values, std::span<const VarType> var_types,
                          std::span<const Real> col_lower,
                          std::span<const Real> col_upper) const = 0;
 };
@@ -41,19 +40,15 @@ public:
 /// Branch on the variable with fractionality closest to 0.5.
 class MostFractionalBranching : public BranchingRule {
 public:
-    Index select(std::span<const Real> primal_values,
-                 std::span<const VarType> var_types,
-                 std::span<const Real> col_lower,
-                 std::span<const Real> col_upper) const override;
+    Index select(std::span<const Real> primal_values, std::span<const VarType> var_types,
+                 std::span<const Real> col_lower, std::span<const Real> col_upper) const override;
 };
 
 /// Branch on the first fractional integer variable found.
 class FirstFractionalBranching : public BranchingRule {
 public:
-    Index select(std::span<const Real> primal_values,
-                 std::span<const VarType> var_types,
-                 std::span<const Real> col_lower,
-                 std::span<const Real> col_upper) const override;
+    Index select(std::span<const Real> primal_values, std::span<const VarType> var_types,
+                 std::span<const Real> col_lower, std::span<const Real> col_upper) const override;
 };
 
 struct BranchingSelection {
@@ -78,11 +73,17 @@ public:
 
     void reset(Index num_cols);
     void setReliabilityThreshold(Int t) { reliability_threshold_ = std::max<Int>(1, t); }
-    void setStrongBranchMaxCandidates(Int c) { strong_branch_max_candidates_ = std::max<Int>(1, c); }
+    void setStrongBranchMaxCandidates(Int c) {
+        strong_branch_max_candidates_ = std::max<Int>(1, c);
+    }
     void setStrongBranchProbeBudget(Int b) { strong_branch_probe_budget_ = std::max<Int>(2, b); }
     [[nodiscard]] Int strongBranchProbeBudget() const { return strong_branch_probe_budget_; }
-    void setStrongBranchIterLimit(Int iters) { strong_branch_iter_limit_ = std::max<Int>(1, iters); }
-    void setPseudocostFallback(Real fallback) { pseudocost_fallback_ = std::max<Real>(1e-8, fallback); }
+    void setStrongBranchIterLimit(Int iters) {
+        strong_branch_iter_limit_ = std::max<Int>(1, iters);
+    }
+    void setPseudocostFallback(Real fallback) {
+        pseudocost_fallback_ = std::max<Real>(1e-8, fallback);
+    }
     void setSymmetryManager(const SymmetryManager* manager) { symmetry_manager_ = manager; }
 
     [[nodiscard]] bool isReliable(Index var) const;
@@ -93,14 +94,10 @@ public:
 
     void updatePseudoCost(Index var, bool up_direction, Real gain_per_unit);
 
-    BranchingSelection select(DualSimplexSolver& lp,
-                              const LpProblem& problem,
-                              std::span<const Real> primal_values,
-                              std::span<const Real> col_lower,
-                              std::span<const Real> col_upper,
-                              Real node_objective,
-                              bool force_strong_branch,
-                              BranchingTelemetry& telemetry);
+    BranchingSelection select(DualSimplexSolver& lp, const LpProblem& problem,
+                              std::span<const Real> primal_values, std::span<const Real> col_lower,
+                              std::span<const Real> col_upper, Real node_objective,
+                              bool force_strong_branch, BranchingTelemetry& telemetry);
 
 private:
     struct PseudoCost {
@@ -130,11 +127,14 @@ private:
     [[nodiscard]] static Real blendScore(Real frac, Real pseudo_score);
 
     const SymmetryManager* symmetry_manager_ = nullptr;
-    [[nodiscard]] bool isCanonicalCandidate(Index var,
-                                            std::span<const Real> primal_values) const {
-        if (symmetry_manager_ == nullptr) return true;
+    [[nodiscard]] bool isCanonicalCandidate(Index var, std::span<const Real> primal_values) const {
+        if (symmetry_manager_ == nullptr) {
+            return true;
+        }
         const Index canon = symmetry_manager_->canonical(var);
-        if (canon == var) return true;
+        if (canon == var) {
+            return true;
+        }
         return isIntegral(primal_values[canon]);
     }
 
@@ -149,8 +149,6 @@ private:
 
 /// Create two child nodes by branching on variable branch_var with value branch_val.
 /// Left child: x_j <= floor(branch_val), right child: x_j >= ceil(branch_val).
-std::pair<BnbNode, BnbNode> createChildren(BnbNode parent,
-                                            Index branch_var,
-                                            Real branch_val);
+std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val);
 
 }  // namespace mipx

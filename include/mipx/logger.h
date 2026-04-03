@@ -35,19 +35,17 @@ public:
     }
 
     /// Check if logging is enabled.  Relaxed load — essentially free.
-    [[nodiscard]] bool enabled() const noexcept {
-        return enabled_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] bool enabled() const noexcept { return enabled_.load(std::memory_order_relaxed); }
 
     /// Enable or disable all output.
-    void setEnabled(bool e) noexcept {
-        enabled_.store(e, std::memory_order_relaxed);
-    }
+    void setEnabled(bool e) noexcept { enabled_.store(e, std::memory_order_relaxed); }
 
     /// Printf-style logging.
     /// Fast path: format on stack, then atomic write().
     void log(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
-        if (!enabled_.load(std::memory_order_relaxed)) return;
+        if (!enabled_.load(std::memory_order_relaxed)) {
+            return;
+        }
 
         // Format into stack buffer — no lock, no allocation.
         char buf[4096];
@@ -56,20 +54,25 @@ public:
         int len = std::vsnprintf(buf, sizeof(buf), fmt, args);
         va_end(args);
 
-        if (len <= 0) return;
-        if (len >= static_cast<int>(sizeof(buf))) len = sizeof(buf) - 1;
+        if (len <= 0) {
+            return;
+        }
+        if (len >= static_cast<int>(sizeof(buf))) {
+            len = sizeof(buf) - 1;
+        }
 
         writeBuf(buf, static_cast<std::size_t>(len));
     }
 
     /// Format a count with SI suffixes: 1234 -> "1234", 12345 -> "12k", 1234567 -> "1.2M".
     static void formatCount(int64_t count, char* buf, std::size_t buf_size) {
-        if (count < 0) count = -count;
+        if (count < 0) {
+            count = -count;
+        }
         if (count >= 1'000'000) {
             std::snprintf(buf, buf_size, "%.1fM", static_cast<double>(count) / 1e6);
         } else if (count >= 10'000) {
-            std::snprintf(buf, buf_size, "%lldk",
-                          static_cast<long long>(count / 1000));
+            std::snprintf(buf, buf_size, "%lldk", static_cast<long long>(count / 1000));
         } else {
             std::snprintf(buf, buf_size, "%lld", static_cast<long long>(count));
         }

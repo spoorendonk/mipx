@@ -1,15 +1,15 @@
 #pragma once
 
-#include <atomic>
-#include <chrono>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/lp_solver.h"
 #include "mipx/lu.h"
 #include "mipx/sparse_matrix.h"
 #include "mipx/work_units.h"
+
+#include <atomic>
+#include <chrono>
+#include <vector>
 
 namespace mipx {
 
@@ -119,10 +119,8 @@ public:
     std::vector<BasisStatus> getBasis() const override;
     void setBasis(std::span<const BasisStatus> basis) override;
 
-    void addRows(std::span<const Index> starts,
-                 std::span<const Index> indices,
-                 std::span<const Real> values,
-                 std::span<const Real> lower,
+    void addRows(std::span<const Index> starts, std::span<const Index> indices,
+                 std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
     void removeRows(std::span<const Index> rows) override;
 
@@ -138,7 +136,10 @@ public:
 
     /// Access work unit counter (includes LU work).
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
-    void resetWorkUnits() { work_.reset(); lu_.resetWorkUnits(); }
+    void resetWorkUnits() {
+        work_.reset();
+        lu_.resetWorkUnits();
+    }
 
     /// Get a tableau row for basis position `basis_pos` in external (unscaled) space.
     /// Returns a dense vector of size num_cols + num_rows (structural + slacks).
@@ -148,7 +149,9 @@ public:
 
     /// Get the basis position of a variable, or -1 if nonbasic.
     [[nodiscard]] Index basisPosition(Index var) const {
-        if (var < 0 || var >= static_cast<Index>(basis_pos_.size())) return -1;
+        if (var < 0 || var >= static_cast<Index>(basis_pos_.size())) {
+            return -1;
+        }
         return basis_pos_[var];
     }
 
@@ -192,17 +195,17 @@ private:
     Index num_rows_ = 0;
     Sense sense_ = Sense::Minimize;
     Real obj_offset_ = 0.0;
-    std::vector<Real> obj_;           // size num_cols
-    std::vector<Real> col_lower_;     // size num_cols
-    std::vector<Real> col_upper_;     // size num_cols
-    std::vector<Real> row_lower_;     // size num_rows
-    std::vector<Real> row_upper_;     // size num_rows
-    SparseMatrix matrix_{0, 0};       // original constraint matrix
-    SparseMatrix augmented_{0, 0};    // [A | I]
+    std::vector<Real> obj_;         // size num_cols
+    std::vector<Real> col_lower_;   // size num_cols
+    std::vector<Real> col_upper_;   // size num_cols
+    std::vector<Real> row_lower_;   // size num_rows
+    std::vector<Real> row_upper_;   // size num_rows
+    SparseMatrix matrix_{0, 0};     // original constraint matrix
+    SparseMatrix augmented_{0, 0};  // [A | I]
 
     // Scaling factors.
-    std::vector<Real> row_scale_;     // size num_rows
-    std::vector<Real> col_scale_;     // size num_cols
+    std::vector<Real> row_scale_;  // size num_rows
+    std::vector<Real> col_scale_;  // size num_cols
     bool scaled_ = false;
 
     // Basis representation.
