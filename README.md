@@ -16,13 +16,13 @@ On Netlib LP instances, mipx is roughly 2-5x slower than HiGHS on medium problem
 | **Dual simplex** | Devex pricing, bound-flipping ratio test, Forrest-Tomlin LU, SIMD kernels |
 | **Barrier** | Interior-point with CPU and GPU (cuDSS) backends |
 | **PDLP** | First-order primal-dual method with CPU and CUDA paths |
-| **Branch-and-bound** | Best-first / depth-first node selection, reliability branching with pseudocosts |
+| **Branch-and-bound** | Best-first, depth-first, best-estimate node selection, reliability branching with pseudocosts |
 | **Cutting planes** | Gomory MIR, cover, clique, zero-half, implied bound, mixing cuts |
 | **Presolve** | Variable fixing, singleton elimination, dual fixing, coefficient tightening, bounds propagation |
 | **Heuristics** | Rounding, diving, feasibility pump, RINS, RENS, local branching |
 | **Parallel search** | TBB-based tree exploration with deterministic and opportunistic modes |
 | **Symmetry** | Orbit detection, symmetry-breaking constraints, canonical branching |
-| **Exact refinement** | Optional rational-arithmetic LP repair for numerical certification |
+| **Exact refinement** | Optional extended-precision LP repair for numerical certification |
 | **Concurrent root** | Race dual simplex, barrier, and PDLP at root with cooperative stop |
 | **Python API** | nanobind bindings for model I/O and solve |
 
