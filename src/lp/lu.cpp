@@ -827,6 +827,11 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         }
     }
 
+    // Reset EMA density predictions (fresh factorization).
+    for (int s = 0; s < kNumSolveStages; ++s) {
+        ema_density_[s] = 0.0;
+    }
+
     // Count work: total nonzeros stored in L and U.
     work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()));
 }
@@ -890,14 +895,24 @@ void SparseLU::applyFT(std::span<Real> x) const {
 void SparseLU::applyFTTranspose(std::span<Real> x) const {
     // (E^{-1})^T * x in reverse order.
     // (E^{-1})^T: x'[i] stays for i != p, x'[p] = (x[p] - sum d[i]*x[i]) / d[p].
+    // Tracks output density via EMA (stage 3) to guide upstream solve decisions.
+    if (num_updates_ == 0) {
+        return;
+    }
+
+    const Index n = static_cast<Index>(x.size());
+
     for (Index u = num_updates_ - 1; u >= 0; --u) {
         Index pos = ft_pivot_pos_[u];
         Real sum = 0.0;
         if (ft_is_dense_[u] != 0) {
+            // Dense-stored eta: use SIMD-accelerated dense dot product.
             Index dense_off = ft_dense_offset_[u];
             const Real* dense = ft_dense_value_.data() + dense_off;
             sum = denseDot(dense, x);
         } else {
+            // Sparse-stored eta: use indexed dot product (only touches eta's
+            // nonzero positions, efficient regardless of input density).
             const Index start = ft_start_[u];
             const Index end = ft_start_[u + 1];
             for (Index k = start; k < end; ++k) {
@@ -905,6 +920,19 @@ void SparseLU::applyFTTranspose(std::span<Real> x) const {
             }
         }
         x[pos] = (x[pos] - sum) * ft_pivot_inv_[u];
+    }
+
+    // Count output nonzeros and update EMA for BTRAN FT-transpose density (stage 3).
+    Index output_nnz = 0;
+    for (Index i = 0; i < n; ++i) {
+        if (std::abs(x[i]) > kZeroTol) {
+            ++output_nnz;
+        }
+    }
+    {
+        const Real actual_density =
+            static_cast<Real>(output_nnz) / static_cast<Real>(std::max<Index>(n, 1));
+        ema_density_[3] = kEmaAlpha * actual_density + (1.0 - kEmaAlpha) * ema_density_[3];
     }
 }
 
@@ -938,6 +966,90 @@ void SparseLU::solveUTranspose(std::span<Real> x) const {
     }
 }
 
+Index SparseLU::solveUTransposeSparse(std::span<Real> x) const {
+    // Hyper-sparse forward substitution with U^T using reachability.
+    // Only process steps reachable from the initial nonzero positions.
+    if (static_cast<Index>(sparse_epoch_.size()) < dim_) {
+        sparse_epoch_.resize(dim_, 0U);
+    }
+    ++sparse_epoch_id_;
+    if (sparse_epoch_id_ == 0U) {
+        std::fill(sparse_epoch_.begin(), sparse_epoch_.begin() + dim_, 0U);
+        sparse_epoch_id_ = 1U;
+    }
+    sparse_steps_.clear();
+
+    // Seed: all steps with nonzero x[step].
+    for (Index step = 0; step < dim_; ++step) {
+        if (std::abs(x[step]) > kZeroTol) {
+            sparse_epoch_[static_cast<std::size_t>(step)] = sparse_epoch_id_;
+            sparse_steps_.push_back(step);
+        }
+    }
+
+    // Forward reachability: step j scatters into u_col_[k] for its row entries.
+    // So if step j is active, all columns it touches become active.
+    for (std::size_t idx = 0; idx < sparse_steps_.size(); ++idx) {
+        Index step = sparse_steps_[idx];
+        for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
+            Index col = u_col_[k];
+            if (sparse_epoch_[static_cast<std::size_t>(col)] != sparse_epoch_id_) {
+                sparse_epoch_[static_cast<std::size_t>(col)] = sparse_epoch_id_;
+                sparse_steps_.push_back(col);
+            }
+        }
+    }
+
+    // Sort reachable steps and process in forward order.
+    std::sort(sparse_steps_.begin(), sparse_steps_.end());
+
+    const Index bailout_threshold =
+        static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_) * 2.0);
+    Index out_nnz = 0;
+
+    std::size_t sorted_idx = 0;
+    for (; sorted_idx < sparse_steps_.size(); ++sorted_idx) {
+        Index step = sparse_steps_[sorted_idx];
+        x[step] *= u_diag_inv_[step];
+        Real val = x[step];
+        if (std::abs(val) > kZeroTol) {
+            ++out_nnz;
+            if (out_nnz > bailout_threshold) {
+                // Mid-solve bailout: finish remaining steps with dense path.
+                ++sorted_idx;
+                break;
+            }
+        }
+        if (val == 0.0) {
+            continue;
+        }
+        for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
+            x[u_col_[k]] -= u_val_[k] * val;
+        }
+    }
+
+    // If we bailed out, finish remaining reachable steps densely.
+    if (sorted_idx < sparse_steps_.size()) {
+        // Process remaining reachable steps.
+        for (; sorted_idx < sparse_steps_.size(); ++sorted_idx) {
+            Index step = sparse_steps_[sorted_idx];
+            x[step] *= u_diag_inv_[step];
+            Real val = x[step];
+            if (val == 0.0) {
+                continue;
+            }
+            if (std::abs(val) > kZeroTol) {
+                ++out_nnz;
+            }
+            for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
+                x[u_col_[k]] -= u_val_[k] * val;
+            }
+        }
+    }
+
+    return out_nnz;
+}
+
 void SparseLU::ftran(std::span<Real> rhs) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
@@ -963,11 +1075,16 @@ void SparseLU::ftran(std::span<Real> rhs) const {
         }
     }
 
-    // Step 2: Apply L^{-1}. Use a hyper-sparse reach solve when rhs is sparse.
+    // Step 2: Apply L^{-1}. Use EMA-predicted density or measured density to
+    // choose between hyper-sparse reachability solve and dense sequential scan.
+    const Real predicted_l_density = ema_density_[0];
     bool use_hypersparse_l =
         dim_ >= kHyperSparseMinDim && !eta_index_.empty() &&
-        work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
+        (predicted_l_density > 0.0
+             ? predicted_l_density < kHyperSparseMaxDensity
+             : work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_)));
 
+    Index l_out_nnz = work_nnz;
     if (use_hypersparse_l) {
         if (static_cast<Index>(sparse_epoch_.size()) < dim_) {
             sparse_epoch_.resize(dim_, 0U);
@@ -1005,15 +1122,30 @@ void SparseLU::ftran(std::span<Real> rhs) const {
             }
         }
 
+        // Mid-solve bailout threshold: switch to dense if nonzero count exceeds this.
+        const Index bailout_threshold =
+            static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_) * 2.0);
+        bool bailed_out = false;
+
         if (max_step >= min_step) {
             const Index range_len = max_step - min_step + 1;
             const Index reach_nnz = static_cast<Index>(sparse_steps_.size());
             if (range_len <= 4 * reach_nnz) {
+                l_out_nnz = 0;
+                Index bailout_step = max_step + 1;
                 for (Index step = min_step; step <= max_step; ++step) {
                     if (sparse_epoch_[static_cast<std::size_t>(step)] != sparse_epoch_id_) {
                         continue;
                     }
                     Real wk = work[step];
+                    if (std::abs(wk) > kZeroTol) {
+                        ++l_out_nnz;
+                        if (l_out_nnz > bailout_threshold) {
+                            bailout_step = step + 1;
+                            bailed_out = true;
+                            break;
+                        }
+                    }
                     if (std::abs(wk) <= kZeroTol) {
                         continue;
                     }
@@ -1021,15 +1153,52 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
                     }
                 }
+                // Dense fallback for remaining steps after bailout.
+                if (bailed_out) {
+                    for (Index step = bailout_step; step < dim_; ++step) {
+                        Real wk = work[step];
+                        if (wk == 0.0) {
+                            continue;
+                        }
+                        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                            work[eta_target_[k]] -= eta_value_[k] * wk;
+                        }
+                    }
+                }
             } else {
                 std::sort(sparse_steps_.begin(), sparse_steps_.end());
-                for (Index step : sparse_steps_) {
+                l_out_nnz = 0;
+                std::size_t bailout_idx = sparse_steps_.size();
+                for (std::size_t si = 0; si < sparse_steps_.size(); ++si) {
+                    Index step = sparse_steps_[si];
                     Real wk = work[step];
+                    if (std::abs(wk) > kZeroTol) {
+                        ++l_out_nnz;
+                        if (l_out_nnz > bailout_threshold) {
+                            // Find the next step value for dense fallback.
+                            bailout_idx = si + 1;
+                            bailed_out = true;
+                            break;
+                        }
+                    }
                     if (std::abs(wk) <= kZeroTol) {
                         continue;
                     }
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
+                    }
+                }
+                // Dense fallback for remaining steps after bailout.
+                if (bailed_out && bailout_idx < sparse_steps_.size()) {
+                    Index resume_from = sparse_steps_[bailout_idx];
+                    for (Index step = resume_from; step < dim_; ++step) {
+                        Real wk = work[step];
+                        if (wk == 0.0) {
+                            continue;
+                        }
+                        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                            work[eta_target_[k]] -= eta_value_[k] * wk;
+                        }
                     }
                 }
             }
@@ -1044,6 +1213,20 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                 work[eta_target_[k]] -= eta_value_[k] * wk;
             }
         }
+        // Count output nonzeros for EMA.
+        l_out_nnz = 0;
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                ++l_out_nnz;
+            }
+        }
+    }
+
+    // Update EMA for FTRAN L-solve density (stage 0).
+    {
+        const Real actual_density =
+            static_cast<Real>(l_out_nnz) / static_cast<Real>(std::max<Index>(dim_, 1));
+        ema_density_[0] = kEmaAlpha * actual_density + (1.0 - kEmaAlpha) * ema_density_[0];
     }
 
     // Step 3: Solve U * y = work (backward substitution).
@@ -1092,19 +1275,52 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
     }
 
     // Step 3: Solve U^T * z = w (forward substitution).
-    solveUTranspose(work);
-
-    // Step 4: Apply L^{-T}. Use reverse-reach hyper-sparse solve when possible.
-    Index work_nnz = 0;
+    // Use hyper-sparse path when input is sparse enough, guided by EMA prediction.
+    Index ut_input_nnz = 0;
     for (Index step = 0; step < dim_; ++step) {
         if (std::abs(work[step]) > kZeroTol) {
-            ++work_nnz;
+            ++ut_input_nnz;
         }
     }
+
+    const Real predicted_ut_density = ema_density_[2];
+    const bool use_hypersparse_ut =
+        dim_ >= kHyperSparseMinDim && !u_col_.empty() &&
+        (predicted_ut_density > 0.0 ? predicted_ut_density < kHyperSparseMaxDensity
+                                    : ut_input_nnz <= static_cast<Index>(kHyperSparseMaxDensity *
+                                                                         static_cast<Real>(dim_)));
+
+    Index ut_out_nnz;
+    if (use_hypersparse_ut) {
+        ut_out_nnz = solveUTransposeSparse(work);
+    } else {
+        solveUTranspose(work);
+        ut_out_nnz = 0;
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                ++ut_out_nnz;
+            }
+        }
+    }
+
+    // Update EMA for BTRAN U^T-solve density (stage 2).
+    {
+        const Real actual_density =
+            static_cast<Real>(ut_out_nnz) / static_cast<Real>(std::max<Index>(dim_, 1));
+        ema_density_[2] = kEmaAlpha * actual_density + (1.0 - kEmaAlpha) * ema_density_[2];
+    }
+
+    // Step 4: Apply L^{-T}. Use reverse-reach hyper-sparse solve when possible,
+    // guided by EMA prediction for BTRAN L^T-solve (stage 1).
+    Index work_nnz = ut_out_nnz;
+    const Real predicted_lt_density = ema_density_[1];
     bool use_hypersparse_lt =
         dim_ >= kHyperSparseMinDim && !eta_index_.empty() &&
-        work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
+        (predicted_lt_density > 0.0
+             ? predicted_lt_density < kHyperSparseMaxDensity
+             : work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_)));
 
+    Index lt_out_nnz = work_nnz;
     if (use_hypersparse_lt) {
         if (static_cast<Index>(sparse_epoch_.size()) < dim_) {
             sparse_epoch_.resize(dim_, 0U);
@@ -1144,10 +1360,17 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
             }
         }
 
+        // Mid-solve bailout threshold.
+        const Index bailout_threshold =
+            static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_) * 2.0);
+        bool bailed_out = false;
+
         if (max_step >= min_step) {
             const Index range_len = max_step - min_step + 1;
             const Index reach_nnz = static_cast<Index>(sparse_steps_.size());
             if (range_len <= 4 * reach_nnz) {
+                lt_out_nnz = 0;
+                Index bailout_step = min_step - 1;
                 for (Index step = max_step; step >= min_step; --step) {
                     if (sparse_epoch_[static_cast<std::size_t>(step)] != sparse_epoch_id_) {
                         if (step == min_step) {
@@ -1160,19 +1383,58 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
                         sum += eta_value_[k] * work[eta_target_[k]];
                     }
                     work[step] -= sum;
+                    if (std::abs(work[step]) > kZeroTol) {
+                        ++lt_out_nnz;
+                        if (lt_out_nnz > bailout_threshold) {
+                            bailout_step = step - 1;
+                            bailed_out = true;
+                            break;
+                        }
+                    }
                     if (step == min_step) {
                         break;
                     }
                 }
+                // Dense fallback for remaining steps after bailout.
+                if (bailed_out) {
+                    for (Index step = bailout_step; step >= 0; --step) {
+                        Real sum = 0.0;
+                        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                            sum += eta_value_[k] * work[eta_target_[k]];
+                        }
+                        work[step] -= sum;
+                    }
+                }
             } else {
                 std::sort(sparse_steps_.begin(), sparse_steps_.end());
-                for (auto it = sparse_steps_.rbegin(); it != sparse_steps_.rend(); ++it) {
+                lt_out_nnz = 0;
+                auto it = sparse_steps_.rbegin();
+                for (; it != sparse_steps_.rend(); ++it) {
                     const Index step = *it;
                     Real sum = 0.0;
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         sum += eta_value_[k] * work[eta_target_[k]];
                     }
                     work[step] -= sum;
+                    if (std::abs(work[step]) > kZeroTol) {
+                        ++lt_out_nnz;
+                        if (lt_out_nnz > bailout_threshold) {
+                            ++it;
+                            bailed_out = true;
+                            break;
+                        }
+                    }
+                }
+                // Dense fallback for remaining steps after bailout.
+                if (bailed_out && it != sparse_steps_.rend()) {
+                    Index resume_to = *it;
+                    for (Index step = resume_to; step >= 0; --step) {
+                        Real sum = 0.0;
+                        for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                            sum += eta_value_[k] * work[eta_target_[k]];
+                        }
+                        work[step] -= sum;
+                    }
                 }
             }
         }
@@ -1184,6 +1446,20 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
             }
             work[step] -= sum;
         }
+        // Count output nonzeros for EMA.
+        lt_out_nnz = 0;
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                ++lt_out_nnz;
+            }
+        }
+    }
+
+    // Update EMA for BTRAN L^T-solve density (stage 1).
+    {
+        const Real actual_density =
+            static_cast<Real>(lt_out_nnz) / static_cast<Real>(std::max<Index>(dim_, 1));
+        ema_density_[1] = kEmaAlpha * actual_density + (1.0 - kEmaAlpha) * ema_density_[1];
     }
 
     // Step 5: y = P^T * work. y[row_perm[step]] = work[step].

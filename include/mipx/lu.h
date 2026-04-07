@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/work_units.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/work_units.h"
 
 namespace mipx {
 
@@ -36,12 +36,10 @@ public:
 
     /// Forrest-Tomlin rank-1 update: replace basis column at position `pivot_pos`
     /// with new column `entering_col` (given in terms of original row indices/values).
-    void update(Index pivot_pos, std::span<const Index> indices,
-                std::span<const Real> values);
+    void update(Index pivot_pos, std::span<const Index> indices, std::span<const Real> values);
     /// Forrest-Tomlin rank-1 update with pre-transformed column `d = B^{-1} a_q`.
     /// `transformed_col` is in basis-position order and must have size dimension().
-    void updateFromFtranColumn(Index pivot_pos,
-                               std::span<const Real> transformed_col);
+    void updateFromFtranColumn(Index pivot_pos, std::span<const Real> transformed_col);
 
     /// Check if refactorization is needed.
     [[nodiscard]] bool needsRefactorization() const;
@@ -66,7 +64,7 @@ private:
     /// Apply Forrest-Tomlin update etas forward.
     void applyFT(std::span<Real> x) const;
 
-    /// Apply Forrest-Tomlin update etas in reverse.
+    /// Apply Forrest-Tomlin update etas in reverse, with density-guided switching.
     void applyFTTranspose(std::span<Real> x) const;
 
     void btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const;
@@ -76,6 +74,10 @@ private:
 
     /// Forward solve with U^T.
     void solveUTranspose(std::span<Real> x) const;
+
+    /// Hyper-sparse forward solve with U^T: only process columns reachable from
+    /// the nonzero positions in x. Returns the number of output nonzeros.
+    Index solveUTransposeSparse(std::span<Real> x) const;
 
     Index dim_ = 0;
 
@@ -94,8 +96,9 @@ private:
     std::vector<Real> eta_value_;
     // Elimination-order target index for each eta entry (same size as eta_index_).
     std::vector<Index> eta_target_;
-    // Reverse adjacency: for elimination index t, eta_rev_src_[eta_rev_start_[t]..eta_rev_start_[t+1])
-    // are steps s such that eta has an edge s -> t.
+    // Reverse adjacency: for elimination index t,
+    // eta_rev_src_[eta_rev_start_[t]..eta_rev_start_[t+1]) are steps s such that eta has an edge s
+    // -> t.
     std::vector<Index> eta_rev_start_;
     std::vector<Index> eta_rev_src_;
 
@@ -140,6 +143,13 @@ private:
     static constexpr Real kHyperSparseMaxDensity = 0.10;
     static constexpr Index kFtDenseMinDim = 512;
     static constexpr Real kFtDenseThreshold = 0.85;
+
+    /// Exponential moving average of solve density per stage.
+    /// Stages: 0 = FTRAN L-solve, 1 = BTRAN L^T-solve, 2 = BTRAN U^T-solve,
+    ///         3 = BTRAN FT-transpose.
+    static constexpr int kNumSolveStages = 4;
+    static constexpr Real kEmaAlpha = 0.15;  // smoothing factor
+    mutable Real ema_density_[kNumSolveStages] = {0.0, 0.0, 0.0, 0.0};
 
     Real max_u_entry_ = 0.0;  // track growth
     Real ft_drop_tol_ = 1e-13;
