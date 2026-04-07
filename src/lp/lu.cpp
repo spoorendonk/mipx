@@ -1,5 +1,7 @@
 #include "mipx/lu.h"
 
+#include "mipx/sparse_matrix.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -8,8 +10,6 @@
 #include <numeric>
 #include <stdexcept>
 #include <vector>
-
-#include "mipx/sparse_matrix.h"
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -80,9 +80,13 @@ inline Real denseDot(const Real* a, std::span<const Real> x) {
 //  Markowitz LU factorization
 // --------------------------------------------------------------------------
 
-void SparseLU::factorize(const SparseMatrix& matrix,
-                         std::span<const Index> basis_cols) {
+void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basis_cols) {
     static constexpr Index kFastPivotMinDim = 500;
+    // Maximum columns to inspect per nnz bucket in the general Markowitz search.
+    static constexpr Index kMaxColsPerBucket = 8;
+    // Accept a pivot early if its Markowitz cost is at or below this fraction of dim.
+    static constexpr Real kEarlyAcceptFraction = 0.05;
+
     dim_ = static_cast<Index>(basis_cols.size());
     num_updates_ = 0;
     max_u_entry_ = 0.0;
@@ -117,8 +121,13 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     for (Index j = 0; j < dim_; ++j) {
         basis_nnz_hint += static_cast<std::size_t>(matrix.col(basis_cols[j]).size());
     }
-    const std::size_t reserve_nnz =
-        std::max(dim_hint * static_cast<std::size_t>(4), basis_nnz_hint);
+    // Estimate fill-in: use a multiplier based on average column density.
+    // Denser matrices produce more fill; scale reservation accordingly.
+    const Real avg_col_nnz =
+        dim_hint > 0 ? static_cast<Real>(basis_nnz_hint) / static_cast<Real>(dim_hint) : 1.0;
+    // Fill multiplier: 2x for very sparse, up to 5x for denser matrices.
+    const std::size_t fill_mult = static_cast<std::size_t>(std::clamp(avg_col_nnz, 2.0, 5.0));
+    const std::size_t reserve_nnz = std::max(dim_hint * fill_mult, basis_nnz_hint * std::size_t{2});
     static thread_local std::vector<Index> tl_e_row;
     static thread_local std::vector<Index> tl_e_col;
     static thread_local std::vector<Real> tl_e_val;
@@ -151,6 +160,9 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     e_prev_row.reserve(reserve_nnz);
     e_prev_col.reserve(reserve_nnz);
     e_alive.reserve(reserve_nnz);
+
+    // Track alive entry count for compaction decisions.
+    Index alive_count = 0;
 
     // Head of linked list for each row/col (-1 = empty).
     static thread_local std::vector<Index> tl_row_head;
@@ -192,12 +204,11 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     col_bucket_prev.assign(static_cast<std::size_t>(dim_), -1);
     col_bucket_next.assign(static_cast<std::size_t>(dim_), -1);
 
-    auto bucketAdd = [](std::vector<Index>& head,
-                        std::vector<Index>& prev,
-                        std::vector<Index>& next,
-                        Index count,
-                        Index id) {
-        if (count <= 0) return;
+    auto bucketAdd = [](std::vector<Index>& head, std::vector<Index>& prev,
+                        std::vector<Index>& next, Index count, Index id) {
+        if (count <= 0) {
+            return;
+        }
         const std::size_t cs = static_cast<std::size_t>(count);
         const std::size_t ids = static_cast<std::size_t>(id);
         const Index first = head[cs];
@@ -209,17 +220,18 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         head[cs] = id;
     };
 
-    auto bucketRemove = [](std::vector<Index>& head,
-                           std::vector<Index>& prev,
-                           std::vector<Index>& next,
-                           Index count,
-                           Index id) {
-        if (count <= 0) return;
+    auto bucketRemove = [](std::vector<Index>& head, std::vector<Index>& prev,
+                           std::vector<Index>& next, Index count, Index id) {
+        if (count <= 0) {
+            return;
+        }
         const std::size_t cs = static_cast<std::size_t>(count);
         const std::size_t ids = static_cast<std::size_t>(id);
         const Index p = prev[ids];
         const Index n = next[ids];
-        if (p < 0 && n < 0 && head[cs] != id) return;
+        if (p < 0 && n < 0 && head[cs] != id) {
+            return;
+        }
         if (p >= 0) {
             next[static_cast<std::size_t>(p)] = n;
         } else {
@@ -242,8 +254,12 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         for (Index k = 0; k < colview.size(); ++k) {
             Index row = colview.indices[k];
             Real val = colview.values[k];
-            if (std::abs(val) < kZeroTol) continue;
-            if (row >= dim_) continue;  // skip rows outside basis dimension
+            if (std::abs(val) < kZeroTol) {
+                continue;
+            }
+            if (row >= dim_) {
+                continue;  // skip rows outside basis dimension
+            }
 
             Index eidx = static_cast<Index>(e_row.size());
             e_row.push_back(row);
@@ -254,6 +270,7 @@ void SparseLU::factorize(const SparseMatrix& matrix,
             e_prev_row.push_back(-1);
             e_prev_col.push_back(-1);
             e_alive.push_back(uint8_t{1});
+            ++alive_count;
 
             // Update row linked list.
             if (row_head[row] >= 0) {
@@ -304,8 +321,11 @@ void SparseLU::factorize(const SparseMatrix& matrix,
 
     // Helper: remove entry from row and col lists.
     auto removeEntry = [&](Index eidx) {
-        if (e_alive[static_cast<std::size_t>(eidx)] == 0) return;
+        if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+            return;
+        }
         e_alive[static_cast<std::size_t>(eidx)] = uint8_t{0};
+        --alive_count;
         const Index row = e_row[static_cast<std::size_t>(eidx)];
         const Index col = e_col[static_cast<std::size_t>(eidx)];
         const Index prev_in_row = e_prev_row[static_cast<std::size_t>(eidx)];
@@ -361,6 +381,7 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         e_prev_row.push_back(-1);
         e_prev_col.push_back(-1);
         e_alive.push_back(uint8_t{1});
+        ++alive_count;
         if (row_head[row] >= 0) {
             e_prev_row[static_cast<std::size_t>(row_head[row])] = eidx;
         }
@@ -421,11 +442,17 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // First check singleton columns from count buckets (Markowitz = 0).
         for (Index j = col_bucket_head[1]; j >= 0;
              j = col_bucket_next[static_cast<std::size_t>(j)]) {
-            if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != 1) continue;
+            if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != 1) {
+                continue;
+            }
             const Index eidx = col_head[j];
-            if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                continue;
+            }
             const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
-            if (absval <= kZeroTol) continue;
+            if (absval <= kZeroTol) {
+                continue;
+            }
             const long long m =
                 static_cast<long long>(row_count[e_row[static_cast<std::size_t>(eidx)]] - 1) *
                 static_cast<long long>(col_count[j] - 1);
@@ -440,9 +467,13 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         if (best_markowitz > 0) {
             for (Index i = row_bucket_head[1]; i >= 0;
                  i = row_bucket_next[static_cast<std::size_t>(i)]) {
-                if (row_active[static_cast<std::size_t>(i)] == 0 || row_count[i] != 1) continue;
+                if (row_active[static_cast<std::size_t>(i)] == 0 || row_count[i] != 1) {
+                    continue;
+                }
                 const Index eidx = row_head[i];
-                if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                    continue;
+                }
                 const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
                 if (absval > kZeroTol) {
                     best_markowitz = 0;
@@ -456,23 +487,44 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // General search over increasing column-nnz buckets.
         if (best_markowitz > 0) {
             const bool use_fast_large_pivot = dim_ >= kFastPivotMinDim;
+            // Dynamic early-accept: accept a pivot whose Markowitz cost is
+            // small relative to the remaining active dimension.
+            const Index remaining = dim_ - step;
+            const long long early_accept = std::max(
+                static_cast<long long>(1),
+                static_cast<long long>(kEarlyAcceptFraction * static_cast<Real>(remaining)));
+
             for (Index nnz = 2; nnz <= dim_; ++nnz) {
-                if (col_bucket_head[static_cast<std::size_t>(nnz)] < 0) continue;
+                if (col_bucket_head[static_cast<std::size_t>(nnz)] < 0) {
+                    continue;
+                }
 
                 const long long col_factor = static_cast<long long>(nnz - 1);
                 // If even the best possible row-factor (=1) is already worse, stop.
-                if (col_factor > best_markowitz) break;
+                if (col_factor > best_markowitz) {
+                    break;
+                }
 
-                for (Index j = col_bucket_head[static_cast<std::size_t>(nnz)];
-                     j >= 0; j = col_bucket_next[static_cast<std::size_t>(j)]) {
-                    if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != nnz) continue;
+                Index cols_inspected = 0;
+                for (Index j = col_bucket_head[static_cast<std::size_t>(nnz)]; j >= 0;
+                     j = col_bucket_next[static_cast<std::size_t>(j)]) {
+                    if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != nnz) {
+                        continue;
+                    }
+                    // Limit columns inspected per bucket to control search time.
+                    if (++cols_inspected > kMaxColsPerBucket && best_entry >= 0) {
+                        break;
+                    }
+
                     if (use_fast_large_pivot) {
                         // Large-dimension fast path: evaluate one strongest candidate per column.
                         Index best_col_entry = -1;
                         Real col_max = 0.0;
                         for (Index eidx = col_head[j]; eidx >= 0;
                              eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-                            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                            if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                                continue;
+                            }
                             const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
                             if (absval > col_max) {
                                 col_max = absval;
@@ -483,8 +535,7 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                             const Index ri = e_row[static_cast<std::size_t>(best_col_entry)];
                             const long long m =
                                 static_cast<long long>(row_count[ri] - 1) * col_factor;
-                            if (m < best_markowitz ||
-                                (m == best_markowitz && col_max > best_abs)) {
+                            if (m < best_markowitz || (m == best_markowitz && col_max > best_abs)) {
                                 best_markowitz = m;
                                 best_entry = best_col_entry;
                                 best_abs = col_max;
@@ -498,22 +549,28 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                     for (Index eidx = col_head[j]; eidx >= 0;
                          eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
                         if (e_alive[static_cast<std::size_t>(eidx)] != 0) {
-                            col_max = std::max(col_max, std::abs(e_val[static_cast<std::size_t>(eidx)]));
+                            col_max =
+                                std::max(col_max, std::abs(e_val[static_cast<std::size_t>(eidx)]));
                         }
                     }
                     const Real threshold = kPivotTol * col_max;
                     for (Index eidx = col_head[j]; eidx >= 0;
                          eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-                        if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+                        if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                            continue;
+                        }
                         const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
-                        if (absval < threshold) continue;
+                        if (absval < threshold) {
+                            continue;
+                        }
 
                         const Index ri = e_row[static_cast<std::size_t>(eidx)];
                         const long long row_factor = static_cast<long long>(row_count[ri] - 1);
-                        if (row_factor > (best_markowitz / col_factor)) continue;
+                        if (row_factor > (best_markowitz / col_factor)) {
+                            continue;
+                        }
                         const long long m = row_factor * col_factor;
-                        if (m < best_markowitz ||
-                            (m == best_markowitz && absval > best_abs)) {
+                        if (m < best_markowitz || (m == best_markowitz && absval > best_abs)) {
                             best_markowitz = m;
                             best_entry = eidx;
                             best_abs = absval;
@@ -521,8 +578,10 @@ void SparseLU::factorize(const SparseMatrix& matrix,
                     }
                 }
 
-                // Early exit if we found near-singleton quality pivot.
-                if (best_markowitz <= 1) break;
+                // Early exit if we found a pivot with low enough Markowitz cost.
+                if (best_markowitz <= early_accept) {
+                    break;
+                }
             }
         }
 
@@ -544,7 +603,9 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         // Gather all entries in the pivot row.
         for (Index eidx = row_head[pivot_row]; eidx >= 0;
              eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
-            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                continue;
+            }
             Index c = e_col[static_cast<std::size_t>(eidx)];
             if (c != pivot_col) {
                 u_col_.push_back(c);  // will remap to elimination order later
@@ -566,7 +627,9 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         work_indices.clear();
         for (Index eidx = row_head[pivot_row]; eidx >= 0;
              eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
-            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                continue;
+            }
             Index c = e_col[static_cast<std::size_t>(eidx)];
             if (c != pivot_col) {
                 work[c] = e_val[static_cast<std::size_t>(eidx)];
@@ -578,11 +641,14 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         rows_to_update.clear();
         for (Index eidx = col_head[pivot_col]; eidx >= 0;
              eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-            if (e_alive[static_cast<std::size_t>(eidx)] == 0) continue;
+            if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                continue;
+            }
             const Index row = e_row[static_cast<std::size_t>(eidx)];
-            if (row == pivot_row) continue;
-            rows_to_update.emplace_back(row,
-                                        e_val[static_cast<std::size_t>(eidx)] / pivot_val);
+            if (row == pivot_row) {
+                continue;
+            }
+            rows_to_update.emplace_back(row, e_val[static_cast<std::size_t>(eidx)] / pivot_val);
         }
 
         // Store L eta vector.
@@ -594,13 +660,14 @@ void SparseLU::factorize(const SparseMatrix& matrix,
 
         // Update rows.
         for (auto& [ri, mult] : rows_to_update) {
-
             // Build a temporary col->entry index map for this row, reused across rows.
             row_touched_cols.clear();
             for (Index eidx = row_head[ri]; eidx >= 0;
                  eidx = e_next_row[static_cast<std::size_t>(eidx)]) {
                 if (e_alive[static_cast<std::size_t>(eidx)] == 0 ||
-                    e_col[static_cast<std::size_t>(eidx)] == pivot_col) continue;
+                    e_col[static_cast<std::size_t>(eidx)] == pivot_col) {
+                    continue;
+                }
                 Index c = e_col[static_cast<std::size_t>(eidx)];
                 row_entry_for_col[c] = eidx;
                 row_touched_cols.push_back(c);
@@ -655,15 +722,75 @@ void SparseLU::factorize(const SparseMatrix& matrix,
         }
 
         if (row_count[pivot_row] > 0) {
-            bucketRemove(row_bucket_head, row_bucket_prev, row_bucket_next,
-                         row_count[pivot_row], pivot_row);
+            bucketRemove(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[pivot_row],
+                         pivot_row);
         }
         if (col_count[pivot_col] > 0) {
-            bucketRemove(col_bucket_head, col_bucket_prev, col_bucket_next,
-                         col_count[pivot_col], pivot_col);
+            bucketRemove(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[pivot_col],
+                         pivot_col);
         }
         deactivate(row_active, pivot_row);
         deactivate(col_active, pivot_col);
+
+        // Compact fill-in storage when alive ratio drops too low.
+        // This reclaims dead entries and improves cache locality.
+        const auto total_entries = static_cast<Index>(e_row.size());
+        if (alive_count > 0 &&
+            static_cast<long long>(total_entries) > 4LL * static_cast<long long>(alive_count) &&
+            total_entries > static_cast<Index>(reserve_nnz)) {
+            // Build a compacted copy: remap alive entries to contiguous storage.
+            // First, build an old-to-new index map.
+            static thread_local std::vector<Index> tl_old_to_new;
+            auto& old_to_new = tl_old_to_new;
+            old_to_new.assign(static_cast<std::size_t>(total_entries), -1);
+            Index new_count = 0;
+            for (Index e = 0; e < total_entries; ++e) {
+                if (e_alive[static_cast<std::size_t>(e)] != 0) {
+                    old_to_new[static_cast<std::size_t>(e)] = new_count++;
+                }
+            }
+            // Compact arrays in-place.
+            for (Index e = 0; e < total_entries; ++e) {
+                const Index ne = old_to_new[static_cast<std::size_t>(e)];
+                if (ne < 0) {
+                    continue;
+                }
+                const auto es = static_cast<std::size_t>(e);
+                const auto nes = static_cast<std::size_t>(ne);
+                e_row[nes] = e_row[es];
+                e_col[nes] = e_col[es];
+                e_val[nes] = e_val[es];
+                e_alive[nes] = uint8_t{1};
+                // Remap linked list pointers.
+                const Index pr = e_prev_row[es];
+                const Index nr = e_next_row[es];
+                const Index pc = e_prev_col[es];
+                const Index nc = e_next_col[es];
+                e_prev_row[nes] = pr >= 0 ? old_to_new[static_cast<std::size_t>(pr)] : -1;
+                e_next_row[nes] = nr >= 0 ? old_to_new[static_cast<std::size_t>(nr)] : -1;
+                e_prev_col[nes] = pc >= 0 ? old_to_new[static_cast<std::size_t>(pc)] : -1;
+                e_next_col[nes] = nc >= 0 ? old_to_new[static_cast<std::size_t>(nc)] : -1;
+            }
+            // Truncate to new size.
+            const auto ns = static_cast<std::size_t>(new_count);
+            e_row.resize(ns);
+            e_col.resize(ns);
+            e_val.resize(ns);
+            e_next_row.resize(ns);
+            e_next_col.resize(ns);
+            e_prev_row.resize(ns);
+            e_prev_col.resize(ns);
+            e_alive.resize(ns);
+            // Update row/col heads.
+            for (Index i = 0; i < dim_; ++i) {
+                if (row_head[i] >= 0) {
+                    row_head[i] = old_to_new[static_cast<std::size_t>(row_head[i])];
+                }
+                if (col_head[i] >= 0) {
+                    col_head[i] = old_to_new[static_cast<std::size_t>(col_head[i])];
+                }
+            }
+        }
 
         // Clean up work vector.
         for (Index c : work_indices) {
@@ -701,8 +828,7 @@ void SparseLU::factorize(const SparseMatrix& matrix,
     }
 
     // Count work: total nonzeros stored in L and U.
-    work_.count(static_cast<uint64_t>(eta_index_.size()) +
-                static_cast<uint64_t>(u_col_.size()));
+    work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()));
 }
 
 // --------------------------------------------------------------------------
@@ -715,7 +841,9 @@ void SparseLU::applyL(std::span<Real> x) const {
         Index start = eta_start_[step];
         Index end = eta_start_[step + 1];
         Real pivot_x = x[row_perm_[step]];
-        if (pivot_x == 0.0) continue;
+        if (pivot_x == 0.0) {
+            continue;
+        }
         for (Index k = start; k < end; ++k) {
             x[eta_index_[k]] -= eta_value_[k] * pivot_x;
         }
@@ -742,7 +870,9 @@ void SparseLU::applyFT(std::span<Real> x) const {
         Index pos = ft_pivot_pos_[u];
         x[pos] *= ft_pivot_inv_[u];
         Real xp = x[pos];
-        if (xp == 0.0) continue;
+        if (xp == 0.0) {
+            continue;
+        }
         if (ft_is_dense_[u] != 0) {
             Index dense_off = ft_dense_offset_[u];
             const Real* dense = ft_dense_value_.data() + dense_off;
@@ -797,7 +927,9 @@ void SparseLU::solveUTranspose(std::span<Real> x) const {
     for (Index step = 0; step < dim_; ++step) {
         x[step] *= u_diag_inv_[step];
         Real val = x[step];
-        if (val == 0.0) continue;
+        if (val == 0.0) {
+            continue;
+        }
         Index start = u_start_[step];
         Index end = u_start_[step + 1];
         for (Index k = start; k < end; ++k) {
@@ -810,10 +942,8 @@ void SparseLU::ftran(std::span<Real> rhs) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
     // Count work: L nnz + U nnz + FT nnz + permutation overhead.
-    work_.count(static_cast<uint64_t>(eta_index_.size()) +
-                static_cast<uint64_t>(u_col_.size()) +
-                static_cast<uint64_t>(ft_index_.size()) +
-                ft_dense_nnz_ +
+    work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()) +
+                static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_ +
                 static_cast<uint64_t>(dim_) * 2);
 
     // B = P^T * L * U * Q^T, so B^{-1} = Q * U^{-1} * L^{-1} * P.
@@ -835,8 +965,7 @@ void SparseLU::ftran(std::span<Real> rhs) const {
 
     // Step 2: Apply L^{-1}. Use a hyper-sparse reach solve when rhs is sparse.
     bool use_hypersparse_l =
-        dim_ >= kHyperSparseMinDim &&
-        !eta_index_.empty() &&
+        dim_ >= kHyperSparseMinDim && !eta_index_.empty() &&
         work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
 
     if (use_hypersparse_l) {
@@ -885,7 +1014,9 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                         continue;
                     }
                     Real wk = work[step];
-                    if (std::abs(wk) <= kZeroTol) continue;
+                    if (std::abs(wk) <= kZeroTol) {
+                        continue;
+                    }
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
                     }
@@ -894,7 +1025,9 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                 std::sort(sparse_steps_.begin(), sparse_steps_.end());
                 for (Index step : sparse_steps_) {
                     Real wk = work[step];
-                    if (std::abs(wk) <= kZeroTol) continue;
+                    if (std::abs(wk) <= kZeroTol) {
+                        continue;
+                    }
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
                     }
@@ -904,7 +1037,9 @@ void SparseLU::ftran(std::span<Real> rhs) const {
     } else {
         for (Index step = 0; step < dim_; ++step) {
             Real wk = work[step];
-            if (wk == 0.0) continue;
+            if (wk == 0.0) {
+                continue;
+            }
             for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                 work[eta_target_[k]] -= eta_value_[k] * wk;
             }
@@ -931,15 +1066,12 @@ void SparseLU::btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) cons
     btranImpl(rhs, &nonzero_rows);
 }
 
-void SparseLU::btranImpl(std::span<Real> rhs,
-                         std::vector<Index>* nonzero_rows) const {
+void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
     // Count work: same structure as ftran.
-    work_.count(static_cast<uint64_t>(eta_index_.size()) +
-                static_cast<uint64_t>(u_col_.size()) +
-                static_cast<uint64_t>(ft_index_.size()) +
-                ft_dense_nnz_ +
+    work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()) +
+                static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_ +
                 static_cast<uint64_t>(dim_) * 2);
 
     // B'^{-T} = B^{-T} * E_1^{-T} * ... * E_n^{-T}.
@@ -970,8 +1102,7 @@ void SparseLU::btranImpl(std::span<Real> rhs,
         }
     }
     bool use_hypersparse_lt =
-        dim_ >= kHyperSparseMinDim &&
-        !eta_index_.empty() &&
+        dim_ >= kHyperSparseMinDim && !eta_index_.empty() &&
         work_nnz <= static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_));
 
     if (use_hypersparse_lt) {
@@ -1019,7 +1150,9 @@ void SparseLU::btranImpl(std::span<Real> rhs,
             if (range_len <= 4 * reach_nnz) {
                 for (Index step = max_step; step >= min_step; --step) {
                     if (sparse_epoch_[static_cast<std::size_t>(step)] != sparse_epoch_id_) {
-                        if (step == min_step) break;
+                        if (step == min_step) {
+                            break;
+                        }
                         continue;
                     }
                     Real sum = 0.0;
@@ -1027,7 +1160,9 @@ void SparseLU::btranImpl(std::span<Real> rhs,
                         sum += eta_value_[k] * work[eta_target_[k]];
                     }
                     work[step] -= sum;
-                    if (step == min_step) break;
+                    if (step == min_step) {
+                        break;
+                    }
                 }
             } else {
                 std::sort(sparse_steps_.begin(), sparse_steps_.end());
@@ -1071,8 +1206,7 @@ void SparseLU::btranImpl(std::span<Real> rhs,
 //  Forrest-Tomlin update
 // --------------------------------------------------------------------------
 
-void SparseLU::update(Index pivot_pos,
-                      std::span<const Index> indices,
+void SparseLU::update(Index pivot_pos, std::span<const Index> indices,
                       std::span<const Real> values) {
     assert(pivot_pos >= 0 && pivot_pos < dim_);
 
@@ -1100,8 +1234,7 @@ void SparseLU::update(Index pivot_pos,
     updateFromFtranColumn(pivot_pos, d);
 }
 
-void SparseLU::updateFromFtranColumn(
-    Index pivot_pos, std::span<const Real> transformed_col) {
+void SparseLU::updateFromFtranColumn(Index pivot_pos, std::span<const Real> transformed_col) {
     assert(pivot_pos >= 0 && pivot_pos < dim_);
     assert(static_cast<Index>(transformed_col.size()) == dim_);
 
@@ -1123,7 +1256,9 @@ void SparseLU::updateFromFtranColumn(
         if (track_update_touched && v != 0.0) {
             update_touched_.push_back(i);
         }
-        if (i == pivot_pos) continue;
+        if (i == pivot_pos) {
+            continue;
+        }
         if (std::abs(v) > drop_tol) {
             ++update_nnz;
         }
@@ -1139,9 +1274,10 @@ void SparseLU::updateFromFtranColumn(
         ft_is_dense_.push_back(1);
         ft_dense_value_.resize(static_cast<std::size_t>(dense_off + dim_), 0.0);
         for (Index i = 0; i < dim_; ++i) {
-            if (i == pivot_pos) continue;
-            const Real v =
-                (std::abs(transformed_col[i]) > drop_tol) ? transformed_col[i] : 0.0;
+            if (i == pivot_pos) {
+                continue;
+            }
+            const Real v = (std::abs(transformed_col[i]) > drop_tol) ? transformed_col[i] : 0.0;
             ft_dense_value_[static_cast<std::size_t>(dense_off + i)] = v;
             if (v != 0.0) {
                 max_u_entry_ = std::max(max_u_entry_, std::abs(v));
@@ -1153,7 +1289,9 @@ void SparseLU::updateFromFtranColumn(
         ft_is_dense_.push_back(0);
         // Store eta: non-pivot entries of d.
         for (Index i = 0; i < dim_; ++i) {
-            if (i == pivot_pos) continue;
+            if (i == pivot_pos) {
+                continue;
+            }
             if (std::abs(transformed_col[i]) > drop_tol) {
                 ft_index_.push_back(i);
                 ft_value_.push_back(transformed_col[i]);
@@ -1176,8 +1314,12 @@ void SparseLU::updateFromFtranColumn(
 }
 
 bool SparseLU::needsRefactorization() const {
-    if (num_updates_ >= max_updates_) return true;
-    if (max_u_entry_ > kGrowthLimit) return true;
+    if (num_updates_ >= max_updates_) {
+        return true;
+    }
+    if (max_u_entry_ > kGrowthLimit) {
+        return true;
+    }
     return false;
 }
 
