@@ -9,7 +9,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mipx/automorphism.h"
+#include "mipx/orbital_fixing.h"
+#include "mipx/schreier_sims.h"
 #include "mipx/sparse_matrix.h"
+#include "mipx/symbreak.h"
 
 namespace mipx {
 
@@ -50,13 +54,11 @@ struct ColumnSignatureHash {
 
 }  // namespace
 
-void SymmetryManager::detect(const LpProblem& problem) {
-    orbits_.clear();
-    canonical_.assign(static_cast<std::size_t>(problem.num_cols), -1);
-    orbital_fixes_.clear();
-    detect_work_units_ = 0.0;
-    cut_work_units_ = 0.0;
+// ---------------------------------------------------------------------------
+// Column-signature detection (original fast path)
+// ---------------------------------------------------------------------------
 
+void SymmetryManager::detectByColumnSignature(const LpProblem& problem) {
     std::unordered_map<ColumnSignature, std::vector<Index>, ColumnSignatureHash> buckets;
 
     for (Index j = 0; j < problem.num_cols; ++j) {
@@ -85,7 +87,88 @@ void SymmetryManager::detect(const LpProblem& problem) {
               [](const std::vector<Index>& a, const std::vector<Index>& b) {
                   return a.front() < b.front();
               });
+}
 
+// ---------------------------------------------------------------------------
+// Graph automorphism detection (new, complete)
+// ---------------------------------------------------------------------------
+
+void SymmetryManager::detectByAutomorphism(const LpProblem& problem) {
+    // Build incidence graph.
+    ColoredGraph graph = buildIncidenceGraph(problem);
+    detect_work_units_ += static_cast<double>(graph.num_vertices);
+
+    // Compute automorphisms.
+    automorphism_result_ = computeAutomorphisms(graph, problem.num_cols);
+    detect_work_units_ += automorphism_result_.work_units;
+
+    // Use the variable orbits from automorphism computation.
+    orbits_ = automorphism_result_.orbits;
+    used_full_detection_ = true;
+
+    // Build Schreier-Sims structure if we have generators.
+    if (!automorphism_result_.generators.empty()) {
+        schreier_sims_.build(automorphism_result_.generators,
+                             graph.num_vertices,
+                             problem.num_cols);
+        detect_work_units_ += schreier_sims_.buildWorkUnits();
+
+        // Set up orbital fixer.
+        orbital_fixer_.setSchreierSims(&schreier_sims_);
+
+        // Set up isomorphism pruner.
+        isomorphism_pruner_.setGenerators(automorphism_result_.generators,
+                                          problem.num_cols);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void SymmetryManager::detect(const LpProblem& problem) {
+    orbits_.clear();
+    canonical_.assign(static_cast<std::size_t>(problem.num_cols), -1);
+    orbital_fixes_.clear();
+    detect_work_units_ = 0.0;
+    cut_work_units_ = 0.0;
+    used_full_detection_ = false;
+    automorphism_result_ = {};
+
+    detectByColumnSignature(problem);
+    buildCanonicalMapping();
+}
+
+void SymmetryManager::detectFull(const LpProblem& problem) {
+    orbits_.clear();
+    canonical_.assign(static_cast<std::size_t>(problem.num_cols), -1);
+    orbital_fixes_.clear();
+    detect_work_units_ = 0.0;
+    cut_work_units_ = 0.0;
+    used_full_detection_ = false;
+    automorphism_result_ = {};
+
+    // Estimate graph size: num_cols + num_rows + nnz (intermediate vertices).
+    Index estimated_vertices = problem.num_cols + problem.num_rows +
+                               problem.matrix.numNonzeros();
+
+    if (estimated_vertices <= kMaxGraphVertices) {
+        detectByAutomorphism(problem);
+    } else {
+        // Fall back to column-signature for large problems.
+        detectByColumnSignature(problem);
+    }
+
+    // If automorphism found fewer orbits than column-signature would,
+    // also run column-signature and merge results.
+    if (orbits_.empty()) {
+        detectByColumnSignature(problem);
+    }
+
+    buildCanonicalMapping();
+}
+
+void SymmetryManager::buildCanonicalMapping() {
     for (const auto& orbit : orbits_) {
         detect_work_units_ += static_cast<double>(orbit.size());
         Index canon = orbit.front();
@@ -161,6 +244,60 @@ Index SymmetryManager::addSymmetryCuts(LpProblem& problem) {
     }
     problem.num_rows = problem.matrix.numRows();
     return added;
+}
+
+Index SymmetryManager::addSymbreakConstraints(LpProblem& problem) {
+    if (!used_full_detection_ || automorphism_result_.generators.empty()) {
+        return 0;
+    }
+
+    auto constraints = symbreak_generator_.generate(
+        automorphism_result_.generators,
+        problem.col_type,
+        problem.num_cols);
+
+    Index added = SymbreakGenerator::addConstraints(problem, constraints);
+    cut_work_units_ += static_cast<double>(added) * 2.0;
+    return added;
+}
+
+Index SymmetryManager::aggregateConstraints(LpProblem& problem) {
+    if (!used_full_detection_ || automorphism_result_.generators.empty()) {
+        return 0;
+    }
+    return SymbreakGenerator::aggregateSymmetricConstraints(
+        problem, automorphism_result_.generators);
+}
+
+OrbitalFixingResult SymmetryManager::applyOrbitalFixing(
+    std::vector<Real>& col_lower,
+    std::vector<Real>& col_upper,
+    const std::vector<VarType>& col_type,
+    const std::vector<Index>& fixed_vars,
+    Index num_cols) const {
+    if (used_full_detection_ && schreier_sims_.isBuilt()) {
+        return orbital_fixer_.fix(col_lower, col_upper, col_type,
+                                  fixed_vars, num_cols);
+    }
+    // Fall back to canonical-based fixing.
+    return OrbitalFixer::fixFromCanonical(col_lower, col_upper,
+                                          canonical_, num_cols);
+}
+
+bool SymmetryManager::canPruneByIsomorphism(
+    const std::vector<Real>& col_lower,
+    const std::vector<Real>& col_upper) const {
+    return isomorphism_pruner_.canPrune(col_lower, col_upper);
+}
+
+void SymmetryManager::recordExplored(
+    const std::vector<Real>& col_lower,
+    const std::vector<Real>& col_upper) {
+    isomorphism_pruner_.recordExplored(col_lower, col_upper);
+}
+
+Index SymmetryManager::numIsomorphismPrunes() const {
+    return isomorphism_pruner_.numPruned();
 }
 
 }  // namespace mipx

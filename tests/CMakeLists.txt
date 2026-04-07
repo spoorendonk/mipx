@@ -18,6 +18,7 @@ add_executable(mipx-tests
     test_cuts.cpp
     test_cut_manager.cpp
     test_parallel.cpp
+    test_symmetry.cpp
     test_barrier.cpp
     test_pdlp.cpp
     test_exact_refinement.cpp

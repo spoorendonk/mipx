@@ -18,8 +18,12 @@ add_library(mipx STATIC
     mip/variable_bounds.cpp
     mip/probing.cpp
     mip/node_queue.cpp
+    mip/automorphism.cpp
     mip/branching.cpp
     mip/mip_solver.cpp
+    mip/orbital_fixing.cpp
+    mip/schreier_sims.cpp
+    mip/symbreak.cpp
     heuristics/rounding.cpp
     heuristics/diving.cpp
     heuristics/rins.cpp

@@ -3504,11 +3504,10 @@ MipResult MipSolver::solve() {
             symmetry_stats_.cut_work_units = cut_work;
             if (verbose_) {
                 const auto& orbits = symmetry_manager_.orbits();
-                log_.log(
-                    "Symmetry detected %zu orbit%s (canonical branching enforced, "
-                    "%d symmetry cut%s added).\n",
-                    orbits.size(), orbits.size() == 1 ? "" : "s", symmetry_cuts_added,
-                    symmetry_cuts_added == 1 ? "" : "s");
+                log_.log("Symmetry detected %zu orbit%s ("
+                         "%d symmetry cut%s added).\n",
+                         orbits.size(), orbits.size() == 1 ? "" : "s", symmetry_cuts_added,
+                         symmetry_cuts_added == 1 ? "" : "s");
             }
         }
     } else {

@@ -160,7 +160,12 @@ struct MipTreePresolveStats {
 struct MipSymmetryStats {
     Int orbits = 0;
     Int cuts_added = 0;
+    Int symbreak_added = 0;
+    Int constraints_aggregated = 0;
+    Int generators = 0;
+    Int isomorphism_prunes = 0;
     bool cuts_applied = false;
+    bool used_full_detection = false;
     double detect_work_units = 0.0;
     double cut_work_units = 0.0;
 };
