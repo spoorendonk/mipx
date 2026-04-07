@@ -140,13 +140,68 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 }
 
 // ---------------------------------------------------------------------------
-//  Scaling: equilibration
+//  Scaling
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// Compute the ratio max|a_ij| / min|a_ij| over all nonzeros.
+Real coefficientRange(const SparseMatrix& A) {
+    Real absmax = 0.0;
+    Real absmin = std::numeric_limits<Real>::infinity();
+    auto vals = A.csr_values();
+    for (Real v : vals) {
+        Real a = std::abs(v);
+        if (a > 1e-30) {
+            absmax = std::max(absmax, a);
+            absmin = std::min(absmin, a);
+        }
+    }
+    if (absmin <= 0.0 || absmax <= 0.0)
+        return 1.0;
+    return absmax / absmin;
+}
+
+ScalingStrategy selectScalingStrategy(Real range) {
+    if (range < 1e4)
+        return ScalingStrategy::Equilibration;
+    if (range < 1e8)
+        return ScalingStrategy::GeometricMean;
+    return ScalingStrategy::Ruiz;
+}
+
+}  // namespace
 
 void DualSimplexSolver::computeScaling() {
     row_scale_.assign(num_rows_, 1.0);
     col_scale_.assign(num_cols_, 1.0);
 
+    ScalingStrategy strategy = options_.scaling_strategy;
+    if (strategy == ScalingStrategy::Auto) {
+        Real range = coefficientRange(matrix_);
+        strategy = selectScalingStrategy(range);
+    }
+
+    switch (strategy) {
+        case ScalingStrategy::Equilibration:
+            computeEquilibrationScaling();
+            break;
+        case ScalingStrategy::GeometricMean:
+            computeGeometricMeanScaling();
+            break;
+        case ScalingStrategy::Ruiz:
+            computeRuizScaling();
+            break;
+        case ScalingStrategy::Auto:
+            // Already resolved above; unreachable.
+            computeEquilibrationScaling();
+            break;
+    }
+
+    scaled_ = true;
+}
+
+void DualSimplexSolver::computeEquilibrationScaling() {
     // Row scaling: max absolute value in each row.
     for (Index i = 0; i < num_rows_; ++i) {
         auto rv = matrix_.row(i);
@@ -170,8 +225,133 @@ void DualSimplexSolver::computeScaling() {
             col_scale_[j] = 1.0 / maxval;
         }
     }
+}
 
-    scaled_ = true;
+void DualSimplexSolver::computeGeometricMeanScaling() {
+    const Int max_passes = options_.scaling_max_passes;
+
+    // Work on CSR data to avoid repeated row() calls.
+    auto vals = matrix_.csr_values();
+    auto cols = matrix_.csr_col_indices();
+    auto rows = matrix_.csr_row_starts();
+    std::vector<Real> values(vals.begin(), vals.end());
+
+    for (Int pass = 0; pass < max_passes; ++pass) {
+        // Row scaling: geometric mean of absolute nonzero values.
+        std::vector<Real> r(num_rows_);
+        for (Index i = 0; i < num_rows_; ++i) {
+            Real mx = 0.0;
+            Real mn = std::numeric_limits<Real>::infinity();
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                Real a = std::abs(values[p]);
+                if (a > 1e-30) {
+                    mx = std::max(mx, a);
+                    mn = std::min(mn, a);
+                }
+            }
+            r[i] = (mx > 1e-30 && mn < std::numeric_limits<Real>::infinity())
+                       ? 1.0 / std::sqrt(mx * mn)
+                       : 1.0;
+        }
+
+        // Apply row scaling to working values.
+        for (Index i = 0; i < num_rows_; ++i) {
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                values[p] *= r[i];
+            }
+        }
+
+        // Column scaling: geometric mean of absolute nonzero values (after row scaling).
+        std::vector<Real> cs_max(num_cols_, 0.0);
+        std::vector<Real> cs_min(num_cols_, std::numeric_limits<Real>::infinity());
+        for (Index i = 0; i < num_rows_; ++i) {
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                Real a = std::abs(values[p]);
+                if (a > 1e-30) {
+                    cs_max[cols[p]] = std::max(cs_max[cols[p]], a);
+                    cs_min[cols[p]] = std::min(cs_min[cols[p]], a);
+                }
+            }
+        }
+        std::vector<Real> cs(num_cols_);
+        for (Index j = 0; j < num_cols_; ++j) {
+            cs[j] = (cs_max[j] > 1e-30 && cs_min[j] < std::numeric_limits<Real>::infinity())
+                        ? 1.0 / std::sqrt(cs_max[j] * cs_min[j])
+                        : 1.0;
+        }
+
+        // Apply column scaling to working values.
+        for (Index i = 0; i < num_rows_; ++i) {
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                values[p] *= cs[cols[p]];
+            }
+        }
+
+        // Accumulate into overall scale factors.
+        for (Index i = 0; i < num_rows_; ++i)
+            row_scale_[i] *= r[i];
+        for (Index j = 0; j < num_cols_; ++j)
+            col_scale_[j] *= cs[j];
+
+        // Check convergence: if the range is close to 1, stop early.
+        Real mx = 0.0;
+        Real mn = std::numeric_limits<Real>::infinity();
+        for (Real v : values) {
+            Real a = std::abs(v);
+            if (a > 1e-30) {
+                mx = std::max(mx, a);
+                mn = std::min(mn, a);
+            }
+        }
+        if (mn > 1e-30 && mx / mn < 16.0)
+            break;
+    }
+}
+
+void DualSimplexSolver::computeRuizScaling() {
+    const Int max_passes = options_.scaling_max_passes;
+
+    // Work on CSR data directly, adapted from barrier.cpp Ruiz implementation.
+    auto vals = matrix_.csr_values();
+    auto cols = matrix_.csr_col_indices();
+    auto rows = matrix_.csr_row_starts();
+    std::vector<Real> values(vals.begin(), vals.end());
+
+    for (Int pass = 0; pass < max_passes; ++pass) {
+        // Row scaling: r_i = 1 / sqrt(max_j |A[i,j]|)
+        std::vector<Real> r(num_rows_);
+        for (Index i = 0; i < num_rows_; ++i) {
+            Real mx = 0.0;
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                mx = std::max(mx, std::abs(values[p]));
+            }
+            r[i] = (mx > 1e-30) ? 1.0 / std::sqrt(mx) : 1.0;
+        }
+
+        // Column scaling: cs_j = 1 / sqrt(max_i |r_i * A[i,j]|)
+        std::vector<Real> cs(num_cols_, 0.0);
+        for (Index i = 0; i < num_rows_; ++i) {
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                cs[cols[p]] = std::max(cs[cols[p]], std::abs(values[p]) * r[i]);
+            }
+        }
+        for (Index j = 0; j < num_cols_; ++j) {
+            cs[j] = (cs[j] > 1e-30) ? 1.0 / std::sqrt(cs[j]) : 1.0;
+        }
+
+        // Apply: A[i,j] *= r[i] * cs[j]
+        for (Index i = 0; i < num_rows_; ++i) {
+            for (Index p = rows[i]; p < rows[i + 1]; ++p) {
+                values[p] *= r[i] * cs[cols[p]];
+            }
+        }
+
+        // Accumulate into overall scale factors.
+        for (Index i = 0; i < num_rows_; ++i)
+            row_scale_[i] *= r[i];
+        for (Index j = 0; j < num_cols_; ++j)
+            col_scale_[j] *= cs[j];
+    }
 }
 
 void DualSimplexSolver::applyScaling() {
@@ -890,30 +1070,28 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> pivot_col(num_rows_, 0.0);
     SparseWorkVector btran_work(num_rows_);
     SparseWorkVector pricing_reduced_cost(numVars());
-    const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
-    // Static entering-score normalization for primal-feasible/dual-infeasible phase:
-    // score(k) = rc(k)^2 / col_norm_sq(k), where slacks have norm 1.
-    std::vector<Real> dual_phase_col_norm_sq;
-    if (use_dual_phase_norm_weight) {
-        dual_phase_col_norm_sq.assign(static_cast<std::size_t>(numVars()), 1.0);
-        std::fill(dual_phase_col_norm_sq.begin(),
-                  dual_phase_col_norm_sq.begin() + static_cast<std::size_t>(num_cols_), 0.0);
-        for (Index i = 0; i < num_rows_; ++i) {
-            auto rv = matrix_.row(i);
-            for (Index p = 0; p < rv.size(); ++p) {
-                const Index j = rv.indices[p];
-                const Real a = rv.values[p];
-                dual_phase_col_norm_sq[static_cast<std::size_t>(j)] += a * a;
-            }
-        }
-        for (Index j = 0; j < num_cols_; ++j) {
-            if (dual_phase_col_norm_sq[static_cast<std::size_t>(j)] <= kZeroTol) {
-                dual_phase_col_norm_sq[static_cast<std::size_t>(j)] = 1.0;
-            }
-            dual_phase_col_norm_sq[static_cast<std::size_t>(j)] =
-                std::sqrt(dual_phase_col_norm_sq[static_cast<std::size_t>(j)]);
+    // Column 2-norms for pivot quality scoring in ratio tests.
+    // col_norms[k] = ||a_k||_2 for structural columns, 1.0 for slacks.
+    std::vector<Real> col_norms(static_cast<std::size_t>(numVars()), 1.0);
+    std::fill(col_norms.begin(), col_norms.begin() + static_cast<std::size_t>(num_cols_), 0.0);
+    for (Index i = 0; i < num_rows_; ++i) {
+        auto rv = matrix_.row(i);
+        for (Index p = 0; p < rv.size(); ++p) {
+            const Index j = rv.indices[p];
+            const Real a = rv.values[p];
+            col_norms[static_cast<std::size_t>(j)] += a * a;
         }
     }
+    for (Index j = 0; j < num_cols_; ++j) {
+        Real& norm = col_norms[static_cast<std::size_t>(j)];
+        norm = (norm <= kZeroTol) ? 1.0 : std::sqrt(norm);
+    }
+    const bool use_dual_phase_norm_weight = num_rows_ >= 2000;
+    // Static entering-score normalization for primal-feasible/dual-infeasible phase:
+    // score(k) = rc(k)^2 / col_norm(k), where slacks have norm 1.
+    // Reuse col_norms which stores ||a_k||_2 (same data dual_phase_col_norm_sq used).
+    std::vector<Real>& dual_phase_col_norm_sq = col_norms;
+
     // Maintained sparse infeasible-row tracking for CHUZR.
     // infeasible_rows holds indices of rows currently primal-infeasible.
     // infeasible_flag[i] is true iff row i is in infeasible_rows.
@@ -1488,41 +1666,76 @@ LpResult DualSimplexSolver::solve() {
             }
 
             // Primal ratio test: find leaving variable.
+            // Two-pass adaptive Harris with pivot quality scoring.
             Index leaving_row_p = -1;
             Real min_step = kInf;
-            constexpr Real kPrimalHarrisTol = 1e-10;
-            Real best_leaving_pivot_abs = 0.0;
+            Real best_leaving_score = 0.0;
+
+            // Compute pivot column norm for relative pivot quality scoring.
+            Real pivot_col_norm = 0.0;
             for (Index i = 0; i < num_rows_; ++i) {
-                Real f = pivot_col[i] * delta_dir;
-                // x_B[i]_new = x_B[i]_old - f * step
-                if (std::abs(f) < kPivotTol)
-                    continue;
+                pivot_col_norm += pivot_col[i] * pivot_col[i];
+            }
+            pivot_col_norm = std::sqrt(pivot_col_norm);
+            if (pivot_col_norm <= kZeroTol)
+                pivot_col_norm = 1.0;
 
-                Index bvar = basis_[i];
-                Real lb = varLower(bvar);
-                Real ub = varUpper(bvar);
-                Real xval = primal_[bvar];
+            const Real min_rel_pivot = options_.harris_min_relative_pivot;
+            const Real harris_tight = options_.harris_tight_tol;
+            const Real harris_max = options_.harris_max_tol;
+            const Real harris_expand = options_.harris_expand_factor;
 
-                Real step;
-                if (f > 0) {
-                    // x_B[i] decreases: limited by lower bound.
-                    step = (lb == -kInf) ? kInf : (xval - lb) / f;
-                } else {
-                    // x_B[i] increases: limited by upper bound.
-                    step = (ub == kInf) ? kInf : (ub - xval) / (-f);
+            // Two-pass expanding tolerance: start tight, expand if no good
+            // candidate found, capped at harris_max.
+            for (Real harris_tol_p = harris_tight; harris_tol_p <= harris_max;
+                 harris_tol_p *= harris_expand) {
+                min_step = kInf;
+                leaving_row_p = -1;
+                best_leaving_score = 0.0;
+
+                for (Index i = 0; i < num_rows_; ++i) {
+                    Real f = pivot_col[i] * delta_dir;
+                    // x_B[i]_new = x_B[i]_old - f * step
+                    if (std::abs(f) < kPivotTol)
+                        continue;
+
+                    // Reject candidates with poor relative pivot quality.
+                    const Real abs_f = std::abs(f);
+                    const Real rel_pivot = abs_f / pivot_col_norm;
+                    if (options_.enable_adaptive_harris && rel_pivot < min_rel_pivot)
+                        continue;
+
+                    Index bvar = basis_[i];
+                    Real lb = varLower(bvar);
+                    Real ub = varUpper(bvar);
+                    Real xval = primal_[bvar];
+
+                    Real step;
+                    if (f > 0) {
+                        // x_B[i] decreases: limited by lower bound.
+                        step = (lb == -kInf) ? kInf : (xval - lb) / f;
+                    } else {
+                        // x_B[i] increases: limited by upper bound.
+                        step = (ub == kInf) ? kInf : (ub - xval) / (-f);
+                    }
+
+                    if (step < -kPrimalTol)
+                        continue;
+
+                    // Score by relative pivot size |alpha|/||column|| for stability.
+                    const Real score = rel_pivot;
+                    if (step + harris_tol_p < min_step) {
+                        min_step = step;
+                        leaving_row_p = i;
+                        best_leaving_score = score;
+                    } else if (step <= min_step + harris_tol_p && score > best_leaving_score) {
+                        leaving_row_p = i;
+                        best_leaving_score = score;
+                    }
                 }
 
-                if (step < -kPrimalTol)
-                    continue;
-                const Real abs_f = std::abs(f);
-                if (step + kPrimalHarrisTol < min_step) {
-                    min_step = step;
-                    leaving_row_p = i;
-                    best_leaving_pivot_abs = abs_f;
-                } else if (step <= min_step + kPrimalHarrisTol && abs_f > best_leaving_pivot_abs) {
-                    leaving_row_p = i;
-                    best_leaving_pivot_abs = abs_f;
-                }
+                if (leaving_row_p >= 0 || !options_.enable_adaptive_harris)
+                    break;
             }
 
             // Check entering variable's opposite bound.
@@ -1710,7 +1923,19 @@ LpResult DualSimplexSolver::solve() {
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
+        // Phase-aware Harris tolerance: wider early on, tighter near optimality.
         Real harris_tol = 1e-6;
+        if (options_.enable_adaptive_harris) {
+            if (current_pinf_count > 100) {
+                // Early phase: many infeasibilities, allow wider tolerance.
+                harris_tol = 1e-5;
+            } else if (current_pinf_count > 10) {
+                harris_tol = 1e-6;
+            } else {
+                // Near optimality: tighten for accuracy.
+                harris_tol = 1e-7;
+            }
+        }
 
         auto isEligible = [&](Index k, Real alpha) -> bool {
             if (std::abs(alpha) < kPivotTol)
@@ -1740,7 +1965,8 @@ LpResult DualSimplexSolver::solve() {
             Index nonbasic_pos;
             Real ratio;
             Real alpha;
-            Real gap;  // ub - lb, kInf if no finite opposite bound
+            Real gap;        // ub - lb, kInf if no finite opposite bound
+            Real rel_pivot;  // |alpha| / ||column|| for pivot quality
         };
         static thread_local std::vector<BfrtCand> bfrt_cands;
         bfrt_cands.clear();
@@ -1769,6 +1995,12 @@ LpResult DualSimplexSolver::solve() {
             Real alpha = pivot_row_alpha[k];
             if (!isEligible(k, alpha))
                 return;
+            // Pivot quality: |alpha| / ||column||.
+            const Real cnorm = col_norms[static_cast<std::size_t>(k)];
+            const Real rp = std::abs(alpha) / cnorm;
+            // Reject candidates with very poor relative pivot quality.
+            if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot)
+                return;
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
             Real gap = kInf;
             if (need_bfrt_gap_scan) {
@@ -1776,7 +2008,7 @@ LpResult DualSimplexSolver::solve() {
                 Real ub = upperBoundFast(k);
                 gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
             }
-            out.push_back({k, pos, ratio, alpha, gap});
+            out.push_back({k, pos, ratio, alpha, gap, rp});
         };
 
         auto collectCandidatesSerial = [&](Index offset, Index count) {
@@ -1800,6 +2032,10 @@ LpResult DualSimplexSolver::solve() {
                 const Real alpha = pivot_row_alpha[k];
                 if (!isEligible(k, alpha))
                     continue;
+                const Real cnorm = col_norms[static_cast<std::size_t>(k)];
+                const Real rp = std::abs(alpha) / cnorm;
+                if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot)
+                    continue;
                 Real ratio = std::abs(reducedCostForPricing(k) / alpha);
                 Real gap = kInf;
                 if (need_bfrt_gap_scan) {
@@ -1807,7 +2043,7 @@ LpResult DualSimplexSolver::solve() {
                     Real ub = upperBoundFast(k);
                     gap = (lb != -kInf && ub != kInf) ? (ub - lb) : kInf;
                 }
-                out.push_back({k, pos, ratio, alpha, gap});
+                out.push_back({k, pos, ratio, alpha, gap, rp});
             }
         };
 
@@ -1946,21 +2182,23 @@ LpResult DualSimplexSolver::solve() {
             Real enter_ratio = bfrt_cands[best_ci].ratio;
             Real harris_threshold = enter_ratio + harris_tol;
             entering_var = bfrt_cands[best_ci].var;
-            Real best_alpha_val = std::abs(bfrt_cands[best_ci].alpha);
+            Real best_pivot_score = bfrt_cands[best_ci].rel_pivot;
             Index best_pos = bfrt_cands[best_ci].nonbasic_pos;
 
             for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
                 const auto& c = bfrt_cands[ci];
                 if (c.ratio > harris_threshold)
                     continue;
-                Real abs_alpha = std::abs(c.alpha);
-                if (abs_alpha > best_alpha_val ||
-                    (abs_alpha == best_alpha_val && c.nonbasic_pos < best_pos)) {
-                    best_alpha_val = abs_alpha;
+                // Prefer candidates with better relative pivot quality.
+                if (c.rel_pivot > best_pivot_score ||
+                    (c.rel_pivot == best_pivot_score && c.nonbasic_pos < best_pos)) {
+                    best_pivot_score = c.rel_pivot;
                     best_pos = c.nonbasic_pos;
                     entering_var = c.var;
                 }
             }
+            // No BFRT flips in this path, reset high-flip counter.
+            bfrt_high_flip_iters_ = 0;
         } else {
             // Sort by ratio for BFRT sweep.
             // Keep legacy ordering when SIP scan is disabled to avoid behavior drift.
@@ -1991,9 +2229,14 @@ LpResult DualSimplexSolver::solve() {
 
             // BFRT sweep: flip bounded variables until the leaving variable's
             // infeasibility can be resolved by the next candidate entering.
+            // Numerical hygiene: track accumulated primal change and flip count.
             Real needed = std::abs(leaving_val - target);
             Real accumulated = 0.0;
+            Real accumulated_primal_change = 0.0;
+            Int flip_count = 0;
             Index entering_ci = -1;
+            const Real bfrt_max_change = options_.bfrt_max_accumulated_change;
+            const Int bfrt_max_flips = options_.bfrt_max_flips;
 
             for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
                 auto& c = bfrt_cands[ci];
@@ -2009,6 +2252,15 @@ LpResult DualSimplexSolver::solve() {
                     break;
                 }
 
+                // Numerical hygiene: stop flipping if accumulated primal
+                // change is too large or flip count exceeded.
+                if (options_.enable_adaptive_harris &&
+                    (accumulated_primal_change + c.gap > bfrt_max_change ||
+                     flip_count >= bfrt_max_flips)) {
+                    entering_ci = ci;
+                    break;
+                }
+
                 // Flip this variable to its opposite bound.
                 if (var_status_[c.var] == BasisStatus::AtLower) {
                     primal_[c.var] = upperBoundFast(c.var);
@@ -2019,24 +2271,34 @@ LpResult DualSimplexSolver::solve() {
                 }
                 has_flips = true;
                 accumulated += contribution;
+                accumulated_primal_change += c.gap;
+                ++flip_count;
             }
 
             if (entering_ci < 0) {
                 entering_ci = static_cast<Index>(bfrt_cands.size()) - 1;
             }
 
+            // Track high-flip iterations for early refactorization.
+            if (options_.enable_adaptive_harris &&
+                flip_count >= options_.bfrt_high_flip_refactor_threshold) {
+                ++bfrt_high_flip_iters_;
+            } else {
+                bfrt_high_flip_iters_ = 0;
+            }
+
             // Harris refinement: among candidates near the entering ratio,
-            // pick the one with largest |alpha| for numerical stability.
+            // pick the one with best relative pivot quality for numerical stability.
             Real enter_ratio = bfrt_cands[entering_ci].ratio;
             Real harris_threshold = enter_ratio + harris_tol;
             entering_var = bfrt_cands[entering_ci].var;
-            Real best_alpha_val = std::abs(bfrt_cands[entering_ci].alpha);
+            Real best_pivot_score_bfrt = bfrt_cands[entering_ci].rel_pivot;
 
             for (Index ci = entering_ci + 1; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
                 if (bfrt_cands[ci].ratio > harris_threshold)
                     break;
-                if (std::abs(bfrt_cands[ci].alpha) > best_alpha_val) {
-                    best_alpha_val = std::abs(bfrt_cands[ci].alpha);
+                if (bfrt_cands[ci].rel_pivot > best_pivot_score_bfrt) {
+                    best_pivot_score_bfrt = bfrt_cands[ci].rel_pivot;
                     entering_var = bfrt_cands[ci].var;
                 }
             }
@@ -2201,6 +2463,12 @@ LpResult DualSimplexSolver::solve() {
             degenerate_pivot_streak >= options_.adaptive_refactor_stall_pivots &&
             lu_.numUpdates() >= options_.adaptive_refactor_min_updates) {
             should_refactorize = true;
+        }
+        // Early refactorization after consecutive high-flip-count BFRT iterations.
+        if (!should_refactorize && options_.enable_adaptive_harris && bfrt_high_flip_iters_ >= 3 &&
+            lu_.numUpdates() >= 4) {
+            should_refactorize = true;
+            bfrt_high_flip_iters_ = 0;
         }
 
         if (should_refactorize) {

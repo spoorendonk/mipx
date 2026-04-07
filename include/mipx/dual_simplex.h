@@ -13,6 +13,13 @@
 
 namespace mipx {
 
+enum class ScalingStrategy {
+    Auto,           // Select based on coefficient range.
+    Equilibration,  // Single-pass max-norm equilibration (current default).
+    GeometricMean,  // Alternating geometric mean scaling passes.
+    Ruiz,           // Iterative Ruiz equilibration (infinity-norm).
+};
+
 struct DualSimplexOptions {
     // Pricing controls.
     bool enable_partial_pricing = false;
@@ -27,6 +34,22 @@ struct DualSimplexOptions {
     Real auto_bfrt_min_col_row_ratio = 4.0;
     Int partial_pricing_chunk_min = 512;
     Int partial_pricing_full_scan_freq = 25;
+
+    // Adaptive Harris ratio test controls.
+    bool enable_adaptive_harris = true;
+    Real harris_tight_tol = 1e-10;
+    Real harris_expand_factor = 10.0;
+    Real harris_max_tol = 1e-5;
+    // Minimum relative pivot size |alpha|/||column|| for pivot quality.
+    Real harris_min_relative_pivot = 1e-8;
+
+    // BFRT numerical hygiene controls.
+    // Maximum accumulated primal change from bound flips before stopping.
+    Real bfrt_max_accumulated_change = 1e6;
+    // Maximum number of bound flips per iteration before stopping.
+    Int bfrt_max_flips = 1000;
+    // Trigger early refactorization after iterations with many flips.
+    Int bfrt_high_flip_refactor_threshold = 50;
 
     // Refactorization controls.
     bool enable_adaptive_refactorization = true;
@@ -53,6 +76,8 @@ struct DualSimplexOptions {
 
     // Matrix/bound scaling.
     bool enable_scaling = true;
+    ScalingStrategy scaling_strategy = ScalingStrategy::Auto;
+    Int scaling_max_passes = 10;
 
     // Solve time limit for stand-alone LP usage. Negative means disabled.
     double max_solve_seconds = -1.0;
@@ -182,6 +207,9 @@ private:
 
     // Scaling.
     void computeScaling();
+    void computeEquilibrationScaling();
+    void computeGeometricMeanScaling();
+    void computeRuizScaling();
     void applyScaling();
     void unscaleResults();
 
@@ -255,6 +283,7 @@ private:
     WorkUnits work_;
     bool bound_perturb_active_ = false;
     Int bound_perturb_activations_ = 0;
+    Int bfrt_high_flip_iters_ = 0;           // consecutive iterations with high flip count
     std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
     std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
     DualSimplexOptions options_{};
