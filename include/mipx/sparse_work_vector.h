@@ -1,12 +1,12 @@
 #pragma once
 
+#include "mipx/core.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -27,9 +27,7 @@ public:
         current_epoch_ = 1U;
     }
 
-    [[nodiscard]] Index size() const {
-        return static_cast<Index>(values_.size());
-    }
+    [[nodiscard]] Index size() const { return static_cast<Index>(values_.size()); }
 
     void clear() {
         for (Index i : touched_indices_) {
@@ -79,9 +77,13 @@ public:
     [[nodiscard]] std::span<Real> dense() { return values_; }
     [[nodiscard]] std::span<const Real> dense() const { return values_; }
 
-    [[nodiscard]] std::span<const Index> touched() const {
-        return touched_indices_;
-    }
+    [[nodiscard]] std::span<const Index> touched() const { return touched_indices_; }
+
+    /// Mutable access to the touched-index list for external solvers (e.g.
+    /// BTRAN) that write directly into dense() and track nonzeros themselves.
+    /// After external mutation the epoch flags for new entries are NOT updated;
+    /// clear() still works correctly because it iterates touched_indices_.
+    [[nodiscard]] std::vector<Index>& touchedMut() { return touched_indices_; }
 
     [[nodiscard]] bool isTouched(Index i) const {
         assert(i >= 0 && i < size());
