@@ -914,6 +914,30 @@ LpResult DualSimplexSolver::solve() {
                 std::sqrt(dual_phase_col_norm_sq[static_cast<std::size_t>(j)]);
         }
     }
+    // Maintained sparse infeasible-row tracking for CHUZR.
+    // infeasible_rows holds indices of rows currently primal-infeasible.
+    // infeasible_flag[i] is true iff row i is in infeasible_rows.
+    std::vector<Index> infeasible_rows;
+    std::vector<uint8_t> infeasible_flag(static_cast<std::size_t>(num_rows_), 0);
+    infeasible_rows.reserve(static_cast<std::size_t>(num_rows_));
+
+    // Initial build of the infeasible set (before bound perturbation is active).
+    for (Index i = 0; i < num_rows_; ++i) {
+        Index k = basis_[i];
+        Real xk = primal_[k];
+        Real lb = varLower(k);
+        Real ub = varUpper(k);
+        if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
+            infeasible_flag[static_cast<std::size_t>(i)] = 1;
+            infeasible_rows.push_back(i);
+        }
+    }
+    // Flag: when true, the infeasible set must be fully rebuilt using current
+    // perturbed bounds before the next CHUZR scan. Set by any code path that
+    // changes bounds or primals globally but cannot call rebuildInfeasibleSet
+    // because the per-iteration bound lambdas are not yet defined.
+    bool need_infeasible_rebuild = false;
+
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
     Int empty_candidate_retry_streak = 0;
@@ -1074,12 +1098,15 @@ LpResult DualSimplexSolver::solve() {
             }
             if (degenerate_pivot_streak == 0) {
                 clearBoundPerturbation();
+                need_infeasible_rebuild = true;
             }
         }
         if (!bound_perturb_active_ && options_.enable_bound_perturbation &&
             options_.bound_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.bound_perturbation_stall_pivots) {
-            activateBoundPerturbation();
+            if (activateBoundPerturbation()) {
+                need_infeasible_rebuild = true;
+            }
         }
 
         const bool restart_budget_ok = (options_.stall_restart_max_restarts < 0) ||
@@ -1099,6 +1126,7 @@ LpResult DualSimplexSolver::solve() {
             computePrimals();
             computeDuals();
             applyCostShifts();
+            need_infeasible_rebuild = true;
 
             ++stall_restart_count;
             degenerate_pivot_streak = 0;
@@ -1189,8 +1217,52 @@ LpResult DualSimplexSolver::solve() {
             return ub;
         };
 
+        // Rebuild the full infeasible set by scanning all rows.
+        auto rebuildInfeasibleSet = [&]() {
+            infeasible_rows.clear();
+            for (Index i = 0; i < num_rows_; ++i) {
+                Index k = basis_[i];
+                Real xk = primal_[k];
+                Real lb = lowerBoundFast(k);
+                Real ub = upperBoundFast(k);
+                if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
+                    infeasible_flag[static_cast<std::size_t>(i)] = 1;
+                    infeasible_rows.push_back(i);
+                } else {
+                    infeasible_flag[static_cast<std::size_t>(i)] = 0;
+                }
+            }
+        };
+
+        // Update infeasible tracking for a single row after its primal changed.
+        auto updateRowInfeasibility = [&](Index i) {
+            Index k = basis_[i];
+            Real xk = primal_[k];
+            Real lb = lowerBoundFast(k);
+            Real ub = upperBoundFast(k);
+            const bool was_infeasible = infeasible_flag[static_cast<std::size_t>(i)] != 0;
+            const bool is_infeasible = (xk < lb - kPrimalTol || xk > ub + kPrimalTol);
+            if (was_infeasible && !is_infeasible) {
+                infeasible_flag[static_cast<std::size_t>(i)] = 0;
+                // Remove from infeasible_rows by swap-erase.
+                auto it = std::find(infeasible_rows.begin(), infeasible_rows.end(), i);
+                if (it != infeasible_rows.end()) {
+                    *it = infeasible_rows.back();
+                    infeasible_rows.pop_back();
+                }
+            } else if (!was_infeasible && is_infeasible) {
+                infeasible_flag[static_cast<std::size_t>(i)] = 1;
+                infeasible_rows.push_back(i);
+            }
+        };
+
+        // Deferred infeasible set rebuild (from bound perturbation or stall restart).
+        if (need_infeasible_rebuild) {
+            rebuildInfeasibleSet();
+            need_infeasible_rebuild = false;
+        }
+
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
-        work_.count(static_cast<uint64_t>(num_rows_));  // pricing scan
         Index leaving_row = -1;
         Real max_score = 0.0;
         Int current_pinf_count = 0;
@@ -1213,74 +1285,14 @@ LpResult DualSimplexSolver::solve() {
             return 0.0;
         };
 
-#ifdef MIPX_HAS_TBB
-        if (options_.enable_sip_parallel_chuzr && num_rows_ >= options_.sip_parallel_min_rows &&
-            options_.sip_parallel_row_grain > 0 && sipThreadGatePass() && sip_numerical_gate) {
-            struct ChuzrBest {
-                Index row = -1;
-                Real score = 0.0;
-                Int pinf = 0;
-            };
-            auto better = [](const ChuzrBest& a, const ChuzrBest& b) {
-                if (a.row < 0)
-                    return false;
-                if (b.row < 0)
-                    return true;
-                if (a.score > b.score)
-                    return true;
-                if (a.score < b.score)
-                    return false;
-                return a.row < b.row;  // deterministic tie-break
-            };
-
-            tbb::enumerable_thread_specific<ChuzrBest> locals;
-            const Index grain = std::max<Index>(1, options_.sip_parallel_row_grain);
-            tbb::parallel_for(tbb::blocked_range<Index>(0, num_rows_, grain),
-                              [&](const tbb::blocked_range<Index>& range) {
-                                  ChuzrBest local_best;
-                                  Int local_pinf = 0;
-                                  for (Index i = range.begin(); i < range.end(); ++i) {
-                                      Real score = scoreRow(i);
-                                      if (score > 0.0) {
-                                          ++local_pinf;
-                                          ChuzrBest cand{i, score};
-                                          if (better(cand, local_best)) {
-                                              local_best = cand;
-                                          }
-                                      }
-                                  }
-                                  if (local_best.row >= 0) {
-                                      local_best.pinf = local_pinf;
-                                      auto& slot = locals.local();
-                                      if (better(local_best, slot)) {
-                                          local_best.pinf += slot.pinf;
-                                          slot = local_best;
-                                      } else {
-                                          slot.pinf += local_pinf;
-                                      }
-                                  }
-                              });
-
-            for (const auto& local : locals) {
-                current_pinf_count += local.pinf;
-                if (local.score > max_score || (local.score == max_score && local.row >= 0 &&
-                                                (leaving_row < 0 || local.row < leaving_row))) {
-                    max_score = local.score;
-                    leaving_row = local.row;
-                }
-            }
-        } else
-#endif
-        {
-            for (Index i = 0; i < num_rows_; ++i) {
-                Real score = scoreRow(i);
-                if (score > 0.0) {
-                    ++current_pinf_count;
-                }
-                if (score > max_score) {
-                    max_score = score;
-                    leaving_row = i;
-                }
+        // Scan only the maintained infeasible set instead of all rows.
+        work_.count(static_cast<uint64_t>(infeasible_rows.size()));  // pricing scan
+        current_pinf_count = static_cast<Int>(infeasible_rows.size());
+        for (Index i : infeasible_rows) {
+            Real score = scoreRow(i);
+            if (score > max_score) {
+                max_score = score;
+                leaving_row = i;
             }
         }
 
@@ -1317,6 +1329,7 @@ LpResult DualSimplexSolver::solve() {
                 }
                 if (flipped) {
                     computePrimals();
+                    rebuildInfeasibleSet();
                 }
                 continue;  // Flipping may have created primal infeasibility.
             }
@@ -1421,6 +1434,7 @@ LpResult DualSimplexSolver::solve() {
                 if (bound_perturb_active_) {
                     // Re-validate optimality against original (unperturbed) bounds.
                     clearBoundPerturbation();
+                    rebuildInfeasibleSet();
                     degenerate_pivot_streak = 0;
                     resetPrimalFeasibleProgress();
                     continue;
@@ -1546,6 +1560,12 @@ LpResult DualSimplexSolver::solve() {
                     primal_[entering_p] = varLower(entering_p);
                     var_status_[entering_p] = BasisStatus::AtLower;
                 }
+                // Incrementally update infeasible rows affected by this pivot.
+                for (Index i = 0; i < num_rows_; ++i) {
+                    if (std::abs(pivot_col[i]) > kZeroTol) {
+                        updateRowInfeasibility(i);
+                    }
+                }
                 if (primal_step_degenerate) {
                     ++degenerate_pivot_streak;
                 } else {
@@ -1653,6 +1673,15 @@ LpResult DualSimplexSolver::solve() {
                 degenerate_pivot_streak = 0;
                 resetPrimalFeasibleProgress();
                 primal_feasible_pivots_since_refactor = 0;
+                rebuildInfeasibleSet();
+            } else {
+                // Incremental update: only rows with nonzero pivot_col entries
+                // had their primals changed.
+                for (Index i = 0; i < num_rows_; ++i) {
+                    if (std::abs(pivot_col[i]) > kZeroTol) {
+                        updateRowInfeasibility(i);
+                    }
+                }
             }
 
             ++iterations_;
@@ -1882,6 +1911,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
             ++empty_candidate_retry_streak;
             ++iterations_;
@@ -2039,6 +2069,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
             continue;
         }
@@ -2190,10 +2221,21 @@ LpResult DualSimplexSolver::solve() {
             if (has_cost_shift) {
                 computeDuals();
             }
+            rebuildInfeasibleSet();
         } else if (has_flips) {
             // BFRT flipped nonbasic variables, so the incremental primal
             // update is inexact. Recompute from scratch (one extra FTRAN).
             computePrimals();
+            rebuildInfeasibleSet();
+        } else {
+            // Incremental update: only rows with nonzero pivot_col entries
+            // had their primals changed (including leaving_row which now
+            // holds the entering variable).
+            for (Index i = 0; i < num_rows_; ++i) {
+                if (std::abs(pivot_col[i]) > kZeroTol) {
+                    updateRowInfeasibility(i);
+                }
+            }
         }
 
         ++iterations_;
