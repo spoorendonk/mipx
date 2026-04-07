@@ -356,6 +356,190 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
         }
     }
 
+    // --- New heuristics ---
+
+    // LP-free heuristics: feasibility jump, ZI-rounding, shifting,
+    // randomized rounding, propagation completion.
+    // These run without requiring the root_lp_heuristics gate since they
+    // don't modify LP state.
+    if (ctx.root_int_inf > 0) {
+        // ZI-rounding (no LP needed, lightweight).
+        {
+            ++out.calls;
+            ++out.zirounding_calls;
+            ++stats_.calls;
+            ZiRoundingHeuristic zirounding;
+            auto hsol = zirounding.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("zirounding", hsol)) {
+                ++stats_.improvements;
+                ++out.zirounding_improvements;
+            }
+        }
+
+        // Shifting heuristic (no LP needed).
+        {
+            ++out.calls;
+            ++out.shifting_calls;
+            ++stats_.calls;
+            ShiftingHeuristic shifting;
+            auto hsol = shifting.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("shifting", hsol)) {
+                ++stats_.improvements;
+                ++out.shifting_improvements;
+            }
+        }
+
+        // Randomized rounding (no LP needed).
+        {
+            ++out.calls;
+            ++out.randrounding_calls;
+            ++stats_.calls;
+            RandomizedRoundingHeuristic randrounding;
+            auto hsol = randrounding.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("randrounding", hsol)) {
+                ++stats_.improvements;
+                ++out.randrounding_improvements;
+            }
+        }
+
+        // Propagation completion (no LP needed).
+        {
+            ++out.calls;
+            ++out.propcompletion_calls;
+            ++stats_.calls;
+            PropagationCompletionHeuristic propcompletion;
+            auto hsol = propcompletion.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("propcompletion", hsol)) {
+                ++stats_.improvements;
+                ++out.propcompletion_improvements;
+            }
+        }
+
+        // Feasibility jump (no LP needed, but more expensive).
+        if (allowRootCall(ctx.total_work_units + out.work_units)) {
+            ++out.calls;
+            ++out.feasjump_calls;
+            ++stats_.calls;
+            FeasibilityJumpHeuristic feasjump;
+            feasjump.setMaxIterations(config_.root_feasjump_max_iterations);
+            feasjump.setMaxRestarts(config_.root_feasjump_max_restarts);
+            auto hsol = feasjump.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("feasjump", hsol)) {
+                ++stats_.improvements;
+                ++out.feasjump_improvements;
+            }
+        }
+    }
+
+    // LP-based new heuristics (gated by root LP heuristics flag).
+
+    // Undercover heuristic.
+    if (run_root_lp_heuristics &&
+        allowRootCall(ctx.total_work_units + out.work_units)) {
+        ++out.calls;
+        ++out.undercover_calls;
+        UncoverHeuristic undercover;
+        undercover.setSubproblemIterLimit(config_.root_undercover_subproblem_iter_limit);
+        undercover.setMinFreeVars(config_.root_undercover_min_free_vars);
+        auto hsol = undercover.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+        out.basis_dirty = out.basis_dirty || undercover.lastExecutedSolve();
+        out.lp_iterations += undercover.lastLpIterations();
+        out.work_units += undercover.lastWorkUnits();
+        stats_.lp_iterations += undercover.lastLpIterations();
+        const bool improved = accept("undercover", hsol);
+        if (improved) ++out.undercover_improvements;
+        recordCall(0, undercover.lastWorkUnits(), improved);
+        if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
+    }
+
+    // Reduced-cost heuristic (root only, needs reduced costs).
+    if (run_root_lp_heuristics &&
+        allowRootCall(ctx.total_work_units + out.work_units)) {
+        ++out.calls;
+        ++out.reducedcost_calls;
+        ReducedCostHeuristic reducedcost;
+        reducedcost.setSubproblemIterLimit(config_.root_reduced_cost_subproblem_iter_limit);
+        reducedcost.setRcThreshold(config_.root_reduced_cost_rc_threshold);
+        reducedcost.setMinFixedVars(config_.root_reduced_cost_min_fixed_vars);
+        auto hsol = reducedcost.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+        out.basis_dirty = out.basis_dirty || reducedcost.lastExecutedSolve();
+        out.lp_iterations += reducedcost.lastLpIterations();
+        out.work_units += reducedcost.lastWorkUnits();
+        stats_.lp_iterations += reducedcost.lastLpIterations();
+        const bool improved = accept("reducedcost", hsol);
+        if (improved) ++out.reducedcost_improvements;
+        recordCall(0, reducedcost.lastWorkUnits(), improved);
+        if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
+    }
+
+    // Crossover heuristic (needs incumbent).
+    if (run_root_lp_heuristics &&
+        hasIncumbent(incumbent) && !best_solution.empty() &&
+        allowRootCall(ctx.total_work_units + out.work_units)) {
+        ++out.calls;
+        ++out.crossover_calls;
+        CrossoverHeuristic crossover;
+        crossover.setSubproblemIterLimit(config_.root_crossover_subproblem_iter_limit);
+        crossover.setMinFixedVars(config_.root_crossover_min_fixed_vars);
+        auto hsol = crossover.run(ctx.problem, ctx.lp, ctx.primals,
+                                   incumbent, best_solution);
+        out.basis_dirty = out.basis_dirty || crossover.lastExecutedSolve();
+        out.lp_iterations += crossover.lastLpIterations();
+        out.work_units += crossover.lastWorkUnits();
+        stats_.lp_iterations += crossover.lastLpIterations();
+        const bool improved = accept("crossover", hsol);
+        if (improved) ++out.crossover_improvements;
+        recordCall(0, crossover.lastWorkUnits(), improved);
+        if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
+    }
+
+    // Proximity search (needs incumbent).
+    if (run_root_lp_heuristics &&
+        hasIncumbent(incumbent) && !best_solution.empty() &&
+        allowRootCall(ctx.total_work_units + out.work_units)) {
+        ++out.calls;
+        ++out.proximity_calls;
+        ProximitySearchHeuristic proximity;
+        proximity.setSubproblemIterLimit(config_.root_proximity_subproblem_iter_limit);
+        proximity.setMinBinaryVars(config_.root_proximity_min_binary_vars);
+        auto hsol = proximity.run(ctx.problem, ctx.lp, ctx.primals,
+                                   incumbent, best_solution);
+        out.basis_dirty = true;
+        out.lp_iterations += proximity.lastLpIterations();
+        out.work_units += proximity.lastWorkUnits();
+        stats_.lp_iterations += proximity.lastLpIterations();
+        const bool improved = accept("proximity", hsol);
+        if (improved) ++out.proximity_improvements;
+        recordCall(0, proximity.lastWorkUnits(), improved);
+        if (callback_ != nullptr) callback_->onHeartbeat(ctx.node_count, stats_);
+    }
+
+    // 1-opt local search (needs incumbent, no LP).
+    if (hasIncumbent(incumbent) && !best_solution.empty()) {
+        ++out.calls;
+        ++out.oneopt_calls;
+        ++stats_.calls;
+        OneOptHeuristic oneopt;
+        auto hsol = oneopt.run(ctx.problem, best_solution, incumbent);
+        if (accept("oneopt", hsol)) {
+            ++stats_.improvements;
+            ++out.oneopt_improvements;
+        }
+    }
+
+    // 2-opt local search (needs incumbent, no LP).
+    if (hasIncumbent(incumbent) && !best_solution.empty()) {
+        ++out.calls;
+        ++out.twoopt_calls;
+        ++stats_.calls;
+        TwoOptHeuristic twoopt;
+        auto hsol = twoopt.run(ctx.problem, best_solution, incumbent);
+        if (accept("twoopt", hsol)) {
+            ++stats_.improvements;
+            ++out.twoopt_improvements;
+        }
+    }
+
     return out;
 }
 

@@ -372,6 +372,304 @@ private:
     double last_work_units_ = 0.0;
 };
 
+// ---------------------------------------------------------------------------
+// Feasibility Jump: constraint-violation-guided variable flipping.
+// ---------------------------------------------------------------------------
+
+/// Feasibility Jump heuristic: iteratively flip integer variables to
+/// reduce total constraint violation, producing feasible MIP solutions
+/// without LP solves.
+class FeasibilityJumpHeuristic : public Heuristic {
+public:
+    void setMaxIterations(Int iters) { max_iterations_ = iters; }
+    void setMaxRestarts(Int restarts) { max_restarts_ = restarts; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "feasjump"; }
+
+private:
+    Int max_iterations_ = 500;
+    Int max_restarts_ = 4;
+};
+
+// ---------------------------------------------------------------------------
+// Crossover: combine two incumbent solutions.
+// ---------------------------------------------------------------------------
+
+/// Crossover heuristic: fix variables where two solutions agree,
+/// optimize the disagreements via a restricted LP.
+class CrossoverHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setMinFixedVars(Int count) { min_fixed_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    /// Crossover of LP relaxation and incumbent solution.
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent,
+        std::span<const Real> incumbent_values);
+
+    [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "crossover"; }
+
+private:
+    Int subproblem_iter_limit_ = 80;
+    Int min_fixed_vars_ = 4;
+    bool enable_rounding_repair_ = true;
+
+    Int last_fixed_count_ = 0;
+    bool last_executed_solve_ = false;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
+// ---------------------------------------------------------------------------
+// Proximity Search (Fischetti & Monaci): minimize Hamming distance.
+// ---------------------------------------------------------------------------
+
+/// Proximity search: minimize Hamming distance to incumbent subject to
+/// an improving objective cutoff constraint.
+class ProximitySearchHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setMinBinaryVars(Int count) { min_binary_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent,
+        std::span<const Real> incumbent_values);
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "proximity"; }
+
+private:
+    Int subproblem_iter_limit_ = 80;
+    Int min_binary_vars_ = 4;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
+// ---------------------------------------------------------------------------
+// Undercover: fix maximum LP-feasible variable set, solve residual.
+// ---------------------------------------------------------------------------
+
+/// Undercover heuristic: fix the maximum set of variables that keeps the
+/// LP feasible, then solve the residual restricted LP.
+class UncoverHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setMinFreeVars(Int count) { min_free_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "undercover"; }
+
+private:
+    Int subproblem_iter_limit_ = 80;
+    Int min_free_vars_ = 2;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    Int last_fixed_count_ = 0;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
+// ---------------------------------------------------------------------------
+// Rounding variants.
+// ---------------------------------------------------------------------------
+
+/// ZI-rounding: round integer variables without worsening the objective.
+class ZiRoundingHeuristic : public Heuristic {
+public:
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "zirounding"; }
+};
+
+/// Shifting heuristic: fix violated constraints by shifting variable values
+/// along feasible directions.
+class ShiftingHeuristic : public Heuristic {
+public:
+    void setMaxPasses(Int passes) { max_passes_ = passes; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "shifting"; }
+
+private:
+    Int max_passes_ = 10;
+};
+
+/// Randomized rounding: multiple random roundings with feasibility repair.
+class RandomizedRoundingHeuristic : public Heuristic {
+public:
+    void setNumTrials(Int trials) { num_trials_ = trials; }
+    void setMaxRepairPasses(Int passes) { max_repair_passes_ = passes; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "randrounding"; }
+
+private:
+    Int num_trials_ = 10;
+    Int max_repair_passes_ = 5;
+};
+
+// ---------------------------------------------------------------------------
+// Reduced-cost and propagation-based.
+// ---------------------------------------------------------------------------
+
+/// Root reduced-cost heuristic: fix variables by reduced cost, solve
+/// restricted LP.
+class ReducedCostHeuristic : public Heuristic {
+public:
+    void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
+    void setRcThreshold(Real threshold) { rc_threshold_ = threshold; }
+    void setMinFixedVars(Int count) { min_fixed_vars_ = count; }
+    void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
+    [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
+    [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
+    [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
+
+    [[nodiscard]] const char* name() const override { return "reducedcost"; }
+
+private:
+    Int subproblem_iter_limit_ = 80;
+    Real rc_threshold_ = 0.5;
+    Int min_fixed_vars_ = 4;
+    bool enable_rounding_repair_ = true;
+
+    bool last_executed_solve_ = false;
+    Int last_fixed_count_ = 0;
+    Int last_lp_iterations_ = 0;
+    double last_work_units_ = 0.0;
+};
+
+/// Propagation-completion heuristic: propagate fixings to maximum extent,
+/// round remainder.
+class PropagationCompletionHeuristic : public Heuristic {
+public:
+    void setMaxPropagationRounds(Int rounds) { max_propagation_rounds_ = rounds; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    [[nodiscard]] const char* name() const override { return "propcompletion"; }
+
+private:
+    Int max_propagation_rounds_ = 10;
+};
+
+// ---------------------------------------------------------------------------
+// Neighborhood search framework.
+// ---------------------------------------------------------------------------
+
+/// 1-opt local search: single variable improvement moves on incumbent.
+class OneOptHeuristic : public Heuristic {
+public:
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        std::span<const Real> incumbent_values,
+        Real incumbent);
+
+    [[nodiscard]] const char* name() const override { return "oneopt"; }
+};
+
+/// 2-opt local search: pairwise variable swaps on incumbent.
+class TwoOptHeuristic : public Heuristic {
+public:
+    void setMaxPairs(Int pairs) { max_pairs_ = pairs; }
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        std::span<const Real> incumbent_values,
+        Real incumbent);
+
+    [[nodiscard]] const char* name() const override { return "twoopt"; }
+
+private:
+    Int max_pairs_ = 500;
+};
+
 /// Adaptive budget controller for primal heuristics.
 /// Tracks heuristic effort and adapts tree-call spacing from outcomes.
 class HeuristicBudgetManager {

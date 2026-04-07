@@ -28,6 +28,16 @@ add_library(mipx STATIC
     heuristics/local_branching.cpp
     heuristics/aux_objective.cpp
     heuristics/zero_objective.cpp
+    heuristics/feasibility_jump.cpp
+    heuristics/crossover.cpp
+    heuristics/proximity_search.cpp
+    heuristics/undercover.cpp
+    heuristics/zi_rounding.cpp
+    heuristics/shifting.cpp
+    heuristics/randomized_rounding.cpp
+    heuristics/reduced_cost.cpp
+    heuristics/propagation_completion.cpp
+    heuristics/local_search.cpp
     heuristics/budget.cpp
     heuristics/runtime.cpp
     heuristics/symmetry.cpp

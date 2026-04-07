@@ -117,6 +117,19 @@ struct HeuristicRuntimeConfig {
     Int root_local_branching_neighborhood_large = 24;
     Int root_local_branching_min_binary_vars = 8;
 
+    // New heuristic config.
+    Int root_feasjump_max_iterations = 500;
+    Int root_feasjump_max_restarts = 4;
+    Int root_crossover_subproblem_iter_limit = 40;
+    Int root_crossover_min_fixed_vars = 4;
+    Int root_proximity_subproblem_iter_limit = 40;
+    Int root_proximity_min_binary_vars = 4;
+    Int root_undercover_subproblem_iter_limit = 40;
+    Int root_undercover_min_free_vars = 2;
+    Int root_reduced_cost_subproblem_iter_limit = 40;
+    Real root_reduced_cost_rc_threshold = 0.5;
+    Int root_reduced_cost_min_fixed_vars = 4;
+
     Real budget_max_work_share = 0.20;
     Int budget_max_frequency_scale = 8;
 };
@@ -153,6 +166,28 @@ struct RootHeuristicOutcome {
     Int rins_improvements = 0;
     Int localbranching_calls = 0;
     Int localbranching_improvements = 0;
+    Int feasjump_calls = 0;
+    Int feasjump_improvements = 0;
+    Int crossover_calls = 0;
+    Int crossover_improvements = 0;
+    Int proximity_calls = 0;
+    Int proximity_improvements = 0;
+    Int undercover_calls = 0;
+    Int undercover_improvements = 0;
+    Int zirounding_calls = 0;
+    Int zirounding_improvements = 0;
+    Int shifting_calls = 0;
+    Int shifting_improvements = 0;
+    Int randrounding_calls = 0;
+    Int randrounding_improvements = 0;
+    Int reducedcost_calls = 0;
+    Int reducedcost_improvements = 0;
+    Int propcompletion_calls = 0;
+    Int propcompletion_improvements = 0;
+    Int oneopt_calls = 0;
+    Int oneopt_improvements = 0;
+    Int twoopt_calls = 0;
+    Int twoopt_improvements = 0;
 };
 
 struct WorkerHeuristicContext {

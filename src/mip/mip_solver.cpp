@@ -1410,6 +1410,17 @@ HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     config.root_local_branching_neighborhood_medium = kRootLocalBranchingNeighborhoodMedium;
     config.root_local_branching_neighborhood_large = kRootLocalBranchingNeighborhoodLarge;
     config.root_local_branching_min_binary_vars = kRootLocalBranchingMinBinaryVars;
+    config.root_feasjump_max_iterations = kRootFeasJumpMaxIterations;
+    config.root_feasjump_max_restarts = kRootFeasJumpMaxRestarts;
+    config.root_crossover_subproblem_iter_limit = kRootCrossoverSubproblemIterLimit;
+    config.root_crossover_min_fixed_vars = kRootCrossoverMinFixedVars;
+    config.root_proximity_subproblem_iter_limit = kRootProximitySubproblemIterLimit;
+    config.root_proximity_min_binary_vars = kRootProximityMinBinaryVars;
+    config.root_undercover_subproblem_iter_limit = kRootUncoverSubproblemIterLimit;
+    config.root_undercover_min_free_vars = kRootUncoverMinFreeVars;
+    config.root_reduced_cost_subproblem_iter_limit = kRootReducedCostSubproblemIterLimit;
+    config.root_reduced_cost_rc_threshold = kRootReducedCostRcThreshold;
+    config.root_reduced_cost_min_fixed_vars = kRootReducedCostMinFixedVars;
     config.budget_max_work_share = kHeurBudgetMaxWorkShare;
     config.budget_max_frequency_scale = kHeurBudgetMaxFrequencyScale;
     return config;

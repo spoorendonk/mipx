@@ -588,6 +588,17 @@ private:
     static constexpr Int kRootLocalBranchingNeighborhoodMedium = 16;
     static constexpr Int kRootLocalBranchingNeighborhoodLarge = 24;
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
+    static constexpr Int kRootFeasJumpMaxIterations = 500;
+    static constexpr Int kRootFeasJumpMaxRestarts = 4;
+    static constexpr Int kRootCrossoverSubproblemIterLimit = 40;
+    static constexpr Int kRootCrossoverMinFixedVars = 4;
+    static constexpr Int kRootProximitySubproblemIterLimit = 40;
+    static constexpr Int kRootProximityMinBinaryVars = 4;
+    static constexpr Int kRootUncoverSubproblemIterLimit = 40;
+    static constexpr Int kRootUncoverMinFreeVars = 2;
+    static constexpr Int kRootReducedCostSubproblemIterLimit = 40;
+    static constexpr Real kRootReducedCostRcThreshold = 0.5;
+    static constexpr Int kRootReducedCostMinFixedVars = 4;
     static constexpr Real kHeurBudgetMaxWorkShare = 0.20;
     static constexpr Int kHeurBudgetMaxFrequencyScale = 8;
     static constexpr Int kTreePresolveBinaryLiteMaxCols = 512;

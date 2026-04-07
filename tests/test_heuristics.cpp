@@ -840,3 +840,499 @@ TEST_CASE("RestartStrategyEngine: seed controls opportunistic sequence",
     }
     CHECK(differs_from_other_seed);
 }
+
+// ===========================================================================
+// FeasibilityJump tests
+// ===========================================================================
+
+TEST_CASE("FeasibilityJumpHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    FeasibilityJumpHeuristic fj;
+    fj.setMaxIterations(200);
+    fj.setMaxRestarts(2);
+    auto result = fj.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("FeasibilityJumpHeuristic: finds feasible on knapsack", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    FeasibilityJumpHeuristic fj;
+    fj.setMaxIterations(500);
+    fj.setMaxRestarts(4);
+    auto result = fj.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+TEST_CASE("FeasibilityJumpHeuristic: respects incumbent cutoff", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    FeasibilityJumpHeuristic fj;
+    auto result = fj.run(problem, lp, primals, -100.0);
+    CHECK(!result.has_value());
+}
+
+// ===========================================================================
+// Crossover tests
+// ===========================================================================
+
+TEST_CASE("CrossoverHeuristic: requires incumbent", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    CrossoverHeuristic xover;
+    auto result = xover.run(problem, lp, primals, kInf);
+    CHECK(!result.has_value());
+}
+
+TEST_CASE("CrossoverHeuristic: uses agreement-based fixing", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    CrossoverHeuristic xover;
+    xover.setSubproblemIterLimit(100);
+    xover.setMinFixedVars(1);
+
+    std::vector<Real> incumbent_values = primals;
+    auto result = xover.run(problem, lp, primals, 100.0, incumbent_values);
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("CrossoverHeuristic: LP state restored after run", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    CrossoverHeuristic xover;
+    xover.setSubproblemIterLimit(50);
+    xover.setMinFixedVars(1);
+    std::vector<Real> incumbent_values = primals;
+    (void)xover.run(problem, lp, primals, 100.0, incumbent_values);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
+// ===========================================================================
+// ProximitySearch tests
+// ===========================================================================
+
+TEST_CASE("ProximitySearchHeuristic: requires incumbent", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    ProximitySearchHeuristic prox;
+    auto result = prox.run(problem, lp, primals, kInf);
+    CHECK(!result.has_value());
+}
+
+TEST_CASE("ProximitySearchHeuristic: finds nearby solution on knapsack", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ProximitySearchHeuristic prox;
+    prox.setSubproblemIterLimit(100);
+    prox.setMinBinaryVars(1);
+    std::vector<Real> incumbent_values = {1.0, 0.0, 0.0};
+    auto result = prox.run(problem, lp, primals, -6.0, incumbent_values);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+        CHECK(result->objective < -6.0);
+    }
+}
+
+TEST_CASE("ProximitySearchHeuristic: LP state restored", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    ProximitySearchHeuristic prox;
+    prox.setSubproblemIterLimit(50);
+    prox.setMinBinaryVars(1);
+    std::vector<Real> incumbent_values = {1.0, 0.0, 0.0};
+    (void)prox.run(problem, lp, primals, -6.0, incumbent_values);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
+// ===========================================================================
+// Undercover tests
+// ===========================================================================
+
+TEST_CASE("UncoverHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    UncoverHeuristic uc;
+    uc.setSubproblemIterLimit(100);
+    uc.setMinFreeVars(1);
+    auto result = uc.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+TEST_CASE("UncoverHeuristic: LP state restored", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    UncoverHeuristic uc;
+    uc.setSubproblemIterLimit(50);
+    (void)uc.run(problem, lp, primals, kInf);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
+// ===========================================================================
+// ZI-rounding tests
+// ===========================================================================
+
+TEST_CASE("ZiRoundingHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ZiRoundingHeuristic zir;
+    auto result = zir.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("ZiRoundingHeuristic: respects incumbent cutoff", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    ZiRoundingHeuristic zir;
+    auto result = zir.run(problem, lp, primals, -100.0);
+    CHECK(!result.has_value());
+}
+
+TEST_CASE("ZiRoundingHeuristic: solution is feasible when returned", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    ZiRoundingHeuristic zir;
+    auto result = zir.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+// ===========================================================================
+// Shifting tests
+// ===========================================================================
+
+TEST_CASE("ShiftingHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ShiftingHeuristic shift;
+    auto result = shift.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("ShiftingHeuristic: solution is feasible when returned", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    ShiftingHeuristic shift;
+    auto result = shift.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+// ===========================================================================
+// RandomizedRounding tests
+// ===========================================================================
+
+TEST_CASE("RandomizedRoundingHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    RandomizedRoundingHeuristic rr;
+    rr.setNumTrials(20);
+    auto result = rr.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("RandomizedRoundingHeuristic: solution is feasible when returned", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    RandomizedRoundingHeuristic rr;
+    rr.setNumTrials(30);
+    auto result = rr.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+TEST_CASE("RandomizedRoundingHeuristic: respects incumbent cutoff", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    RandomizedRoundingHeuristic rr;
+    auto result = rr.run(problem, lp, primals, -100.0);
+    CHECK(!result.has_value());
+}
+
+// ===========================================================================
+// ReducedCost tests
+// ===========================================================================
+
+TEST_CASE("ReducedCostHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ReducedCostHeuristic rc;
+    rc.setSubproblemIterLimit(100);
+    rc.setRcThreshold(0.01);
+    rc.setMinFixedVars(1);
+    auto result = rc.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+TEST_CASE("ReducedCostHeuristic: LP state restored", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    Real obj_before = lr.objective;
+    auto primals = lp.getPrimalValues();
+
+    ReducedCostHeuristic rc;
+    rc.setSubproblemIterLimit(50);
+    rc.setRcThreshold(0.01);
+    rc.setMinFixedVars(1);
+    (void)rc.run(problem, lp, primals, kInf);
+
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
+// ===========================================================================
+// PropagationCompletion tests
+// ===========================================================================
+
+TEST_CASE("PropagationCompletionHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    PropagationCompletionHeuristic pc;
+    auto result = pc.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("PropagationCompletionHeuristic: solution is feasible when returned", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    PropagationCompletionHeuristic pc;
+    auto result = pc.run(problem, lp, primals, kInf);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+    }
+}
+
+// ===========================================================================
+// OneOpt tests
+// ===========================================================================
+
+TEST_CASE("OneOptHeuristic: improves incumbent on knapsack", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    OneOptHeuristic oneopt;
+    // Start from a suboptimal feasible solution: x1=1, x2=0, x3=0 with obj=-6.
+    std::vector<Real> incumbent_values = {1.0, 0.0, 0.0};
+    auto result = oneopt.run(problem, incumbent_values, -6.0);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+        CHECK(result->objective < -6.0);
+    }
+}
+
+TEST_CASE("OneOptHeuristic: requires incumbent", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    OneOptHeuristic oneopt;
+    auto result = oneopt.run(problem, lp, primals, kInf);
+    CHECK(!result.has_value());
+}
+
+// ===========================================================================
+// TwoOpt tests
+// ===========================================================================
+
+TEST_CASE("TwoOptHeuristic: improves incumbent on knapsack", "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    TwoOptHeuristic twoopt;
+    // Start from x1=0, x2=0, x3=1 with obj=-4.
+    std::vector<Real> incumbent_values = {0.0, 0.0, 1.0};
+    auto result = twoopt.run(problem, incumbent_values, -4.0);
+
+    if (result.has_value()) {
+        CHECK(isFeasible(problem, result->values));
+        CHECK(result->objective < -4.0);
+    }
+}
+
+TEST_CASE("TwoOptHeuristic: requires incumbent", "[heuristics]") {
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    TwoOptHeuristic twoopt;
+    auto result = twoopt.run(problem, lp, primals, kInf);
+    CHECK(!result.has_value());
+}
