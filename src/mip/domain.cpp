@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "mipx/implication_graph.h"
+
 namespace mipx {
 
 void DomainPropagator::load(const LpProblem& problem) {
@@ -245,6 +247,59 @@ bool DomainPropagator::propagateRow(Index row) {
 
         if (changed) {
             enqueueColumn(j);
+            // Propagate binary implications when a variable becomes fixed.
+            if (implication_graph_ != nullptr &&
+                col_type_[j] != VarType::Continuous &&
+                lower_[j] > upper_[j] - kTol) {
+                if (!propagateImplications(j)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+bool DomainPropagator::propagateImplications(Index col) {
+    if (implication_graph_ == nullptr) return true;
+    if (!implication_graph_->isBinary(col)) return true;
+
+    // Determine the fixed value.
+    bool fixed_val = (lower_[col] > 0.5);
+
+    const auto& imps = implication_graph_->implications(col, fixed_val);
+    for (const auto& imp : imps) {
+        Index j = imp.to_var;
+        if (j < 0 || j >= num_cols_) continue;
+
+        Real new_lb = imp.to_val ? 1.0 : lower_[j];
+        Real new_ub = imp.to_val ? upper_[j] : 0.0;
+
+        bool bound_changed = false;
+        if (new_lb > lower_[j] + kTol) {
+            recordChange(j);
+            lower_[j] = new_lb;
+            bound_changed = true;
+        }
+        if (new_ub < upper_[j] - kTol) {
+            recordChange(j);
+            upper_[j] = new_ub;
+            bound_changed = true;
+        }
+
+        if (lower_[j] > upper_[j] + kTol) {
+            return false;
+        }
+
+        if (bound_changed) {
+            enqueueColumn(j);
+            // Recursively propagate if this variable also became fixed.
+            if (lower_[j] > upper_[j] - kTol) {
+                if (!propagateImplications(j)) {
+                    return false;
+                }
+            }
         }
     }
 

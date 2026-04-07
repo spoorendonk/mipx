@@ -14,6 +14,9 @@ add_library(mipx STATIC
     io/lp_reader.cpp
     io/solu_reader.cpp
     mip/domain.cpp
+    mip/implication_graph.cpp
+    mip/variable_bounds.cpp
+    mip/probing.cpp
     mip/node_queue.cpp
     mip/branching.cpp
     mip/mip_solver.cpp

@@ -8,6 +8,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "mipx/variable_bounds.h"
+
 namespace mipx {
 
 namespace {
@@ -343,6 +345,62 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
             }
         }
     }
+
+    // Generate implied-bound cuts from probing-derived VUBs/VLBs.
+    if (vb_store_ != nullptr) {
+        for (Index j = 0; j < problem.num_cols && accepted < max_cuts_per_family_; ++j) {
+            if (problem.col_type[j] == VarType::Binary) continue;
+
+            // VUB cuts: x_j <= a*y + b translates to x_j - a*y <= b.
+            for (const auto& vub : vb_store_->vubs(j)) {
+                if (accepted >= max_cuts_per_family_) break;
+                if (vub.binary_var < 0 ||
+                    vub.binary_var >= static_cast<Index>(primals.size())) continue;
+                if (std::abs(vub.coeff) < 1e-10) continue;
+                ++stats.attempted;
+
+                Cut cut;
+                cut.family = CutFamily::ImpliedBound;
+                cut.lower = -kInf;
+                cut.upper = vub.constant;
+                if (j < vub.binary_var) {
+                    cut.indices = {j, vub.binary_var};
+                    cut.values = {1.0, -vub.coeff};
+                } else {
+                    cut.indices = {vub.binary_var, j};
+                    cut.values = {-vub.coeff, 1.0};
+                }
+                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                    ++accepted;
+                }
+            }
+
+            // VLB cuts: x_j >= a*y + b translates to -x_j + a*y <= -b.
+            for (const auto& vlb : vb_store_->vlbs(j)) {
+                if (accepted >= max_cuts_per_family_) break;
+                if (vlb.binary_var < 0 ||
+                    vlb.binary_var >= static_cast<Index>(primals.size())) continue;
+                if (std::abs(vlb.coeff) < 1e-10) continue;
+                ++stats.attempted;
+
+                Cut cut;
+                cut.family = CutFamily::ImpliedBound;
+                cut.lower = vlb.constant;
+                cut.upper = kInf;
+                if (j < vlb.binary_var) {
+                    cut.indices = {j, vlb.binary_var};
+                    cut.values = {1.0, -vlb.coeff};
+                } else {
+                    cut.indices = {vlb.binary_var, j};
+                    cut.values = {-vlb.coeff, 1.0};
+                }
+                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                    ++accepted;
+                }
+            }
+        }
+    }
+
     return accepted;
 }
 

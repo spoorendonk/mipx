@@ -11,6 +11,8 @@
 
 namespace mipx {
 
+class VariableBoundStore;
+
 struct CutFamilyStats {
     Int attempted = 0;
     Int generated = 0;
@@ -47,6 +49,7 @@ public:
     [[nodiscard]] const CutFamilyConfig& config() const { return config_; }
     void setMaxCutsPerFamily(Int value) { max_cuts_per_family_ = std::max<Int>(1, value); }
     void setMinViolation(Real value) { min_violation_ = std::max<Real>(1e-8, value); }
+    void setVariableBoundStore(const VariableBoundStore* store) { vb_store_ = store; }
 
     Int separate(DualSimplexSolver& lp,
                  const LpProblem& problem,
@@ -91,6 +94,7 @@ private:
     GomorySeparator gomory_{};
     Int max_cuts_per_family_ = 50;
     Real min_violation_ = 1e-5;
+    const VariableBoundStore* vb_store_ = nullptr;
 };
 
 }  // namespace mipx

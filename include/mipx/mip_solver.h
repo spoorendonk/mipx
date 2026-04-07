@@ -15,6 +15,8 @@
 #include "mipx/branching.h"
 #include "mipx/core.h"
 #include "mipx/cut_manager.h"
+#include "mipx/implication_graph.h"
+#include "mipx/probing.h"
 #include "mipx/symmetry.h"
 #include "mipx/cut_pool.h"
 #include "mipx/domain.h"
@@ -25,6 +27,7 @@
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
 #include "mipx/separators.h"
+#include "mipx/variable_bounds.h"
 
 namespace mipx {
 
@@ -185,6 +188,18 @@ struct MipExactRefinementStats {
     Real objective_mismatch_after = 0.0;
 };
 
+struct MipProbingStats {
+    bool enabled = false;
+    Int variables_probed = 0;
+    Int fixings_found = 0;
+    Int implications_found = 0;
+    Int vubs_found = 0;
+    Int vlbs_found = 0;
+    Int equivalences_found = 0;
+    Int rounds = 0;
+    double time_seconds = 0.0;
+};
+
 struct MipResult {
     Status status = Status::Error;
     Real objective = 0.0;
@@ -332,6 +347,16 @@ public:
         return exact_refinement_stats_;
     }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
+    void setProbingEnabled(bool enabled) { probing_enabled_ = enabled; }
+    void setProbingMaxRounds(Int rounds) {
+        probing_max_rounds_ = std::max<Int>(1, rounds);
+    }
+    void setProbingTimeLimit(double seconds) {
+        probing_time_limit_ = std::max(0.1, seconds);
+    }
+    const MipProbingStats& getProbingStats() const { return probing_stats_; }
+    const ImplicationGraph& getImplicationGraph() const { return implication_graph_; }
+    const VariableBoundStore& getVariableBoundStore() const { return vb_store_; }
 
 private:
     void refreshTreePresolveProfile();
@@ -422,6 +447,10 @@ private:
                                             std::span<const Real> current_upper,
                                             Index default_var);
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
+
+    /// Run root probing and populate implication graph / variable bounds.
+    void runRootProbing();
+
     [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower,
                                              std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
@@ -523,6 +552,15 @@ private:
     mutable std::mutex tree_presolve_stats_mutex_;
     SymmetryManager symmetry_manager_;
     bool symmetry_enabled_ = true;
+
+    // Probing infrastructure.
+    bool probing_enabled_ = false;
+    Int probing_max_rounds_ = 3;
+    double probing_time_limit_ = 30.0;
+    ImplicationGraph implication_graph_;
+    VariableBoundStore vb_store_;
+    MipProbingStats probing_stats_{};
+
     mutable Logger log_;
 
     static constexpr Real kIntTol = 1e-6;

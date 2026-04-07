@@ -1308,6 +1308,51 @@ void MipSolver::load(const LpProblem& problem) {
     loaded_ = true;
 }
 
+void MipSolver::runRootProbing() {
+    probing_stats_ = {};
+    probing_stats_.enabled = true;
+
+    ProbingConfig config;
+    config.max_rounds = probing_max_rounds_;
+    config.time_limit = probing_time_limit_;
+    config.detect_equivalences = true;
+    config.detect_dominated = true;
+    config.learn_vubs = true;
+    config.learn_implications = true;
+
+    ProbingEngine engine;
+    auto stats = engine.probe(problem_, implication_graph_, vb_store_, config);
+
+    probing_stats_.variables_probed = stats.variables_probed;
+    probing_stats_.fixings_found = stats.fixings_found;
+    probing_stats_.implications_found = stats.implications_found;
+    probing_stats_.vubs_found = stats.vubs_found;
+    probing_stats_.vlbs_found = stats.vlbs_found;
+    probing_stats_.equivalences_found = stats.equivalences_found;
+    probing_stats_.rounds = stats.rounds;
+    probing_stats_.time_seconds = stats.time_seconds;
+
+    // Apply fixings discovered by probing.
+    Int fixings_applied = 0;
+    for (const auto& [var, val] : engine.fixings()) {
+        if (var >= 0 && var < problem_.num_cols) {
+            problem_.col_lower[var] = val;
+            problem_.col_upper[var] = val;
+            ++fixings_applied;
+        }
+    }
+
+    if (verbose_ && (stats.variables_probed > 0)) {
+        log_.log("Probing: %d vars probed, %d fixings, %d implications, "
+                 "%d VUBs, %d VLBs, %d equivalences, %d rounds, %.3fs\n",
+                 stats.variables_probed, fixings_applied,
+                 stats.implications_found,
+                 stats.vubs_found, stats.vlbs_found,
+                 stats.equivalences_found,
+                 stats.rounds, stats.time_seconds);
+    }
+}
+
 bool MipSolver::hasLpLightCapability() const {
     return kLpLightCompiled;
 }
@@ -1580,9 +1625,15 @@ Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals
         if (isIntegral(primals[j], kIntTol)) {
             continue;
         }
-        const Real score =
+        Real score =
             (j < static_cast<Index>(conflict_scores_.size())) ? conflict_scores_[j] : 0.0;
-        if (score > best_score + 1e-12 || (std::abs(score - best_score) <= 1e-12 && j < best_var)) {
+        // Boost score for variables with rich implication structure.
+        if (implication_graph_.numImplications() > 0) {
+            const Int imp_score = implication_graph_.implicationScore(j);
+            score += 0.01 * static_cast<Real>(imp_score);
+        }
+        if (score > best_score + 1e-12 ||
+            (std::abs(score - best_score) <= 1e-12 && j < best_var)) {
             best_var = j;
             best_score = score;
         }
@@ -1997,6 +2048,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if ((depth_gate || frac_gate) && !benefit_skip) {
             DomainPropagator dp;
             dp.load(problem_);
+            if (implication_graph_.numImplications() > 0) {
+                dp.setImplicationGraph(&implication_graph_);
+            }
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
@@ -2200,6 +2254,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if (run_tree_rounds) {
             SeparatorManager tree_separators;
             tree_separators.setConfig(cut_family_config_);
+            if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
+                tree_separators.setVariableBoundStore(&vb_store_);
+            }
             const Int max_tree_cuts = aggressive ? 8 : 4;
             tree_separators.setMaxCutsPerFamily(max_tree_cuts);
             const Int max_rounds = aggressive ? 2 : 1;
@@ -3227,6 +3284,7 @@ MipResult MipSolver::solve() {
     tree_presolve_stats_ = {};
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
+    probing_stats_ = {};
     for (auto& clause : conflict_pool_) {
         recycleConflictClause(std::move(clause));
     }
@@ -3556,6 +3614,12 @@ MipResult MipSolver::solve() {
         if (isDiscreteType(problem_.col_type[j])) {
             discrete_vars.push_back(j);
         }
+    }
+
+    // Root probing: discover implications, variable bounds, and fixings.
+    if (probing_enabled_ && !discrete_vars.empty()) {
+        runRootProbing();
+        total_work += probing_stats_.time_seconds;  // Approximate work measure.
     }
 
     const bool pre_root_stage_enabled =
@@ -4998,6 +5062,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
     CutPool pool;
     SeparatorManager separators;
+    if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
+        separators.setVariableBoundStore(&vb_store_);
+    }
     CutSeparationStats total_family_stats;
     CutManager cut_manager;
     cut_manager.setMode(cut_effort_mode_);

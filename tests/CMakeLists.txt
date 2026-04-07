@@ -11,6 +11,7 @@ add_executable(mipx-tests
     test_node_queue.cpp
     test_branching.cpp
     test_domain.cpp
+    test_implication_graph.cpp
     test_mip_solver.cpp
     test_heuristics.cpp
     test_presolve.cpp

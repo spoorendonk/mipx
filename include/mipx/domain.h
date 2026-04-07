@@ -8,10 +8,18 @@
 
 namespace mipx {
 
+class ImplicationGraph;
+
 class DomainPropagator {
 public:
     /// Initialize with problem data.
     void load(const LpProblem& problem);
+
+    /// Set an implication graph to use during propagation. Optional.
+    /// The graph pointer must remain valid for the lifetime of the propagator.
+    void setImplicationGraph(const ImplicationGraph* graph) {
+        implication_graph_ = graph;
+    }
 
     /// Set variable bounds.
     void setBound(Index col, Real lower, Real upper);
@@ -40,6 +48,10 @@ private:
     /// Add all rows containing column col to the propagation queue.
     void enqueueColumn(Index col);
 
+    /// Propagate binary implications when a binary variable gets fixed.
+    /// Returns false if infeasibility detected.
+    bool propagateImplications(Index col);
+
     // Problem data
     Index num_cols_ = 0;
     Index num_rows_ = 0;
@@ -64,6 +76,9 @@ private:
     // Propagation queue
     std::vector<bool> row_in_queue_;
     std::vector<Index> queue_;
+
+    // Optional implication graph for enhanced propagation.
+    const ImplicationGraph* implication_graph_ = nullptr;
 
     static constexpr Real kTol = 1e-8;
 };
