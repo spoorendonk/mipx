@@ -22,6 +22,7 @@ add_executable(mipx-tests
     test_barrier.cpp
     test_pdlp.cpp
     test_exact_refinement.cpp
+    test_conflict_graph.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE

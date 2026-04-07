@@ -17,6 +17,8 @@ add_library(mipx STATIC
     mip/implication_graph.cpp
     mip/variable_bounds.cpp
     mip/probing.cpp
+    mip/conflict_graph.cpp
+    mip/clique_table.cpp
     mip/node_queue.cpp
     mip/automorphism.cpp
     mip/branching.cpp

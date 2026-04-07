@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "mipx/clique_table.h"
 #include "mipx/implication_graph.h"
 
 namespace mipx {
@@ -22,6 +23,10 @@ void DomainPropagator::load(const LpProblem& problem) {
 
     row_in_queue_.assign(num_rows_, false);
     queue_.clear();
+}
+
+void DomainPropagator::setCliqueTable(const CliqueTable* table) {
+    clique_table_ = table;
 }
 
 void DomainPropagator::setBound(Index col, Real lower, Real upper) {
@@ -78,6 +83,53 @@ bool DomainPropagator::propagate() {
             return false;
         }
     }
+
+    // Run clique propagation after row-based propagation converges.
+    if (clique_table_ != nullptr) {
+        if (!propagateCliques()) {
+            return false;
+        }
+        // If clique propagation changed bounds, re-run row propagation.
+        if (!queue_.empty()) {
+            return propagate();
+        }
+    }
+
+    return true;
+}
+
+bool DomainPropagator::propagateCliques() {
+    if (clique_table_ == nullptr) return true;
+
+    std::vector<CliqueTable::BoundUpdate> updates;
+    if (!clique_table_->propagate(lower_, upper_, updates)) {
+        return false;
+    }
+
+    for (const auto& upd : updates) {
+        if (upd.col < 0 || upd.col >= num_cols_) continue;
+
+        bool changed = false;
+        if (upd.new_lower > lower_[upd.col] + kTol) {
+            recordChange(upd.col);
+            lower_[upd.col] = upd.new_lower;
+            changed = true;
+        }
+        if (upd.new_upper < upper_[upd.col] - kTol) {
+            recordChange(upd.col);
+            upper_[upd.col] = upd.new_upper;
+            changed = true;
+        }
+
+        if (lower_[upd.col] > upper_[upd.col] + kTol) {
+            return false;
+        }
+
+        if (changed) {
+            enqueueColumn(upd.col);
+        }
+    }
+
     return true;
 }
 

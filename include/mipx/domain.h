@@ -8,6 +8,7 @@
 
 namespace mipx {
 
+class CliqueTable;
 class ImplicationGraph;
 
 class DomainPropagator {
@@ -20,6 +21,10 @@ public:
     void setImplicationGraph(const ImplicationGraph* graph) {
         implication_graph_ = graph;
     }
+
+    /// Attach a clique table for clique-based propagation.
+    /// The clique table must outlive the propagator.
+    void setCliqueTable(const CliqueTable* table);
 
     /// Set variable bounds.
     void setBound(Index col, Real lower, Real upper);
@@ -41,6 +46,9 @@ public:
 private:
     /// Propagate a single row. Returns false if infeasibility detected.
     bool propagateRow(Index row);
+
+    /// Propagate clique constraints. Returns false if infeasibility detected.
+    bool propagateCliques();
 
     /// Record a bound change for the undo stack.
     void recordChange(Index col);
@@ -79,6 +87,9 @@ private:
 
     // Optional implication graph for enhanced propagation.
     const ImplicationGraph* implication_graph_ = nullptr;
+
+    // Clique table for clique-based propagation (not owned).
+    const CliqueTable* clique_table_ = nullptr;
 
     static constexpr Real kTol = 1e-8;
 };
