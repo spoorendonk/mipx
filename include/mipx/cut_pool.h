@@ -18,6 +18,12 @@ enum class CutFamily : Int {
     Clique,
     ZeroHalf,
     Mixing,
+    Cmir,
+    StrongCg,
+    LiftedCover,
+    ModK,
+    IntersectionCut,
+    MultiRow,
     Count,
 };
 

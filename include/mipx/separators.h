@@ -41,6 +41,12 @@ struct CutFamilyConfig {
     bool clique = true;
     bool zero_half = true;
     bool mixing = true;
+    bool cmir = true;
+    bool strong_cg = true;
+    bool lifted_cover = true;
+    bool mod_k = true;
+    bool intersection_cut = true;
+    bool multi_row = true;
 };
 
 class SeparatorManager {
@@ -87,6 +93,34 @@ private:
                        std::span<const Real> primals,
                        CutPool& pool,
                        CutFamilyStats& stats);
+    Int separateCmir(DualSimplexSolver& lp,
+                     const LpProblem& problem,
+                     std::span<const Real> primals,
+                     CutPool& pool,
+                     CutFamilyStats& stats);
+    Int separateStrongCg(DualSimplexSolver& lp,
+                         const LpProblem& problem,
+                         std::span<const Real> primals,
+                         CutPool& pool,
+                         CutFamilyStats& stats);
+    Int separateLiftedCover(const LpProblem& problem,
+                            std::span<const Real> primals,
+                            CutPool& pool,
+                            CutFamilyStats& stats);
+    Int separateModK(const LpProblem& problem,
+                     std::span<const Real> primals,
+                     CutPool& pool,
+                     CutFamilyStats& stats);
+    Int separateIntersectionCut(DualSimplexSolver& lp,
+                                const LpProblem& problem,
+                                std::span<const Real> primals,
+                                CutPool& pool,
+                                CutFamilyStats& stats);
+    Int separateMultiRow(DualSimplexSolver& lp,
+                         const LpProblem& problem,
+                         std::span<const Real> primals,
+                         CutPool& pool,
+                         CutFamilyStats& stats);
 
     [[nodiscard]] bool isEnabled(CutFamily family) const;
 

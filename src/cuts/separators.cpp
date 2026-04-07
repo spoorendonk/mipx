@@ -104,6 +104,12 @@ bool SeparatorManager::isEnabled(CutFamily family) const {
         case CutFamily::Clique: return config_.clique;
         case CutFamily::ZeroHalf: return config_.zero_half;
         case CutFamily::Mixing: return config_.mixing;
+        case CutFamily::Cmir: return config_.cmir;
+        case CutFamily::StrongCg: return config_.strong_cg;
+        case CutFamily::LiftedCover: return config_.lifted_cover;
+        case CutFamily::ModK: return config_.mod_k;
+        case CutFamily::IntersectionCut: return config_.intersection_cut;
+        case CutFamily::MultiRow: return config_.multi_row;
         case CutFamily::Unknown:
         case CutFamily::Count:
         default: return false;
@@ -145,6 +151,24 @@ Int SeparatorManager::separate(DualSimplexSolver& lp,
     });
     runFamily(CutFamily::Mixing, [&](CutFamilyStats& s) {
         return separateMixing(problem, primals, pool, s);
+    });
+    runFamily(CutFamily::Cmir, [&](CutFamilyStats& s) {
+        return separateCmir(lp, problem, primals, pool, s);
+    });
+    runFamily(CutFamily::StrongCg, [&](CutFamilyStats& s) {
+        return separateStrongCg(lp, problem, primals, pool, s);
+    });
+    runFamily(CutFamily::LiftedCover, [&](CutFamilyStats& s) {
+        return separateLiftedCover(problem, primals, pool, s);
+    });
+    runFamily(CutFamily::ModK, [&](CutFamilyStats& s) {
+        return separateModK(problem, primals, pool, s);
+    });
+    runFamily(CutFamily::IntersectionCut, [&](CutFamilyStats& s) {
+        return separateIntersectionCut(lp, problem, primals, pool, s);
+    });
+    runFamily(CutFamily::MultiRow, [&](CutFamilyStats& s) {
+        return separateMultiRow(lp, problem, primals, pool, s);
     });
 
     return total_added;

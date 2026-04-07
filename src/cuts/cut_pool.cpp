@@ -15,6 +15,12 @@ const char* cutFamilyName(CutFamily family) {
         case CutFamily::Clique: return "clique";
         case CutFamily::ZeroHalf: return "zerohalf";
         case CutFamily::Mixing: return "mixing";
+        case CutFamily::Cmir: return "cmir";
+        case CutFamily::StrongCg: return "strongcg";
+        case CutFamily::LiftedCover: return "liftcov";
+        case CutFamily::ModK: return "modk";
+        case CutFamily::IntersectionCut: return "intersect";
+        case CutFamily::MultiRow: return "multirow";
         case CutFamily::Unknown:
         case CutFamily::Count:
         default: return "unknown";

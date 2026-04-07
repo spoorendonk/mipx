@@ -52,6 +52,11 @@ add_library(mipx STATIC
     cuts/gomory.cpp
     cuts/cut_manager.cpp
     cuts/separators.cpp
+    cuts/cmir.cpp
+    cuts/cut_strengthening.cpp
+    cuts/intersection_cut.cpp
+    cuts/lifted_covers.cpp
+    cuts/mod_k.cpp
 )
 
 set_target_properties(mipx PROPERTIES POSITION_INDEPENDENT_CODE ON)
