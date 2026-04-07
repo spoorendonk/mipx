@@ -26,6 +26,7 @@
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
 #include "mipx/presolve.h"
+#include "mipx/reduced_cost_fixer.h"
 #include "mipx/separators.h"
 #include "mipx/variable_bounds.h"
 
@@ -341,6 +342,7 @@ public:
     [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
+    const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
     [[nodiscard]] bool isTreePresolveAutoTuningEnabled() const {
         return tree_presolve_auto_tuning_enabled_;
     }
@@ -537,6 +539,8 @@ private:
     MipSearchStats search_stats_{};
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
+    RcFixingStats rc_fixing_stats_{};
+    ReducedCostFixer rc_fixer_;
     ExactRefinementMode exact_refinement_mode_ = ExactRefinementMode::Off;
     bool exact_refinement_rational_check_ = false;
     Real exact_refinement_warning_tol_ = 1e-7;

@@ -2225,6 +2225,63 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
     }
 
+    // Standalone local reduced-cost fixing when tree presolve did not run.
+    // The tree presolve block already does inline RC tightening, so we only
+    // apply the dedicated fixer as a fallback for nodes outside tree presolve
+    // scope (e.g., deeper nodes, models with continuous vars, or tree presolve
+    // disabled).
+    const bool tree_presolve_ran =
+        tree_presolve_enabled_ &&
+        tree_presolve_model_supported &&
+        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
+        node.depth > 0 && node.depth <= tree_presolve_max_depth_;
+    // Local RC fixing is serial-only: rc_fixer_ stats are not thread-safe.
+    if (!tree_presolve_ran && num_threads_ <= 1 &&
+        rc_fixer_.loaded() && incumbent_snapshot < kInf &&
+        node_obj_out < incumbent_snapshot - 1e-6) {
+        auto node_rc = lp.getReducedCosts();
+        std::vector<Index> rc_local_tightened;
+        bool rc_feasible = rc_fixer_.applyLocalFixing(
+            node_rc, node_primals_out, node_obj_out, incumbent_snapshot,
+            current_lower, current_upper, rc_local_tightened);
+        if (!rc_feasible) {
+            if (use_conflicts) {
+                learnConflictFromNode(node.bound_changes, false);
+            }
+            return false;
+        }
+        if (!rc_local_tightened.empty()) {
+            for (Index j : rc_local_tightened) {
+                lp.setColBounds(j, current_lower[j], current_upper[j]);
+                touched_vars.push_back(j);
+            }
+            // Re-solve LP with tightened bounds.
+            auto refresh = lp.solve();
+            node_iters_out += refresh.iterations;
+            node_work_out += refresh.work_units;
+            if (refresh.status == Status::Infeasible) {
+                if (use_conflicts) {
+                    learnConflictFromNode(node.bound_changes, true);
+                }
+                return false;
+            }
+            if (refresh.status == Status::Optimal) {
+                node_obj_out = refresh.objective;
+                node_primals_out = lp.getPrimalValues();
+                if (incumbent_snapshot < kInf &&
+                    node_obj_out >= incumbent_snapshot - 1e-6) {
+                    return false;
+                }
+                frac_count = 0;
+                for (Index j = 0; j < problem_.num_cols; ++j) {
+                    if (problem_.col_type[j] == VarType::Continuous) continue;
+                    if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+                }
+                int_inf_out = frac_count;
+            }
+        }
+    }
+
     std::vector<Cut> node_local_cuts = std::move(node.local_cuts);
     if (!node_local_cuts.empty()) {
         auto& kept = node_scratch.kept_cuts;
@@ -3296,6 +3353,8 @@ MipResult MipSolver::solve() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
+    rc_fixing_stats_ = {};
+    rc_fixer_.reset();
     for (auto& clause : conflict_pool_) {
         recycleConflictClause(std::move(clause));
     }
@@ -4874,6 +4933,38 @@ MipResult MipSolver::solve() {
     // Suppress LP iteration logs during tree search.
     lp.setVerbose(false);
 
+    // Reduced-cost fixing: load engine and apply global fixings at root.
+    rc_fixer_.load(problem_);
+    if (incumbent < kInf) {
+        auto root_rc = lp.getReducedCosts();
+        std::vector<Index> rc_tightened;
+        bool rc_feasible = rc_fixer_.applyGlobalFixing(
+            root_rc, root_primals, root_bound, incumbent,
+            problem_.col_lower, problem_.col_upper, rc_tightened);
+        if (!rc_feasible) {
+            if (verbose_) log_.log("Root RC fixing detected infeasibility.\n");
+            MipResult result;
+            result.status = Status::Infeasible;
+            result.nodes = 1;
+            result.lp_iterations = total_lp_iters;
+            result.work_units = canonicalReportedWork(total_work);
+            result.time_seconds = elapsed();
+            restoreProblem();
+            return result;
+        }
+        if (!rc_tightened.empty()) {
+            for (Index j : rc_tightened) {
+                lp.setColBounds(j, problem_.col_lower[j],
+                                problem_.col_upper[j]);
+            }
+            if (verbose_) {
+                log_.log("Root RC fixing: %d global tightenings, %d fixings\n",
+                         rc_fixer_.stats().root_global_tightenings,
+                         rc_fixer_.stats().root_global_fixings);
+            }
+        }
+    }
+
     // Branch-and-bound.
     if (verbose_) {
         log_.log("\n%10s  %8s  %6s  %6s  %14s  %14s  %7s  %5s\n", "Nodes", "Active", "LPit/n",
@@ -5039,6 +5130,17 @@ MipResult MipSolver::solve() {
                 tree_presolve_stats_.activity_tightenings,
                 tree_presolve_stats_.reduced_cost_tightenings, tree_presolve_stats_.lp_resolves,
                 tree_presolve_stats_.lp_delta);
+        }
+        rc_fixing_stats_ = rc_fixer_.stats();
+        if (rc_fixing_stats_.root_global_fixings > 0 ||
+            rc_fixing_stats_.root_global_tightenings > 0 ||
+            rc_fixing_stats_.tree_local_fixings > 0 ||
+            rc_fixing_stats_.tree_local_tightenings > 0) {
+            log_.log("RCFixing: root_fix=%d root_tight=%d tree_fix=%d tree_tight=%d\n",
+                     rc_fixing_stats_.root_global_fixings,
+                     rc_fixing_stats_.root_global_tightenings,
+                     rc_fixing_stats_.tree_local_fixings,
+                     rc_fixing_stats_.tree_local_tightenings);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));

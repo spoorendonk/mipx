@@ -22,6 +22,7 @@ add_library(mipx STATIC
     mip/node_queue.cpp
     mip/automorphism.cpp
     mip/branching.cpp
+    mip/reduced_cost_fixer.cpp
     mip/mip_solver.cpp
     mip/orbital_fixing.cpp
     mip/schreier_sims.cpp
