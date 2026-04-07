@@ -1,9 +1,12 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <vector>
-
 #include "mipx/lu.h"
 #include "mipx/sparse_matrix.h"
+
+#include <algorithm>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cmath>
+#include <span>
+#include <vector>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -19,8 +22,7 @@ static std::vector<Real> denseColumn(const SparseMatrix& A, Index j) {
 }
 
 // Helper: dense matrix-vector product y = B*x where B is defined by basis columns.
-static std::vector<Real> denseMultiply(const SparseMatrix& A,
-                                       std::span<const Index> basis_cols,
+static std::vector<Real> denseMultiply(const SparseMatrix& A, std::span<const Index> basis_cols,
                                        std::span<const Real> x) {
     Index m = static_cast<Index>(basis_cols.size());
     std::vector<Real> y(m, 0.0);
@@ -87,10 +89,8 @@ TEST_CASE("SparseLU: small 3x3 system", "[lu]") {
     //      [1, 3, 1],
     //      [0, 1, 2]]
     // Store as a 3x3 matrix with columns 0,1,2.
-    std::vector<Triplet> trips = {
-        {0, 0, 2.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 1, 3.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 2.0}};
+    std::vector<Triplet> trips = {{0, 0, 2.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 3.0},
+                                  {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 2.0}};
     SparseMatrix A(3, 3, trips);
 
     SparseLU lu;
@@ -109,9 +109,7 @@ TEST_CASE("SparseLU: small 3x3 system", "[lu]") {
 TEST_CASE("SparseLU: FTRAN round-trip", "[lu]") {
     // B = [[4, 1],
     //      [2, 3]]
-    std::vector<Triplet> trips = {
-        {0, 0, 4.0}, {0, 1, 1.0},
-        {1, 0, 2.0}, {1, 1, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 3.0}};
     SparseMatrix A(2, 2, trips);
 
     SparseLU lu;
@@ -133,9 +131,7 @@ TEST_CASE("SparseLU: FTRAN round-trip", "[lu]") {
 TEST_CASE("SparseLU: BTRAN round-trip", "[lu]") {
     // B = [[4, 1],
     //      [2, 3]]
-    std::vector<Triplet> trips = {
-        {0, 0, 4.0}, {0, 1, 1.0},
-        {1, 0, 2.0}, {1, 1, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 3.0}};
     SparseMatrix A(2, 2, trips);
 
     SparseLU lu;
@@ -203,9 +199,8 @@ TEST_CASE("SparseLU: sparse basis from larger matrix", "[lu]") {
 TEST_CASE("SparseLU: rank-1 update", "[lu]") {
     // B = [[3, 1],
     //      [1, 4]]
-    std::vector<Triplet> trips = {
-        {0, 0, 3.0}, {0, 1, 1.0}, {0, 2, 2.0},
-        {1, 0, 1.0}, {1, 1, 4.0}, {1, 2, 5.0}};
+    std::vector<Triplet> trips = {{0, 0, 3.0}, {0, 1, 1.0}, {0, 2, 2.0},
+                                  {1, 0, 1.0}, {1, 1, 4.0}, {1, 2, 5.0}};
     SparseMatrix A(2, 3, trips);
 
     SparseLU lu;
@@ -232,11 +227,9 @@ TEST_CASE("SparseLU: rank-1 update", "[lu]") {
 }
 
 TEST_CASE("SparseLU: updateFromFtranColumn matches update", "[lu]") {
-    std::vector<Triplet> trips = {
-        {0, 0, 4.0}, {1, 0, 1.0}, {2, 0, 0.5},
-        {0, 1, 1.0}, {1, 1, 3.0}, {2, 1, 1.0},
-        {0, 2, 0.0}, {1, 2, 2.0}, {2, 2, 5.0},
-        {0, 3, 2.0}, {1, 3, 1.0}, {2, 3, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {1, 0, 1.0}, {2, 0, 0.5}, {0, 1, 1.0},
+                                  {1, 1, 3.0}, {2, 1, 1.0}, {0, 2, 0.0}, {1, 2, 2.0},
+                                  {2, 2, 5.0}, {0, 3, 2.0}, {1, 3, 1.0}, {2, 3, 3.0}};
     SparseMatrix A(3, 4, trips);
 
     std::vector<Index> basis = {0, 1, 2};
@@ -276,19 +269,25 @@ TEST_CASE("SparseLU: updateFromFtranColumn matches update", "[lu]") {
 
 TEST_CASE("SparseLU: multiple updates", "[lu]") {
     // 3x6 matrix with enough columns for several basis swaps.
-    std::vector<Triplet> trips = {
-        // col 0: [2, 0, 1]
-        {0, 0, 2.0}, {2, 0, 1.0},
-        // col 1: [1, 3, 0]
-        {0, 1, 1.0}, {1, 1, 3.0},
-        // col 2: [0, 1, 4]
-        {1, 2, 1.0}, {2, 2, 4.0},
-        // col 3: [1, 1, 1]
-        {0, 3, 1.0}, {1, 3, 1.0}, {2, 3, 1.0},
-        // col 4: [3, 0, 2]
-        {0, 4, 3.0}, {2, 4, 2.0},
-        // col 5: [0, 2, 3]
-        {1, 5, 2.0}, {2, 5, 3.0}};
+    std::vector<Triplet> trips = {// col 0: [2, 0, 1]
+                                  {0, 0, 2.0},
+                                  {2, 0, 1.0},
+                                  // col 1: [1, 3, 0]
+                                  {0, 1, 1.0},
+                                  {1, 1, 3.0},
+                                  // col 2: [0, 1, 4]
+                                  {1, 2, 1.0},
+                                  {2, 2, 4.0},
+                                  // col 3: [1, 1, 1]
+                                  {0, 3, 1.0},
+                                  {1, 3, 1.0},
+                                  {2, 3, 1.0},
+                                  // col 4: [3, 0, 2]
+                                  {0, 4, 3.0},
+                                  {2, 4, 2.0},
+                                  // col 5: [0, 2, 3]
+                                  {1, 5, 2.0},
+                                  {2, 5, 3.0}};
     SparseMatrix A(3, 6, trips);
 
     SparseLU lu;
@@ -350,13 +349,18 @@ TEST_CASE("SparseLU: sparse entering-column updates stay consistent across repea
     // Extra columns 4..6 are singleton (very sparse) entering columns.
     std::vector<Triplet> trips = {
         // col 0: [2, 1, 0, 0]
-        {0, 0, 2.0}, {1, 0, 1.0},
+        {0, 0, 2.0},
+        {1, 0, 1.0},
         // col 1: [0, 3, 1, 0]
-        {1, 1, 3.0}, {2, 1, 1.0},
+        {1, 1, 3.0},
+        {2, 1, 1.0},
         // col 2: [1, 0, 2, 1]
-        {0, 2, 1.0}, {2, 2, 2.0}, {3, 2, 1.0},
+        {0, 2, 1.0},
+        {2, 2, 2.0},
+        {3, 2, 1.0},
         // col 3: [0, 1, 0, 2]
-        {1, 3, 1.0}, {3, 3, 2.0},
+        {1, 3, 1.0},
+        {3, 3, 2.0},
         // col 4: e0
         {0, 4, 1.0},
         // col 5: e3
@@ -421,8 +425,7 @@ TEST_CASE("SparseLU: sparse entering-column updates stay consistent across repea
 
 TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
     // Simple 2x2 identity.
-    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0},
-                                  {0, 2, 2.0}, {1, 2, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0}, {0, 2, 2.0}, {1, 2, 3.0}};
     SparseMatrix A(2, 4, trips);
 
     SparseLU lu;
@@ -470,14 +473,10 @@ TEST_CASE("SparseLU: refactorization tracking", "[lu]") {
 TEST_CASE("SparseLU: update workspace resets across refactorization", "[lu][regression]") {
     // Basis columns 0..3 form a coupled nonsingular matrix.
     // Extra sparse columns are used for updates before/after refactorization.
-    std::vector<Triplet> trips = {
-        {0, 0, 2.0}, {1, 0, 1.0},
-        {1, 1, 3.0}, {2, 1, 1.0},
-        {0, 2, 1.0}, {2, 2, 2.0}, {3, 2, 1.0},
-        {1, 3, 1.0}, {3, 3, 2.0},
-        {0, 4, 1.0},  // sparse entering col
-        {3, 5, 1.0},
-        {2, 6, 1.0}};  // sparse entering col
+    std::vector<Triplet> trips = {{0, 0, 2.0}, {1, 0, 1.0}, {1, 1, 3.0}, {2, 1, 1.0},
+                                  {0, 2, 1.0}, {2, 2, 2.0}, {3, 2, 1.0}, {1, 3, 1.0},
+                                  {3, 3, 2.0}, {0, 4, 1.0},   // sparse entering col
+                                  {3, 5, 1.0}, {2, 6, 1.0}};  // sparse entering col
     SparseMatrix A(4, 7, trips);
     std::vector<Index> basis = {0, 1, 2, 3};
 
@@ -527,8 +526,7 @@ TEST_CASE("SparseLU: update workspace resets across refactorization", "[lu][regr
 }
 
 TEST_CASE("SparseLU: configurable update limit", "[lu]") {
-    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0},
-                                  {0, 2, 2.0}, {1, 2, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 1.0}, {0, 2, 2.0}, {1, 2, 3.0}};
     SparseMatrix A(2, 4, trips);
 
     SparseLU lu;
@@ -589,10 +587,7 @@ TEST_CASE("SparseLU: permuted identity", "[lu]") {
     // So B = [[0, 1, 0],
     //         [0, 0, 1],
     //         [1, 0, 0]]
-    std::vector<Triplet> trips = {
-        {2, 0, 1.0},
-        {0, 1, 1.0},
-        {1, 2, 1.0}};
+    std::vector<Triplet> trips = {{2, 0, 1.0}, {0, 1, 1.0}, {1, 2, 1.0}};
     SparseMatrix A(3, 3, trips);
 
     SparseLU lu;
@@ -625,12 +620,18 @@ TEST_CASE("SparseLU: hypersparse solve paths on large sparse rhs", "[lu]") {
     trips.reserve(static_cast<std::size_t>(3 * n));
     for (Index i = 0; i < n; ++i) {
         trips.push_back({i, i, 4.0});
-        if (i > 0) trips.push_back({i, i - 1, -1.0});
-        if (i + 1 < n) trips.push_back({i, i + 1, 0.5});
+        if (i > 0) {
+            trips.push_back({i, i - 1, -1.0});
+        }
+        if (i + 1 < n) {
+            trips.push_back({i, i + 1, 0.5});
+        }
     }
     SparseMatrix A(n, n, trips);
     std::vector<Index> basis(n);
-    for (Index i = 0; i < n; ++i) basis[i] = i;
+    for (Index i = 0; i < n; ++i) {
+        basis[i] = i;
+    }
 
     SparseLU lu;
     lu.factorize(A, basis);
@@ -661,5 +662,332 @@ TEST_CASE("SparseLU: hypersparse solve paths on large sparse rhs", "[lu]") {
         for (Index i = 0; i < n; ++i) {
             CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-9));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  BTRAN sparse support regression tests (issue #138)
+// ---------------------------------------------------------------------------
+
+// Helper: verify that every index in the support set is unique.
+static bool supportHasNoDuplicates(std::span<const Index> support) {
+    std::vector<Index> sorted(support.begin(), support.end());
+    std::sort(sorted.begin(), sorted.end());
+    return std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
+}
+
+// Helper: verify that the support set covers all truly nonzero entries in rhs.
+// A position is "truly nonzero" if |rhs[i]| > tol.
+static bool supportCoversNonzeros(std::span<const Real> rhs, std::span<const Index> support,
+                                  Real tol = 1e-13) {
+    // Build a set of supported indices.
+    std::vector<bool> in_support(rhs.size(), false);
+    for (Index i : support) {
+        in_support[static_cast<std::size_t>(i)] = true;
+    }
+    for (std::size_t i = 0; i < rhs.size(); ++i) {
+        if (std::abs(rhs[i]) > tol && !in_support[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+TEST_CASE("SparseLU: BTRAN support cancellation — two contributions summing to zero",
+          "[lu][regression][support]") {
+    // Construct a basis where BTRAN of e_0 produces cancellation: two intermediate
+    // contributions to some row that sum to zero. The support should NOT list
+    // that position.
+    //
+    // B = [[1, 1, 0],
+    //      [1,-1, 0],
+    //      [0, 0, 1]]
+    // B^{-T} * e_0 = B^{-1}[0,:] as a column. B^{-1} = [[0.5, 0.5, 0], [0.5, -0.5, 0], [0, 0, 1]].
+    // B^{-T} * e_0 = [0.5, 0.5, 0]. Row 2 cancels (was never touched) or is zero.
+    //
+    // Larger matrix to potentially trigger sparse path bookkeeping:
+    // Embed a 2x2 coupling block in a 300-dim tridiagonal to get sparse BTRAN.
+    constexpr Index n = 300;
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(3 * n + 4));
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 4.0});
+        if (i > 0) {
+            trips.push_back({i, i - 1, -1.0});
+        }
+        if (i + 1 < n) {
+            trips.push_back({i, i + 1, 0.5});
+        }
+    }
+    // Override rows 100,101 to create coupling that forces cancellation in BTRAN.
+    // Replace diagonal and off-diagonal for rows 100,101 to create a cancellation pair.
+    // Column 100 = [... 1 at row 100, 1 at row 101, ...] (off-diag adds)
+    // Column 101 = [... 1 at row 100, -1 at row 101, ...] (off-diag subtracts)
+    // After BTRAN of a unit vector at some position that propagates through these rows,
+    // certain components should cancel.
+    // For simplicity: override col 100,101 completely.
+    // We'll add extra columns to the matrix and use those as basis columns 100,101.
+    Index extra_base = n;
+    // Extra column for basis pos 100: [1 at row 100, 1 at row 101]
+    trips.push_back({100, extra_base, 1.0});
+    trips.push_back({101, extra_base, 1.0});
+    // Extra column for basis pos 101: [1 at row 100, -1 at row 101]
+    trips.push_back({100, extra_base + 1, 1.0});
+    trips.push_back({101, extra_base + 1, -1.0});
+
+    SparseMatrix A(n, n + 2, trips);
+
+    std::vector<Index> basis(n);
+    for (Index i = 0; i < n; ++i) {
+        basis[i] = i;
+    }
+    // Replace basis columns 100,101 with the extra columns.
+    basis[100] = extra_base;
+    basis[101] = extra_base + 1;
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    // BTRAN of a vector with entry at row 100 only: rhs = e_{100}.
+    // B^{-T} * e_{100} should have nonzeros that propagate through the tridiagonal
+    // but the coupling block creates cancellation patterns.
+    std::vector<Real> rhs(n, 0.0);
+    rhs[100] = 1.0;
+    std::vector<Index> support;
+
+    lu.btran(rhs, support);
+
+    // Verify support invariants.
+    CHECK(supportHasNoDuplicates(support));
+    CHECK(supportCoversNonzeros(rhs, support));
+
+    // Verify that positions truly at zero are not in the support.
+    std::vector<bool> in_support(n, false);
+    for (Index i : support) {
+        in_support[i] = true;
+    }
+    for (Index i = 0; i < n; ++i) {
+        if (std::abs(rhs[i]) <= 1e-13) {
+            CHECK_FALSE(in_support[i]);
+        }
+    }
+
+    // Verify correctness against dense BTRAN (no support).
+    std::vector<Real> rhs_dense(n, 0.0);
+    rhs_dense[100] = 1.0;
+    lu.btran(rhs_dense);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(rhs[i], WithinAbs(rhs_dense[i], 1e-10));
+    }
+}
+
+TEST_CASE("SparseLU: BTRAN support re-touch — position written, cleared, written again",
+          "[lu][regression][support]") {
+    // After an update, BTRAN traverses both the FT etas and the original L/U factors.
+    // A position could appear nonzero in the FT-transpose pass, then get zeroed out
+    // by U^{-T}, then become nonzero again during L^{-T}. The support must list it
+    // exactly once.
+    //
+    // Strategy: factorize a coupled basis, do a rank-1 update that shifts pivots
+    // around, then BTRAN a sparse RHS. Verify support has no duplicates and covers
+    // all nonzeros.
+    std::vector<Triplet> trips = {// col 0: [3, 1, 0, 0]
+                                  {0, 0, 3.0},
+                                  {1, 0, 1.0},
+                                  // col 1: [1, 4, 1, 0]
+                                  {0, 1, 1.0},
+                                  {1, 1, 4.0},
+                                  {2, 1, 1.0},
+                                  // col 2: [0, 1, 3, 1]
+                                  {1, 2, 1.0},
+                                  {2, 2, 3.0},
+                                  {3, 2, 1.0},
+                                  // col 3: [0, 0, 1, 4]
+                                  {2, 3, 1.0},
+                                  {3, 3, 4.0},
+                                  // col 4 (entering): [2, 0, 0, 1]
+                                  {0, 4, 2.0},
+                                  {3, 4, 1.0},
+                                  // col 5 (entering): [0, 1, 2, 0]
+                                  {1, 5, 1.0},
+                                  {2, 5, 2.0}};
+    SparseMatrix A(4, 6, trips);
+
+    SparseLU lu;
+    lu.setMaxUpdates(100);
+    std::vector<Index> basis = {0, 1, 2, 3};
+    lu.factorize(A, basis);
+
+    // Update 1: replace position 0 with col 4.
+    {
+        auto c = A.col(4);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(0, idx, val);
+        basis[0] = 4;
+    }
+    // Update 2: replace position 2 with col 5.
+    {
+        auto c = A.col(5);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(2, idx, val);
+        basis[2] = 5;
+    }
+
+    // BTRAN each unit vector and verify support invariants.
+    for (Index row = 0; row < 4; ++row) {
+        std::vector<Real> rhs(4, 0.0);
+        rhs[row] = 1.0;
+        std::vector<Index> support;
+        lu.btran(rhs, support);
+
+        INFO("BTRAN e_" << row << " after two updates");
+        CHECK(supportHasNoDuplicates(support));
+        CHECK(supportCoversNonzeros(rhs, support));
+
+        // Cross-check against dense BTRAN.
+        std::vector<Real> rhs_dense(4, 0.0);
+        rhs_dense[row] = 1.0;
+        lu.btran(rhs_dense);
+        for (Index i = 0; i < 4; ++i) {
+            CHECK_THAT(rhs[i], WithinAbs(rhs_dense[i], 1e-10));
+        }
+    }
+}
+
+TEST_CASE("SparseLU: BTRAN support near-zero entries — consistent treatment",
+          "[lu][regression][support]") {
+    // Verify that entries below the drop tolerance (kZeroTol = 1e-13) are excluded
+    // from the support set, and entries above it are included, with the dense values
+    // matching in both cases.
+    //
+    // Use a well-conditioned diagonal with tiny off-diagonal perturbations that
+    // produce near-zero BTRAN results in some positions.
+    constexpr Index n = 300;
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(2 * n));
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 1e6});  // large diagonal -> tiny B^{-T} entries
+    }
+    // Add a tiny off-diagonal coupling that creates near-zero propagation.
+    trips.push_back({50, 51, 1e-8});
+    trips.push_back({51, 50, 1e-8});
+    SparseMatrix A(n, n, trips);
+
+    std::vector<Index> basis(n);
+    for (Index i = 0; i < n; ++i) {
+        basis[i] = i;
+    }
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    // BTRAN of e_50: should produce a very small value at position 51 due to
+    // the off-diagonal coupling, and vice versa.
+    std::vector<Real> rhs(n, 0.0);
+    rhs[50] = 1.0;
+    std::vector<Index> support;
+    lu.btran(rhs, support);
+
+    // Verify support invariants.
+    CHECK(supportHasNoDuplicates(support));
+    CHECK(supportCoversNonzeros(rhs, support));
+
+    // All support entries should have |value| > 1e-13.
+    for (Index i : support) {
+        CHECK(std::abs(rhs[i]) > 1e-13);
+    }
+
+    // All non-support entries should have |value| <= 1e-13.
+    std::vector<bool> in_support(n, false);
+    for (Index i : support) {
+        in_support[i] = true;
+    }
+    for (Index i = 0; i < n; ++i) {
+        if (!in_support[i]) {
+            CHECK(std::abs(rhs[i]) <= 1e-13);
+        }
+    }
+
+    // Cross-check values against dense BTRAN.
+    std::vector<Real> rhs_dense(n, 0.0);
+    rhs_dense[50] = 1.0;
+    lu.btran(rhs_dense);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(rhs[i], WithinAbs(rhs_dense[i], 1e-10));
+    }
+}
+
+TEST_CASE("SparseLU: BTRAN dense fallback matches sparse support path",
+          "[lu][regression][support]") {
+    // When the RHS is dense enough, BTRAN should skip hyper-sparse tracking
+    // and produce the same result as when it uses the sparse path.
+    // We compare results for the same system with sparse vs dense RHS.
+    constexpr Index n = 300;
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(3 * n));
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 4.0});
+        if (i > 0) {
+            trips.push_back({i, i - 1, -1.0});
+        }
+        if (i + 1 < n) {
+            trips.push_back({i, i + 1, 0.5});
+        }
+    }
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(n);
+    for (Index i = 0; i < n; ++i) {
+        basis[i] = i;
+    }
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    SECTION("Sparse RHS: support matches dense-only BTRAN") {
+        // Very sparse RHS — triggers hyper-sparse path.
+        std::vector<Real> rhs_sparse(n, 0.0);
+        rhs_sparse[150] = 1.0;
+        std::vector<Index> support;
+        lu.btran(rhs_sparse, support);
+
+        // Dense-only BTRAN (no support output).
+        std::vector<Real> rhs_dense(n, 0.0);
+        rhs_dense[150] = 1.0;
+        lu.btran(rhs_dense);
+
+        // Values must match.
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(rhs_sparse[i], WithinAbs(rhs_dense[i], 1e-10));
+        }
+
+        // Support must be valid.
+        CHECK(supportHasNoDuplicates(support));
+        CHECK(supportCoversNonzeros(rhs_sparse, support));
+    }
+
+    SECTION("Dense RHS: dense fallback produces correct result") {
+        // Dense RHS — more than 10% nonzero, should trigger dense fallback.
+        std::vector<Real> rhs_dense_in(n, 0.0);
+        for (Index i = 0; i < n; i += 2) {
+            rhs_dense_in[i] = static_cast<Real>(i + 1);
+        }
+        std::vector<Index> support;
+        lu.btran(rhs_dense_in, support);
+
+        // Verify round-trip: B^T * (B^{-T} * c) = c.
+        auto Bty = denseMultiplyTranspose(A, basis, rhs_dense_in);
+        std::vector<Real> orig(n, 0.0);
+        for (Index i = 0; i < n; i += 2) {
+            orig[i] = static_cast<Real>(i + 1);
+        }
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bty[i], WithinAbs(orig[i], 1e-8));
+        }
+
+        // Support validity (may be empty if dense path was taken, which is fine).
+        CHECK(supportHasNoDuplicates(support));
+        CHECK(supportCoversNonzeros(rhs_dense_in, support));
     }
 }
