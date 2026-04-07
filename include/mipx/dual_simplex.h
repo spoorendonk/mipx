@@ -91,7 +91,17 @@ struct DualSimplexOptions {
     bool enable_bound_perturbation = true;
     Int bound_perturbation_stall_pivots = 512;
     Real bound_perturbation_magnitude = 1e-8;
-    Int bound_perturbation_max_activations = 2;
+    Int bound_perturbation_max_activations = 4;
+
+    // Expanding perturbation: start at initial_scale * base, escalate by
+    // expand_factor each time degeneracy persists, up to max_level levels.
+    Real bound_perturbation_initial_scale = 0.1;
+    Real bound_perturbation_expand_factor = 10.0;
+    Int bound_perturbation_max_level = 3;
+
+    // Cleanup phase: bounded iterations to resolve infeasibilities after
+    // removing perturbation at optimality.
+    Int bound_perturbation_cleanup_iter_limit = 500;
 
     // Stall-triggered deterministic restart/re-crash.
     bool enable_stall_restart = false;
@@ -283,6 +293,7 @@ private:
     WorkUnits work_;
     bool bound_perturb_active_ = false;
     Int bound_perturb_activations_ = 0;
+    Int bound_perturb_level_ = 0;            // current escalation level (0 = initial)
     Int bfrt_high_flip_iters_ = 0;           // consecutive iterations with high flip count
     std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
     std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers

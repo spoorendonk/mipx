@@ -407,6 +407,10 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.bound_perturbation_stall_pivots = 64;
     opts.bound_perturbation_magnitude = 1e-6;
     opts.bound_perturbation_max_activations = 3;
+    opts.bound_perturbation_initial_scale = 0.05;
+    opts.bound_perturbation_expand_factor = 5.0;
+    opts.bound_perturbation_max_level = 4;
+    opts.bound_perturbation_cleanup_iter_limit = 200;
     opts.enable_stall_restart = false;
     opts.stall_restart_pivots = 1234;
     opts.stall_restart_max_restarts = 4;
@@ -458,6 +462,10 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     CHECK(applied.bound_perturbation_stall_pivots == 64);
     CHECK(applied.bound_perturbation_magnitude == 1e-6);
     CHECK(applied.bound_perturbation_max_activations == 3);
+    CHECK(applied.bound_perturbation_initial_scale == 0.05);
+    CHECK(applied.bound_perturbation_expand_factor == 5.0);
+    CHECK(applied.bound_perturbation_max_level == 4);
+    CHECK(applied.bound_perturbation_cleanup_iter_limit == 200);
     CHECK_FALSE(applied.enable_stall_restart);
     CHECK(applied.stall_restart_pivots == 1234);
     CHECK(applied.stall_restart_max_restarts == 4);

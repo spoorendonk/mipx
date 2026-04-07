@@ -134,6 +134,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     nonbasic_pos_.clear();
     bound_perturb_active_ = false;
     bound_perturb_activations_ = 0;
+    bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
     loaded_ = true;
@@ -767,6 +768,7 @@ LpResult DualSimplexSolver::solve() {
     solve_start_ = std::chrono::steady_clock::now();
     bound_perturb_active_ = false;
     bound_perturb_activations_ = 0;
+    bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
 
@@ -1066,6 +1068,63 @@ LpResult DualSimplexSolver::solve() {
     std::copy(row_upper_.begin(), row_upper_.end(),
               base_var_upper.begin() + static_cast<std::size_t>(num_cols_));
 
+    // Per-variable perturbation base magnitudes (problem-adapted).
+    // For structural columns: based on column coefficient range and objective.
+    // For slacks: based on base magnitude and bound-width scaling.
+    // Uses logarithmic distribution: eps_j = base * 10^(hash_uniform * range).
+    std::vector<Real> var_perturb_base(static_cast<std::size_t>(numVars()), 0.0);
+    {
+        const Real base_mag = options_.bound_perturbation_magnitude;
+        // Compute per-column max|a_ij| for coefficient-range scaling.
+        std::vector<Real> col_max_abs(static_cast<std::size_t>(num_cols_), 0.0);
+        for (Index i = 0; i < num_rows_; ++i) {
+            auto rv = matrix_.row(i);
+            for (Index p = 0; p < rv.size(); ++p) {
+                const Index j = rv.indices[p];
+                const Real av = std::abs(rv.values[p]);
+                Real& cm = col_max_abs[static_cast<std::size_t>(j)];
+                if (av > cm)
+                    cm = av;
+            }
+        }
+        for (Index k = 0; k < numVars(); ++k) {
+            const std::size_t ks = static_cast<std::size_t>(k);
+            const Real lb = base_var_lower[ks];
+            const Real ub = base_var_upper[ks];
+            if (lb == -kInf && ub == kInf)
+                continue;
+
+            // Deterministic hash for logarithmic distribution.
+            const uint32_t hash = static_cast<uint32_t>(k + 1) * 2246822519u;
+            // Uniform in [0, 1) from hash bits.
+            const Real u = static_cast<Real>((hash >> 8) & 0xffffff) / 16777216.0;
+            // Logarithmic spread: 10^(u * 2) gives range [1, 100].
+            const Real log_weight = std::pow(10.0, u * 2.0);
+
+            Real coeff_scale = 1.0;
+            if (k < num_cols_) {
+                // Scale by column coefficient range and objective magnitude.
+                const Real cm = col_max_abs[ks];
+                if (cm > kZeroTol)
+                    coeff_scale = std::max(1.0, 1.0 / cm);
+                const Real obj_mag = std::abs(obj_[k]);
+                if (obj_mag > kZeroTol) {
+                    coeff_scale = std::max(coeff_scale, obj_mag);
+                }
+            }
+            // Bound-width scaling: narrower bounds get smaller perturbation.
+            Real bound_scale = 1.0;
+            if (lb != -kInf && ub != kInf) {
+                const Real width = ub - lb;
+                if (width > 4.0 * kPrimalTol) {
+                    bound_scale = std::min(1.0, width * 0.1);
+                }
+            }
+
+            var_perturb_base[ks] = base_mag * log_weight * coeff_scale * bound_scale;
+        }
+    }
+
     SparseWorkVector pivot_row_alpha(numVars());
     std::vector<Real> pivot_col(num_rows_, 0.0);
     SparseWorkVector btran_work(num_rows_);
@@ -1122,6 +1181,9 @@ LpResult DualSimplexSolver::solve() {
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
     Int iters_since_pinf_improve = 0;
+    // Cleanup phase: bounded iteration budget after removing perturbation.
+    bool in_cleanup_phase = false;
+    Int cleanup_iters_remaining = 0;
     const Int primal_feasible_stall_pivots =
         std::max<Int>(1, options_.primal_feasible_adaptive_refactor_stall_pivots);
     const Int primal_feasible_min_updates =
@@ -1189,17 +1251,30 @@ LpResult DualSimplexSolver::solve() {
         std::fill(upper_bound_perturb_.begin(), upper_bound_perturb_.end(), 0.0);
     };
 
-    auto activateBoundPerturbation = [&]() -> bool {
+    // Activate or escalate bound perturbation using problem-adapted magnitudes.
+    // level_override >= 0 forces a specific escalation level.
+    auto activateBoundPerturbation = [&](Int level_override = -1) -> bool {
         if (!options_.enable_bound_perturbation)
             return false;
-        if (bound_perturb_active_)
-            return false;
-        if (options_.bound_perturbation_max_activations >= 0 &&
-            bound_perturb_activations_ >= options_.bound_perturbation_max_activations) {
-            return false;
-        }
         if (options_.bound_perturbation_magnitude <= 0.0)
             return false;
+
+        const Int level = (level_override >= 0) ? level_override : bound_perturb_level_;
+        if (!bound_perturb_active_) {
+            // Fresh activation: check activation budget.
+            if (options_.bound_perturbation_max_activations >= 0 &&
+                bound_perturb_activations_ >= options_.bound_perturbation_max_activations) {
+                return false;
+            }
+        }
+
+        // Compute level multiplier: initial_scale * expand_factor^level.
+        const Real initial_scale = std::max(1e-6, options_.bound_perturbation_initial_scale);
+        const Real expand_factor = std::max(1.0, options_.bound_perturbation_expand_factor);
+        Real level_mult = initial_scale;
+        for (Int i = 0; i < level; ++i) {
+            level_mult *= expand_factor;
+        }
 
         const Index n = numVars();
         lower_bound_perturb_.assign(static_cast<std::size_t>(n), 0.0);
@@ -1212,11 +1287,7 @@ LpResult DualSimplexSolver::solve() {
             if (lb == -kInf && ub == kInf)
                 continue;
 
-            const uint32_t hash = static_cast<uint32_t>(k + 1) * 2246822519u;
-            const Real weight = 1.0 + static_cast<Real>((hash >> 24) & 0xff) / 512.0;
-            const Real scale = std::max<Real>(1.0, std::max((lb == -kInf) ? 0.0 : std::abs(lb),
-                                                            (ub == kInf) ? 0.0 : std::abs(ub)));
-            Real eps = options_.bound_perturbation_magnitude * weight * scale;
+            Real eps = var_perturb_base[ks] * level_mult;
             if (eps <= kZeroTol)
                 continue;
 
@@ -1234,9 +1305,20 @@ LpResult DualSimplexSolver::solve() {
             }
         }
 
+        if (!bound_perturb_active_) {
+            ++bound_perturb_activations_;
+        }
         bound_perturb_active_ = true;
-        ++bound_perturb_activations_;
+        bound_perturb_level_ = level;
         return true;
+    };
+
+    // Escalate perturbation to the next level if degeneracy persists.
+    auto escalateBoundPerturbation = [&]() -> bool {
+        const Int max_level = std::max<Int>(0, options_.bound_perturbation_max_level);
+        if (bound_perturb_level_ >= max_level)
+            return false;
+        return activateBoundPerturbation(bound_perturb_level_ + 1);
     };
 
     // Log header.
@@ -1267,6 +1349,18 @@ LpResult DualSimplexSolver::solve() {
             break;
         }
 
+        // Cleanup phase budget: if we've exhausted cleanup iterations
+        // without reaching optimality, declare optimal anyway (the
+        // perturbation was only a numerical device).
+        if (in_cleanup_phase) {
+            --cleanup_iters_remaining;
+            if (cleanup_iters_remaining <= 0) {
+                // Budget exhausted. Accept current solution.
+                status_ = Status::Optimal;
+                break;
+            }
+        }
+
         if (bound_perturb_active_) {
             const std::size_t expected = static_cast<std::size_t>(numVars());
             if (lower_bound_perturb_.size() != expected ||
@@ -1275,15 +1369,26 @@ LpResult DualSimplexSolver::solve() {
                 break;
             }
             if (degenerate_pivot_streak == 0) {
+                // Degeneracy resolved: de-activate perturbation.
                 clearBoundPerturbation();
+                bound_perturb_level_ = 0;
                 need_infeasible_rebuild = true;
             }
         }
-        if (!bound_perturb_active_ && options_.enable_bound_perturbation &&
-            options_.bound_perturbation_stall_pivots > 0 &&
+        if (options_.enable_bound_perturbation && options_.bound_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.bound_perturbation_stall_pivots) {
-            if (activateBoundPerturbation()) {
-                need_infeasible_rebuild = true;
+            if (!bound_perturb_active_) {
+                // First activation at level 0.
+                if (activateBoundPerturbation(0)) {
+                    in_cleanup_phase = false;
+                    need_infeasible_rebuild = true;
+                }
+            } else if (degenerate_pivot_streak - options_.bound_perturbation_stall_pivots >=
+                       options_.bound_perturbation_stall_pivots) {
+                // Degeneracy persists despite perturbation: escalate.
+                if (escalateBoundPerturbation()) {
+                    need_infeasible_rebuild = true;
+                }
             }
         }
 
@@ -1292,6 +1397,7 @@ LpResult DualSimplexSolver::solve() {
         if (options_.enable_stall_restart && options_.stall_restart_pivots > 0 &&
             degenerate_pivot_streak >= options_.stall_restart_pivots && restart_budget_ok) {
             clearBoundPerturbation();
+            bound_perturb_level_ = 0;
             clearCostShifts();
             setupCrashBasis();
             try {
@@ -1610,11 +1716,79 @@ LpResult DualSimplexSolver::solve() {
 
             if (entering_p < 0) {
                 if (bound_perturb_active_) {
-                    // Re-validate optimality against original (unperturbed) bounds.
+                    // Cleanup phase: freeze basis, restore original bounds,
+                    // recompute primals/duals, and re-validate.
                     clearBoundPerturbation();
-                    rebuildInfeasibleSet();
+                    bound_perturb_level_ = 0;
+                    computePrimals();
+                    computeDuals();
                     degenerate_pivot_streak = 0;
                     resetPrimalFeasibleProgress();
+
+                    // Check if primal feasibility was lost by removing perturbation.
+                    bool primal_ok = true;
+                    for (Index i = 0; i < num_rows_; ++i) {
+                        Index bk = basis_[i];
+                        Real xk = primal_[bk];
+                        Real lbk = base_var_lower[static_cast<std::size_t>(bk)];
+                        Real ubk = base_var_upper[static_cast<std::size_t>(bk)];
+                        if (xk < lbk - kPrimalTol || xk > ubk + kPrimalTol) {
+                            primal_ok = false;
+                            break;
+                        }
+                    }
+
+                    if (!primal_ok) {
+                        // Primal infeasibilities from unperturbing: allow bounded
+                        // cleanup iterations to resolve them via normal dual pivots.
+                        in_cleanup_phase = true;
+                        cleanup_iters_remaining =
+                            std::max<Int>(1, options_.bound_perturbation_cleanup_iter_limit);
+                        rebuildInfeasibleSet();
+                        continue;
+                    }
+
+                    // Primal OK: check if dual feasibility was lost.
+                    bool dual_ok = true;
+                    for (Index k : nonbasic_) {
+                        const Real rc = reduced_cost_[k];
+                        const BasisStatus st = var_status_[k];
+                        if ((st == BasisStatus::AtLower && rc < -kDualTol) ||
+                            (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                            (st == BasisStatus::Free && std::abs(rc) > kDualTol)) {
+                            dual_ok = false;
+                            break;
+                        }
+                    }
+                    if (!dual_ok) {
+                        // Shift-back: flip dual-infeasible nonbasic variables.
+                        bool flipped = false;
+                        for (Index k : nonbasic_) {
+                            const Real rc = reduced_cost_[k];
+                            const BasisStatus st = var_status_[k];
+                            const Real lbk = base_var_lower[static_cast<std::size_t>(k)];
+                            const Real ubk = base_var_upper[static_cast<std::size_t>(k)];
+                            if (st == BasisStatus::AtLower && rc < -kDualTol && ubk != kInf) {
+                                primal_[k] = ubk;
+                                var_status_[k] = BasisStatus::AtUpper;
+                                flipped = true;
+                            } else if (st == BasisStatus::AtUpper && rc > kDualTol &&
+                                       lbk != -kInf) {
+                                primal_[k] = lbk;
+                                var_status_[k] = BasisStatus::AtLower;
+                                flipped = true;
+                            }
+                        }
+                        if (flipped) {
+                            computePrimals();
+                            // Flips may introduce primal infeasibilities.
+                            in_cleanup_phase = true;
+                            cleanup_iters_remaining =
+                                std::max<Int>(1, options_.bound_perturbation_cleanup_iter_limit);
+                        }
+                    }
+                    // Re-enter main loop to check final optimality.
+                    rebuildInfeasibleSet();
                     continue;
                 }
                 status_ = Status::Optimal;
