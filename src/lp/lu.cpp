@@ -77,6 +77,287 @@ inline Real denseDot(const Real* a, std::span<const Real> x) {
 }  // namespace
 
 // --------------------------------------------------------------------------
+//  BTF detection via maximum matching + Tarjan's SCC
+// --------------------------------------------------------------------------
+
+Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
+                          std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
+                          std::vector<Index>& btf_block_start) {
+    // Minimum dimension to attempt BTF detection (overhead not worth it for tiny matrices).
+    static constexpr Index kBtfMinDim = 16;
+
+    if (dim < kBtfMinDim) {
+        return 0;
+    }
+
+    const auto n = static_cast<std::size_t>(dim);
+
+    // Step 1: Build column-to-row adjacency for the basis submatrix.
+    // col_adj_start[j]..col_adj_start[j+1] gives the row indices in column j.
+    std::vector<Index> col_adj_start(n + 1, 0);
+    std::vector<Index> col_adj_rows;
+    col_adj_rows.reserve(n * 4);  // heuristic
+
+    for (Index j = 0; j < dim; ++j) {
+        auto colview = matrix.col(basis_cols[j]);
+        for (Index k = 0; k < colview.size(); ++k) {
+            Index row = colview.indices[k];
+            if (row < dim && std::abs(colview.values[k]) > kZeroTol) {
+                col_adj_rows.push_back(row);
+            }
+        }
+        col_adj_start[static_cast<std::size_t>(j + 1)] = static_cast<Index>(col_adj_rows.size());
+    }
+
+    // Skip BTF for matrices where the matching work would be excessive.
+    // The augmenting-path matching is O(V*E) worst case, and for general LP
+    // bases (which are typically not block-structured), it adds overhead
+    // without benefit.
+    const auto total_nnz = static_cast<Index>(col_adj_rows.size());
+    if (static_cast<long long>(dim) * static_cast<long long>(total_nnz) > 2000000LL) {
+        return 0;
+    }
+
+    // Step 2: Maximum matching using augmenting paths (Koenig's algorithm).
+    // match_row[i] = column matched to row i (-1 if unmatched).
+    std::vector<Index> match_row(n, -1);
+    std::vector<Index> visited(n, -1);  // epoch-based visited marking
+
+    // Try to find an augmenting path from column j.
+    // Returns true if an augmenting path was found.
+    auto try_augment = [&](Index j, Index epoch, auto& self) -> bool {
+        for (Index k = col_adj_start[j]; k < col_adj_start[j + 1]; ++k) {
+            Index row = col_adj_rows[static_cast<std::size_t>(k)];
+            if (visited[static_cast<std::size_t>(row)] == epoch) {
+                continue;
+            }
+            visited[static_cast<std::size_t>(row)] = epoch;
+            if (match_row[static_cast<std::size_t>(row)] < 0 ||
+                self(match_row[static_cast<std::size_t>(row)], epoch, self)) {
+                match_row[static_cast<std::size_t>(row)] = j;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    Index matching_size = 0;
+    for (Index j = 0; j < dim; ++j) {
+        if (try_augment(j, j, try_augment)) {
+            ++matching_size;
+        }
+    }
+
+    // If we don't have a perfect matching, BTF is not applicable.
+    if (matching_size < dim) {
+        return 0;
+    }
+
+    // Step 3: Build the directed graph for Tarjan's SCC.
+    // After matching, the directed graph has an edge from SCC node i to SCC node j
+    // if column match_row^{-1}[i] has a nonzero in row j (and j != i).
+    // Here "SCC node i" corresponds to the matched pair (row i, col match_row[i]).
+    // The directed edges are: for each column j = match_row[i], for each row r in
+    // column j where r != i, we have edge i -> r.
+
+    // Tarjan's SCC algorithm.
+    std::vector<Index> scc_index(n, -1);
+    std::vector<Index> scc_lowlink(n, -1);
+    std::vector<bool> scc_on_stack(n, false);
+    std::vector<Index> scc_stack;
+    scc_stack.reserve(n);
+    Index scc_counter = 0;
+    Index num_sccs = 0;
+    std::vector<Index> scc_id(n, -1);  // which SCC each node belongs to
+
+    auto tarjan_visit = [&](Index node, auto& self) -> void {
+        scc_index[static_cast<std::size_t>(node)] = scc_counter;
+        scc_lowlink[static_cast<std::size_t>(node)] = scc_counter;
+        ++scc_counter;
+        scc_stack.push_back(node);
+        scc_on_stack[static_cast<std::size_t>(node)] = true;
+
+        // Edges from node: match_row[i] = column j means row i is matched to column j.
+        // For each row r (r != node) that appears in column match_row[node],
+        // we have an edge node -> r.
+        Index col = match_row[static_cast<std::size_t>(node)];
+        for (Index k = col_adj_start[col]; k < col_adj_start[col + 1]; ++k) {
+            Index target = col_adj_rows[static_cast<std::size_t>(k)];
+            if (target == node) {
+                continue;
+            }
+            if (scc_index[static_cast<std::size_t>(target)] < 0) {
+                self(target, self);
+                scc_lowlink[static_cast<std::size_t>(node)] =
+                    std::min(scc_lowlink[static_cast<std::size_t>(node)],
+                             scc_lowlink[static_cast<std::size_t>(target)]);
+            } else if (scc_on_stack[static_cast<std::size_t>(target)]) {
+                scc_lowlink[static_cast<std::size_t>(node)] =
+                    std::min(scc_lowlink[static_cast<std::size_t>(node)],
+                             scc_index[static_cast<std::size_t>(target)]);
+            }
+        }
+
+        // If node is a root of an SCC, pop the SCC from the stack.
+        if (scc_lowlink[static_cast<std::size_t>(node)] ==
+            scc_index[static_cast<std::size_t>(node)]) {
+            Index scc = num_sccs++;
+            while (true) {
+                Index w = scc_stack.back();
+                scc_stack.pop_back();
+                scc_on_stack[static_cast<std::size_t>(w)] = false;
+                scc_id[static_cast<std::size_t>(w)] = scc;
+                if (w == node) {
+                    break;
+                }
+            }
+        }
+    };
+
+    // For large matrices, use an iterative Tarjan to avoid stack overflow.
+    // For matrices < 10000, recursive is fine.
+    if (dim < 10000) {
+        for (Index i = 0; i < dim; ++i) {
+            if (scc_index[static_cast<std::size_t>(i)] < 0) {
+                tarjan_visit(i, tarjan_visit);
+            }
+        }
+    } else {
+        // Iterative Tarjan's algorithm for large matrices.
+        struct Frame {
+            Index node;
+            Index k;  // current edge index in col adjacency
+            Index k_end;
+        };
+        std::vector<Frame> call_stack;
+        call_stack.reserve(n);
+
+        for (Index start = 0; start < dim; ++start) {
+            if (scc_index[static_cast<std::size_t>(start)] >= 0) {
+                continue;
+            }
+
+            Index col = match_row[static_cast<std::size_t>(start)];
+            scc_index[static_cast<std::size_t>(start)] = scc_counter;
+            scc_lowlink[static_cast<std::size_t>(start)] = scc_counter;
+            ++scc_counter;
+            scc_stack.push_back(start);
+            scc_on_stack[static_cast<std::size_t>(start)] = true;
+
+            call_stack.push_back({start, col_adj_start[col], col_adj_start[col + 1]});
+
+            while (!call_stack.empty()) {
+                auto& frame = call_stack.back();
+                bool pushed_child = false;
+
+                while (frame.k < frame.k_end) {
+                    Index target = col_adj_rows[static_cast<std::size_t>(frame.k)];
+                    ++frame.k;
+
+                    if (target == frame.node) {
+                        continue;
+                    }
+
+                    if (scc_index[static_cast<std::size_t>(target)] < 0) {
+                        // Push new frame for unvisited target.
+                        scc_index[static_cast<std::size_t>(target)] = scc_counter;
+                        scc_lowlink[static_cast<std::size_t>(target)] = scc_counter;
+                        ++scc_counter;
+                        scc_stack.push_back(target);
+                        scc_on_stack[static_cast<std::size_t>(target)] = true;
+
+                        Index tcol = match_row[static_cast<std::size_t>(target)];
+                        call_stack.push_back(
+                            {target, col_adj_start[tcol], col_adj_start[tcol + 1]});
+                        pushed_child = true;
+                        break;
+                    } else if (scc_on_stack[static_cast<std::size_t>(target)]) {
+                        scc_lowlink[static_cast<std::size_t>(frame.node)] =
+                            std::min(scc_lowlink[static_cast<std::size_t>(frame.node)],
+                                     scc_index[static_cast<std::size_t>(target)]);
+                    }
+                }
+
+                if (pushed_child) {
+                    continue;
+                }
+
+                // All edges processed for this node.
+                if (scc_lowlink[static_cast<std::size_t>(frame.node)] ==
+                    scc_index[static_cast<std::size_t>(frame.node)]) {
+                    Index scc = num_sccs++;
+                    while (true) {
+                        Index w = scc_stack.back();
+                        scc_stack.pop_back();
+                        scc_on_stack[static_cast<std::size_t>(w)] = false;
+                        scc_id[static_cast<std::size_t>(w)] = scc;
+                        if (w == frame.node) {
+                            break;
+                        }
+                    }
+                }
+
+                Index finished_node = frame.node;
+                call_stack.pop_back();
+
+                // Update parent's lowlink.
+                if (!call_stack.empty()) {
+                    auto& parent = call_stack.back();
+                    scc_lowlink[static_cast<std::size_t>(parent.node)] =
+                        std::min(scc_lowlink[static_cast<std::size_t>(parent.node)],
+                                 scc_lowlink[static_cast<std::size_t>(finished_node)]);
+                }
+            }
+        }
+    }
+
+    // If there's only one SCC, BTF gives no benefit.
+    if (num_sccs <= 1) {
+        return 0;
+    }
+
+    // Step 4: Build the BTF ordering.
+    // Tarjan's algorithm yields SCCs in reverse topological order.
+    // We want blocks ordered so that block 0 comes first (earliest in elimination).
+    // SCC id `num_sccs - 1` is the first in topological order.
+
+    // Count nodes per SCC and build block starts.
+    std::vector<Index> scc_size(static_cast<std::size_t>(num_sccs), 0);
+    for (Index i = 0; i < dim; ++i) {
+        ++scc_size[static_cast<std::size_t>(scc_id[i])];
+    }
+
+    // Reverse the SCC ordering so block 0 is topologically first.
+    // Tarjan gives SCCs in reverse topological order: scc_id 0 is the LAST SCC found,
+    // which is topologically LAST. We want it reversed.
+    btf_block_start.resize(static_cast<std::size_t>(num_sccs + 1));
+    btf_block_start[0] = 0;
+    for (Index b = 0; b < num_sccs; ++b) {
+        // Block b in our ordering = SCC (num_sccs - 1 - b) in Tarjan's ordering.
+        btf_block_start[static_cast<std::size_t>(b + 1)] =
+            btf_block_start[static_cast<std::size_t>(b)] +
+            scc_size[static_cast<std::size_t>(num_sccs - 1 - b)];
+    }
+
+    // Place each row into its block position.
+    // Remap SCC ids: new_scc = num_sccs - 1 - old_scc.
+    std::vector<Index> block_cursor = btf_block_start;
+
+    btf_row_perm.resize(n);
+    btf_col_perm.resize(n);
+
+    for (Index i = 0; i < dim; ++i) {
+        Index block = num_sccs - 1 - scc_id[static_cast<std::size_t>(i)];
+        Index pos = block_cursor[static_cast<std::size_t>(block)]++;
+        btf_row_perm[static_cast<std::size_t>(pos)] = i;
+        // Column matched to row i goes to the same position.
+        btf_col_perm[static_cast<std::size_t>(pos)] = match_row[static_cast<std::size_t>(i)];
+    }
+
+    return num_sccs;
+}
+
+// --------------------------------------------------------------------------
 //  Markowitz LU factorization
 // --------------------------------------------------------------------------
 
@@ -107,6 +388,59 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     // Reset update workspace so the first update after a refactorization
     // cannot read stale values when using sparse touch clearing.
     update_work_.clear();
+
+    // --- BTF pre-ordering ---
+    // Detect block upper-triangular form to improve pivot selection.
+    // When BTF detects multiple blocks, we reorder rows and columns so the
+    // Markowitz code processes diagonal blocks first with less fill-in.
+    std::vector<Index> btf_row_perm;
+    std::vector<Index> btf_col_perm;
+    std::vector<Index> btf_block_start;
+    Index num_blocks =
+        detectBTF(dim_, matrix, basis_cols, btf_row_perm, btf_col_perm, btf_block_start);
+
+    // Build the effective row and column mapping.
+    // If BTF detected blocks, we use the BTF permutation to reorder the
+    // active submatrix. btf_row_perm[p] = original row at position p,
+    // btf_col_perm[p] = which basis column index goes to position p.
+    //
+    // row_map[original_row] = internal row index in the active submatrix
+    // col_order[internal_col] = basis_cols index for that column
+    // row_to_orig[internal_row] = original row index
+    // col_to_orig[internal_col] = original basis position index
+    static thread_local std::vector<Index> tl_row_map;
+    static thread_local std::vector<Index> tl_col_order;
+    static thread_local std::vector<Index> tl_row_to_orig;
+    static thread_local std::vector<Index> tl_col_to_orig;
+    auto& row_map = tl_row_map;
+    auto& col_order = tl_col_order;
+    auto& row_to_orig = tl_row_to_orig;
+    auto& col_to_orig = tl_col_to_orig;
+    row_map.resize(static_cast<std::size_t>(dim_));
+    col_order.resize(static_cast<std::size_t>(dim_));
+    row_to_orig.resize(static_cast<std::size_t>(dim_));
+    col_to_orig.resize(static_cast<std::size_t>(dim_));
+
+    if (num_blocks > 1) {
+        // Build inverse row mapping: row_map[orig_row] = BTF position.
+        for (Index p = 0; p < dim_; ++p) {
+            row_map[static_cast<std::size_t>(btf_row_perm[p])] = p;
+            row_to_orig[static_cast<std::size_t>(p)] = btf_row_perm[p];
+        }
+        // Column order: internal col p uses basis column btf_col_perm[p].
+        for (Index p = 0; p < dim_; ++p) {
+            col_order[static_cast<std::size_t>(p)] = btf_col_perm[p];
+            col_to_orig[static_cast<std::size_t>(p)] = btf_col_perm[p];
+        }
+    } else {
+        // Identity mapping: no BTF reordering.
+        for (Index i = 0; i < dim_; ++i) {
+            row_map[static_cast<std::size_t>(i)] = i;
+            col_order[static_cast<std::size_t>(i)] = i;
+            row_to_orig[static_cast<std::size_t>(i)] = i;
+            col_to_orig[static_cast<std::size_t>(i)] = i;
+        }
+    }
 
     // Build dense-ish active submatrix from selected columns.
     // active[i][j] = value at (original_row i, basis_position j).
@@ -248,18 +582,22 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         active[static_cast<std::size_t>(idx)] = uint8_t{0};
     };
 
-    // Populate from matrix columns.
+    // Populate from matrix columns using BTF-reordered indices.
+    // Internal column j corresponds to basis_cols[col_order[j]].
+    // Internal row index = row_map[original_row].
     for (Index j = 0; j < dim_; ++j) {
-        auto colview = matrix.col(basis_cols[j]);
+        auto colview = matrix.col(basis_cols[col_order[j]]);
         for (Index k = 0; k < colview.size(); ++k) {
-            Index row = colview.indices[k];
+            Index orig_row = colview.indices[k];
             Real val = colview.values[k];
             if (std::abs(val) < kZeroTol) {
                 continue;
             }
-            if (row >= dim_) {
+            if (orig_row >= dim_) {
                 continue;  // skip rows outside basis dimension
             }
+
+            Index row = row_map[static_cast<std::size_t>(orig_row)];
 
             Index eidx = static_cast<Index>(e_row.size());
             e_row.push_back(row);
@@ -593,11 +931,14 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         Index pivot_col = e_col[static_cast<std::size_t>(best_entry)];
         Real pivot_val = e_val[static_cast<std::size_t>(best_entry)];
 
-        // Record permutations.
-        row_perm_[step] = pivot_row;
-        col_perm_[step] = pivot_col;
-        row_perm_inv_[pivot_row] = step;
-        col_perm_inv_[pivot_col] = step;
+        // Record permutations in original index space.
+        // pivot_row/pivot_col are in internal (BTF-reordered) space.
+        Index orig_pivot_row = row_to_orig[static_cast<std::size_t>(pivot_row)];
+        Index orig_pivot_col = col_to_orig[static_cast<std::size_t>(pivot_col)];
+        row_perm_[step] = orig_pivot_row;
+        col_perm_[step] = orig_pivot_col;
+        row_perm_inv_[orig_pivot_row] = step;
+        col_perm_inv_[orig_pivot_col] = step;
 
         // ---- Extract pivot row into U ----
         // Gather all entries in the pivot row.
@@ -651,9 +992,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
             rows_to_update.emplace_back(row, e_val[static_cast<std::size_t>(eidx)] / pivot_val);
         }
 
-        // Store L eta vector.
+        // Store L eta vector (using original row indices).
         for (auto& [ri, mult] : rows_to_update) {
-            eta_index_.push_back(ri);
+            eta_index_.push_back(row_to_orig[static_cast<std::size_t>(ri)]);
             eta_value_.push_back(mult);
         }
         eta_start_.push_back(static_cast<Index>(eta_index_.size()));
@@ -798,9 +1139,11 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         }
     }
 
-    // Remap U column indices from original to elimination order.
+    // Remap U column indices from internal to elimination order.
+    // u_col_ contains internal (BTF-reordered) column indices; convert to
+    // original basis positions first, then to elimination order.
     for (auto& c : u_col_) {
-        c = col_perm_inv_[c];
+        c = col_perm_inv_[col_to_orig[static_cast<std::size_t>(c)]];
     }
 
     // Build elimination-order eta adjacency for hyper-sparse solves.
@@ -824,6 +1167,120 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
             Index target = eta_target_[k];
             Index pos = rev_cursor[static_cast<std::size_t>(target)]++;
             eta_rev_src_[static_cast<std::size_t>(pos)] = step;
+        }
+    }
+
+    // --- Supernodal detection ---
+    // Identify groups of consecutive elimination steps whose eta patterns
+    // form nested subsets (fundamental supernodes). For groups >= kSupernodeMinWidth,
+    // build dense column-major panels for efficient L-solve.
+    supernodes_.clear();
+    snode_panel_values_.clear();
+    snode_panel_row_indices_.clear();
+
+    if (dim_ >= kSupernodeMinWidth) {
+        // Detect fundamental supernodes: consecutive steps where each step's
+        // eta target set is a subset of the next step's. Use a rolling
+        // comparison of sorted target sets to keep cost linear.
+        static thread_local std::vector<Index> tl_prev_targets;
+        static thread_local std::vector<Index> tl_curr_targets;
+        static thread_local std::vector<Index> tl_union_targets;
+        auto& prev_targets = tl_prev_targets;
+        auto& curr_targets = tl_curr_targets;
+        auto& union_targets = tl_union_targets;
+
+        Index snode_start = 0;
+        prev_targets.clear();
+
+        for (Index step = 0; step <= dim_; ++step) {
+            bool extend_snode = false;
+
+            if (step < dim_) {
+                // Build sorted target set for this step.
+                curr_targets.clear();
+                for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                    curr_targets.push_back(eta_target_[k]);
+                }
+                std::sort(curr_targets.begin(), curr_targets.end());
+
+                if (step > snode_start && !prev_targets.empty()) {
+                    // Check if prev_targets is a subset of curr_targets.
+                    // This is the fundamental supernode condition.
+                    std::size_t pi = 0;
+                    std::size_t ci = 0;
+                    bool is_subset = true;
+                    while (pi < prev_targets.size() && ci < curr_targets.size()) {
+                        if (prev_targets[pi] == curr_targets[ci]) {
+                            ++pi;
+                            ++ci;
+                        } else if (prev_targets[pi] > curr_targets[ci]) {
+                            ++ci;
+                        } else {
+                            is_subset = false;
+                            break;
+                        }
+                    }
+                    if (pi < prev_targets.size()) {
+                        is_subset = false;
+                    }
+                    extend_snode = is_subset;
+                }
+            }
+
+            if (!extend_snode) {
+                // Finalize the current supernode [snode_start, step).
+                Index snode_width = step - snode_start;
+                if (snode_width >= kSupernodeMinWidth) {
+                    // Build the union of all target rows in this supernode.
+                    union_targets.clear();
+                    for (Index s = snode_start; s < step; ++s) {
+                        for (Index k = eta_start_[s]; k < eta_start_[s + 1]; ++k) {
+                            union_targets.push_back(eta_target_[k]);
+                        }
+                    }
+                    std::sort(union_targets.begin(), union_targets.end());
+                    union_targets.erase(std::unique(union_targets.begin(), union_targets.end()),
+                                        union_targets.end());
+
+                    Index panel_rows = static_cast<Index>(union_targets.size());
+                    if (panel_rows > 0) {
+                        // Build row index -> panel row mapping.
+                        // We'll store the panel in column-major order: panel[r][c]
+                        // at offset panel_offset + c * panel_rows + r.
+                        Index panel_offset = static_cast<Index>(snode_panel_values_.size());
+                        Index row_offset = static_cast<Index>(snode_panel_row_indices_.size());
+
+                        snode_panel_values_.resize(
+                            static_cast<std::size_t>(panel_offset + panel_rows * snode_width), 0.0);
+
+                        // Store row indices.
+                        for (Index t : union_targets) {
+                            snode_panel_row_indices_.push_back(t);
+                        }
+
+                        // Build target -> panel_row map using the sorted union.
+                        // Since union_targets is sorted, use binary search.
+                        for (Index c = 0; c < snode_width; ++c) {
+                            Index s = snode_start + c;
+                            for (Index k = eta_start_[s]; k < eta_start_[s + 1]; ++k) {
+                                Index target = eta_target_[k];
+                                // Binary search in union_targets.
+                                auto it = std::lower_bound(union_targets.begin(),
+                                                           union_targets.end(), target);
+                                Index r = static_cast<Index>(it - union_targets.begin());
+                                snode_panel_values_[static_cast<std::size_t>(
+                                    panel_offset + c * panel_rows + r)] = eta_value_[k];
+                            }
+                        }
+
+                        supernodes_.push_back(
+                            {snode_start, snode_width, panel_rows, panel_offset, row_offset});
+                    }
+                }
+                snode_start = step;
+            }
+
+            std::swap(prev_targets, curr_targets);
         }
     }
 
@@ -1322,7 +1779,50 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                 }
             }
         }
+    } else if (!supernodes_.empty()) {
+        // Dense L-solve with supernodal acceleration.
+        // Process steps sequentially, but use dense panel operations for supernodes.
+        std::size_t snode_idx = 0;
+        for (Index step = 0; step < dim_;) {
+            // Check if this step starts a supernode.
+            if (snode_idx < supernodes_.size() && supernodes_[snode_idx].start == step) {
+                const auto& sn = supernodes_[snode_idx];
+                // Apply dense panel: for each column c in the supernode,
+                // subtract panel[:,c] * work[step+c] from the target rows.
+                const Real* panel = snode_panel_values_.data() + sn.panel_offset;
+                const Index* row_idx = snode_panel_row_indices_.data() + sn.row_offset;
+                for (Index c = 0; c < sn.width; ++c) {
+                    Real wk = work[step + c];
+                    if (wk == 0.0) {
+                        continue;
+                    }
+                    const Real* col_panel = panel + c * sn.panel_rows;
+                    for (Index r = 0; r < sn.panel_rows; ++r) {
+                        work[row_idx[r]] -= col_panel[r] * wk;
+                    }
+                }
+                step += sn.width;
+                ++snode_idx;
+            } else {
+                // Scalar path for steps not in a supernode.
+                Real wk = work[step];
+                if (wk != 0.0) {
+                    for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                        work[eta_target_[k]] -= eta_value_[k] * wk;
+                    }
+                }
+                ++step;
+            }
+        }
+        // Count output nonzeros for EMA.
+        l_out_nnz = 0;
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                ++l_out_nnz;
+            }
+        }
     } else {
+        // Standard dense L-solve (no supernodes).
         for (Index step = 0; step < dim_; ++step) {
             Real wk = work[step];
             if (wk == 0.0) {
@@ -1663,7 +2163,49 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
                 }
             }
         }
+    } else if (!supernodes_.empty()) {
+        // Dense L^T-solve with supernodal acceleration (reverse order).
+        auto snode_idx = static_cast<std::ptrdiff_t>(supernodes_.size()) - 1;
+        for (Index step = dim_ - 1; step >= 0;) {
+            // Check if this step ends a supernode.
+            if (snode_idx >= 0 && supernodes_[static_cast<std::size_t>(snode_idx)].start +
+                                          supernodes_[static_cast<std::size_t>(snode_idx)].width -
+                                          1 ==
+                                      step) {
+                const auto& sn = supernodes_[static_cast<std::size_t>(snode_idx)];
+                // L^T-solve for the supernode: process columns in reverse.
+                // For column c: work[sn.start+c] -= dot(panel[:,c], work[targets])
+                const Real* panel = snode_panel_values_.data() + sn.panel_offset;
+                const Index* row_idx = snode_panel_row_indices_.data() + sn.row_offset;
+                for (Index c = sn.width - 1; c >= 0; --c) {
+                    const Real* col_panel = panel + c * sn.panel_rows;
+                    Real sum = 0.0;
+                    for (Index r = 0; r < sn.panel_rows; ++r) {
+                        sum += col_panel[r] * work[row_idx[r]];
+                    }
+                    work[sn.start + c] -= sum;
+                }
+                step = sn.start - 1;
+                --snode_idx;
+            } else {
+                // Scalar path.
+                Real sum = 0.0;
+                for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
+                    sum += eta_value_[k] * work[eta_target_[k]];
+                }
+                work[step] -= sum;
+                --step;
+            }
+        }
+        // Count output nonzeros for EMA.
+        lt_out_nnz = 0;
+        for (Index step = 0; step < dim_; ++step) {
+            if (std::abs(work[step]) > kZeroTol) {
+                ++lt_out_nnz;
+            }
+        }
     } else {
+        // Standard dense L^T-solve (no supernodes).
         for (Index step = dim_ - 1; step >= 0; --step) {
             Real sum = 0.0;
             for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {

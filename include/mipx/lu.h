@@ -84,6 +84,14 @@ private:
     /// the nonzero positions in x. Returns the number of output nonzeros.
     Index solveUTransposeSparse(std::span<Real> x) const;
 
+    /// BTF detection: find block upper-triangular form via maximum matching
+    /// and Tarjan's SCC algorithm. Returns the number of blocks found.
+    /// Populates btf_row_perm and btf_col_perm with the BTF ordering, and
+    /// btf_block_start with the block boundaries.
+    static Index detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
+                           std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
+                           std::vector<Index>& btf_block_start);
+
     // --- FP32 mixed-precision solve helpers ---
 
     /// Apply L eta vectors forward in FP32.
@@ -136,6 +144,25 @@ private:
     // -> t.
     std::vector<Index> eta_rev_start_;
     std::vector<Index> eta_rev_src_;
+
+    // Supernodal grouping for dense panel L-solve.
+    // A supernode is a group of consecutive elimination steps where the eta
+    // patterns are nested. For supernodes >= kSupernodeMinWidth, we store a
+    // dense panel for efficient application.
+    static constexpr Index kSupernodeMinWidth = 4;
+    struct Supernode {
+        Index start;         // first elimination step
+        Index width;         // number of steps in the supernode
+        Index panel_rows;    // number of affected rows (dense panel height)
+        Index panel_offset;  // offset into snode_panel_values_
+        // Row indices offset into snode_panel_row_indices_.
+        Index row_offset;
+    };
+    std::vector<Supernode> supernodes_;
+    // Dense panel values: column-major, panel_rows x width.
+    std::vector<Real> snode_panel_values_;
+    // Row indices for each supernode (in original row space).
+    std::vector<Index> snode_panel_row_indices_;
 
     // U stored row-wise (in elimination order).
     // u_start_[k] .. u_start_[k+1] gives the range for row k.

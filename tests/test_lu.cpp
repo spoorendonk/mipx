@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <numeric>
 #include <span>
 #include <vector>
 
@@ -1232,4 +1233,283 @@ TEST_CASE("SparseLU mixed-precision: BTRAN with nonzero tracking", "[lu][mixed-p
 
     // Nonzero tracking should report the correct indices.
     CHECK_FALSE(nonzeros.empty());
+}
+
+// --------------------------------------------------------------------------
+//  BTF and supernodal tests
+// --------------------------------------------------------------------------
+
+TEST_CASE("SparseLU: block diagonal matrix triggers BTF", "[lu][btf]") {
+    // Build a block-diagonal matrix: two 3x3 blocks.
+    // Block 1: rows 0-2, cols 0-2; Block 2: rows 3-5, cols 3-5.
+    // BTF should detect 2 blocks and factorize each independently.
+    std::vector<Triplet> trips = {
+        // Block 1
+        {0, 0, 3.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 4.0},
+        {1, 2, 1.0},
+        {2, 1, 1.0},
+        {2, 2, 2.0},
+        // Block 2
+        {3, 3, 5.0},
+        {3, 4, 2.0},
+        {4, 3, 1.0},
+        {4, 4, 3.0},
+        {4, 5, 1.0},
+        {5, 4, 1.0},
+        {5, 5, 4.0},
+    };
+    SparseMatrix A(6, 6, trips);
+
+    SparseLU lu;
+    std::vector<Index> basis = {0, 1, 2, 3, 4, 5};
+    lu.factorize(A, basis);
+
+    SECTION("FTRAN round-trip") {
+        std::vector<Real> b = {1.0, -2.0, 3.0, 4.0, -1.0, 2.0};
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < 6; ++i) {
+            CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-10));
+        }
+    }
+
+    SECTION("BTRAN round-trip") {
+        std::vector<Real> c = {2.0, -1.0, 0.5, 3.0, -2.0, 1.0};
+        std::vector<Real> y = c;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < 6; ++i) {
+            CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-10));
+        }
+    }
+}
+
+TEST_CASE("SparseLU: block upper-triangular matrix triggers BTF", "[lu][btf]") {
+    // B = [[A11, A12],
+    //      [0,   A22]]
+    // Block A11 (rows 0-1, cols 0-1), A12 (rows 0-1, cols 2-3), A22 (rows 2-3, cols 2-3).
+    std::vector<Triplet> trips = {
+        // A11
+        {0, 0, 3.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 4.0},
+        // A12 (off-diagonal coupling)
+        {0, 2, 2.0},
+        {1, 3, 1.0},
+        // A22
+        {2, 2, 5.0},
+        {2, 3, 1.0},
+        {3, 2, 2.0},
+        {3, 3, 3.0},
+    };
+    SparseMatrix A(4, 4, trips);
+
+    SparseLU lu;
+    std::vector<Index> basis = {0, 1, 2, 3};
+    lu.factorize(A, basis);
+
+    SECTION("FTRAN round-trip") {
+        std::vector<Real> b = {1.0, 2.0, 3.0, -1.0};
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < 4; ++i) {
+            CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-10));
+        }
+    }
+
+    SECTION("BTRAN round-trip") {
+        std::vector<Real> c = {-1.0, 3.0, 2.0, -2.0};
+        std::vector<Real> y = c;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < 4; ++i) {
+            CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-10));
+        }
+    }
+}
+
+TEST_CASE("SparseLU: BTF with update", "[lu][btf]") {
+    // Block diagonal + extra columns for updates.
+    std::vector<Triplet> trips = {
+        // Block 1
+        {0, 0, 2.0},
+        {1, 1, 3.0},
+        // Block 2
+        {2, 2, 4.0},
+        {3, 3, 5.0},
+        // Extra columns for swaps
+        {0, 4, 1.0},
+        {1, 4, 1.0},
+        {2, 4, 1.0},
+        {3, 4, 1.0},
+        {0, 5, 2.0},
+        {3, 5, 3.0},
+    };
+    SparseMatrix A(4, 6, trips);
+
+    SparseLU lu;
+    lu.setMaxUpdates(100);
+    std::vector<Index> basis = {0, 1, 2, 3};
+    lu.factorize(A, basis);
+
+    // Verify initial factorization.
+    std::vector<Real> b = {1.0, 2.0, 3.0, 4.0};
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < 4; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-10));
+    }
+
+    // Update: replace column 1 with column 4.
+    auto c = A.col(4);
+    std::vector<Index> idx(c.indices.begin(), c.indices.end());
+    std::vector<Real> val(c.values.begin(), c.values.end());
+    lu.update(1, idx, val);
+    basis[1] = 4;
+
+    // Verify after update.
+    x = b;
+    lu.ftran(x);
+    Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < 4; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-10));
+    }
+}
+
+TEST_CASE("SparseLU: larger block structure for BTF", "[lu][btf]") {
+    // 20x20 matrix with 4 diagonal blocks of size 5.
+    constexpr Index n = 20;
+    constexpr Index block_size = 5;
+    std::vector<Triplet> trips;
+
+    for (Index b = 0; b < n / block_size; ++b) {
+        Index base = b * block_size;
+        for (Index i = 0; i < block_size; ++i) {
+            // Diagonal
+            trips.push_back({base + i, base + i, 4.0 + static_cast<Real>(i)});
+            // Off-diagonal within block
+            if (i + 1 < block_size) {
+                trips.push_back({base + i, base + i + 1, 1.0});
+                trips.push_back({base + i + 1, base + i, -0.5});
+            }
+        }
+    }
+
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(n);
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    std::vector<Real> rhs(n);
+    for (Index i = 0; i < n; ++i) {
+        rhs[i] = static_cast<Real>(i + 1);
+    }
+
+    // FTRAN round-trip.
+    std::vector<Real> x = rhs;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(rhs[i], 1e-9));
+    }
+
+    // BTRAN round-trip.
+    std::vector<Real> y = rhs;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bty[i], WithinAbs(rhs[i], 1e-9));
+    }
+}
+
+TEST_CASE("SparseLU: upper triangular matrix with BTF", "[lu][btf]") {
+    // Upper triangular 20x20 matrix -- ideal case for BTF (n blocks of size 1).
+    constexpr Index n = 20;
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 2.0 + static_cast<Real>(i)});
+        for (Index j = i + 1; j < std::min(i + 3, n); ++j) {
+            trips.push_back({i, j, 0.5});
+        }
+    }
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(n);
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    std::vector<Real> b(n);
+    for (Index i = 0; i < n; ++i) {
+        b[i] = static_cast<Real>((i % 3) - 1);
+    }
+
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bty[i], WithinAbs(b[i], 1e-9));
+    }
+}
+
+TEST_CASE("SparseLU: BTF with permuted block structure", "[lu][btf]") {
+    // The rows and columns of a block-diagonal matrix are shuffled.
+    // BTF should still detect the block structure.
+    // Block 1: rows {0,2,4}, cols {1,3,5}
+    // Block 2: rows {1,3,5}, cols {0,2,4}
+    // (After BTF reordering, it should separate into two 3x3 blocks.)
+    std::vector<Triplet> trips = {
+        // Block 1: rows 0,2,4 with cols 1,3,5
+        {0, 1, 3.0},
+        {0, 3, 1.0},
+        {2, 1, 1.0},
+        {2, 3, 4.0},
+        {2, 5, 1.0},
+        {4, 3, 1.0},
+        {4, 5, 2.0},
+        // Block 2: rows 1,3,5 with cols 0,2,4
+        {1, 0, 5.0},
+        {1, 2, 2.0},
+        {3, 0, 1.0},
+        {3, 2, 3.0},
+        {3, 4, 1.0},
+        {5, 2, 1.0},
+        {5, 4, 4.0},
+    };
+    SparseMatrix A(6, 6, trips);
+    std::vector<Index> basis = {0, 1, 2, 3, 4, 5};
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    std::vector<Real> b = {1.0, -2.0, 3.0, -4.0, 5.0, -6.0};
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < 6; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < 6; ++i) {
+        CHECK_THAT(Bty[i], WithinAbs(b[i], 1e-9));
+    }
 }
