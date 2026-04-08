@@ -325,11 +325,6 @@ Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp,
                 }
 
                 // Compute step to each facet of the triangle.
-                // Facet 1: x1 = floor(b1), step = f1/t1 if t1 > 0
-                // Facet 2: x2 = floor(b2), step = f2/t2 if t2 > 0
-                // Facet 3: (x1-floor(b1))/(1-f1) + (x2-floor(b2))/(1-f2) = 1
-                //   step s: s*t1/(1-f1) + s*t2/(1-f2) = 1
-                //   s = 1 / (t1/(1-f1) + t2/(1-f2)) if denominator > 0
                 Real min_step = kInf;
 
                 if (t1 > kCoeffTol) {
@@ -344,7 +339,6 @@ Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp,
                     min_step = std::min(min_step, 1.0 / denom3);
                 }
 
-                // Also check facets for negative directions.
                 if (t1 < -kCoeffTol) {
                     min_step = std::min(min_step, (1.0 - f1) / (-t1));
                 }
@@ -353,8 +347,8 @@ Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp,
                 }
 
                 if (min_step <= kCoeffTol || min_step >= kInf || !std::isfinite(min_step)) {
-                    // Ray does not cross the lattice-free set boundary: skip.
-                    continue;
+                    valid = false;
+                    break;
                 }
 
                 const Real alpha = 1.0 / min_step;

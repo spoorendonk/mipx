@@ -255,15 +255,4 @@ bool makeNumericallySafe(Cut& cut) {
     return changed;
 }
 
-void postProcessCuts(CutPool& pool, const LpProblem& problem,
-                     std::span<const Real> primals) {
-    // Post-process all cuts in the pool.
-    // Note: CutPool doesn't expose mutable iteration, so this function
-    // is intended to be called on individual cuts before they are added
-    // to the pool. The public API is via the individual functions above.
-    (void)pool;
-    (void)problem;
-    (void)primals;
-}
-
 }  // namespace mipx

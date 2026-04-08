@@ -2234,7 +2234,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         tree_presolve_enabled_ &&
         tree_presolve_model_supported &&
         (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
-        node.depth > 0 && node.depth <= tree_presolve_max_depth_;
+        node.depth > 0 && node.depth <= tree_presolve_max_depth;
     // Local RC fixing is serial-only: rc_fixer_ stats are not thread-safe.
     if (!tree_presolve_ran && num_threads_ <= 1 &&
         rc_fixer_.loaded() && incumbent_snapshot < kInf &&
