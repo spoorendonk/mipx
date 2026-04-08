@@ -65,31 +65,6 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
     }
 }
 
-inline void negateCopy(std::span<Real> dst, std::span<const Real> src,
-                       const DualSimplexOptions& options) {
-    assert(dst.size() == src.size());
-    (void)options;
-#if defined(__AVX2__)
-    if (canUseSimd(options, static_cast<Index>(dst.size()))) {
-        const __m256d z = _mm256_setzero_pd();
-        std::size_t i = 0;
-        const std::size_t n = dst.size();
-        for (; i + 4 <= n; i += 4) {
-            __m256d s = _mm256_loadu_pd(src.data() + i);
-            __m256d d = _mm256_sub_pd(z, s);
-            _mm256_storeu_pd(dst.data() + i, d);
-        }
-        for (; i < n; ++i) {
-            dst[i] = -src[i];
-        }
-        return;
-    }
-#endif
-    for (std::size_t i = 0; i < dst.size(); ++i) {
-        dst[i] = -src[i];
-    }
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -105,8 +80,9 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     // Copy objective (negate for maximize).
     obj_ = problem.obj;
     if (sense_ == Sense::Maximize) {
-        for (auto& c : obj_)
+        for (auto& c : obj_) {
             c = -c;
+        }
     }
 
     col_lower_ = problem.col_lower;
@@ -158,16 +134,19 @@ Real coefficientRange(const SparseMatrix& A) {
             absmin = std::min(absmin, a);
         }
     }
-    if (absmin <= 0.0 || absmax <= 0.0)
+    if (absmin <= 0.0 || absmax <= 0.0) {
         return 1.0;
+    }
     return absmax / absmin;
 }
 
 ScalingStrategy selectScalingStrategy(Real range) {
-    if (range < 1e4)
+    if (range < 1e4) {
         return ScalingStrategy::Equilibration;
-    if (range < 1e8)
+    }
+    if (range < 1e8) {
         return ScalingStrategy::GeometricMean;
+    }
     return ScalingStrategy::Ruiz;
 }
 
@@ -237,9 +216,14 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
     auto rows = matrix_.csr_row_starts();
     std::vector<Real> values(vals.begin(), vals.end());
 
+    // Pre-allocate work vectors outside the loop to avoid per-pass heap churn.
+    std::vector<Real> r(num_rows_);
+    std::vector<Real> cs(num_cols_);
+    std::vector<Real> cs_max(num_cols_);
+    std::vector<Real> cs_min(num_cols_);
+
     for (Int pass = 0; pass < max_passes; ++pass) {
         // Row scaling: geometric mean of absolute nonzero values.
-        std::vector<Real> r(num_rows_);
         for (Index i = 0; i < num_rows_; ++i) {
             Real mx = 0.0;
             Real mn = std::numeric_limits<Real>::infinity();
@@ -263,8 +247,8 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
         }
 
         // Column scaling: geometric mean of absolute nonzero values (after row scaling).
-        std::vector<Real> cs_max(num_cols_, 0.0);
-        std::vector<Real> cs_min(num_cols_, std::numeric_limits<Real>::infinity());
+        std::fill(cs_max.begin(), cs_max.end(), 0.0);
+        std::fill(cs_min.begin(), cs_min.end(), std::numeric_limits<Real>::infinity());
         for (Index i = 0; i < num_rows_; ++i) {
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 Real a = std::abs(values[p]);
@@ -274,7 +258,6 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
                 }
             }
         }
-        std::vector<Real> cs(num_cols_);
         for (Index j = 0; j < num_cols_; ++j) {
             cs[j] = (cs_max[j] > 1e-30 && cs_min[j] < std::numeric_limits<Real>::infinity())
                         ? 1.0 / std::sqrt(cs_max[j] * cs_min[j])
@@ -289,10 +272,12 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
         }
 
         // Accumulate into overall scale factors.
-        for (Index i = 0; i < num_rows_; ++i)
+        for (Index i = 0; i < num_rows_; ++i) {
             row_scale_[i] *= r[i];
-        for (Index j = 0; j < num_cols_; ++j)
+        }
+        for (Index j = 0; j < num_cols_; ++j) {
             col_scale_[j] *= cs[j];
+        }
 
         // Check convergence: if the range is close to 1, stop early.
         Real mx = 0.0;
@@ -304,8 +289,9 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
                 mn = std::min(mn, a);
             }
         }
-        if (mn > 1e-30 && mx / mn < 16.0)
+        if (mn > 1e-30 && mx / mn < 16.0) {
             break;
+        }
     }
 }
 
@@ -318,9 +304,12 @@ void DualSimplexSolver::computeRuizScaling() {
     auto rows = matrix_.csr_row_starts();
     std::vector<Real> values(vals.begin(), vals.end());
 
+    // Pre-allocate work vectors outside the loop.
+    std::vector<Real> r(num_rows_);
+    std::vector<Real> cs(num_cols_);
+
     for (Int pass = 0; pass < max_passes; ++pass) {
         // Row scaling: r_i = 1 / sqrt(max_j |A[i,j]|)
-        std::vector<Real> r(num_rows_);
         for (Index i = 0; i < num_rows_; ++i) {
             Real mx = 0.0;
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
@@ -330,7 +319,7 @@ void DualSimplexSolver::computeRuizScaling() {
         }
 
         // Column scaling: cs_j = 1 / sqrt(max_i |r_i * A[i,j]|)
-        std::vector<Real> cs(num_cols_, 0.0);
+        std::fill(cs.begin(), cs.end(), 0.0);
         for (Index i = 0; i < num_rows_; ++i) {
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 cs[cols[p]] = std::max(cs[cols[p]], std::abs(values[p]) * r[i]);
@@ -348,16 +337,19 @@ void DualSimplexSolver::computeRuizScaling() {
         }
 
         // Accumulate into overall scale factors.
-        for (Index i = 0; i < num_rows_; ++i)
+        for (Index i = 0; i < num_rows_; ++i) {
             row_scale_[i] *= r[i];
-        for (Index j = 0; j < num_cols_; ++j)
+        }
+        for (Index j = 0; j < num_cols_; ++j) {
             col_scale_[j] *= cs[j];
+        }
     }
 }
 
 void DualSimplexSolver::applyScaling() {
-    if (!scaled_)
+    if (!scaled_) {
         return;
+    }
 
     // Scale the matrix: A' = R * A * C where R = diag(row_scale_), C = diag(col_scale_).
     // We need to rebuild from triplets since we can't modify CSR in-place easily.
@@ -376,10 +368,12 @@ void DualSimplexSolver::applyScaling() {
 
     // Scale bounds: row bounds *= row_scale, col bounds /= col_scale (since x = C * x').
     for (Index i = 0; i < num_rows_; ++i) {
-        if (row_lower_[i] != -kInf)
+        if (row_lower_[i] != -kInf) {
             row_lower_[i] *= row_scale_[i];
-        if (row_upper_[i] != kInf)
+        }
+        if (row_upper_[i] != kInf) {
             row_upper_[i] *= row_scale_[i];
+        }
     }
     for (Index j = 0; j < num_cols_; ++j) {
         // x_j = col_scale_[j] * x'_j, so x'_j = x_j / col_scale_[j]
@@ -388,18 +382,21 @@ void DualSimplexSolver::applyScaling() {
         // Actually: x = C*x', so l <= x <= u becomes l <= C*x' <= u
         // For component j: l_j <= col_scale_j * x'_j <= u_j
         // So: l_j / col_scale_j <= x'_j <= u_j / col_scale_j
-        if (col_lower_[j] != -kInf)
+        if (col_lower_[j] != -kInf) {
             col_lower_[j] /= col_scale_[j];
-        if (col_upper_[j] != kInf)
+        }
+        if (col_upper_[j] != kInf) {
             col_upper_[j] /= col_scale_[j];
+        }
         // Objective: c^T x = c^T C x' = (C c)^T x'. So c'_j = c_j * col_scale_j.
         obj_[j] *= col_scale_[j];
     }
 }
 
 void DualSimplexSolver::unscaleResults() {
-    if (!scaled_)
+    if (!scaled_) {
         return;
+    }
 
     // Unscale primal values: x_j = col_scale_j * x'_j for structural, row_scale_i * s'_i for slack.
     for (Index j = 0; j < num_cols_; ++j) {
@@ -471,8 +468,9 @@ Real DualSimplexSolver::varUpper(Index k) const {
 }
 
 Real DualSimplexSolver::varCost(Index k) const {
-    if (k < num_cols_)
+    if (k < num_cols_) {
         return obj_[k];
+    }
     return 0.0;  // slacks have zero cost
 }
 
@@ -670,8 +668,9 @@ void DualSimplexSolver::computePrimals() {
 
     for (Index k : nonbasic_) {
         Real xk = primal_[k];
-        if (std::abs(xk) < kZeroTol)
+        if (std::abs(xk) < kZeroTol) {
             continue;
+        }
 
         if (k < num_cols_) {
             // Structural: a_k = column k of A.
@@ -782,16 +781,19 @@ LpResult DualSimplexSolver::solve() {
     double work_at_start = work_.units();
 
     auto rowViolation = [&](Real activity, Real lower, Real upper) -> Real {
-        if (activity < lower - kPrimalTol)
+        if (activity < lower - kPrimalTol) {
             return lower - activity;
-        if (activity > upper + kPrimalTol)
+        }
+        if (activity > upper + kPrimalTol) {
             return activity - upper;
+        }
         return 0.0;
     };
 
     auto runStructuralCrash = [&]() {
-        if (!options_.enable_structural_crash || options_.structural_crash_max_swaps <= 0)
+        if (!options_.enable_structural_crash || options_.structural_crash_max_swaps <= 0) {
             return;
+        }
         struct StructuralCand {
             Index col = -1;
             Index row = -1;
@@ -800,11 +802,13 @@ LpResult DualSimplexSolver::solve() {
         std::vector<StructuralCand> candidates;
         candidates.reserve(static_cast<std::size_t>(num_cols_));
         for (Index j = 0; j < num_cols_; ++j) {
-            if (nonbasic_pos_[j] < 0)
+            if (nonbasic_pos_[j] < 0) {
                 continue;
+            }
             auto cv = matrix_.col(j);
-            if (cv.size() <= 0)
+            if (cv.size() <= 0) {
                 continue;
+            }
 
             Real sum_abs = 0.0;
             Real best_abs = 0.0;
@@ -817,15 +821,18 @@ LpResult DualSimplexSolver::solve() {
                     best_row = cv.indices[p];
                 }
             }
-            if (best_row < 0 || best_abs < options_.structural_crash_min_pivot)
+            if (best_row < 0 || best_abs < options_.structural_crash_min_pivot) {
                 continue;
-            if (basis_[best_row] < num_cols_)
+            }
+            if (basis_[best_row] < num_cols_) {
                 continue;  // keep already-structural rows untouched
+            }
 
             const Real off_abs = sum_abs - best_abs;
             // Prefer near-singleton columns to preserve a stable crash basis.
-            if (off_abs > best_abs)
+            if (off_abs > best_abs) {
                 continue;
+            }
 
             const Real score = best_abs / (1.0 + off_abs);
             candidates.push_back({j, best_row, score});
@@ -833,30 +840,37 @@ LpResult DualSimplexSolver::solve() {
 
         std::sort(candidates.begin(), candidates.end(),
                   [](const StructuralCand& a, const StructuralCand& b) {
-                      if (a.score != b.score)
+                      if (a.score != b.score) {
                           return a.score > b.score;
-                      if (a.row != b.row)
+                      }
+                      if (a.row != b.row) {
                           return a.row < b.row;
+                      }
                       return a.col < b.col;
                   });
 
         std::vector<uint8_t> used_row(static_cast<std::size_t>(num_rows_), 0);
         Int swaps = 0;
         for (const auto& cand : candidates) {
-            if (swaps >= options_.structural_crash_max_swaps)
+            if (swaps >= options_.structural_crash_max_swaps) {
                 break;
-            if (used_row[cand.row] != 0)
+            }
+            if (used_row[cand.row] != 0) {
                 continue;
-            if (nonbasic_pos_[cand.col] < 0)
+            }
+            if (nonbasic_pos_[cand.col] < 0) {
                 continue;
+            }
 
             const Index leaving = basis_[cand.row];
-            if (leaving < num_cols_)
+            if (leaving < num_cols_) {
                 continue;  // conservative: only swap out slacks
+            }
 
             const Index nb_pos = nonbasic_pos_[cand.col];
-            if (nb_pos < 0)
+            if (nb_pos < 0) {
                 continue;
+            }
 
             basis_[cand.row] = cand.col;
             basis_pos_[cand.col] = cand.row;
@@ -888,14 +902,16 @@ LpResult DualSimplexSolver::solve() {
     };
 
     auto runIdiotCrash = [&]() {
-        if (!options_.enable_idiot_crash || options_.idiot_crash_passes <= 0)
+        if (!options_.enable_idiot_crash || options_.idiot_crash_passes <= 0) {
             return;
+        }
 
         std::vector<Real> row_activity(num_rows_, 0.0);
         for (Index j = 0; j < num_cols_; ++j) {
             Real xj = primal_[j];
-            if (std::abs(xj) <= kZeroTol)
+            if (std::abs(xj) <= kZeroTol) {
                 continue;
+            }
             auto cv = matrix_.col(j);
             for (Index p = 0; p < cv.size(); ++p) {
                 row_activity[cv.indices[p]] += cv.values[p] * xj;
@@ -906,24 +922,29 @@ LpResult DualSimplexSolver::solve() {
         for (Index pass = 0; pass < options_.idiot_crash_passes; ++pass) {
             bool changed = false;
             for (Index j = 0; j < num_cols_; ++j) {
-                if (nonbasic_pos_[j] < 0)
+                if (nonbasic_pos_[j] < 0) {
                     continue;
+                }
                 BasisStatus st = var_status_[j];
-                if (st != BasisStatus::AtLower && st != BasisStatus::AtUpper)
+                if (st != BasisStatus::AtLower && st != BasisStatus::AtUpper) {
                     continue;
+                }
 
                 Real lb = col_lower_[j];
                 Real ub = col_upper_[j];
-                if (lb == -kInf || ub == kInf)
+                if (lb == -kInf || ub == kInf) {
                     continue;
-                if (std::abs(ub - lb) <= kZeroTol)
+                }
+                if (std::abs(ub - lb) <= kZeroTol) {
                     continue;
+                }
 
                 Real old_x = primal_[j];
                 Real new_x = (st == BasisStatus::AtLower) ? ub : lb;
                 Real delta = new_x - old_x;
-                if (std::abs(delta) <= kZeroTol)
+                if (std::abs(delta) <= kZeroTol) {
                     continue;
+                }
 
                 auto cv = matrix_.col(j);
                 Real gain = 0.0;
@@ -935,8 +956,9 @@ LpResult DualSimplexSolver::solve() {
                             rowViolation(new_act, row_lower_[i], row_upper_[i]);
                 }
 
-                if (gain <= options_.idiot_crash_min_gain)
+                if (gain <= options_.idiot_crash_min_gain) {
                     continue;
+                }
 
                 primal_[j] = new_x;
                 var_status_[j] =
@@ -1037,8 +1059,9 @@ LpResult DualSimplexSolver::solve() {
     // For bases up to a moderate size, compute exact weights via m BTRANs.
     // For larger bases, reset to 1.0 and let Goldfarb-Forrest converge.
     auto initDseWeights = [&]() {
-        if (!dse_active_)
+        if (!dse_active_) {
             return;
+        }
         constexpr Index kExactInitMaxDim = 1000;
         if (num_rows_ <= kExactInitMaxDim) {
             // Exact: w_i = ||B^{-T} e_i||^2 = ||rho_i||^2.
@@ -1074,8 +1097,9 @@ LpResult DualSimplexSolver::solve() {
     std::vector<Real> cost_shift(num_cols_, 0.0);
     bool has_cost_shift = false;
     auto clearCostShifts = [&]() {
-        if (!has_cost_shift)
+        if (!has_cost_shift) {
             return;
+        }
         for (Index j = 0; j < num_cols_; ++j) {
             if (std::abs(cost_shift[j]) > kZeroTol) {
                 obj_[j] -= cost_shift[j];
@@ -1088,8 +1112,9 @@ LpResult DualSimplexSolver::solve() {
         clearCostShifts();
         bool any_shift = false;
         for (Index j = 0; j < num_cols_; ++j) {
-            if (var_status_[j] == BasisStatus::Basic)
+            if (var_status_[j] == BasisStatus::Basic) {
                 continue;
+            }
             const Real rc = reduced_cost_[j];
             if (var_status_[j] == BasisStatus::AtLower) {
                 if (rc < -kDualTol) {
@@ -1146,16 +1171,18 @@ LpResult DualSimplexSolver::solve() {
                 const Index j = rv.indices[p];
                 const Real av = std::abs(rv.values[p]);
                 Real& cm = col_max_abs[static_cast<std::size_t>(j)];
-                if (av > cm)
+                if (av > cm) {
                     cm = av;
+                }
             }
         }
         for (Index k = 0; k < numVars(); ++k) {
             const std::size_t ks = static_cast<std::size_t>(k);
             const Real lb = base_var_lower[ks];
             const Real ub = base_var_upper[ks];
-            if (lb == -kInf && ub == kInf)
+            if (lb == -kInf && ub == kInf) {
                 continue;
+            }
 
             // Deterministic hash for logarithmic distribution.
             const uint32_t hash = static_cast<uint32_t>(k + 1) * 2246822519u;
@@ -1168,8 +1195,9 @@ LpResult DualSimplexSolver::solve() {
             if (k < num_cols_) {
                 // Scale by column coefficient range and objective magnitude.
                 const Real cm = col_max_abs[ks];
-                if (cm > kZeroTol)
+                if (cm > kZeroTol) {
                     coeff_scale = std::max(1.0, 1.0 / cm);
+                }
                 const Real obj_mag = std::abs(obj_[k]);
                 if (obj_mag > kZeroTol) {
                     coeff_scale = std::max(coeff_scale, obj_mag);
@@ -1279,8 +1307,9 @@ LpResult DualSimplexSolver::solve() {
 
         auto accumulateRow = [&](Index i) {
             const Real rho_i = btran_work[i];
-            if (std::abs(rho_i) < kZeroTol)
+            if (std::abs(rho_i) < kZeroTol) {
                 return;
+            }
             auto rv = matrix_.row(i);
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
@@ -1309,8 +1338,9 @@ LpResult DualSimplexSolver::solve() {
     };
 
     auto clearBoundPerturbation = [&]() {
-        if (!bound_perturb_active_)
+        if (!bound_perturb_active_) {
             return;
+        }
         bound_perturb_active_ = false;
         std::fill(lower_bound_perturb_.begin(), lower_bound_perturb_.end(), 0.0);
         std::fill(upper_bound_perturb_.begin(), upper_bound_perturb_.end(), 0.0);
@@ -1319,10 +1349,12 @@ LpResult DualSimplexSolver::solve() {
     // Activate or escalate bound perturbation using problem-adapted magnitudes.
     // level_override >= 0 forces a specific escalation level.
     auto activateBoundPerturbation = [&](Int level_override = -1) -> bool {
-        if (!options_.enable_bound_perturbation)
+        if (!options_.enable_bound_perturbation) {
             return false;
-        if (options_.bound_perturbation_magnitude <= 0.0)
+        }
+        if (options_.bound_perturbation_magnitude <= 0.0) {
             return false;
+        }
 
         const Int level = (level_override >= 0) ? level_override : bound_perturb_level_;
         if (!bound_perturb_active_) {
@@ -1349,17 +1381,20 @@ LpResult DualSimplexSolver::solve() {
             const std::size_t ks = static_cast<std::size_t>(k);
             const Real lb = base_var_lower[ks];
             const Real ub = base_var_upper[ks];
-            if (lb == -kInf && ub == kInf)
+            if (lb == -kInf && ub == kInf) {
                 continue;
+            }
 
             Real eps = var_perturb_base[ks] * level_mult;
-            if (eps <= kZeroTol)
+            if (eps <= kZeroTol) {
                 continue;
+            }
 
             if (lb != -kInf && ub != kInf) {
                 const Real width = ub - lb;
-                if (width <= 4.0 * kPrimalTol)
+                if (width <= 4.0 * kPrimalTol) {
                     continue;
+                }
                 eps = std::min(eps, 0.25 * width);
                 lower_bound_perturb_[k] = eps;
                 upper_bound_perturb_[k] = eps;
@@ -1381,15 +1416,17 @@ LpResult DualSimplexSolver::solve() {
     // Escalate perturbation to the next level if degeneracy persists.
     auto escalateBoundPerturbation = [&]() -> bool {
         const Int max_level = std::max<Int>(0, options_.bound_perturbation_max_level);
-        if (bound_perturb_level_ >= max_level)
+        if (bound_perturb_level_ >= max_level) {
             return false;
+        }
         return activateBoundPerturbation(bound_perturb_level_ + 1);
     };
 
     // Log header.
-    if (verbose_)
+    if (verbose_) {
         std::printf("%-7s  %9s  %20s  %11s  %9s\n", "Method", "Iteration", "Objective",
                     "Primal.NInf", "Time");
+    }
 
 #ifdef MIPX_HAS_TBB
     auto sipThreadGatePass = [&]() -> bool {
@@ -1509,15 +1546,17 @@ LpResult DualSimplexSolver::solve() {
                 Real xk = primal_[k];
                 Real lb = varLower(k);
                 Real ub = varUpper(k);
-                if (xk < lb - kPrimalTol || xk > ub + kPrimalTol)
+                if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
                     ++pinf_count;
+                }
             }
             double solve_elapsed =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_)
                     .count();
-            if (verbose_)
+            if (verbose_) {
                 std::printf("%-7s  %9d  %20.10e  %11d  %7.2fs\n", "Dual", iterations_, obj_val,
                             pinf_count, solve_elapsed);
+            }
         }
 
 #ifdef MIPX_HAS_TBB
@@ -1539,12 +1578,13 @@ LpResult DualSimplexSolver::solve() {
                 const Real weight = 1.0 + static_cast<Real>((hash >> 22) & 0x3ff) / 1024.0;
                 const Real eps = options_.dual_perturbation_magnitude * weight;
                 const BasisStatus st = var_status_[k];
-                if (st == BasisStatus::AtLower)
+                if (st == BasisStatus::AtLower) {
                     rc += eps;
-                else if (st == BasisStatus::AtUpper)
+                } else if (st == BasisStatus::AtUpper) {
                     rc -= eps;
-                else if (st == BasisStatus::Free)
+                } else if (st == BasisStatus::Free) {
                     rc += ((k & 1) ? eps : -eps);
+                }
                 pricing_reduced_cost.set(k, rc);
             }
         }
@@ -1628,10 +1668,11 @@ LpResult DualSimplexSolver::solve() {
             Real ub = upperBoundFast(k);
 
             Real viol = 0.0;
-            if (xk < lb - kPrimalTol)
+            if (xk < lb - kPrimalTol) {
                 viol = lb - xk;
-            else if (xk > ub + kPrimalTol)
+            } else if (xk > ub + kPrimalTol) {
                 viol = xk - ub;
+            }
 
             if (viol > kPrimalTol) {
                 return viol * viol / devex_weights_[i];
@@ -1706,14 +1747,18 @@ LpResult DualSimplexSolver::solve() {
                     Real score = 0.0;
                 };
                 auto better = [](const DualScanBest& a, const DualScanBest& b) {
-                    if (a.var < 0)
+                    if (a.var < 0) {
                         return false;
-                    if (b.var < 0)
+                    }
+                    if (b.var < 0) {
                         return true;
-                    if (a.score > b.score)
+                    }
+                    if (a.score > b.score) {
                         return true;
-                    if (a.score < b.score)
+                    }
+                    if (a.score < b.score) {
                         return false;
+                    }
                     return a.pos < b.pos;  // deterministic tie-break
                 };
 
@@ -1730,8 +1775,9 @@ LpResult DualSimplexSolver::solve() {
                             bool dual_inf = (st == BasisStatus::AtLower && rc < -kDualTol) ||
                                             (st == BasisStatus::AtUpper && rc > kDualTol) ||
                                             (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                            if (!dual_inf)
+                            if (!dual_inf) {
                                 continue;
+                            }
                             const Real score =
                                 use_dual_phase_norm_weight
                                     ? (rc * rc) /
@@ -1770,8 +1816,9 @@ LpResult DualSimplexSolver::solve() {
                     bool dual_inf = (st == BasisStatus::AtLower && rc < -kDualTol) ||
                                     (st == BasisStatus::AtUpper && rc > kDualTol) ||
                                     (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                    if (!dual_inf)
+                    if (!dual_inf) {
                         continue;
+                    }
                     const Real score =
                         use_dual_phase_norm_weight
                             ? (rc * rc) / dual_phase_col_norm_sq[static_cast<std::size_t>(k)]
@@ -1921,8 +1968,9 @@ LpResult DualSimplexSolver::solve() {
                 pivot_col_norm += pivot_col[i] * pivot_col[i];
             }
             pivot_col_norm = std::sqrt(pivot_col_norm);
-            if (pivot_col_norm <= kZeroTol)
+            if (pivot_col_norm <= kZeroTol) {
                 pivot_col_norm = 1.0;
+            }
 
             const Real min_rel_pivot = options_.harris_min_relative_pivot;
             const Real harris_tight = options_.harris_tight_tol;
@@ -1940,14 +1988,16 @@ LpResult DualSimplexSolver::solve() {
                 for (Index i = 0; i < num_rows_; ++i) {
                     Real f = pivot_col[i] * delta_dir;
                     // x_B[i]_new = x_B[i]_old - f * step
-                    if (std::abs(f) < kPivotTol)
+                    if (std::abs(f) < kPivotTol) {
                         continue;
+                    }
 
                     // Reject candidates with poor relative pivot quality.
                     const Real abs_f = std::abs(f);
                     const Real rel_pivot = abs_f / pivot_col_norm;
-                    if (options_.enable_adaptive_harris && rel_pivot < min_rel_pivot)
+                    if (options_.enable_adaptive_harris && rel_pivot < min_rel_pivot) {
                         continue;
+                    }
 
                     Index bvar = basis_[i];
                     Real lb = varLower(bvar);
@@ -1963,8 +2013,9 @@ LpResult DualSimplexSolver::solve() {
                         step = (ub == kInf) ? kInf : (ub - xval) / (-f);
                     }
 
-                    if (step < -kPrimalTol)
+                    if (step < -kPrimalTol) {
                         continue;
+                    }
 
                     // Score by relative pivot size |alpha|/||column|| for stability.
                     const Real score = rel_pivot;
@@ -1978,8 +2029,9 @@ LpResult DualSimplexSolver::solve() {
                     }
                 }
 
-                if (leaving_row_p >= 0 || !options_.enable_adaptive_harris)
+                if (leaving_row_p >= 0 || !options_.enable_adaptive_harris) {
                     break;
+                }
             }
 
             // Check entering variable's opposite bound.
@@ -1996,8 +2048,9 @@ LpResult DualSimplexSolver::solve() {
             }
 
             Real step = std::min(min_step, entering_bound_step);
-            if (step < 0)
+            if (step < 0) {
                 step = 0;
+            }
             Real delta_entering = delta_dir * step;
             const bool primal_step_degenerate =
                 std::abs(step) <= options_.adaptive_refactor_degenerate_pivot_tol;
@@ -2049,8 +2102,9 @@ LpResult DualSimplexSolver::solve() {
             // Update reduced costs.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
             for (Index k : nonbasic_) {
-                if (k == entering_p)
+                if (k == entering_p) {
                     continue;
+                }
                 if (std::abs(pivot_row_alpha[k]) > kZeroTol) {
                     reduced_cost_[k] -= theta_d_p * pivot_row_alpha[k];
                 }
@@ -2183,23 +2237,30 @@ LpResult DualSimplexSolver::solve() {
         }
 
         auto isEligible = [&](Index k, Real alpha) -> bool {
-            if (std::abs(alpha) < kPivotTol)
+            if (std::abs(alpha) < kPivotTol) {
                 return false;
+            }
             BasisStatus st = var_status_[k];
-            if (st == BasisStatus::Fixed)
+            if (st == BasisStatus::Fixed) {
                 return false;
-            if (st == BasisStatus::Free)
+            }
+            if (st == BasisStatus::Free) {
                 return true;
+            }
             if (sigma > 0.0) {
-                if (st == BasisStatus::AtLower && alpha < -kPivotTol)
+                if (st == BasisStatus::AtLower && alpha < -kPivotTol) {
                     return true;
-                if (st == BasisStatus::AtUpper && alpha > kPivotTol)
+                }
+                if (st == BasisStatus::AtUpper && alpha > kPivotTol) {
                     return true;
+                }
             } else {
-                if (st == BasisStatus::AtLower && alpha > kPivotTol)
+                if (st == BasisStatus::AtLower && alpha > kPivotTol) {
                     return true;
-                if (st == BasisStatus::AtUpper && alpha < -kPivotTol)
+                }
+                if (st == BasisStatus::AtUpper && alpha < -kPivotTol) {
                     return true;
+                }
             }
             return false;
         };
@@ -2238,14 +2299,16 @@ LpResult DualSimplexSolver::solve() {
         auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out) {
             Index k = nonbasic_[pos];
             Real alpha = pivot_row_alpha[k];
-            if (!isEligible(k, alpha))
+            if (!isEligible(k, alpha)) {
                 return;
+            }
             // Pivot quality: |alpha| / ||column||.
             const Real cnorm = col_norms[static_cast<std::size_t>(k)];
             const Real rp = std::abs(alpha) / cnorm;
             // Reject candidates with very poor relative pivot quality.
-            if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot)
+            if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot) {
                 return;
+            }
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
             Real gap = kInf;
             if (need_bfrt_gap_scan) {
@@ -2257,8 +2320,9 @@ LpResult DualSimplexSolver::solve() {
         };
 
         auto collectCandidatesSerial = [&](Index offset, Index count) {
-            if (count <= 0)
+            if (count <= 0) {
                 return;
+            }
             Index first_end = std::min<Index>(nnb, offset + count);
             for (Index pos = offset; pos < first_end; ++pos) {
                 appendCandidate(pos, bfrt_cands);
@@ -2272,15 +2336,18 @@ LpResult DualSimplexSolver::solve() {
         auto collectCandidatesFromAlphaSupport = [&](std::vector<BfrtCand>& out) {
             for (Index k : pivot_row_alpha.touched()) {
                 const Index pos = nonbasic_pos_[k];
-                if (pos < 0)
+                if (pos < 0) {
                     continue;
+                }
                 const Real alpha = pivot_row_alpha[k];
-                if (!isEligible(k, alpha))
+                if (!isEligible(k, alpha)) {
                     continue;
+                }
                 const Real cnorm = col_norms[static_cast<std::size_t>(k)];
                 const Real rp = std::abs(alpha) / cnorm;
-                if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot)
+                if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot) {
                     continue;
+                }
                 Real ratio = std::abs(reducedCostForPricing(k) / alpha);
                 Real gap = kInf;
                 if (need_bfrt_gap_scan) {
@@ -2307,8 +2374,9 @@ LpResult DualSimplexSolver::solve() {
                                                          (range.end() - range.begin()) / 4 + 8));
                         for (Index t = range.begin(); t < range.end(); ++t) {
                             Index pos = offset + t;
-                            if (pos >= nnb)
+                            if (pos >= nnb) {
                                 pos -= nnb;
+                            }
                             appendCandidate(pos, local);
                         }
                     });
@@ -2402,10 +2470,12 @@ LpResult DualSimplexSolver::solve() {
         empty_candidate_retry_streak = 0;
 
         auto cand_ratio_pos_less = [](const BfrtCand& a, const BfrtCand& b) {
-            if (a.ratio != b.ratio)
+            if (a.ratio != b.ratio) {
                 return a.ratio < b.ratio;
-            if (a.nonbasic_pos != b.nonbasic_pos)
+            }
+            if (a.nonbasic_pos != b.nonbasic_pos) {
                 return a.nonbasic_pos < b.nonbasic_pos;
+            }
             return a.var < b.var;
         };
 
@@ -2413,8 +2483,9 @@ LpResult DualSimplexSolver::solve() {
         Index best_ci = -1;
         for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
             const auto& c = bfrt_cands[ci];
-            if (need_bfrt_gap_scan && c.gap != kInf)
+            if (need_bfrt_gap_scan && c.gap != kInf) {
                 has_finite_gap_cand = true;
+            }
             if (best_ci < 0 || cand_ratio_pos_less(c, bfrt_cands[best_ci])) {
                 best_ci = ci;
             }
@@ -2433,8 +2504,9 @@ LpResult DualSimplexSolver::solve() {
 
             for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
                 const auto& c = bfrt_cands[ci];
-                if (c.ratio > harris_threshold)
+                if (c.ratio > harris_threshold) {
                     continue;
+                }
                 // Prefer candidates with better relative pivot quality.
                 if (c.rel_pivot > best_pivot_score ||
                     (c.rel_pivot == best_pivot_score && c.nonbasic_pos < best_pos)) {
@@ -2453,8 +2525,9 @@ LpResult DualSimplexSolver::solve() {
                           [](const BfrtCand& a, const BfrtCand& b) { return a.ratio < b.ratio; });
             } else {
                 auto cmp = [](const BfrtCand& a, const BfrtCand& b) {
-                    if (a.ratio != b.ratio)
+                    if (a.ratio != b.ratio) {
                         return a.ratio < b.ratio;
+                    }
                     if (a.nonbasic_pos != b.nonbasic_pos) {
                         return a.nonbasic_pos < b.nonbasic_pos;
                     }
@@ -2541,8 +2614,9 @@ LpResult DualSimplexSolver::solve() {
             Real best_pivot_score_bfrt = bfrt_cands[entering_ci].rel_pivot;
 
             for (Index ci = entering_ci + 1; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
-                if (bfrt_cands[ci].ratio > harris_threshold)
+                if (bfrt_cands[ci].ratio > harris_threshold) {
                     break;
+                }
                 if (bfrt_cands[ci].rel_pivot > best_pivot_score_bfrt) {
                     best_pivot_score_bfrt = bfrt_cands[ci].rel_pivot;
                     entering_var = bfrt_cands[ci].var;
@@ -2617,8 +2691,9 @@ LpResult DualSimplexSolver::solve() {
         // Update reduced costs.
         Real theta_d = reduced_cost_[entering_var] / alpha_entering;
         for (Index k : nonbasic_) {
-            if (k == entering_var)
+            if (k == entering_var) {
                 continue;
+            }
             Real alpha_k = pivot_row_alpha[k];
             if (std::abs(alpha_k) > kZeroTol) {
                 reduced_cost_[k] -= theta_d * alpha_k;
@@ -2703,8 +2778,9 @@ LpResult DualSimplexSolver::solve() {
             const Real w_p = devex_weights_[leaving_row];
 
             for (Index i = 0; i < num_rows_; ++i) {
-                if (i == leaving_row)
+                if (i == leaving_row) {
                     continue;
+                }
                 const Real d_i = pivot_col[i];
                 const Real ratio = d_i * d_p_inv;
                 const Real v_i = dse_tau[i];
@@ -2748,8 +2824,9 @@ LpResult DualSimplexSolver::solve() {
             // Devex weight update (original behavior).
             Real pivot_sq = pivot_col[leaving_row] * pivot_col[leaving_row];
             for (Index i = 0; i < num_rows_; ++i) {
-                if (i == leaving_row)
+                if (i == leaving_row) {
                     continue;
+                }
                 Real ratio = pivot_col[i] / pivot_col[leaving_row];
                 devex_weights_[i] = std::max(
                     kDualTol, devex_weights_[i] + ratio * ratio * devex_weights_[leaving_row]);
@@ -2859,8 +2936,9 @@ LpResult DualSimplexSolver::solve() {
             Real xk = primal_[k];
             Real lb = varLower(k);
             Real ub = varUpper(k);
-            if (xk < lb - kPrimalTol || xk > ub + kPrimalTol)
+            if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
                 ++pinf_count;
+            }
         }
         double solve_elapsed =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
@@ -2912,8 +2990,9 @@ std::vector<Real> DualSimplexSolver::getDualValues() const {
     std::vector<Real> result(num_rows_);
     for (Index i = 0; i < num_rows_; ++i) {
         result[i] = dual_[i] * (scaled_ ? row_scale_[i] : 1.0);
-        if (sense_ == Sense::Maximize)
+        if (sense_ == Sense::Maximize) {
             result[i] = -result[i];
+        }
     }
     return result;
 }
@@ -2923,8 +3002,9 @@ std::vector<Real> DualSimplexSolver::getReducedCosts() const {
     std::vector<Real> result(num_cols_);
     for (Index j = 0; j < num_cols_; ++j) {
         result[j] = reduced_cost_[j] / (scaled_ ? col_scale_[j] : 1.0);
-        if (sense_ == Sense::Maximize)
+        if (sense_ == Sense::Maximize) {
             result[j] = -result[j];
+        }
     }
     return result;
 }
@@ -2937,8 +3017,9 @@ std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
 void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     // External basis: first num_cols are structural, next num_rows are slacks.
     Index n = numVars();
-    if (static_cast<Index>(basis.size()) != n)
+    if (static_cast<Index>(basis.size()) != n) {
         return;
+    }
 
     // Fast path: identical basis status vector already installed.
     if (has_basis_ && static_cast<Index>(var_status_.size()) == n &&
@@ -2989,8 +3070,9 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
-    if (!loaded_ || col < 0 || col >= num_cols_)
+    if (!loaded_ || col < 0 || col >= num_cols_) {
         return;
+    }
 
     // Apply scaling: internal bounds = external / col_scale.
     Real scale = scaled_ ? col_scale_[col] : 1.0;
@@ -3047,15 +3129,18 @@ void DualSimplexSolver::getColBounds(Index col, Real& lower, Real& upper) const 
 }
 
 void DualSimplexSolver::setObjective(std::span<const Real> obj) {
-    if (!loaded_ || static_cast<Index>(obj.size()) != num_cols_)
+    if (!loaded_ || static_cast<Index>(obj.size()) != num_cols_) {
         return;
+    }
 
     for (Index j = 0; j < num_cols_; ++j) {
         Real c = obj[j];
-        if (sense_ == Sense::Maximize)
+        if (sense_ == Sense::Maximize) {
             c = -c;
-        if (scaled_)
+        }
+        if (scaled_) {
             c *= col_scale_[j];
+        }
         obj_[j] = c;
     }
 }
@@ -3063,12 +3148,14 @@ void DualSimplexSolver::setObjective(std::span<const Real> obj) {
 void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const Index> indices,
                                 std::span<const Real> values, std::span<const Real> lower,
                                 std::span<const Real> upper) {
-    if (!loaded_)
+    if (!loaded_) {
         return;
+    }
 
     Index num_new = static_cast<Index>(lower.size());
-    if (num_new == 0)
+    if (num_new == 0) {
         return;
+    }
 
     Index old_rows = num_rows_;
     Index old_vars = numVars();
@@ -3153,8 +3240,9 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
 }
 
 void DualSimplexSolver::removeRows(std::span<const Index> rows) {
-    if (!loaded_ || rows.empty())
+    if (!loaded_ || rows.empty()) {
         return;
+    }
 
     Index old_rows = num_rows_;
     Index old_vars = numVars();
@@ -3182,8 +3270,9 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     std::vector<Triplet> triplets;
     triplets.reserve(matrix_.numNonzeros());
     for (Index i = 0; i < num_rows_; ++i) {
-        if (row_map[i] < 0)
+        if (row_map[i] < 0) {
             continue;
+        }
         auto rv = matrix_.row(i);
         for (Index k = 0; k < rv.size(); ++k) {
             triplets.push_back({row_map[i], rv.indices[k], rv.values[k]});
@@ -3195,31 +3284,36 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     std::vector<Real> new_row_scale;
     new_row_lower.reserve(new_rows);
     new_row_upper.reserve(new_rows);
-    if (scaled_)
+    if (scaled_) {
         new_row_scale.reserve(new_rows);
+    }
 
     for (Index i = 0; i < num_rows_; ++i) {
-        if (row_map[i] < 0)
+        if (row_map[i] < 0) {
             continue;
+        }
         new_row_lower.push_back(row_lower_[i]);
         new_row_upper.push_back(row_upper_[i]);
-        if (scaled_)
+        if (scaled_) {
             new_row_scale.push_back(row_scale_[i]);
+        }
     }
 
     num_rows_ = new_rows;
     row_lower_ = std::move(new_row_lower);
     row_upper_ = std::move(new_row_upper);
-    if (scaled_)
+    if (scaled_) {
         row_scale_ = std::move(new_row_scale);
+    }
     matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
 
     // Try to preserve basis via slack index remapping.
     if (has_basis_) {
         // old var index -> new var index (-1 if removed)
         std::vector<Index> var_map(old_vars, -1);
-        for (Index j = 0; j < num_cols_; ++j)
+        for (Index j = 0; j < num_cols_; ++j) {
             var_map[j] = j;
+        }
         for (Index i = 0; i < old_rows; ++i) {
             Index old_slack = num_cols_ + i;
             if (row_map[i] >= 0) {
@@ -3234,8 +3328,9 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
         } else {
             for (Index old_row = 0; old_row < old_rows; ++old_row) {
                 Index new_row = row_map[old_row];
-                if (new_row < 0)
+                if (new_row < 0) {
                     continue;
+                }
                 Index old_var = basis_[old_row];
                 if (old_var < 0 || old_var >= old_vars) {
                     can_preserve = false;
@@ -3269,8 +3364,9 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
             // Transfer mapped solution/status values.
             for (Index old_var = 0; old_var < old_vars; ++old_var) {
                 Index new_var = var_map[old_var];
-                if (new_var < 0)
+                if (new_var < 0) {
                     continue;
+                }
                 if (old_var < static_cast<Index>(var_status_.size())) {
                     new_var_status[new_var] = var_status_[old_var];
                 }
@@ -3292,8 +3388,9 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
 
             // Rebuild nonbasic list and sanitize statuses.
             for (Index v = 0; v < new_vars; ++v) {
-                if (new_basis_pos[v] >= 0)
+                if (new_basis_pos[v] >= 0) {
                     continue;
+                }
                 BasisStatus st = new_var_status[v];
                 if (st == BasisStatus::Basic) {
                     Real lb = varLower(v);
@@ -3359,8 +3456,9 @@ void DualSimplexSolver::getTableauRow(Index basis_pos, std::vector<Real>& tablea
     // Row-wise computation (faster when rho is dense):
     for (Index i = 0; i < num_rows_; ++i) {
         Real rho_i = rho[i];
-        if (std::abs(rho_i) < kZeroTol)
+        if (std::abs(rho_i) < kZeroTol) {
             continue;
+        }
         auto rv = matrix_.row(i);
         for (Index p = 0; p < rv.size(); ++p) {
             tableau_row[rv.indices[p]] += rho_i * rv.values[p];

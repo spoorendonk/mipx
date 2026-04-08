@@ -215,8 +215,8 @@ Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const
     };
 
     // For large matrices, use an iterative Tarjan to avoid stack overflow.
-    // For matrices < 10000, recursive is fine.
-    if (dim < 10000) {
+    // Recursive lambda frames are ~100+ bytes; keep limit conservative.
+    if (dim < 2000) {
         for (Index i = 0; i < dim; ++i) {
             if (scc_index[static_cast<std::size_t>(i)] < 0) {
                 tarjan_visit(i, tarjan_visit);

@@ -85,6 +85,9 @@ public:
     /// clear() still works correctly because it iterates touched_indices_.
     [[nodiscard]] std::vector<Index>& touchedMut() { return touched_indices_; }
 
+    // WARNING: isTouched() may return false for indices added via touchedMut()
+    // because touchedMut() does not update epoch flags. Use touched() iteration
+    // (not isTouched()) to enumerate entries after external mutation.
     [[nodiscard]] bool isTouched(Index i) const {
         assert(i >= 0 && i < size());
         return touched_epoch_[static_cast<std::size_t>(i)] == current_epoch_;
