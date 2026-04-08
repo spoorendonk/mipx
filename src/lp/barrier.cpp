@@ -1,5 +1,8 @@
 #include "mipx/barrier.h"
 
+#include "mipx/dual_simplex.h"
+#include "newton_solver.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -9,8 +12,6 @@
 #include <numeric>
 #include <string>
 #include <utility>
-
-#include "newton_solver.h"
 
 namespace mipx {
 
@@ -22,25 +23,29 @@ inline bool isFinite(Real v) {
 
 inline Real infNorm(std::span<const Real> v) {
     Real n = 0.0;
-    for (Real x : v) n = std::max(n, std::abs(x));
+    for (Real x : v) {
+        n = std::max(n, std::abs(x));
+    }
     return n;
 }
 
 inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     Real s = 0.0;
-    for (Index i = 0; i < static_cast<Index>(a.size()); ++i) s += a[i] * b[i];
+    for (Index i = 0; i < static_cast<Index>(a.size()); ++i) {
+        s += a[i] * b[i];
+    }
     return s;
 }
 
-inline Real computeOriginalObjective(const LpProblem& problem,
-                                     std::span<const Real> x) {
+inline Real computeOriginalObjective(const LpProblem& problem, std::span<const Real> x) {
     Real obj = problem.obj_offset;
-    for (Index j = 0; j < problem.num_cols; ++j) obj += problem.obj[j] * x[j];
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        obj += problem.obj[j] * x[j];
+    }
     return obj;
 }
 
-inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx,
-                              Real fraction) {
+inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx, Real fraction) {
     Real alpha = 1.0;
     for (Index i = 0; i < static_cast<Index>(x.size()); ++i) {
         if (dx[i] < 0.0) {
@@ -54,18 +59,17 @@ inline Real maxStepToBoundary(std::span<const Real> x, std::span<const Real> dx,
 // Ruiz equilibration scaling
 // ============================================================================
 
-void computeRuizScaling(SparseMatrix& A,
-                        std::vector<Real>& b,
-                        std::vector<Real>& c,
-                        std::vector<Real>& row_scale,
-                        std::vector<Real>& col_scale,
+void computeRuizScaling(SparseMatrix& A, std::vector<Real>& b, std::vector<Real>& c,
+                        std::vector<Real>& row_scale, std::vector<Real>& col_scale,
                         Int iterations) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     row_scale.assign(static_cast<size_t>(m), 1.0);
     col_scale.assign(static_cast<size_t>(n), 1.0);
 
-    if (iterations <= 0 || m == 0 || n == 0) return;
+    if (iterations <= 0 || m == 0 || n == 0) {
+        return;
+    }
 
     // Work on CSR data directly.  After scaling we rebuild the matrix.
     auto vals = A.csr_values();
@@ -106,17 +110,24 @@ void computeRuizScaling(SparseMatrix& A,
         }
 
         // Accumulate into overall scale factors.
-        for (Index i = 0; i < m; ++i) row_scale[i] *= r[i];
-        for (Index j = 0; j < n; ++j) col_scale[j] *= cs[j];
+        for (Index i = 0; i < m; ++i) {
+            row_scale[i] *= r[i];
+        }
+        for (Index j = 0; j < n; ++j) {
+            col_scale[j] *= cs[j];
+        }
     }
 
     // Rebuild matrix.
-    A = SparseMatrix(m, n, std::move(values), std::move(col_indices),
-                     std::move(row_starts));
+    A = SparseMatrix(m, n, std::move(values), std::move(col_indices), std::move(row_starts));
 
     // Scale b and c.
-    for (Index i = 0; i < m; ++i) b[i] *= row_scale[i];
-    for (Index j = 0; j < n; ++j) c[j] *= col_scale[j];
+    for (Index i = 0; i < m; ++i) {
+        b[i] *= row_scale[i];
+    }
+    for (Index j = 0; j < n; ++j) {
+        c[j] *= col_scale[j];
+    }
 }
 
 // ============================================================================
@@ -137,13 +148,17 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
     Index thresh = std::max<Index>(1, static_cast<Index>(dense_fraction * m));
     for (Index j = 0; j < n; ++j) {
         auto cv = A.col(j);
-        if (cv.size() > thresh) ++info.dense_cols;
+        if (cv.size() > thresh) {
+            ++info.dense_cols;
+        }
     }
 
     Index col_thresh = std::max<Index>(1, static_cast<Index>(dense_fraction * n));
     for (Index i = 0; i < m; ++i) {
         auto rv = A.row(i);
-        if (rv.size() > col_thresh) ++info.dense_rows;
+        if (rv.size() > col_thresh) {
+            ++info.dense_rows;
+        }
     }
 
     // Estimate NE row density.
@@ -164,16 +179,9 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
 // Shared Mehrotra predictor-corrector IPM loop
 // ============================================================================
 
-bool runMehrotraIpm(NewtonSolver& solver,
-                    const SparseMatrix& A,
-                    std::span<const Real> b,
-                    std::span<const Real> c,
-                    const BarrierOptions& opts,
-                    Real obj_offset,
-                    std::vector<Real>& z,
-                    std::vector<Real>& y,
-                    std::vector<Real>& s,
-                    Int& iters) {
+bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
+                    std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
+                    std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s, Int& iters) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const Real reg = std::max(opts.regularization, 1e-12);
@@ -205,8 +213,7 @@ bool runMehrotraIpm(NewtonSolver& solver,
     const Real inv_c = 1.0 / (1.0 + infNorm(c));
 
     for (Int iter = 0; iter < opts.max_iter; ++iter) {
-        if (opts.stop_flag != nullptr &&
-            opts.stop_flag->load(std::memory_order_relaxed)) {
+        if (opts.stop_flag != nullptr && opts.stop_flag->load(std::memory_order_relaxed)) {
             iters = iter;
             return false;
         }
@@ -217,8 +224,12 @@ bool runMehrotraIpm(NewtonSolver& solver,
         A.multiply(z, az);
         A.multiplyTranspose(y, at_y);
 
-        for (Index i = 0; i < m; ++i) rp[i] = b[i] - az[i];
-        for (Index j = 0; j < n; ++j) rd[j] = c[j] - at_y[j] - s[j];
+        for (Index i = 0; i < m; ++i) {
+            rp[i] = b[i] - az[i];
+        }
+        for (Index j = 0; j < n; ++j) {
+            rd[j] = c[j] - at_y[j] - s[j];
+        }
 
         Real mu = dot(z, s) / std::max<Index>(n, 1);
         Real pinf = infNorm(rp) * inv_b;
@@ -226,12 +237,11 @@ bool runMehrotraIpm(NewtonSolver& solver,
         Real gap = std::abs(mu) / (1.0 + std::abs(obj_offset + dot(c, z)));
 
         if (opts.verbose) {
-            std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e\n",
-                        iter, obj_offset + dot(c, z), pinf, dinf, gap);
+            std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e\n", iter,
+                        obj_offset + dot(c, z), pinf, dinf, gap);
         }
 
-        if (pinf < opts.primal_dual_tol &&
-            dinf < opts.primal_dual_tol &&
+        if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
             gap < opts.primal_dual_tol) {
             iters = iter;
             return true;
@@ -259,7 +269,9 @@ bool runMehrotraIpm(NewtonSolver& solver,
         }
 
         // Affine direction (predictor).
-        for (Index j = 0; j < n; ++j) rc[j] = -z[j] * s[j];
+        for (Index j = 0; j < n; ++j) {
+            rc[j] = -z[j] * s[j];
+        }
         if (!solver.solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff)) {
             iters = iter;
             return false;
@@ -270,8 +282,7 @@ bool runMehrotraIpm(NewtonSolver& solver,
 
         Real mu_aff = 0.0;
         for (Index j = 0; j < n; ++j) {
-            mu_aff += (z[j] + alpha_aff_p * dz_aff[j]) *
-                      (s[j] + alpha_aff_d * ds_aff[j]);
+            mu_aff += (z[j] + alpha_aff_p * dz_aff[j]) * (s[j] + alpha_aff_d * ds_aff[j]);
         }
         mu_aff /= std::max<Index>(n, 1);
 
@@ -297,7 +308,9 @@ bool runMehrotraIpm(NewtonSolver& solver,
             z[j] = std::max(z[j], 1e-12);
             s[j] = std::max(s[j], 1e-12);
         }
-        for (Index i = 0; i < m; ++i) y[i] += alpha_d * dy[i];
+        for (Index i = 0; i < m; ++i) {
+            y[i] += alpha_d * dy[i];
+        }
     }
 
     iters = opts.max_iter;
@@ -317,10 +330,12 @@ void BarrierSolver::load(const LpProblem& problem) {
     objective_ = 0.0;
     scaled_obj_ = 0.0;
     iterations_ = 0;
+    crossover_iters_ = 0;
     last_error_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_eq_.clear();
     reduced_costs_std_.clear();
+    basis_orig_.clear();
     used_gpu_ = false;
     transformed_ok_ = buildStandardForm();
 }
@@ -340,8 +355,7 @@ bool BarrierSolver::buildStandardForm() {
         return idx;
     };
 
-    auto addEqRow = [&](const std::vector<std::pair<Index, Real>>& entries,
-                        Real rhs) {
+    auto addEqRow = [&](const std::vector<std::pair<Index, Real>>& entries, Real rhs) {
         Index row = static_cast<Index>(beq_.size());
         beq_.push_back(rhs);
         for (const auto& [col, val] : entries) {
@@ -411,8 +425,12 @@ bool BarrierSolver::buildStandardForm() {
                 Real a = rv.values[k];
                 const auto& e = col_expr_[j];
                 rhs -= a * e.offset;
-                if (e.col_a >= 0) entries.push_back({e.col_a, a * e.coeff_a});
-                if (e.col_b >= 0) entries.push_back({e.col_b, a * e.coeff_b});
+                if (e.col_a >= 0) {
+                    entries.push_back({e.col_a, a * e.coeff_a});
+                }
+                if (e.col_b >= 0) {
+                    entries.push_back({e.col_b, a * e.coeff_b});
+                }
             }
             Index s = addStdCol(0.0);
             entries.push_back({s, 1.0});
@@ -427,8 +445,12 @@ bool BarrierSolver::buildStandardForm() {
                 Real a = rv.values[k];
                 const auto& e = col_expr_[j];
                 rhs += a * e.offset;
-                if (e.col_a >= 0) entries.push_back({e.col_a, -a * e.coeff_a});
-                if (e.col_b >= 0) entries.push_back({e.col_b, -a * e.coeff_b});
+                if (e.col_a >= 0) {
+                    entries.push_back({e.col_a, -a * e.coeff_a});
+                }
+                if (e.col_b >= 0) {
+                    entries.push_back({e.col_b, -a * e.coeff_b});
+                }
             }
             Index s = addStdCol(0.0);
             entries.push_back({s, 1.0});
@@ -436,8 +458,7 @@ bool BarrierSolver::buildStandardForm() {
         }
     }
 
-    aeq_ = SparseMatrix(static_cast<Index>(beq_.size()),
-                        static_cast<Index>(cstd_.size()),
+    aeq_ = SparseMatrix(static_cast<Index>(beq_.size()), static_cast<Index>(cstd_.size()),
                         std::move(trips));
 
     dual_eq_.assign(beq_.size(), 0.0);
@@ -459,39 +480,50 @@ std::vector<Real> BarrierSolver::getReducedCosts() const {
     for (Index j = 0; j < original_.num_cols; ++j) {
         const auto& e = col_expr_[j];
         Real v = 0.0;
-        if (e.col_a >= 0 && e.col_a < static_cast<Index>(reduced_costs_std_.size()))
+        if (e.col_a >= 0 && e.col_a < static_cast<Index>(reduced_costs_std_.size())) {
             v += e.coeff_a * reduced_costs_std_[e.col_a];
-        if (e.col_b >= 0 && e.col_b < static_cast<Index>(reduced_costs_std_.size()))
+        }
+        if (e.col_b >= 0 && e.col_b < static_cast<Index>(reduced_costs_std_.size())) {
             v += e.coeff_b * reduced_costs_std_[e.col_b];
+        }
         rc[j] = sense_sign * v;
     }
     return rc;
 }
 
-std::vector<BasisStatus> BarrierSolver::getBasis() const { return {}; }
+std::vector<BasisStatus> BarrierSolver::getBasis() const {
+    return basis_orig_;
+}
 
 void BarrierSolver::setBasis(std::span<const BasisStatus> basis) {
     (void)basis;
 }
 
-void BarrierSolver::addRows(std::span<const Index> starts,
-                            std::span<const Index> indices,
-                            std::span<const Real> values,
-                            std::span<const Real> lower,
+void BarrierSolver::addRows(std::span<const Index> starts, std::span<const Index> indices,
+                            std::span<const Real> values, std::span<const Real> lower,
                             std::span<const Real> upper) {
-    if (!loaded_) return;
-    if (starts.empty()) return;
+    if (!loaded_) {
+        return;
+    }
+    if (starts.empty()) {
+        return;
+    }
 
     Index rows_to_add = static_cast<Index>(lower.size());
-    if (rows_to_add != static_cast<Index>(upper.size())) return;
-    if (static_cast<Index>(starts.size()) != rows_to_add + 1) return;
+    if (rows_to_add != static_cast<Index>(upper.size())) {
+        return;
+    }
+    if (static_cast<Index>(starts.size()) != rows_to_add + 1) {
+        return;
+    }
 
     for (Index r = 0; r < rows_to_add; ++r) {
         Index s = starts[r];
         Index e = starts[r + 1];
         if (s < 0 || e < s || e > static_cast<Index>(indices.size()) ||
-            e > static_cast<Index>(values.size()))
+            e > static_cast<Index>(values.size())) {
             return;
+        }
         std::span<const Index> ri(indices.data() + s, static_cast<size_t>(e - s));
         std::span<const Real> rv(values.data() + s, static_cast<size_t>(e - s));
         original_.matrix.addRow(ri, rv);
@@ -504,8 +536,12 @@ void BarrierSolver::addRows(std::span<const Index> starts,
 }
 
 void BarrierSolver::removeRows(std::span<const Index> rows) {
-    if (!loaded_) return;
-    if (rows.empty()) return;
+    if (!loaded_) {
+        return;
+    }
+    if (rows.empty()) {
+        return;
+    }
 
     std::vector<Index> sorted(rows.begin(), rows.end());
     std::sort(sorted.begin(), sorted.end());
@@ -513,28 +549,39 @@ void BarrierSolver::removeRows(std::span<const Index> rows) {
 
     for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
         Index r = *it;
-        if (r < 0 || r >= original_.num_rows) continue;
+        if (r < 0 || r >= original_.num_rows) {
+            continue;
+        }
         original_.matrix.removeRowStable(r);
         original_.row_lower.erase(original_.row_lower.begin() + r);
         original_.row_upper.erase(original_.row_upper.begin() + r);
-        if (r < static_cast<Index>(original_.row_names.size()))
+        if (r < static_cast<Index>(original_.row_names.size())) {
             original_.row_names.erase(original_.row_names.begin() + r);
+        }
         --original_.num_rows;
     }
     transformed_ok_ = buildStandardForm();
 }
 
 void BarrierSolver::setColBounds(Index col, Real lower, Real upper) {
-    if (!loaded_) return;
-    if (col < 0 || col >= original_.num_cols) return;
+    if (!loaded_) {
+        return;
+    }
+    if (col < 0 || col >= original_.num_cols) {
+        return;
+    }
     original_.col_lower[col] = lower;
     original_.col_upper[col] = upper;
     transformed_ok_ = buildStandardForm();
 }
 
 void BarrierSolver::setObjective(std::span<const Real> obj) {
-    if (!loaded_) return;
-    if (static_cast<Index>(obj.size()) != original_.num_cols) return;
+    if (!loaded_) {
+        return;
+    }
+    if (static_cast<Index>(obj.size()) != original_.num_cols) {
+        return;
+    }
     original_.obj.assign(obj.begin(), obj.end());
     transformed_ok_ = buildStandardForm();
 }
@@ -544,14 +591,18 @@ void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
     for (Index j = 0; j < original_.num_cols; ++j) {
         const auto& e = col_expr_[j];
         Real x = e.offset;
-        if (e.col_a >= 0 && e.col_a < static_cast<Index>(z.size()))
+        if (e.col_a >= 0 && e.col_a < static_cast<Index>(z.size())) {
             x += e.coeff_a * z[e.col_a];
-        if (e.col_b >= 0 && e.col_b < static_cast<Index>(z.size()))
+        }
+        if (e.col_b >= 0 && e.col_b < static_cast<Index>(z.size())) {
             x += e.coeff_b * z[e.col_b];
-        if (isFinite(original_.col_lower[j]))
+        }
+        if (isFinite(original_.col_lower[j])) {
             x = std::max(x, original_.col_lower[j]);
-        if (isFinite(original_.col_upper[j]))
+        }
+        if (isFinite(original_.col_upper[j])) {
             x = std::min(x, original_.col_upper[j]);
+        }
         primal_orig_[j] = x;
     }
 }
@@ -559,19 +610,23 @@ void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
 bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) const {
     const Real tol = 1e-5;
     for (Index j = 0; j < original_.num_cols; ++j) {
-        if (isFinite(original_.col_lower[j]) && x[j] < original_.col_lower[j] - tol)
+        if (isFinite(original_.col_lower[j]) && x[j] < original_.col_lower[j] - tol) {
             return false;
-        if (isFinite(original_.col_upper[j]) && x[j] > original_.col_upper[j] + tol)
+        }
+        if (isFinite(original_.col_upper[j]) && x[j] > original_.col_upper[j] + tol) {
             return false;
+        }
     }
 
     std::vector<Real> ax(static_cast<size_t>(original_.num_rows), 0.0);
     original_.matrix.multiply(x, ax);
     for (Index i = 0; i < original_.num_rows; ++i) {
-        if (isFinite(original_.row_lower[i]) && ax[i] < original_.row_lower[i] - tol)
+        if (isFinite(original_.row_lower[i]) && ax[i] < original_.row_lower[i] - tol) {
             return false;
-        if (isFinite(original_.row_upper[i]) && ax[i] > original_.row_upper[i] + tol)
+        }
+        if (isFinite(original_.row_upper[i]) && ax[i] > original_.row_upper[i] + tol) {
             return false;
+        }
     }
     return true;
 }
@@ -580,10 +635,8 @@ bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) cons
 // solveStandardForm — dispatch + shared IPM
 // ============================================================================
 
-bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
-                                      std::vector<Real>& y,
-                                      std::vector<Real>& s,
-                                      Int& iters) {
+bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
+                                      std::vector<Real>& s, Int& iters) {
     const Index m = aeq_.numRows();
     const Index n = aeq_.numCols();
     if (n == 0) {
@@ -598,21 +651,21 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
         y.clear();
         s = cstd_;
         for (Index j = 0; j < n; ++j) {
-            if (s[j] < -1e-12) return false;
+            if (s[j] < -1e-12) {
+                return false;
+            }
         }
         iters = 0;
         return true;
     }
 
     // Ruiz equilibration.
-    computeRuizScaling(aeq_, beq_, cstd_, row_scale_, col_scale_,
-                       options_.ruiz_iterations);
+    computeRuizScaling(aeq_, beq_, cstd_, row_scale_, col_scale_, options_.ruiz_iterations);
 
     // Density detection for backend selection.
     auto density = detectDensity(aeq_, options_.dense_col_fraction);
-    bool use_augmented = (density.dense_cols > 50 ||
-                          density.dense_rows > 10 ||
-                          density.avg_ne_row_density > 20.0);
+    bool use_augmented =
+        (density.dense_cols > 50 || density.dense_rows > 10 || density.avg_ne_row_density > 20.0);
 
     // Select backend.
     std::unique_ptr<NewtonSolver> solver;
@@ -621,11 +674,9 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     const auto requested_algo = options_.algorithm;
     if (algo == BarrierAlgorithm::Auto) {
 #ifdef MIPX_HAS_CUDSS
-        algo = use_augmented ? BarrierAlgorithm::GpuAugmented
-                             : BarrierAlgorithm::GpuCholesky;
+        algo = use_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
 #else
-        algo = use_augmented ? BarrierAlgorithm::CpuAugmented
-                             : BarrierAlgorithm::CpuCholesky;
+        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
 #endif
     }
 
@@ -637,26 +688,23 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
         bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
         std::string gpu_error;
-        ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_,
-                             std_obj_offset_, prefer_aug, z, y, s, iters, &gpu_error);
+        ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_, std_obj_offset_, prefer_aug, z, y,
+                             s, iters, &gpu_error);
         if (ok) {
             used_gpu_ = true;
         } else {
-            gpu_fallback_error =
-                gpu_error.empty() ? "Barrier GPU solve failed." : gpu_error;
+            gpu_fallback_error = gpu_error.empty() ? "Barrier GPU solve failed." : gpu_error;
             if (options_.verbose && !gpu_error.empty()) {
                 if (requested_algo == BarrierAlgorithm::Auto) {
-                    std::fprintf(stderr,
-                                 "Barrier GPU backend failed, falling back to CPU: %s\n",
+                    std::fprintf(stderr, "Barrier GPU backend failed, falling back to CPU: %s\n",
                                  gpu_error.c_str());
                 } else {
-                    std::fprintf(stderr, "Barrier GPU backend failed: %s\n",
-                                 gpu_error.c_str());
+                    std::fprintf(stderr, "Barrier GPU backend failed: %s\n", gpu_error.c_str());
                 }
             }
             if (requested_algo == BarrierAlgorithm::Auto) {
-                algo = use_augmented ? BarrierAlgorithm::CpuAugmented
-                                     : BarrierAlgorithm::CpuCholesky;
+                algo =
+                    use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
             } else {
                 last_error_ = gpu_fallback_error;
                 return false;
@@ -666,22 +714,21 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
 #else
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
         // No CUDA — use CPU.
-        algo = use_augmented ? BarrierAlgorithm::CpuAugmented
-                             : BarrierAlgorithm::CpuCholesky;
+        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
     }
 #endif
 
     if (!ok && !solver) {
         switch (algo) {
-        case BarrierAlgorithm::CpuCholesky:
-            solver = createCpuCholeskySolver();
-            break;
-        case BarrierAlgorithm::CpuAugmented:
-            solver = createCpuAugmentedSolver();
-            break;
-        default:
-            solver = createCpuCholeskySolver();
-            break;
+            case BarrierAlgorithm::CpuCholesky:
+                solver = createCpuCholeskySolver();
+                break;
+            case BarrierAlgorithm::CpuAugmented:
+                solver = createCpuAugmentedSolver();
+                break;
+            default:
+                solver = createCpuCholeskySolver();
+                break;
         }
     }
 
@@ -692,14 +739,12 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
             }
             return false;
         }
-        ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_,
-                             std_obj_offset_, z, y, s, iters);
+        ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s, iters);
         if (!ok && last_error_.empty() &&
             !(options_.stop_flag != nullptr &&
               options_.stop_flag->load(std::memory_order_relaxed))) {
             if (!gpu_fallback_error.empty()) {
-                last_error_ =
-                    gpu_fallback_error + " CPU fallback also failed.";
+                last_error_ = gpu_fallback_error + " CPU fallback also failed.";
             } else {
                 last_error_ = "Barrier solve failed.";
             }
@@ -725,6 +770,218 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z,
     }
 
     return ok;
+}
+
+// ============================================================================
+// runCrossover() — extract a basic feasible solution from the IPM iterate
+// ============================================================================
+
+bool BarrierSolver::runCrossover() {
+    const Index ncols = original_.num_cols;
+    const Index nrows = original_.num_rows;
+    const Real tol = 1e-6;
+
+    // Phase 1: Variable pushing — classify each original variable.
+    std::vector<BasisStatus> basis(static_cast<size_t>(ncols + nrows));
+
+    for (Index j = 0; j < ncols; ++j) {
+        Real x = primal_orig_[j];
+        Real lb = original_.col_lower[j];
+        Real ub = original_.col_upper[j];
+        bool lb_finite = isFinite(lb);
+        bool ub_finite = isFinite(ub);
+
+        if (lb_finite && ub_finite && std::abs(ub - lb) < tol) {
+            basis[j] = BasisStatus::Fixed;
+        } else if (lb_finite && std::abs(x - lb) < tol) {
+            basis[j] = BasisStatus::AtLower;
+        } else if (ub_finite && std::abs(x - ub) < tol) {
+            basis[j] = BasisStatus::AtUpper;
+        } else if (!lb_finite && !ub_finite) {
+            // Free variable — must be basic.
+            basis[j] = BasisStatus::Basic;
+        } else {
+            // Interior point — candidate for basic.
+            basis[j] = BasisStatus::Basic;
+        }
+    }
+
+    // Compute row activities: ax[i] = sum_j A[i,j] * x[j].
+    std::vector<Real> ax(static_cast<size_t>(nrows), 0.0);
+    original_.matrix.multiply(primal_orig_, ax);
+
+    // Phase 1 (continued): Classify row slacks.
+    // Dual simplex basis has structural vars [0..ncols) then slacks [ncols..ncols+nrows).
+    for (Index i = 0; i < nrows; ++i) {
+        Real rl = original_.row_lower[i];
+        Real ru = original_.row_upper[i];
+        bool rl_finite = isFinite(rl);
+        bool ru_finite = isFinite(ru);
+
+        if (rl_finite && ru_finite && std::abs(ru - rl) < tol) {
+            // Equality row — slack is fixed at zero.
+            basis[ncols + i] = BasisStatus::Fixed;
+        } else if (ru_finite && std::abs(ax[i] - ru) < tol) {
+            // Active at upper bound — slack at lower bound (zero).
+            basis[ncols + i] = BasisStatus::AtLower;
+        } else if (rl_finite && std::abs(ax[i] - rl) < tol) {
+            // Active at lower bound — slack at upper bound.
+            basis[ncols + i] = BasisStatus::AtUpper;
+        } else {
+            // Slack is interior — basic candidate.
+            basis[ncols + i] = BasisStatus::Basic;
+        }
+    }
+
+    // Count basics. We need exactly nrows basic variables.
+    Index n_basic = 0;
+    for (auto s : basis) {
+        if (s == BasisStatus::Basic) {
+            ++n_basic;
+        }
+    }
+
+    // If too many basics, push some to bounds using reduced cost indicators.
+    // Variables with larger |reduced_cost| are less likely to be basic.
+    if (n_basic > nrows) {
+        auto rc = getReducedCosts();
+        // Build list of basic structural variables with their |rc| values.
+        std::vector<std::pair<Real, Index>> basic_vars;
+        for (Index j = 0; j < ncols; ++j) {
+            if (basis[j] == BasisStatus::Basic) {
+                basic_vars.push_back({std::abs(rc[j]), j});
+            }
+        }
+        // Sort by |rc| descending — push the ones with largest |rc| first.
+        std::sort(basic_vars.begin(), basic_vars.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        for (const auto& [rc_val, j] : basic_vars) {
+            if (n_basic <= nrows) {
+                break;
+            }
+            Real lb = original_.col_lower[j];
+            Real ub = original_.col_upper[j];
+            Real x = primal_orig_[j];
+            bool lb_finite = isFinite(lb);
+            bool ub_finite = isFinite(ub);
+
+            if (lb_finite && ub_finite) {
+                // Push to nearer bound.
+                basis[j] = (x - lb <= ub - x) ? BasisStatus::AtLower : BasisStatus::AtUpper;
+                --n_basic;
+            } else if (lb_finite) {
+                basis[j] = BasisStatus::AtLower;
+                --n_basic;
+            } else if (ub_finite) {
+                basis[j] = BasisStatus::AtUpper;
+                --n_basic;
+            }
+            // Free variables cannot be pushed to a bound.
+        }
+
+        // If still too many basics, push basic slacks.
+        if (n_basic > nrows) {
+            for (Index i = 0; i < nrows; ++i) {
+                if (n_basic <= nrows) {
+                    break;
+                }
+                if (basis[ncols + i] != BasisStatus::Basic) {
+                    continue;
+                }
+                Real rl = original_.row_lower[i];
+                Real ru = original_.row_upper[i];
+                if (isFinite(ru)) {
+                    basis[ncols + i] = BasisStatus::AtLower;
+                    --n_basic;
+                } else if (isFinite(rl)) {
+                    basis[ncols + i] = BasisStatus::AtUpper;
+                    --n_basic;
+                }
+            }
+        }
+    }
+
+    // If too few basics, promote nonbasic variables that are interior.
+    if (n_basic < nrows) {
+        // First try slacks.
+        for (Index i = 0; i < nrows; ++i) {
+            if (n_basic >= nrows) {
+                break;
+            }
+            if (basis[ncols + i] == BasisStatus::Basic) {
+                continue;
+            }
+            Real rl = original_.row_lower[i];
+            Real ru = original_.row_upper[i];
+            bool can_promote = isFinite(rl) || isFinite(ru);
+            if (can_promote && basis[ncols + i] != BasisStatus::Fixed) {
+                basis[ncols + i] = BasisStatus::Basic;
+                ++n_basic;
+            }
+        }
+        // Then try structural variables.
+        for (Index j = 0; j < ncols; ++j) {
+            if (n_basic >= nrows) {
+                break;
+            }
+            if (basis[j] == BasisStatus::Basic) {
+                continue;
+            }
+            if (basis[j] != BasisStatus::Fixed) {
+                basis[j] = BasisStatus::Basic;
+                ++n_basic;
+            }
+        }
+    }
+
+    // Phase 2: Basis cleanup using dual simplex.
+    DualSimplexSolver ds;
+    ds.load(original_);
+    ds.setVerbose(false);
+    ds.setBasis(basis);
+
+    DualSimplexOptions ds_opts;
+    ds_opts.stop_flag = options_.stop_flag;
+    ds_opts.enable_scaling = true;
+    ds.setOptions(ds_opts);
+
+    auto result = ds.solve();
+    crossover_iters_ = result.iterations;
+
+    if (result.status == Status::Optimal) {
+        primal_orig_ = ds.getPrimalValues();
+        basis_orig_ = ds.getBasis();
+        objective_ = result.objective;
+        return true;
+    }
+
+    // Crossover failed — fall back to cold dual simplex.
+    if (options_.verbose) {
+        std::printf(
+            "Crossover cleanup failed (status %d, %d iters), "
+            "falling back to cold dual simplex.\n",
+            static_cast<int>(result.status), result.iterations);
+    }
+
+    DualSimplexSolver ds_cold;
+    ds_cold.load(original_);
+    ds_cold.setVerbose(false);
+    DualSimplexOptions cold_opts;
+    cold_opts.stop_flag = options_.stop_flag;
+    ds_cold.setOptions(cold_opts);
+
+    auto cold_result = ds_cold.solve();
+    crossover_iters_ += cold_result.iterations;
+
+    if (cold_result.status == Status::Optimal) {
+        primal_orig_ = ds_cold.getPrimalValues();
+        basis_orig_ = ds_cold.getBasis();
+        objective_ = cold_result.objective;
+        return true;
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -755,8 +1012,7 @@ LpResult BarrierSolver::solve() {
     bool ok = solveStandardForm(z, y, s, iters);
 
     if (!ok) {
-        if (options_.stop_flag != nullptr &&
-            options_.stop_flag->load(std::memory_order_relaxed)) {
+        if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
             status_ = Status::IterLimit;
             objective_ = 0.0;
             iterations_ = iters;
@@ -795,12 +1051,24 @@ LpResult BarrierSolver::solve() {
     iterations_ = iters;
     last_error_.clear();
 
-    double seconds = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t0).count();
+    // Run crossover to extract a basic feasible solution.
+    if (options_.crossover) {
+        if (!runCrossover()) {
+            // Crossover failed but barrier itself converged.
+            // Keep barrier solution with empty basis.
+            basis_orig_.clear();
+            if (options_.verbose) {
+                std::printf("Crossover failed; barrier solution retained without basis.\n");
+            }
+        } else {
+            iterations_ += crossover_iters_;
+        }
+    }
 
-    double work = static_cast<double>(iters) *
-                  (4.0 * static_cast<double>(aeq_.numNonzeros()) +
-                   10.0 * static_cast<double>(aeq_.numRows()));
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    double work = static_cast<double>(iters) * (4.0 * static_cast<double>(aeq_.numNonzeros()) +
+                                                10.0 * static_cast<double>(aeq_.numRows()));
     work += seconds * 1e-6;
 
     return {status_, objective_, iterations_, work};

@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/lp_problem.h"
+#include "mipx/lp_solver.h"
+
 #include <atomic>
 #include <span>
 #include <string>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/lp_problem.h"
-#include "mipx/lp_solver.h"
 
 namespace mipx {
 
@@ -29,6 +29,7 @@ struct BarrierOptions {
     Int ir_steps = 2;
     Int ruiz_iterations = 10;
     bool verbose = true;
+    bool crossover = true;
     const std::atomic<bool>* stop_flag = nullptr;
 };
 
@@ -49,10 +50,8 @@ public:
     std::vector<BasisStatus> getBasis() const override;
     void setBasis(std::span<const BasisStatus> basis) override;
 
-    void addRows(std::span<const Index> starts,
-                 std::span<const Index> indices,
-                 std::span<const Real> values,
-                 std::span<const Real> lower,
+    void addRows(std::span<const Index> starts, std::span<const Index> indices,
+                 std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
     void removeRows(std::span<const Index> rows) override;
 
@@ -74,10 +73,11 @@ private:
     };
 
     bool buildStandardForm();
-    bool solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
-                           std::vector<Real>& s, Int& iters);
+    bool solveStandardForm(std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
+                           Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
+    bool runCrossover();
 
     BarrierOptions options_{};
     LpProblem original_;
@@ -99,22 +99,21 @@ private:
     std::vector<Real> primal_orig_;
     std::vector<Real> dual_eq_;
     std::vector<Real> reduced_costs_std_;
+    std::vector<BasisStatus> basis_orig_;
     Status status_ = Status::Error;
     Real objective_ = 0.0;
     Int iterations_ = 0;
+    Int crossover_iters_ = 0;
     bool used_gpu_ = false;
     std::string last_error_;
 };
 
 // GPU device-resident barrier solver (available when compiled with MIPX_HAS_CUDSS).
 #ifdef MIPX_HAS_CUDSS
-bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n,
-                     std::span<const Real> b, std::span<const Real> c,
-                     const BarrierOptions& opts, Real obj_offset,
-                     bool prefer_augmented,
-                     std::vector<Real>& z, std::vector<Real>& y,
-                     std::vector<Real>& s, Int& iters,
-                     std::string* error_msg = nullptr);
+bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n, std::span<const Real> b,
+                     std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
+                     bool prefer_augmented, std::vector<Real>& z, std::vector<Real>& y,
+                     std::vector<Real>& s, Int& iters, std::string* error_msg = nullptr);
 #endif
 
 }  // namespace mipx

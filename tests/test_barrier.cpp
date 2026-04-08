@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -27,7 +27,8 @@ LpProblem buildSimpleLp() {
     lp.row_names = {"c1"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -65,7 +66,8 @@ LpProblem buildBranchingMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -90,9 +92,7 @@ LpProblem buildTriangleLp() {
     lp.row_names = {"c1", "c2", "c3"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 1, 1.0}, {1, 2, 1.0},
-        {2, 0, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}, {2, 0, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -113,8 +113,9 @@ LpProblem buildWideDenseLp() {
     lp.col_lower.assign(N, 0.0);
     lp.col_upper.assign(N, kInf);
     lp.col_type.assign(N, VarType::Continuous);
-    for (int j = 0; j < N; ++j)
+    for (int j = 0; j < N; ++j) {
         lp.col_names.push_back("x" + std::to_string(j));
+    }
 
     lp.num_rows = 2;
     lp.row_lower = {-kInf, -kInf};
@@ -132,7 +133,9 @@ LpProblem buildWideDenseLp() {
 
 Real originalObjective(const LpProblem& lp, std::span<const Real> x) {
     Real obj = lp.obj_offset;
-    for (Index j = 0; j < lp.num_cols; ++j) obj += lp.obj[j] * x[j];
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        obj += lp.obj[j] * x[j];
+    }
     return obj;
 }
 
@@ -390,8 +393,7 @@ TEST_CASE("BarrierSolver Auto: wide dense LP triggers augmented backend",
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
 }
 
-TEST_CASE("BarrierSolver: dual simplex fallback on max_iter=1",
-          "[barrier][fallback]") {
+TEST_CASE("BarrierSolver: dual simplex fallback on max_iter=1", "[barrier][fallback]") {
     auto lp = buildTriangleLp();
 
     BarrierSolver solver;
@@ -425,6 +427,114 @@ TEST_CASE("BarrierSolver: reported objective matches reconstructed primal",
     auto x = solver.getPrimalValues();
     REQUIRE(x.size() == static_cast<size_t>(lp.num_cols));
     CHECK_THAT(result.objective, WithinAbs(originalObjective(lp, x), 1e-6));
+}
+
+// ============================================================================
+// Crossover / basis recovery
+// ============================================================================
+
+TEST_CASE("BarrierSolver crossover: simple LP returns valid basis", "[barrier][crossover]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.crossover = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
+
+    auto basis = solver.getBasis();
+    REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
+
+    // Count basics — must equal num_rows.
+    Index n_basic = 0;
+    for (auto s : basis) {
+        if (s == BasisStatus::Basic) {
+            ++n_basic;
+        }
+    }
+    CHECK(n_basic == lp.num_rows);
+}
+
+TEST_CASE("BarrierSolver crossover: triangle LP basis is valid", "[barrier][crossover]") {
+    auto lp = buildTriangleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.crossover = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+
+    auto basis = solver.getBasis();
+    REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
+
+    Index n_basic = 0;
+    for (auto s : basis) {
+        if (s == BasisStatus::Basic) {
+            ++n_basic;
+        }
+    }
+    CHECK(n_basic == lp.num_rows);
+
+    // Cross-check: dual simplex warm-started from this basis should solve immediately.
+    DualSimplexSolver ds;
+    ds.load(lp);
+    ds.setVerbose(false);
+    ds.setBasis(basis);
+    auto ds_result = ds.solve();
+    REQUIRE(ds_result.status == Status::Optimal);
+    CHECK_THAT(ds_result.objective, WithinAbs(result.objective, 1e-6));
+    // Warm-started dual simplex should need very few (or zero) pivots.
+    CHECK(ds_result.iterations <= 5);
+}
+
+TEST_CASE("BarrierSolver crossover disabled: getBasis returns empty", "[barrier][crossover]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.crossover = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(solver.getBasis().empty());
+}
+
+TEST_CASE("BarrierSolver crossover: wide dense LP", "[barrier][crossover]") {
+    auto lp = buildWideDenseLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::Auto;
+    opts.crossover = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+
+    auto basis = solver.getBasis();
+    REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
+
+    Index n_basic = 0;
+    for (auto s : basis) {
+        if (s == BasisStatus::Basic) {
+            ++n_basic;
+        }
+    }
+    CHECK(n_basic == lp.num_rows);
 }
 
 // ============================================================================
