@@ -991,3 +991,245 @@ TEST_CASE("SparseLU: BTRAN dense fallback matches sparse support path",
         CHECK(supportCoversNonzeros(rhs_dense_in, support));
     }
 }
+
+// --------------------------------------------------------------------------
+//  Mixed-precision (FP32 factorization + FP64 iterative refinement) tests
+// --------------------------------------------------------------------------
+
+TEST_CASE("SparseLU mixed-precision: identity basis", "[lu][mixed-precision]") {
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < 3; ++i) {
+        trips.push_back({i, i, 1.0});
+    }
+    SparseMatrix A(3, 3, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1, 2};
+    lu.factorize(A, basis);
+
+    CHECK(lu.mixedPrecision());
+
+    SECTION("FTRAN returns input unchanged") {
+        std::vector<Real> rhs = {1.0, 2.0, 3.0};
+        std::vector<Real> expected = rhs;
+        lu.ftran(rhs);
+        for (Index i = 0; i < 3; ++i) {
+            CHECK_THAT(rhs[i], WithinAbs(expected[i], 1e-10));
+        }
+    }
+
+    SECTION("BTRAN returns input unchanged") {
+        std::vector<Real> rhs = {4.0, 5.0, 6.0};
+        std::vector<Real> expected = rhs;
+        lu.btran(rhs);
+        for (Index i = 0; i < 3; ++i) {
+            CHECK_THAT(rhs[i], WithinAbs(expected[i], 1e-10));
+        }
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: small 3x3 FTRAN round-trip", "[lu][mixed-precision]") {
+    std::vector<Triplet> trips = {{0, 0, 2.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 3.0},
+                                  {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 2.0}};
+    SparseMatrix A(3, 3, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1, 2};
+    lu.factorize(A, basis);
+
+    CHECK(lu.mixedPrecision());
+
+    std::vector<Real> b = {3.0, 5.0, 3.0};
+    std::vector<Real> x = b;
+    lu.ftran(x);
+
+    // Verify B*x = b.
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < 3; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-10));
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: BTRAN round-trip", "[lu][mixed-precision]") {
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 3.0}};
+    SparseMatrix A(2, 2, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1};
+    lu.factorize(A, basis);
+
+    CHECK(lu.mixedPrecision());
+
+    std::vector<Real> c = {3.0, 2.0};
+    std::vector<Real> y = c;
+    lu.btran(y);
+
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < 2; ++i) {
+        CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-10));
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: matches FP64 on larger sparse basis",
+          "[lu][mixed-precision]") {
+    // 10x15 sparse matrix.
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < 10; ++i) {
+        trips.push_back({i, i, 2.0 + static_cast<Real>(i)});
+    }
+    trips.push_back({0, 3, 1.0});
+    trips.push_back({1, 5, -0.5});
+    trips.push_back({3, 7, 0.3});
+    trips.push_back({5, 0, -1.0});
+    trips.push_back({7, 2, 0.7});
+    trips.push_back({9, 4, -0.2});
+    for (Index j = 10; j < 15; ++j) {
+        trips.push_back({j - 10, j, 1.0});
+    }
+    SparseMatrix A(10, 15, trips);
+
+    std::vector<Index> basis = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+    // Solve with FP64.
+    SparseLU lu64;
+    lu64.factorize(A, basis);
+
+    // Solve with mixed-precision.
+    SparseLU lu_mp;
+    lu_mp.setMixedPrecision(true);
+    lu_mp.factorize(A, basis);
+    CHECK(lu_mp.mixedPrecision());
+
+    std::vector<Real> b = {1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0};
+
+    // FTRAN comparison.
+    std::vector<Real> x64 = b;
+    std::vector<Real> x_mp = b;
+    lu64.ftran(x64);
+    lu_mp.ftran(x_mp);
+    for (Index i = 0; i < 10; ++i) {
+        CHECK_THAT(x_mp[i], WithinAbs(x64[i], 1e-8));
+    }
+
+    // BTRAN comparison.
+    std::vector<Real> c = {2.0, 4.0, 6.0, 8.0, 10.0, 1.0, 3.0, 5.0, 7.0, 9.0};
+    std::vector<Real> y64 = c;
+    std::vector<Real> y_mp = c;
+    lu64.btran(y64);
+    lu_mp.btran(y_mp);
+    for (Index i = 0; i < 10; ++i) {
+        CHECK_THAT(y_mp[i], WithinAbs(y64[i], 1e-8));
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: updates maintain accuracy", "[lu][mixed-precision]") {
+    std::vector<Triplet> trips = {// col 0: [2, 0, 1]
+                                  {0, 0, 2.0},
+                                  {2, 0, 1.0},
+                                  // col 1: [1, 3, 0]
+                                  {0, 1, 1.0},
+                                  {1, 1, 3.0},
+                                  // col 2: [0, 1, 4]
+                                  {1, 2, 1.0},
+                                  {2, 2, 4.0},
+                                  // col 3: [1, 1, 1]
+                                  {0, 3, 1.0},
+                                  {1, 3, 1.0},
+                                  {2, 3, 1.0},
+                                  // col 4: [3, 0, 2]
+                                  {0, 4, 3.0},
+                                  {2, 4, 2.0},
+                                  // col 5: [0, 2, 3]
+                                  {1, 5, 2.0},
+                                  {2, 5, 3.0}};
+    SparseMatrix A(3, 6, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1, 2};
+    lu.factorize(A, basis);
+    CHECK(lu.mixedPrecision());
+
+    auto verify = [&](std::vector<Index>& cur_basis) {
+        std::vector<Real> b = {1.0, 2.0, 3.0};
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, cur_basis, x);
+        for (Index i = 0; i < 3; ++i) {
+            CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-8));
+        }
+    };
+
+    verify(basis);
+
+    // Update: replace position 0 with column 3.
+    {
+        auto c = A.col(3);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(0, idx, val);
+        basis[0] = 3;
+        verify(basis);
+    }
+
+    // Update: replace position 1 with column 4.
+    {
+        auto c = A.col(4);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(1, idx, val);
+        basis[1] = 4;
+        verify(basis);
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: growth fallback to FP64", "[lu][mixed-precision]") {
+    // Matrix with large entries that exceed the FP32 growth limit.
+    // Growth limit is 1e4, so entries of 1e5 should trigger fallback.
+    std::vector<Triplet> trips = {{0, 0, 1e5}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 1e5}};
+    SparseMatrix A(2, 2, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1};
+    lu.factorize(A, basis);
+
+    // Should have fallen back to FP64 due to growth.
+    CHECK_FALSE(lu.mixedPrecision());
+
+    // But solve should still work correctly (FP64 path).
+    std::vector<Real> b = {1e5 + 1.0, 1e5 + 1.0};
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < 2; ++i) {
+        CHECK_THAT(Bx[i], WithinAbs(b[i], 1e-5));
+    }
+}
+
+TEST_CASE("SparseLU mixed-precision: BTRAN with nonzero tracking", "[lu][mixed-precision]") {
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 3.0}};
+    SparseMatrix A(2, 2, trips);
+
+    SparseLU lu;
+    lu.setMixedPrecision(true);
+    std::vector<Index> basis = {0, 1};
+    lu.factorize(A, basis);
+    CHECK(lu.mixedPrecision());
+
+    std::vector<Real> c = {3.0, 2.0};
+    std::vector<Real> y = c;
+    std::vector<Index> nonzeros;
+    lu.btran(y, nonzeros);
+
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < 2; ++i) {
+        CHECK_THAT(Bty[i], WithinAbs(c[i], 1e-10));
+    }
+
+    // Nonzero tracking should report the correct indices.
+    CHECK_FALSE(nonzeros.empty());
+}

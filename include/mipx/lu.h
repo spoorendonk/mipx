@@ -50,6 +50,11 @@ public:
     void setFtDropTolerance(Real tol) { ft_drop_tol_ = std::max<Real>(0.0, tol); }
     [[nodiscard]] Real ftDropTolerance() const { return ft_drop_tol_; }
 
+    /// Enable/disable mixed-precision mode (FP32 factorization + FP64 iterative refinement).
+    void setMixedPrecision(bool enable) { mixed_precision_enabled_ = enable; }
+    [[nodiscard]] bool mixedPrecision() const { return mixed_precision_active_; }
+    [[nodiscard]] bool mixedPrecisionEnabled() const { return mixed_precision_enabled_; }
+
     /// Access work unit counter.
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
     void resetWorkUnits() { work_.reset(); }
@@ -78,6 +83,36 @@ private:
     /// Hyper-sparse forward solve with U^T: only process columns reachable from
     /// the nonzero positions in x. Returns the number of output nonzeros.
     Index solveUTransposeSparse(std::span<Real> x) const;
+
+    // --- FP32 mixed-precision solve helpers ---
+
+    /// Apply L eta vectors forward in FP32.
+    void applyL32(std::span<float> x) const;
+
+    /// Apply L^T eta vectors backward in FP32.
+    void applyLTranspose32(std::span<float> x) const;
+
+    /// Backward solve with U in FP32.
+    void solveU32(std::span<float> x) const;
+
+    /// Forward solve with U^T in FP32.
+    void solveUTranspose32(std::span<float> x) const;
+
+    /// Apply Forrest-Tomlin update etas forward in FP32.
+    void applyFT32(std::span<float> x) const;
+
+    /// Apply Forrest-Tomlin update etas in reverse in FP32.
+    void applyFTTranspose32(std::span<float> x) const;
+
+    /// Full FP32 FTRAN solve (no permutation, operates in elimination order).
+    void ftranFp32(std::span<Real> rhs) const;
+
+    /// Full FP32 BTRAN solve.
+    void btranFp32(std::span<Real> rhs) const;
+
+    /// Build FP32 copies of L and U factors from FP64 data.
+    /// Returns false if element growth exceeds FP32 range.
+    bool buildFp32Factors();
 
     Index dim_ = 0;
 
@@ -153,6 +188,46 @@ private:
 
     Real max_u_entry_ = 0.0;  // track growth
     Real ft_drop_tol_ = 1e-13;
+
+    // --- Mixed-precision (FP32) state ---
+    bool mixed_precision_enabled_ = false;  // user opt-in
+    mutable bool mixed_precision_active_ =
+        false;  // actually using FP32 (mutable: fallback in const solves)
+
+    // Stored references for residual computation during iterative refinement.
+    // Lifetime: the matrix must outlive the SparseLU (caller's responsibility).
+    const SparseMatrix* ir_matrix_ = nullptr;
+    std::vector<Index> ir_basis_cols_;
+
+    // FP32 copies of L eta vectors.
+    std::vector<float> eta_value_f32_;
+
+    // FP32 copies of U values.
+    std::vector<float> u_val_f32_;
+    std::vector<float> u_diag_f32_;
+    std::vector<float> u_diag_inv_f32_;
+
+    // FP32 copies of Forrest-Tomlin update etas.
+    std::vector<float> ft_value_f32_;
+    std::vector<float> ft_pivot_val_f32_;
+    std::vector<float> ft_pivot_inv_f32_;
+    std::vector<float> ft_dense_value_f32_;
+
+    // FP32 scratch buffers for solve.
+    mutable std::vector<float> solve_work_f32_;
+
+    // Iterative refinement scratch buffers (mutable to avoid allocation per solve).
+    mutable std::vector<Real> ir_residual_;
+    mutable std::vector<Real> ir_z_;
+
+    // Iterative refinement tracking.
+    static constexpr Real kFp32GrowthLimit = 1e4;  // FP32 growth -> fallback to FP64
+    static constexpr int kMaxRefinementSteps = 3;  // max IR steps per solve
+    static constexpr Real kRefinementTol = 1e-10;  // residual convergence tolerance
+    static constexpr int kFallbackRefinementCount =
+        3;                               // if IR consistently needs this many, fall back
+    mutable int ir_step_ema_count_ = 0;  // exponential moving count of refinement steps needed
+    mutable int ir_solves_count_ = 0;    // number of solves performed with IR
 
     // Deterministic work counter.
     mutable WorkUnits work_;

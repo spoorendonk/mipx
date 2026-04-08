@@ -834,6 +834,19 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
 
     // Count work: total nonzeros stored in L and U.
     work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()));
+
+    // Build FP32 copies of L and U factors if mixed-precision is enabled.
+    if (mixed_precision_enabled_) {
+        mixed_precision_active_ = buildFp32Factors();
+        if (mixed_precision_active_) {
+            ir_matrix_ = &matrix;
+            ir_basis_cols_.assign(basis_cols.begin(), basis_cols.end());
+        }
+    } else {
+        mixed_precision_active_ = false;
+    }
+    ir_step_ema_count_ = 0;
+    ir_solves_count_ = 0;
 }
 
 // --------------------------------------------------------------------------
@@ -1053,6 +1066,112 @@ Index SparseLU::solveUTransposeSparse(std::span<Real> x) const {
 void SparseLU::ftran(std::span<Real> rhs) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
 
+    // Mixed-precision path: solve in FP32 with FP64 iterative refinement.
+    // Factorization is in FP32 (half memory). Solves use FP32 factors, then
+    // compute residual r = b - B'*x using the original FP64 matrix and FT etas,
+    // and iterate: x <- x + solve32(r).
+    //
+    // B' = B * E_1 * ... * E_n, so B' * x = B * (E_1 * ... * E_n * x).
+    // We compute z = E_1 * ... * E_n * x, then B * z from the original matrix.
+    if (mixed_precision_active_ && ir_matrix_ != nullptr) {
+        // Count work: FP32 solve + IR residual computation.
+        work_.count(static_cast<uint64_t>(eta_index_.size()) +
+                    static_cast<uint64_t>(u_col_.size()) + static_cast<uint64_t>(ft_index_.size()) +
+                    ft_dense_nnz_ + static_cast<uint64_t>(dim_) * 2);
+
+        // Save original RHS for residual computation.
+        std::vector<Real> b_save(rhs.begin(), rhs.end());
+
+        // Initial solve in FP32.
+        ftranFp32(rhs);
+
+        // Iterative refinement loop.
+        int steps_used = 0;
+        if (static_cast<Index>(ir_residual_.size()) < dim_) {
+            ir_residual_.resize(dim_);
+        }
+        if (static_cast<Index>(ir_z_.size()) < dim_) {
+            ir_z_.resize(dim_);
+        }
+        std::span<Real> residual(ir_residual_.data(), static_cast<std::size_t>(dim_));
+        std::span<Real> z(ir_z_.data(), static_cast<std::size_t>(dim_));
+        for (int ir = 0; ir < kMaxRefinementSteps; ++ir) {
+            // Compute z = E_1 * ... * E_n * x (undo FT updates to get original-basis coords).
+            // Process from u = n-1 down to 0 (innermost E_n first, then E_{n-1}, etc.)
+            // E_u * y: y[i] += d_u[i] * y[p_u] for i != p, then y[p] *= d_u[p].
+            std::copy(rhs.begin(), rhs.end(), z.begin());
+            for (Index u = num_updates_ - 1; u >= 0; --u) {
+                Index pos = ft_pivot_pos_[u];
+                Real yp = z[pos];
+                if (ft_is_dense_[u] != 0) {
+                    Index dense_off = ft_dense_offset_[u];
+                    for (Index i = 0; i < dim_; ++i) {
+                        if (i != pos) {
+                            z[i] += ft_dense_value_[static_cast<std::size_t>(dense_off + i)] * yp;
+                        }
+                    }
+                } else {
+                    const Index start = ft_start_[u];
+                    const Index end = ft_start_[u + 1];
+                    for (Index k = start; k < end; ++k) {
+                        z[ft_index_[k]] += ft_value_[k] * yp;
+                    }
+                }
+                z[pos] = yp * ft_pivot_val_[u];
+            }
+
+            // Compute B * z using original matrix columns.
+            std::fill(residual.begin(), residual.end(), 0.0);
+            for (Index j = 0; j < dim_; ++j) {
+                Real zj = z[j];
+                if (zj == 0.0) {
+                    continue;
+                }
+                auto colview = ir_matrix_->col(ir_basis_cols_[j]);
+                for (Index k = 0; k < colview.size(); ++k) {
+                    Index row = colview.indices[k];
+                    if (row < dim_) {
+                        residual[row] += colview.values[k] * zj;
+                    }
+                }
+            }
+
+            // Residual r = b - B' * x.
+            Real max_residual = 0.0;
+            for (Index i = 0; i < dim_; ++i) {
+                residual[i] = b_save[i] - residual[i];
+                max_residual = std::max(max_residual, std::abs(residual[i]));
+            }
+
+            if (max_residual < kRefinementTol) {
+                break;
+            }
+            ++steps_used;
+
+            // Solve correction in FP32.
+            ftranFp32(residual);
+
+            // Update solution in FP64.
+            for (Index i = 0; i < dim_; ++i) {
+                rhs[i] += residual[i];
+            }
+        }
+
+        // Track refinement effort for automatic fallback.
+        ++ir_solves_count_;
+        if (ir_solves_count_ <= 1) {
+            ir_step_ema_count_ = steps_used;
+        } else {
+            ir_step_ema_count_ =
+                static_cast<int>(0.3 * steps_used + 0.7 * ir_step_ema_count_ + 0.5);
+        }
+        if (ir_solves_count_ >= 10 && ir_step_ema_count_ >= kFallbackRefinementCount) {
+            mixed_precision_active_ = false;
+        }
+
+        return;
+    }
+
     // Count work: L nnz + U nnz + FT nnz + permutation overhead.
     work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()) +
                 static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_ +
@@ -1251,6 +1370,112 @@ void SparseLU::btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) cons
 
 void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const {
     assert(static_cast<Index>(rhs.size()) == dim_);
+
+    // Mixed-precision path: solve B'^T y = c in FP32 with FP64 iterative refinement.
+    // B'^T = E_n^T * ... * E_1^T * B^T.
+    // Residual: r = c - B'^T * y = c - E_n^T * ... * E_1^T * B^T * y.
+    // First compute w = B^T * y using original matrix, then apply E^T etas.
+    if (mixed_precision_active_ && ir_matrix_ != nullptr) {
+        // Count work: FP32 solve + IR residual computation.
+        work_.count(static_cast<uint64_t>(eta_index_.size()) +
+                    static_cast<uint64_t>(u_col_.size()) + static_cast<uint64_t>(ft_index_.size()) +
+                    ft_dense_nnz_ + static_cast<uint64_t>(dim_) * 2);
+
+        // Save original RHS.
+        std::vector<Real> c_save(rhs.begin(), rhs.end());
+
+        // Initial solve in FP32.
+        btranFp32(rhs);
+
+        // Iterative refinement loop.
+        int steps_used = 0;
+        if (static_cast<Index>(ir_residual_.size()) < dim_) {
+            ir_residual_.resize(dim_);
+        }
+        std::span<Real> residual(ir_residual_.data(), static_cast<std::size_t>(dim_));
+        for (int ir = 0; ir < kMaxRefinementSteps; ++ir) {
+            // Compute w = B^T * y using original matrix.
+            // (B^T * y)[j] = col(basis_cols[j])^T * y.
+            for (Index j = 0; j < dim_; ++j) {
+                Real dot = 0.0;
+                auto colview = ir_matrix_->col(ir_basis_cols_[j]);
+                for (Index k = 0; k < colview.size(); ++k) {
+                    Index row = colview.indices[k];
+                    if (row < dim_) {
+                        dot += colview.values[k] * rhs[row];
+                    }
+                }
+                residual[j] = dot;
+            }
+
+            // Apply E_n^T * ... * E_1^T to w.
+            // E_u^T * z: z[p] = d[p] * z[p] + sum_{i!=p} d[i] * z[i]; other z[i] unchanged.
+            // Process from u = num_updates_-1 down to 0.
+            for (Index u = num_updates_ - 1; u >= 0; --u) {
+                Index pos = ft_pivot_pos_[u];
+                Real sum = 0.0;
+                if (ft_is_dense_[u] != 0) {
+                    Index dense_off = ft_dense_offset_[u];
+                    for (Index i = 0; i < dim_; ++i) {
+                        if (i != pos) {
+                            sum += ft_dense_value_[static_cast<std::size_t>(dense_off + i)] *
+                                   residual[i];
+                        }
+                    }
+                } else {
+                    const Index start = ft_start_[u];
+                    const Index end = ft_start_[u + 1];
+                    for (Index k = start; k < end; ++k) {
+                        sum += ft_value_[k] * residual[ft_index_[k]];
+                    }
+                }
+                residual[pos] = ft_pivot_val_[u] * residual[pos] + sum;
+            }
+
+            // Residual r = c - B'^T * y.
+            Real max_residual = 0.0;
+            for (Index i = 0; i < dim_; ++i) {
+                residual[i] = c_save[i] - residual[i];
+                max_residual = std::max(max_residual, std::abs(residual[i]));
+            }
+
+            if (max_residual < kRefinementTol) {
+                break;
+            }
+            ++steps_used;
+
+            // Solve correction in FP32.
+            btranFp32(residual);
+
+            // Update solution in FP64.
+            for (Index i = 0; i < dim_; ++i) {
+                rhs[i] += residual[i];
+            }
+        }
+
+        // Track refinement effort.
+        ++ir_solves_count_;
+        if (ir_solves_count_ <= 1) {
+            ir_step_ema_count_ = steps_used;
+        } else {
+            ir_step_ema_count_ =
+                static_cast<int>(0.3 * steps_used + 0.7 * ir_step_ema_count_ + 0.5);
+        }
+        if (ir_solves_count_ >= 10 && ir_step_ema_count_ >= kFallbackRefinementCount) {
+            mixed_precision_active_ = false;
+        }
+
+        // Collect nonzero rows if requested.
+        if (nonzero_rows != nullptr) {
+            nonzero_rows->clear();
+            for (Index i = 0; i < dim_; ++i) {
+                if (std::abs(rhs[i]) > kZeroTol) {
+                    nonzero_rows->push_back(i);
+                }
+            }
+        }
+        return;
+    }
 
     // Count work: same structure as ftran.
     work_.count(static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size()) +
@@ -1581,6 +1806,21 @@ void SparseLU::updateFromFtranColumn(Index pivot_pos, std::span<const Real> tran
     ft_pivot_val_.push_back(pivot_val);
     ft_pivot_inv_.push_back(1.0 / pivot_val);
 
+    // Maintain FP32 copies for mixed-precision solves.
+    if (mixed_precision_active_) {
+        // Extend FP32 sparse FT values to match FP64 ft_value_.
+        while (ft_value_f32_.size() < ft_value_.size()) {
+            ft_value_f32_.push_back(static_cast<float>(ft_value_[ft_value_f32_.size()]));
+        }
+        ft_pivot_val_f32_.push_back(static_cast<float>(pivot_val));
+        ft_pivot_inv_f32_.push_back(static_cast<float>(1.0 / pivot_val));
+        // Extend FP32 dense FT values to match FP64 ft_dense_value_.
+        while (ft_dense_value_f32_.size() < ft_dense_value_.size()) {
+            ft_dense_value_f32_.push_back(
+                static_cast<float>(ft_dense_value_[ft_dense_value_f32_.size()]));
+        }
+    }
+
     max_u_entry_ = std::max(max_u_entry_, std::abs(pivot_val));
 
     // Count work: scanning d vector for eta storage.
@@ -1597,6 +1837,216 @@ bool SparseLU::needsRefactorization() const {
         return true;
     }
     return false;
+}
+
+// --------------------------------------------------------------------------
+//  Mixed-precision FP32 support
+// --------------------------------------------------------------------------
+
+bool SparseLU::buildFp32Factors() {
+    // Check element growth: if any factor entry exceeds FP32 safe range, bail out.
+    if (max_u_entry_ > kFp32GrowthLimit) {
+        return false;
+    }
+
+    // Build FP32 copies of L eta values.
+    eta_value_f32_.resize(eta_value_.size());
+    for (std::size_t i = 0; i < eta_value_.size(); ++i) {
+        eta_value_f32_[i] = static_cast<float>(eta_value_[i]);
+    }
+
+    // Build FP32 copies of U values.
+    u_val_f32_.resize(u_val_.size());
+    for (std::size_t i = 0; i < u_val_.size(); ++i) {
+        u_val_f32_[i] = static_cast<float>(u_val_[i]);
+    }
+    u_diag_f32_.resize(u_diag_.size());
+    u_diag_inv_f32_.resize(u_diag_inv_.size());
+    for (std::size_t i = 0; i < u_diag_.size(); ++i) {
+        u_diag_f32_[i] = static_cast<float>(u_diag_[i]);
+        u_diag_inv_f32_[i] = static_cast<float>(u_diag_inv_[i]);
+    }
+
+    // Initialize empty FT FP32 arrays (will be populated by updateFromFtranColumn).
+    ft_value_f32_.clear();
+    ft_pivot_val_f32_.clear();
+    ft_pivot_inv_f32_.clear();
+    ft_dense_value_f32_.clear();
+
+    return true;
+}
+
+void SparseLU::applyL32(std::span<float> x) const {
+    // Apply L^{-1} in FP32, operating in elimination order.
+    // x is indexed by elimination step.
+    for (Index step = 0; step < dim_; ++step) {
+        float wk = x[step];
+        if (wk == 0.0f) {
+            continue;
+        }
+        Index start = eta_start_[step];
+        Index end = eta_start_[step + 1];
+        for (Index k = start; k < end; ++k) {
+            x[eta_target_[k]] -= eta_value_f32_[k] * wk;
+        }
+    }
+}
+
+void SparseLU::applyLTranspose32(std::span<float> x) const {
+    // Apply L^{-T} in FP32, operating in elimination order.
+    for (Index step = dim_ - 1; step >= 0; --step) {
+        float sum = 0.0f;
+        Index start = eta_start_[step];
+        Index end = eta_start_[step + 1];
+        for (Index k = start; k < end; ++k) {
+            sum += eta_value_f32_[k] * x[eta_target_[k]];
+        }
+        x[step] -= sum;
+    }
+}
+
+void SparseLU::solveU32(std::span<float> x) const {
+    for (Index step = dim_ - 1; step >= 0; --step) {
+        float rhs = x[step];
+        Index start = u_start_[step];
+        Index end = u_start_[step + 1];
+        for (Index k = start; k < end; ++k) {
+            rhs -= u_val_f32_[k] * x[u_col_[k]];
+        }
+        x[step] = rhs * u_diag_inv_f32_[step];
+    }
+}
+
+void SparseLU::solveUTranspose32(std::span<float> x) const {
+    for (Index step = 0; step < dim_; ++step) {
+        x[step] *= u_diag_inv_f32_[step];
+        float val = x[step];
+        if (val == 0.0f) {
+            continue;
+        }
+        Index start = u_start_[step];
+        Index end = u_start_[step + 1];
+        for (Index k = start; k < end; ++k) {
+            x[u_col_[k]] -= u_val_f32_[k] * val;
+        }
+    }
+}
+
+void SparseLU::applyFT32(std::span<float> x) const {
+    for (Index u = 0; u < num_updates_; ++u) {
+        Index pos = ft_pivot_pos_[u];
+        x[pos] *= ft_pivot_inv_f32_[u];
+        float xp = x[pos];
+        if (xp == 0.0f) {
+            continue;
+        }
+        if (ft_is_dense_[u] != 0) {
+            Index dense_off = ft_dense_offset_[u];
+            for (Index i = 0; i < dim_; ++i) {
+                x[i] -= ft_dense_value_f32_[static_cast<std::size_t>(dense_off + i)] * xp;
+            }
+            continue;
+        }
+        const Index start = ft_start_[u];
+        const Index end = ft_start_[u + 1];
+        for (Index k = start; k < end; ++k) {
+            x[ft_index_[k]] -= ft_value_f32_[k] * xp;
+        }
+    }
+}
+
+void SparseLU::applyFTTranspose32(std::span<float> x) const {
+    for (Index u = num_updates_ - 1; u >= 0; --u) {
+        Index pos = ft_pivot_pos_[u];
+        float sum = 0.0f;
+        if (ft_is_dense_[u] != 0) {
+            Index dense_off = ft_dense_offset_[u];
+            for (Index i = 0; i < dim_; ++i) {
+                sum += ft_dense_value_f32_[static_cast<std::size_t>(dense_off + i)] * x[i];
+            }
+        } else {
+            const Index start = ft_start_[u];
+            const Index end = ft_start_[u + 1];
+            for (Index k = start; k < end; ++k) {
+                sum += ft_value_f32_[k] * x[ft_index_[k]];
+            }
+        }
+        x[pos] = (x[pos] - sum) * ft_pivot_inv_f32_[u];
+    }
+}
+
+void SparseLU::ftranFp32(std::span<Real> rhs) const {
+    // Allocate FP32 scratch.
+    const auto dim_sz = static_cast<std::size_t>(dim_);
+    if (solve_work_f32_.size() < dim_sz) {
+        solve_work_f32_.resize(dim_sz);
+    }
+    std::span<float> work(solve_work_f32_.data(), dim_sz);
+
+    // Step 1: w = P * b, cast to FP32.
+    for (Index step = 0; step < dim_; ++step) {
+        work[step] = static_cast<float>(rhs[row_perm_[step]]);
+    }
+
+    // Step 2: Apply L^{-1} in FP32.
+    applyL32(work);
+
+    // Step 3: Solve U in FP32.
+    solveU32(work);
+
+    // Step 4: x = Q * y, cast back to FP64.
+    for (Index step = 0; step < dim_; ++step) {
+        rhs[col_perm_[step]] = static_cast<Real>(work[step]);
+    }
+
+    // Step 5: Apply FT etas in FP32 (reuse solve_work_f32_ scratch).
+    if (num_updates_ > 0) {
+        for (Index i = 0; i < dim_; ++i) {
+            solve_work_f32_[i] = static_cast<float>(rhs[i]);
+        }
+        applyFT32(std::span<float>(solve_work_f32_.data(), dim_sz));
+        for (Index i = 0; i < dim_; ++i) {
+            rhs[i] = static_cast<Real>(solve_work_f32_[i]);
+        }
+    }
+}
+
+void SparseLU::btranFp32(std::span<Real> rhs) const {
+    const auto dim_sz = static_cast<std::size_t>(dim_);
+
+    // Step 1: Apply FT transpose in FP32 (reuse solve_work_f32_ scratch).
+    if (num_updates_ > 0) {
+        if (solve_work_f32_.size() < dim_sz) {
+            solve_work_f32_.resize(dim_sz);
+        }
+        for (Index i = 0; i < dim_; ++i) {
+            solve_work_f32_[i] = static_cast<float>(rhs[i]);
+        }
+        applyFTTranspose32(std::span<float>(solve_work_f32_.data(), dim_sz));
+        for (Index i = 0; i < dim_; ++i) {
+            rhs[i] = static_cast<Real>(solve_work_f32_[i]);
+        }
+    }
+
+    // Step 2: w = Q^T * rhs in FP32.
+    if (solve_work_f32_.size() < dim_sz) {
+        solve_work_f32_.resize(dim_sz);
+    }
+    std::span<float> work(solve_work_f32_.data(), dim_sz);
+    for (Index step = 0; step < dim_; ++step) {
+        work[step] = static_cast<float>(rhs[col_perm_[step]]);
+    }
+
+    // Step 3: Solve U^T in FP32.
+    solveUTranspose32(work);
+
+    // Step 4: Apply L^{-T} in FP32.
+    applyLTranspose32(work);
+
+    // Step 5: y = P^T * work, cast back to FP64.
+    for (Index step = 0; step < dim_; ++step) {
+        rhs[row_perm_[step]] = static_cast<Real>(work[step]);
+    }
 }
 
 }  // namespace mipx
