@@ -493,9 +493,15 @@ void DualSimplexSolver::setupInitialBasis() {
     dual_.resize(num_rows_);
     reduced_cost_.resize(n);
 
-    // Initialize Devex weights.
+    // Initialize pricing weights.
     devex_weights_.assign(num_rows_, 1.0);
     devex_reset_count_ = 0;
+    dse_active_ = false;
+    dse_fell_back_ = false;
+    dse_pivots_since_init_ = 0;
+    dse_btran_work_ = 0.0;
+    dse_total_work_ = 0.0;
+    dse_window_pivots_ = 0;
 
     // All slacks basic.
     for (Index i = 0; i < num_rows_; ++i) {
@@ -1007,6 +1013,63 @@ LpResult DualSimplexSolver::solve() {
     computePrimals();
     computeDuals();
 
+    // Determine initial pricing strategy.
+    // If auto-fallback previously switched to Devex, stay on Devex.
+    const bool want_dse = (options_.pricing == PricingStrategy::SteepestEdge ||
+                           options_.pricing == PricingStrategy::Auto) &&
+                          !dse_fell_back_;
+    dse_active_ = want_dse;
+    dse_pivots_since_init_ = 0;
+    dse_btran_work_ = 0.0;
+    dse_total_work_ = 0.0;
+    dse_window_pivots_ = 0;
+
+    // DSE weight initialization: set to 1.0 initially.
+    // The Goldfarb-Forrest update will refine them over subsequent pivots.
+    // Exact initialization (m BTRANs) is too expensive for large bases;
+    // starting from 1.0 converges within O(m) pivots in practice.
+    if (dse_active_) {
+        std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+        devex_reset_count_ = 0;
+    }
+
+    // Helper: initialize DSE weights after refactorization.
+    // For bases up to a moderate size, compute exact weights via m BTRANs.
+    // For larger bases, reset to 1.0 and let Goldfarb-Forrest converge.
+    auto initDseWeights = [&]() {
+        if (!dse_active_)
+            return;
+        constexpr Index kExactInitMaxDim = 1000;
+        if (num_rows_ <= kExactInitMaxDim) {
+            // Exact: w_i = ||B^{-T} e_i||^2 = ||rho_i||^2.
+            std::vector<Real> ei(static_cast<std::size_t>(num_rows_), 0.0);
+            for (Index i = 0; i < num_rows_; ++i) {
+                std::fill(ei.begin(), ei.end(), 0.0);
+                ei[i] = 1.0;
+                lu_.btran(ei);
+                Real norm_sq = 0.0;
+                for (Index j = 0; j < num_rows_; ++j) {
+                    norm_sq += ei[j] * ei[j];
+                }
+                devex_weights_[i] = std::max(kDualTol, norm_sq);
+            }
+        } else {
+            // Approximate: reset to 1.0 and let updates converge.
+            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+        }
+        devex_reset_count_ = 0;
+        dse_pivots_since_init_ = 0;
+    };
+    initDseWeights();
+
+    // Helper: fall back from DSE to Devex pricing.
+    auto fallbackToDevex = [&]() {
+        dse_active_ = false;
+        dse_fell_back_ = true;
+        std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+        devex_reset_count_ = 0;
+    };
+
     // Cost shifting for dual feasibility (Phase 1).
     std::vector<Real> cost_shift(num_cols_, 0.0);
     bool has_cost_shift = false;
@@ -1128,6 +1191,8 @@ LpResult DualSimplexSolver::solve() {
     SparseWorkVector pivot_row_alpha(numVars());
     std::vector<Real> pivot_col(num_rows_, 0.0);
     SparseWorkVector btran_work(num_rows_);
+    // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector).
+    std::vector<Real> dse_tau(num_rows_, 0.0);
     SparseWorkVector pricing_reduced_cost(numVars());
     // Column 2-norms for pivot quality scoring in ratio tests.
     // col_norms[k] = ||a_k||_2 for structural columns, 1.0 for slacks.
@@ -1335,6 +1400,10 @@ LpResult DualSimplexSolver::solve() {
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
+        // Track work at iteration start for DSE cost/benefit analysis.
+        double iter_work_start = work_.units();
+        double iter_lu_work_start = lu_.workUnits().units();
+
         if (options_.max_solve_seconds >= 0.0) {
             double elapsed =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_)
@@ -1409,6 +1478,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            initDseWeights();
             applyCostShifts();
             need_infeasible_rebuild = true;
 
@@ -2057,6 +2127,7 @@ LpResult DualSimplexSolver::solve() {
                 }
                 computePrimals();
                 computeDuals();
+                initDseWeights();
                 degenerate_pivot_streak = 0;
                 resetPrimalFeasibleProgress();
                 primal_feasible_pivots_since_refactor = 0;
@@ -2321,6 +2392,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            initDseWeights();
             rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
             ++empty_candidate_retry_streak;
@@ -2505,6 +2577,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            initDseWeights();
             rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
             continue;
@@ -2601,8 +2674,78 @@ LpResult DualSimplexSolver::solve() {
             nonbasic_pos_[entering_var] = -1;
         }
 
-        // ---- Update Devex weights ----
-        {
+        // ---- Update pricing weights ----
+        // Must happen before LU update since we need the old basis factorization.
+        if (dse_active_) {
+            // DSE (Dual Steepest Edge) weight update via Goldfarb-Forrest formula.
+            //
+            // tau_p = B^{-T} e_p is already in `work` from the BTRAN above.
+            // d = B^{-1} a_q is `pivot_col` (FTRAN result).
+            // w_p = devex_weights_[leaving_row] = ||tau_p||^2.
+            //
+            // Compute v = B^{-1} tau_p (extra FTRAN for DSE).
+            // Then v_i = dot(B^{-T} e_i, tau_p), used in the update formula:
+            //   w_i_new = w_i - 2*(d_i/d_p)*v_i + (d_i/d_p)^2 * w_p
+            //   w_p_new = w_p / (d_p^2)
+
+            // Track DSE FTRAN cost for fallback decision (includes LU work).
+            double lu_work_before_dse = lu_.workUnits().units();
+
+            auto btran_dense = btran_work.dense();
+            std::copy(btran_dense.begin(), btran_dense.end(), dse_tau.begin());
+            lu_.ftran(dse_tau);
+
+            double dse_extra_work =
+                lu_.workUnits().units() - lu_work_before_dse + static_cast<double>(num_rows_);
+
+            const Real d_p = pivot_col[leaving_row];
+            const Real d_p_inv = 1.0 / d_p;
+            const Real w_p = devex_weights_[leaving_row];
+
+            for (Index i = 0; i < num_rows_; ++i) {
+                if (i == leaving_row)
+                    continue;
+                const Real d_i = pivot_col[i];
+                const Real ratio = d_i * d_p_inv;
+                const Real v_i = dse_tau[i];
+                Real w_new = devex_weights_[i] - 2.0 * ratio * v_i + ratio * ratio * w_p;
+                devex_weights_[i] = std::max(kDualTol, w_new);
+            }
+            devex_weights_[leaving_row] = std::max(kDualTol, w_p / (d_p * d_p));
+
+            ++dse_pivots_since_init_;
+
+            // Accumulate cost tracking for auto-fallback.
+            if (options_.pricing == PricingStrategy::Auto) {
+                dse_btran_work_ += dse_extra_work;
+                ++dse_window_pivots_;
+
+                // Early warmup check: if DSE is expensive in the first
+                // few pivots, fall back immediately without waiting for
+                // the full evaluation window.
+                const bool warmup_check = dse_pivots_since_init_ <= options_.dse_warmup_window &&
+                                          dse_window_pivots_ >= options_.dse_warmup_window;
+                const bool window_check = dse_window_pivots_ >= options_.dse_fallback_window;
+
+                if (warmup_check || window_check) {
+                    // Check if DSE cost exceeds threshold.
+                    if (dse_total_work_ > 0.0 &&
+                        dse_btran_work_ / dse_total_work_ > options_.dse_fallback_cost_ratio) {
+                        fallbackToDevex();
+                    }
+                    dse_btran_work_ = 0.0;
+                    dse_total_work_ = 0.0;
+                    dse_window_pivots_ = 0;
+                }
+                // Fall back if DSE is not helping with degeneracy: a long
+                // degenerate pivot streak under DSE suggests the weights are
+                // not guiding the solver well (common with approximate init).
+                if (dse_active_ && degenerate_pivot_streak >= options_.dse_fallback_window) {
+                    fallbackToDevex();
+                }
+            }
+        } else {
+            // Devex weight update (original behavior).
             Real pivot_sq = pivot_col[leaving_row] * pivot_col[leaving_row];
             for (Index i = 0; i < num_rows_; ++i) {
                 if (i == leaving_row)
@@ -2612,11 +2755,12 @@ LpResult DualSimplexSolver::solve() {
                     kDualTol, devex_weights_[i] + ratio * ratio * devex_weights_[leaving_row]);
             }
             devex_weights_[leaving_row] = 1.0 / pivot_sq;
-        }
-        ++devex_reset_count_;
-        if (devex_reset_count_ >= kDevexResetFreq) {
-            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-            devex_reset_count_ = 0;
+
+            ++devex_reset_count_;
+            if (devex_reset_count_ >= kDevexResetFreq) {
+                std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+                devex_reset_count_ = 0;
+            }
         }
 
         // ---- LU update ----
@@ -2655,6 +2799,7 @@ LpResult DualSimplexSolver::solve() {
             }
             computePrimals();
             computeDuals();
+            initDseWeights();
             degenerate_pivot_streak = 0;
             resetPrimalFeasibleProgress();
             primal_feasible_pivots_since_refactor = 0;
@@ -2678,6 +2823,14 @@ LpResult DualSimplexSolver::solve() {
                     updateRowInfeasibility(i);
                 }
             }
+        }
+
+        // Track total iteration work for DSE cost/benefit analysis.
+        // Include LU work units (FTRAN/BTRAN) since they dominate cost.
+        if (dse_active_ && options_.pricing == PricingStrategy::Auto) {
+            double iter_work =
+                (work_.units() - iter_work_start) + (lu_.workUnits().units() - iter_lu_work_start);
+            dse_total_work_ += iter_work;
         }
 
         ++iterations_;
@@ -2800,6 +2953,11 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     reduced_cost_.resize(n, 0.0);
     devex_weights_.assign(num_rows_, 1.0);
     devex_reset_count_ = 0;
+    dse_active_ = false;
+    dse_pivots_since_init_ = 0;
+    dse_btran_work_ = 0.0;
+    dse_total_work_ = 0.0;
+    dse_window_pivots_ = 0;
 
     basis_.clear();
     nonbasic_.clear();

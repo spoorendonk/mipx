@@ -13,6 +13,13 @@
 
 namespace mipx {
 
+/// Pricing strategy for the dual simplex CHUZR.
+enum class PricingStrategy : int {
+    Devex = 0,         // Devex only (original behavior)
+    SteepestEdge = 1,  // DSE only (no fallback)
+    Auto = 2,          // DSE with automatic Devex fallback (default)
+};
+
 enum class ScalingStrategy {
     Auto,           // Select based on coefficient range.
     Equilibration,  // Single-pass max-norm equilibration (current default).
@@ -21,6 +28,19 @@ enum class ScalingStrategy {
 };
 
 struct DualSimplexOptions {
+    // Pricing strategy: Auto = DSE with Devex fallback.
+    PricingStrategy pricing = PricingStrategy::Auto;
+
+    // DSE fallback controls.
+    // Short warmup window: evaluate DSE cost after this many initial pivots.
+    // If DSE is expensive in this early window, fall back immediately.
+    Int dse_warmup_window = 30;
+    // Number of pivots over which to measure DSE cost/benefit ratio.
+    Int dse_fallback_window = 50;
+    // If DSE BTRAN time exceeds this fraction of total iteration time,
+    // fall back to Devex.
+    Real dse_fallback_cost_ratio = 0.20;
+
     // Pricing controls.
     bool enable_partial_pricing = false;
     bool enable_bfrt = false;
@@ -274,10 +294,20 @@ private:
     bool has_basis_ = false;  // true after first solve or setBasis()
     bool verbose_ = true;
 
-    // Devex pricing weights.
-    std::vector<Real> devex_weights_;  // size num_rows, one per basis position
+    // Pricing weights (one per basis position, size num_rows).
+    // When DSE is active, these hold exact steepest-edge weights w_i = ||B^{-1} e_i||^2.
+    // When Devex is active, these hold approximate Devex weights.
+    std::vector<Real> devex_weights_;
     Int devex_reset_count_ = 0;
     static constexpr Int kDevexResetFreq = 200;  // reset every N pivots
+
+    // DSE state.
+    bool dse_active_ = false;        // true when using DSE pricing
+    bool dse_fell_back_ = false;     // true once auto-fallback switched to Devex
+    Int dse_pivots_since_init_ = 0;  // pivots since last DSE weight init
+    double dse_btran_work_ = 0.0;    // cumulative DSE BTRAN work in window
+    double dse_total_work_ = 0.0;    // cumulative total iteration work in window
+    Int dse_window_pivots_ = 0;      // pivots counted in current window
 
     // Tolerances.
     static constexpr Real kPrimalTol = 1e-7;
