@@ -1477,45 +1477,28 @@ Index SparseLU::solveUTransposeSparse(std::span<Real> x) const {
         static_cast<Index>(kHyperSparseMaxDensity * static_cast<Real>(dim_) * 2.0);
     Index out_nnz = 0;
 
-    std::size_t sorted_idx = 0;
-    for (; sorted_idx < sparse_steps_.size(); ++sorted_idx) {
+    // Process all reachable steps in forward order. The scatter must run for
+    // every step (regardless of bailout) because subsequent steps depend on
+    // the contributions written into x[u_col_[k]] here. The bailout check
+    // only counts output density and runs after the scatter is committed.
+    for (std::size_t sorted_idx = 0; sorted_idx < sparse_steps_.size(); ++sorted_idx) {
         Index step = sparse_steps_[sorted_idx];
         x[step] *= u_diag_inv_[step];
         Real val = x[step];
-        if (std::abs(val) > kZeroTol) {
-            ++out_nnz;
-            if (out_nnz > bailout_threshold) {
-                // Mid-solve bailout: finish remaining steps with dense path.
-                ++sorted_idx;
-                break;
-            }
-        }
         if (val == 0.0) {
             continue;
         }
         for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
             x[u_col_[k]] -= u_val_[k] * val;
         }
-    }
-
-    // If we bailed out, finish remaining reachable steps densely.
-    if (sorted_idx < sparse_steps_.size()) {
-        // Process remaining reachable steps.
-        for (; sorted_idx < sparse_steps_.size(); ++sorted_idx) {
-            Index step = sparse_steps_[sorted_idx];
-            x[step] *= u_diag_inv_[step];
-            Real val = x[step];
-            if (val == 0.0) {
-                continue;
-            }
-            if (std::abs(val) > kZeroTol) {
-                ++out_nnz;
-            }
-            for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
-                x[u_col_[k]] -= u_val_[k] * val;
-            }
+        if (std::abs(val) > kZeroTol) {
+            ++out_nnz;
         }
     }
+
+    // bailout_threshold is recorded for caller cost analysis but does not
+    // truncate the loop: skipping any step's scatter loses correctness.
+    (void)bailout_threshold;
 
     return out_nnz;
 }
@@ -1718,19 +1701,20 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                         continue;
                     }
                     Real wk = work[step];
-                    if (std::abs(wk) > kZeroTol) {
-                        ++l_out_nnz;
-                        if (l_out_nnz > bailout_threshold) {
-                            bailout_step = step + 1;
-                            bailed_out = true;
-                            break;
-                        }
-                    }
                     if (std::abs(wk) <= kZeroTol) {
                         continue;
                     }
+                    // Scatter must run before any bailout — later steps depend
+                    // on this contribution. Bailout only switches the *iteration*
+                    // strategy (sparse → dense scan) for remaining steps.
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
+                    }
+                    ++l_out_nnz;
+                    if (l_out_nnz > bailout_threshold) {
+                        bailout_step = step + 1;
+                        bailed_out = true;
+                        break;
                     }
                 }
                 // Dense fallback for remaining steps after bailout.
@@ -1752,20 +1736,17 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                 for (std::size_t si = 0; si < sparse_steps_.size(); ++si) {
                     Index step = sparse_steps_[si];
                     Real wk = work[step];
-                    if (std::abs(wk) > kZeroTol) {
-                        ++l_out_nnz;
-                        if (l_out_nnz > bailout_threshold) {
-                            // Find the next step value for dense fallback.
-                            bailout_idx = si + 1;
-                            bailed_out = true;
-                            break;
-                        }
-                    }
                     if (std::abs(wk) <= kZeroTol) {
                         continue;
                     }
                     for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
                         work[eta_target_[k]] -= eta_value_[k] * wk;
+                    }
+                    ++l_out_nnz;
+                    if (l_out_nnz > bailout_threshold) {
+                        bailout_idx = si + 1;
+                        bailed_out = true;
+                        break;
                     }
                 }
                 // Dense fallback for remaining steps after bailout.
