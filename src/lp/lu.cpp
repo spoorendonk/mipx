@@ -2367,6 +2367,18 @@ bool SparseLU::needsRefactorization() const {
     if (max_u_entry_ > kGrowthLimit) {
         return true;
     }
+    // Cost-based trigger: refactor when accumulated FT update overhead
+    // dominates the base FTRAN/BTRAN cost. Each pivot adds roughly one
+    // eta to ft_index_, so for a long sequence of updates (especially on
+    // small bases) the per-solve cost balloons relative to the eta+U
+    // base. The crossover at 2x base cost is empirically near the point
+    // where amortizing one O(nnz) refactor pays off.
+    const uint64_t base_cost =
+        static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size());
+    const uint64_t ft_cost = static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_;
+    if (base_cost > 0 && ft_cost > 2 * base_cost && num_updates_ >= kMinUpdatesForCostRefactor) {
+        return true;
+    }
     return false;
 }
 

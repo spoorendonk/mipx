@@ -1069,15 +1069,22 @@ LpResult DualSimplexSolver::solve() {
         devex_reset_count_ = 0;
     }
 
-    // Helper: initialize DSE weights after refactorization.
-    // For bases up to a moderate size, compute exact weights via m BTRANs.
-    // For larger bases, reset to 1.0 and let Goldfarb-Forrest converge.
+    // Helper: initialize DSE weights.
+    //
+    // The exact initialization w_i = ||B^{-T} e_i||^2 requires m BTRANs and is
+    // O(m * nnz(L,U)) work. This is too expensive for medium and large bases
+    // (m^2-scaling), and even for small bases the upfront cost outweighs the
+    // benefit because Goldfarb-Forrest converges within O(m) pivots when
+    // starting from w_i = 1.0. Per-refactor re-initialization compounds the
+    // overhead because each refactorization triggers another m BTRANs even
+    // when the basis is unchanged. Use approximate init (1.0) by default,
+    // mirroring HiGHS / CLP. Exact init is gated by an opt-in option for
+    // problems where empirical results show a benefit.
     auto initDseWeights = [&]() {
         if (!dse_active_) {
             return;
         }
-        constexpr Index kExactInitMaxDim = 1000;
-        if (num_rows_ <= kExactInitMaxDim) {
+        if (options_.dse_exact_init && num_rows_ <= options_.dse_exact_init_max_dim) {
             // Exact: w_i = ||B^{-T} e_i||^2 = ||rho_i||^2.
             std::vector<Real> ei(static_cast<std::size_t>(num_rows_), 0.0);
             for (Index i = 0; i < num_rows_; ++i) {
@@ -1091,7 +1098,7 @@ LpResult DualSimplexSolver::solve() {
                 devex_weights_[i] = std::max(kDualTol, norm_sq);
             }
         } else {
-            // Approximate: reset to 1.0 and let updates converge.
+            // Approximate: reset to 1.0 and let Goldfarb-Forrest converge.
             std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
         }
         devex_reset_count_ = 0;

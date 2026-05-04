@@ -41,6 +41,17 @@ struct DualSimplexOptions {
     // fall back to Devex.
     Real dse_fallback_cost_ratio = 0.20;
 
+    // DSE weight initialization.
+    // Exact init (w_i = ||B^{-T} e_i||^2) requires m BTRANs and is repeated
+    // after every refactorization. Each per-refactor init costs O(m^2) work,
+    // which dominates total work on small/medium bases that solve in a few
+    // hundred pivots. Default is approximate init (w_i = 1.0) — Goldfarb-Forrest
+    // converges within O(m) pivots from this starting point, matching HiGHS/CLP.
+    bool dse_exact_init = false;
+    // Upper bound on basis dimension for exact init; above this, exact init
+    // is too expensive even when enabled.
+    Int dse_exact_init_max_dim = 1000;
+
     // Pricing controls.
     bool enable_partial_pricing = false;
     bool enable_bfrt = false;

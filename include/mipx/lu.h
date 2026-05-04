@@ -201,6 +201,9 @@ private:
     static constexpr Real kPivotTol = 0.1;
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Real kGrowthLimit = 1e12;
+    // Floor on update count before the cost-based refactor trigger applies.
+    // Prevents repeated tiny re-factorizations when ft_index_ briefly bursts.
+    static constexpr Index kMinUpdatesForCostRefactor = 8;
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
     static constexpr Index kFtDenseMinDim = 512;
