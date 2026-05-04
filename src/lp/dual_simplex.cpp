@@ -343,6 +343,20 @@ void DualSimplexSolver::computeRuizScaling() {
         for (Index j = 0; j < num_cols_; ++j) {
             col_scale_[j] *= cs[j];
         }
+
+        // Early convergence check: stop when residual coefficient range is tight.
+        Real mx = 0.0;
+        Real mn = std::numeric_limits<Real>::infinity();
+        for (Real v : values) {
+            Real a = std::abs(v);
+            if (a > 1e-30) {
+                mx = std::max(mx, a);
+                mn = std::min(mn, a);
+            }
+        }
+        if (mn > 1e-30 && mx / mn < 16.0) {
+            break;
+        }
     }
 }
 
@@ -1218,6 +1232,10 @@ LpResult DualSimplexSolver::solve() {
 
     SparseWorkVector pivot_row_alpha(numVars());
     std::vector<Real> pivot_col(num_rows_, 0.0);
+    // Sparse index list of nonzero entries in pivot_col, populated after FTRAN.
+    // Used by incremental infeasibility updates to avoid O(m) scans.
+    std::vector<Index> pivot_col_nz;
+    pivot_col_nz.reserve(static_cast<std::size_t>(num_rows_));
     SparseWorkVector btran_work(num_rows_);
     // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector).
     std::vector<Real> dse_tau(num_rows_, 0.0);
@@ -1246,9 +1264,10 @@ LpResult DualSimplexSolver::solve() {
 
     // Maintained sparse infeasible-row tracking for CHUZR.
     // infeasible_rows holds indices of rows currently primal-infeasible.
-    // infeasible_flag[i] is true iff row i is in infeasible_rows.
+    // infeasible_pos[i] is the position of row i in infeasible_rows (-1 if absent).
+    // This enables O(1) swap-erase removal in updateRowInfeasibility.
     std::vector<Index> infeasible_rows;
-    std::vector<uint8_t> infeasible_flag(static_cast<std::size_t>(num_rows_), 0);
+    std::vector<Index> infeasible_pos(static_cast<std::size_t>(num_rows_), -1);
     infeasible_rows.reserve(static_cast<std::size_t>(num_rows_));
 
     // Initial build of the infeasible set (before bound perturbation is active).
@@ -1258,7 +1277,8 @@ LpResult DualSimplexSolver::solve() {
         Real lb = varLower(k);
         Real ub = varUpper(k);
         if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
-            infeasible_flag[static_cast<std::size_t>(i)] = 1;
+            infeasible_pos[static_cast<std::size_t>(i)] =
+                static_cast<Index>(infeasible_rows.size());
             infeasible_rows.push_back(i);
         }
     }
@@ -1614,38 +1634,40 @@ LpResult DualSimplexSolver::solve() {
         // Rebuild the full infeasible set by scanning all rows.
         auto rebuildInfeasibleSet = [&]() {
             infeasible_rows.clear();
+            std::fill(infeasible_pos.begin(), infeasible_pos.end(), -1);
             for (Index i = 0; i < num_rows_; ++i) {
                 Index k = basis_[i];
                 Real xk = primal_[k];
                 Real lb = lowerBoundFast(k);
                 Real ub = upperBoundFast(k);
                 if (xk < lb - kPrimalTol || xk > ub + kPrimalTol) {
-                    infeasible_flag[static_cast<std::size_t>(i)] = 1;
+                    infeasible_pos[static_cast<std::size_t>(i)] =
+                        static_cast<Index>(infeasible_rows.size());
                     infeasible_rows.push_back(i);
-                } else {
-                    infeasible_flag[static_cast<std::size_t>(i)] = 0;
                 }
             }
         };
 
         // Update infeasible tracking for a single row after its primal changed.
+        // Uses position map for O(1) swap-erase.
         auto updateRowInfeasibility = [&](Index i) {
             Index k = basis_[i];
             Real xk = primal_[k];
             Real lb = lowerBoundFast(k);
             Real ub = upperBoundFast(k);
-            const bool was_infeasible = infeasible_flag[static_cast<std::size_t>(i)] != 0;
+            const Index pos = infeasible_pos[static_cast<std::size_t>(i)];
+            const bool was_infeasible = pos >= 0;
             const bool is_infeasible = (xk < lb - kPrimalTol || xk > ub + kPrimalTol);
             if (was_infeasible && !is_infeasible) {
-                infeasible_flag[static_cast<std::size_t>(i)] = 0;
-                // Remove from infeasible_rows by swap-erase.
-                auto it = std::find(infeasible_rows.begin(), infeasible_rows.end(), i);
-                if (it != infeasible_rows.end()) {
-                    *it = infeasible_rows.back();
-                    infeasible_rows.pop_back();
-                }
+                // O(1) swap-erase: move last element into removed slot, update its position.
+                const Index last = infeasible_rows.back();
+                infeasible_rows[static_cast<std::size_t>(pos)] = last;
+                infeasible_pos[static_cast<std::size_t>(last)] = pos;
+                infeasible_rows.pop_back();
+                infeasible_pos[static_cast<std::size_t>(i)] = -1;
             } else if (!was_infeasible && is_infeasible) {
-                infeasible_flag[static_cast<std::size_t>(i)] = 1;
+                infeasible_pos[static_cast<std::size_t>(i)] =
+                    static_cast<Index>(infeasible_rows.size());
                 infeasible_rows.push_back(i);
             }
         };
@@ -1962,10 +1984,15 @@ LpResult DualSimplexSolver::solve() {
             Real min_step = kInf;
             Real best_leaving_score = 0.0;
 
-            // Compute pivot column norm for relative pivot quality scoring.
+            // Compute pivot column norm and build sparse nonzero index in one pass.
             Real pivot_col_norm = 0.0;
+            pivot_col_nz.clear();
             for (Index i = 0; i < num_rows_; ++i) {
-                pivot_col_norm += pivot_col[i] * pivot_col[i];
+                Real v = pivot_col[i];
+                pivot_col_norm += v * v;
+                if (std::abs(v) > kZeroTol) {
+                    pivot_col_nz.push_back(i);
+                }
             }
             pivot_col_norm = std::sqrt(pivot_col_norm);
             if (pivot_col_norm <= kZeroTol) {
@@ -2071,10 +2098,9 @@ LpResult DualSimplexSolver::solve() {
                     var_status_[entering_p] = BasisStatus::AtLower;
                 }
                 // Incrementally update infeasible rows affected by this pivot.
-                for (Index i = 0; i < num_rows_; ++i) {
-                    if (std::abs(pivot_col[i]) > kZeroTol) {
-                        updateRowInfeasibility(i);
-                    }
+                // Iterate only the sparse nonzero indices (built after FTRAN).
+                for (Index i : pivot_col_nz) {
+                    updateRowInfeasibility(i);
                 }
                 if (primal_step_degenerate) {
                     ++degenerate_pivot_streak;
@@ -2089,6 +2115,27 @@ LpResult DualSimplexSolver::solve() {
             // Basis swap: entering enters, leaving exits.
             Index leaving_var_p = basis_[leaving_row_p];
             Real pivot_elem = pivot_col[leaving_row_p];
+
+            // Guard against numerically degenerate pivot. Ratio test filters
+            // |alpha| < kPivotTol, but values can drift after LU updates between
+            // selection and use. Refactorize and retry on degeneracy.
+            if (std::abs(pivot_elem) < kPivotTol) {
+                try {
+                    refactorize();
+                } catch (const std::runtime_error&) {
+                    if (!recoverFromSingularBasis()) {
+                        break;
+                    }
+                }
+                computePrimals();
+                computeDuals();
+                initDseWeights();
+                degenerate_pivot_streak = 0;
+                resetPrimalFeasibleProgress();
+                primal_feasible_pivots_since_refactor = 0;
+                rebuildInfeasibleSet();
+                continue;
+            }
 
             // BTRAN for dual update.
             btran_work.clear();
@@ -2188,11 +2235,9 @@ LpResult DualSimplexSolver::solve() {
                 rebuildInfeasibleSet();
             } else {
                 // Incremental update: only rows with nonzero pivot_col entries
-                // had their primals changed.
-                for (Index i = 0; i < num_rows_; ++i) {
-                    if (std::abs(pivot_col[i]) > kZeroTol) {
-                        updateRowInfeasibility(i);
-                    }
+                // had their primals changed. Iterate the sparse index list.
+                for (Index i : pivot_col_nz) {
+                    updateRowInfeasibility(i);
                 }
             }
 
@@ -2639,6 +2684,14 @@ LpResult DualSimplexSolver::solve() {
         }
         lu_.ftran(pivot_col);
 
+        // Build sparse nonzero index list for incremental infeasibility updates.
+        pivot_col_nz.clear();
+        for (Index i = 0; i < num_rows_; ++i) {
+            if (std::abs(pivot_col[i]) > kZeroTol) {
+                pivot_col_nz.push_back(i);
+            }
+        }
+
         Real pivot_element = pivot_col[leaving_row];
         if (std::abs(pivot_element) < kPivotTol) {
             // Numerically degenerate pivot. Refactorize and retry.
@@ -2894,11 +2947,9 @@ LpResult DualSimplexSolver::solve() {
         } else {
             // Incremental update: only rows with nonzero pivot_col entries
             // had their primals changed (including leaving_row which now
-            // holds the entering variable).
-            for (Index i = 0; i < num_rows_; ++i) {
-                if (std::abs(pivot_col[i]) > kZeroTol) {
-                    updateRowInfeasibility(i);
-                }
+            // holds the entering variable). Iterate the sparse index list.
+            for (Index i : pivot_col_nz) {
+                updateRowInfeasibility(i);
             }
         }
 

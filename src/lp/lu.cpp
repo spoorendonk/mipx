@@ -1536,8 +1536,12 @@ void SparseLU::ftran(std::span<Real> rhs) const {
                     static_cast<uint64_t>(u_col_.size()) + static_cast<uint64_t>(ft_index_.size()) +
                     ft_dense_nnz_ + static_cast<uint64_t>(dim_) * 2);
 
-        // Save original RHS for residual computation.
-        std::vector<Real> b_save(rhs.begin(), rhs.end());
+        // Save original RHS for residual computation (reuse persistent buffer).
+        if (static_cast<Index>(ir_rhs_save_.size()) < dim_) {
+            ir_rhs_save_.resize(dim_);
+        }
+        std::copy(rhs.begin(), rhs.end(), ir_rhs_save_.begin());
+        std::span<const Real> b_save(ir_rhs_save_.data(), static_cast<std::size_t>(dim_));
 
         // Initial solve in FP32.
         ftranFp32(rhs);
@@ -1881,8 +1885,12 @@ void SparseLU::btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) 
                     static_cast<uint64_t>(u_col_.size()) + static_cast<uint64_t>(ft_index_.size()) +
                     ft_dense_nnz_ + static_cast<uint64_t>(dim_) * 2);
 
-        // Save original RHS.
-        std::vector<Real> c_save(rhs.begin(), rhs.end());
+        // Save original RHS (reuse persistent buffer).
+        if (static_cast<Index>(ir_rhs_save_.size()) < dim_) {
+            ir_rhs_save_.resize(dim_);
+        }
+        std::copy(rhs.begin(), rhs.end(), ir_rhs_save_.begin());
+        std::span<const Real> c_save(ir_rhs_save_.data(), static_cast<std::size_t>(dim_));
 
         // Initial solve in FP32.
         btranFp32(rhs);

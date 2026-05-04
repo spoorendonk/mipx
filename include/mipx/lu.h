@@ -246,6 +246,7 @@ private:
     // Iterative refinement scratch buffers (mutable to avoid allocation per solve).
     mutable std::vector<Real> ir_residual_;
     mutable std::vector<Real> ir_z_;
+    mutable std::vector<Real> ir_rhs_save_;
 
     // Iterative refinement tracking.
     static constexpr Real kFp32GrowthLimit = 1e4;  // FP32 growth -> fallback to FP64

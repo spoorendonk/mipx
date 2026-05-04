@@ -967,6 +967,11 @@ bool BarrierSolver::runCrossover() {
     DualSimplexSolver ds_cold;
     ds_cold.load(original_);
     ds_cold.setVerbose(false);
+    // Bound the cold fallback to avoid unbounded runtime in MIP node context.
+    // 3 * (m + n) is generous for a fresh LP and matches typical cold-start
+    // expectations in branch-and-cut.
+    const Int dim_sum = static_cast<Int>(original_.num_rows) + static_cast<Int>(original_.num_cols);
+    ds_cold.setIterationLimit(3 * dim_sum);
     DualSimplexOptions cold_opts;
     cold_opts.stop_flag = options_.stop_flag;
     ds_cold.setOptions(cold_opts);
