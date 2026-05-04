@@ -2277,19 +2277,14 @@ LpResult DualSimplexSolver::solve() {
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
-        // Phase-aware Harris tolerance: wider early on, tighter near optimality.
+        // Standard Harris tolerance. The previous phase-aware variant widened
+        // to 1e-5 in the primal-infeasible phase and tightened to 1e-7 near
+        // optimality. Combined with the relative-pivot tie-breaker the
+        // widened window admitted poorly-scaled pivots and produced long
+        // oscillation tails on numerically tricky LPs (e.g. greenbea, where
+        // the wider window prevented convergence). Stick with 1e-6, which is
+        // the textbook value and matches the legacy behavior.
         Real harris_tol = 1e-6;
-        if (options_.enable_adaptive_harris) {
-            if (current_pinf_count > 100) {
-                // Early phase: many infeasibilities, allow wider tolerance.
-                harris_tol = 1e-5;
-            } else if (current_pinf_count > 10) {
-                harris_tol = 1e-6;
-            } else {
-                // Near optimality: tighten for accuracy.
-                harris_tol = 1e-7;
-            }
-        }
 
         auto isEligible = [&](Index k, Real alpha) -> bool {
             if (std::abs(alpha) < kPivotTol) {
