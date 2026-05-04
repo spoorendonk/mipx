@@ -1078,13 +1078,16 @@ LpResult DualSimplexSolver::solve() {
     // starting from w_i = 1.0. Per-refactor re-initialization compounds the
     // overhead because each refactorization triggers another m BTRANs even
     // when the basis is unchanged. Use approximate init (1.0) by default,
-    // mirroring HiGHS / CLP. Exact init is gated by an opt-in option for
-    // problems where empirical results show a benefit.
+    // mirroring HiGHS / CLP. Exact init is gated by an opt-in option, and
+    // even when opted in we skip it for tiny bases where the m BTRANs are
+    // pure overhead.
     auto initDseWeights = [&]() {
         if (!dse_active_) {
             return;
         }
-        if (options_.dse_exact_init && num_rows_ <= options_.dse_exact_init_max_dim) {
+        constexpr Index kExactInitMinDim = 50;
+        if (options_.dse_exact_init && num_rows_ >= kExactInitMinDim &&
+            num_rows_ <= options_.dse_exact_init_max_dim) {
             // Exact: w_i = ||B^{-T} e_i||^2 = ||rho_i||^2.
             std::vector<Real> ei(static_cast<std::size_t>(num_rows_), 0.0);
             for (Index i = 0; i < num_rows_; ++i) {

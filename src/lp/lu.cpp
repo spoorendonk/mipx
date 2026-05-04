@@ -83,8 +83,11 @@ inline Real denseDot(const Real* a, std::span<const Real> x) {
 Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
                           std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
                           std::vector<Index>& btf_block_start) {
-    // Minimum dimension to attempt BTF detection (overhead not worth it for tiny matrices).
-    static constexpr Index kBtfMinDim = 16;
+    // Minimum dimension to attempt BTF detection. BTF builds a matching +
+    // Tarjan SCC over the basis pattern; for small bases the fixed cost
+    // (allocations + scans) outweighs any savings, since a single-block LU
+    // factorization is already cheap on small matrices.
+    static constexpr Index kBtfMinDim = 100;
 
     if (dim < kBtfMinDim) {
         return 0;
@@ -1178,7 +1181,13 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     snode_panel_values_.clear();
     snode_panel_row_indices_.clear();
 
-    if (dim_ >= kSupernodeMinWidth) {
+    // Lower guard: supernode detection performs a linear scan with sorted
+    // target-set comparisons and panel allocations. For small bases the
+    // cost of detection itself dominates the savings, since the L-solve
+    // is already cheap. Only run on bases where dense-panel L-solve can
+    // amortize the detection cost.
+    static constexpr Index kSupernodeDetectMinDim = 64;
+    if (dim_ >= kSupernodeDetectMinDim) {
         // Detect fundamental supernodes: consecutive steps where each step's
         // eta target set is a subset of the next step's. Use a rolling
         // comparison of sorted target sets to keep cost linear.
