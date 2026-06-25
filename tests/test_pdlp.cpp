@@ -344,10 +344,8 @@ TEST_CASE("PdlpSolver: detects unbounded bounds-only LP", "[pdlp]") {
     REQUIRE(result.status == Status::Unbounded);
 }
 
-TEST_CASE("PdlpSolver: infeasible LP hits iteration limit", "[pdlp]") {
+TEST_CASE("PdlpSolver: detects infeasible LP", "[pdlp]") {
     // min x  s.t. x <= -1, x >= 1 → infeasible
-    // PDLP is a first-order method; it won't certify infeasibility but will
-    // fail to converge and hit the iteration limit.
     LpProblem lp;
     lp.name = "pdlp_infeasible";
     lp.sense = Sense::Minimize;
@@ -368,12 +366,152 @@ TEST_CASE("PdlpSolver: infeasible LP hits iteration limit", "[pdlp]") {
     PdlpSolver solver;
     PdlpOptions opts;
     opts.verbose = false;
-    opts.max_iter = 1000;  // low limit so test is fast
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
 
-    CHECK(result.status == Status::IterLimit);
+    REQUIRE(result.status == Status::Infeasible);
+}
+
+TEST_CASE("PdlpSolver: detects infeasible LP with equality constraint", "[pdlp]") {
+    // min x + y  s.t.  x + y = 5,  x + y = 3  → infeasible (contradicting equalities)
+    LpProblem lp;
+    lp.name = "pdlp_infeasible_eq";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 2;
+    lp.row_lower = {5.0, 3.0};
+    lp.row_upper = {5.0, 3.0};
+    lp.row_names = {"eq1", "eq2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Infeasible);
+}
+
+TEST_CASE("PdlpSolver: detects unbounded LP with constraints", "[pdlp]") {
+    // min -x  s.t.  x - y <= 0,  x >= 0, y >= 0  → unbounded (increase y, set x = y)
+    LpProblem lp;
+    lp.name = "pdlp_unbounded_constrained";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {0.0};  // x - y <= 0, i.e. x <= y
+    lp.row_names = {"c1"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, -1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Unbounded);
+}
+
+TEST_CASE("PdlpSolver: Farkas certificate verifies for infeasible LP", "[pdlp]") {
+    // min x  s.t. x <= -1, x >= 1 → infeasible
+    // Farkas certificate: y >= 0 (for <= constraint), A^T y has correct sign,
+    // and b^T y - column_support < 0.
+    LpProblem lp;
+    lp.name = "pdlp_farkas";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.obj = {1.0};
+    lp.col_lower = {1.0};
+    lp.col_upper = {kInf};
+    lp.col_type = {VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {-1.0};
+    lp.row_names = {"c1"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}};
+    lp.matrix = SparseMatrix(1, 1, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Infeasible);
+
+    // Verify the Farkas certificate from dual values.
+    auto y = solver.getDualValues();
+    REQUIRE(y.size() == 1);
+
+    // Normalize y to get the ray.
+    Real y_norm = std::sqrt(y[0] * y[0]);
+    REQUIRE(y_norm > 1e-10);
+    Real ray = y[0] / y_norm;
+
+    // For <= constraint: dual ray should be >= 0.
+    CHECK(ray >= -1e-6);
+
+    // A^T * ray = ray (since A = [1]).
+    // For variable with lb = 1 (finite): A^T ray >= 0 is needed.
+    CHECK(ray >= -1e-6);
+
+    // Farkas value: ray * ru - (A^T ray) * lb = ray * (-1) - ray * 1 = -2 * ray < 0.
+    Real farkas_val = ray * (-1.0) - ray * 1.0;
+    CHECK(farkas_val < -1e-6);
+}
+
+TEST_CASE("PdlpSolver: no false positive on feasible LP", "[pdlp]") {
+    // Verify that the infeasibility/unboundedness detection does not
+    // fire on a feasible bounded LP.
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    // Should be optimal, not infeasible or unbounded.
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
 }
 
 TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") {

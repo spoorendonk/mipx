@@ -89,6 +89,200 @@ inline bool timeLimitReached(const std::chrono::steady_clock::time_point start_t
     return elapsed >= max_solve_seconds;
 }
 
+// ---------------------------------------------------------------------------
+// Infeasibility / unboundedness certificate checks.
+//
+// Following the approach in Applegate et al. (2021) "Practical Large-Scale
+// Linear Programming using Primal-Dual Hybrid Gradient":
+//
+// Infeasibility (dual ray): given candidate y, check that
+//   (1) For each column j, the reduced cost r_j = c_j + (A^T y)_j satisfies:
+//       r_j >= 0 if lb_j > -inf, r_j <= 0 if ub_j < inf (both if finite box).
+//   (2) The dual ray objective  sum_i support(y_i, [rl_i, ru_i])  is negative
+//       (for minimization), where support is the support function of the
+//       constraint interval.
+//   We normalize y by its L2 norm and check (1) with tolerance, (2) strictly.
+//
+// Unboundedness (primal ray): given candidate x, check that
+//   (1) ||A x|| is small relative to ||x||.
+//   (2) c^T x < 0 (improving direction for minimization).
+//   (3) x_j >= 0 if lb_j is finite, x_j <= 0 if ub_j is finite.
+// ---------------------------------------------------------------------------
+
+/// Check whether the (unscaled, original-space) dual iterate forms an
+/// approximate Farkas infeasibility certificate.
+///
+/// \param y         Dual iterate in original space (length m).
+/// \param problem   The original LP problem.
+/// \param tol       Tolerance for reduced-cost sign feasibility.
+/// \return true if the certificate verifies.
+inline bool checkInfeasibilityCertificate(std::span<const Real> y, const LpProblem& problem,
+                                          Real tol) {
+    const Index m = problem.num_rows;
+    const Index n = problem.num_cols;
+    if (m == 0)
+        return false;
+
+    Real y_norm = l2Norm(y);
+    if (y_norm < 1e-15)
+        return false;
+
+    // Normalize to get the ray direction.
+    std::vector<Real> ray(y.begin(), y.end());
+    for (auto& v : ray)
+        v /= y_norm;
+
+    // Check dual ray sign feasibility for constraints:
+    // For <= constraint (row_upper finite, row_lower = -inf): y_i >= 0.
+    // For >= constraint (row_lower finite, row_upper = inf): y_i <= 0.
+    // For equality (row_lower == row_upper): y_i free.
+    // For ranged: both finite, y_i free.
+    for (Index i = 0; i < m; ++i) {
+        bool has_lower = std::isfinite(problem.row_lower[i]);
+        bool has_upper = std::isfinite(problem.row_upper[i]);
+        if (has_upper && !has_lower) {
+            // <= constraint: dual must be >= 0 (for min).
+            if (ray[i] < -tol)
+                return false;
+        } else if (has_lower && !has_upper) {
+            // >= constraint: dual must be <= 0 (for min).
+            if (ray[i] > tol)
+                return false;
+        }
+        // Equality or ranged: no sign restriction on ray.
+    }
+
+    // Compute A^T * ray.
+    std::vector<Real> at_ray(static_cast<size_t>(n), 0.0);
+    problem.matrix.multiplyTranspose(ray, at_ray);
+
+    // Check reduced-cost sign feasibility:
+    // For variable with finite lower bound: (A^T y)_j >= -tol.
+    // For variable with finite upper bound: (A^T y)_j <= tol.
+    // (We ignore c here — the Farkas certificate is about A^T y, not c + A^T y.)
+    for (Index j = 0; j < n; ++j) {
+        Real rj = at_ray[j];
+        bool has_lb = std::isfinite(problem.col_lower[j]);
+        bool has_ub = std::isfinite(problem.col_upper[j]);
+        if (has_lb && rj < -tol)
+            return false;
+        if (has_ub && rj > tol)
+            return false;
+    }
+
+    // Compute dual ray objective:
+    // sum_i ray_i * bound_i, where we pick the bound that makes the product
+    // most negative. For the problem to be infeasible, this must be negative.
+    //   If ray_i > 0 and finite upper bound: contributes ray_i * ru_i.
+    //   If ray_i < 0 and finite lower bound: contributes ray_i * rl_i.
+    //   For equality: contributes ray_i * (rl_i = ru_i).
+    Real ray_obj = 0.0;
+    for (Index i = 0; i < m; ++i) {
+        Real rl = problem.row_lower[i];
+        Real ru = problem.row_upper[i];
+        if (rl == ru) {
+            // Equality constraint.
+            ray_obj += ray[i] * rl;
+        } else if (ray[i] > 0.0 && std::isfinite(ru)) {
+            ray_obj += ray[i] * ru;
+        } else if (ray[i] < 0.0 && std::isfinite(rl)) {
+            ray_obj += ray[i] * rl;
+        }
+        // If ray[i] > 0 and no upper bound, the dual sign check above
+        // should have already rejected this (for <= constraints only).
+    }
+
+    // Also add contribution from variable bounds via A^T ray:
+    // For columns with finite bounds and nonzero A^T ray, the support
+    // function adds: max(0, (A^T ray)_j) * ub_j + min(0, (A^T ray)_j) * lb_j.
+    Real col_support = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        Real rj = at_ray[j];
+        if (rj > 0.0 && std::isfinite(problem.col_lower[j]))
+            col_support += rj * problem.col_lower[j];
+        else if (rj < 0.0 && std::isfinite(problem.col_upper[j]))
+            col_support += rj * problem.col_upper[j];
+    }
+
+    // The Farkas condition: b^T y - (column support) < 0.
+    // Equivalently: the dual ray objective must be strictly negative.
+    Real farkas_val = ray_obj - col_support;
+    return farkas_val < -tol;
+}
+
+/// Check whether the (unscaled, original-space) primal iterate forms an
+/// approximate unboundedness certificate (primal ray).
+///
+/// \param x         Primal iterate in original space (length n).
+/// \param problem   The original LP problem.
+/// \param tol       Tolerance for feasibility of the ray.
+/// \return true if the certificate verifies.
+inline bool checkUnboundednessCertificate(std::span<const Real> x, const LpProblem& problem,
+                                          Real tol) {
+    const Index m = problem.num_rows;
+    const Index n = problem.num_cols;
+    if (n == 0)
+        return false;
+
+    Real x_norm = l2Norm(x);
+    if (x_norm < 1e-15)
+        return false;
+
+    // Normalize.
+    std::vector<Real> ray(x.begin(), x.end());
+    for (auto& v : ray)
+        v /= x_norm;
+
+    // Check sign consistency with variable bounds:
+    // If lb_j is finite (> -inf): ray_j >= -tol.
+    // If ub_j is finite (< inf): ray_j <= tol.
+    for (Index j = 0; j < n; ++j) {
+        if (std::isfinite(problem.col_lower[j]) && ray[j] < -tol)
+            return false;
+        if (std::isfinite(problem.col_upper[j]) && ray[j] > tol)
+            return false;
+    }
+
+    // Check ||A * ray|| is small.
+    std::vector<Real> a_ray(static_cast<size_t>(m), 0.0);
+    problem.matrix.multiply(ray, a_ray);
+
+    // The constraint residual must respect constraint types:
+    // For each row i, A_i * ray must be consistent with the constraint type.
+    // For <= constraint: A_i * ray <= tol.
+    // For >= constraint: A_i * ray >= -tol.
+    // For equality: |A_i * ray| <= tol.
+    // For ranged: we just check |A_i * ray| <= tol since rays in both
+    // directions are bounded.
+    for (Index i = 0; i < m; ++i) {
+        Real ar = a_ray[i];
+        bool has_lower = std::isfinite(problem.row_lower[i]);
+        bool has_upper = std::isfinite(problem.row_upper[i]);
+        if (has_lower && has_upper) {
+            // Ranged or equality: ray must be zero in this direction.
+            if (std::abs(ar) > tol)
+                return false;
+        } else if (has_upper && !has_lower) {
+            // <= constraint: ray must not increase lhs.
+            if (ar > tol)
+                return false;
+        } else if (has_lower && !has_upper) {
+            // >= constraint: ray must not decrease lhs.
+            if (ar < -tol)
+                return false;
+        }
+        // Free row: any direction is fine.
+    }
+
+    // Check improving direction: c^T ray < 0 for minimization.
+    Real obj_sign = (problem.sense == Sense::Minimize) ? 1.0 : -1.0;
+    Real c_dot_ray = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        c_dot_ray += problem.obj[j] * ray[j];
+    }
+    return obj_sign * c_dot_ray < -tol;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -856,6 +1050,50 @@ LpResult PdlpSolver::solve() {
             break;
         }
 
+        // --- Infeasibility / unboundedness detection ---
+        // Check periodically (every 10 batches after an initial warm-up)
+        // to avoid overhead. We unscale iterates to original space and
+        // verify certificates.
+        if (total_count >= 10 * N && total_count % (10 * N) == 0) {
+            // Unscale dual iterate to original space.
+            std::vector<Real> y_orig(static_cast<size_t>(m));
+            Real inv_obj_sc = 1.0 / objective_scale_;
+            for (Index i = 0; i < m; ++i) {
+                y_orig[i] = obj_sign_ * pdhg_y[i] * row_scale_[i] * inv_obj_sc;
+            }
+            if (checkInfeasibilityCertificate(y_orig, original_, 1e-6)) {
+                status_ = Status::Infeasible;
+                iterations_ = total_count;
+                dual_orig_ = std::move(y_orig);
+                double seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                double work = static_cast<double>(total_count) *
+                              (4.0 * static_cast<double>(scaled_a_.numNonzeros()) +
+                               2.0 * static_cast<double>(m + n));
+                work += seconds * 1e-6;
+                return {status_, 0.0, iterations_, work};
+            }
+
+            // Unscale primal iterate to original space.
+            std::vector<Real> x_orig(static_cast<size_t>(n));
+            Real inv_con_sc = 1.0 / constraint_scale_;
+            for (Index j = 0; j < n; ++j) {
+                x_orig[j] = pdhg_x[j] * col_scale_[j] * inv_con_sc;
+            }
+            if (checkUnboundednessCertificate(x_orig, original_, 1e-6)) {
+                status_ = Status::Unbounded;
+                iterations_ = total_count;
+                primal_orig_ = std::move(x_orig);
+                double seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                double work = static_cast<double>(total_count) *
+                              (4.0 * static_cast<double>(scaled_a_.numNonzeros()) +
+                               2.0 * static_cast<double>(m + n));
+                work += seconds * 1e-6;
+                return {status_, 0.0, iterations_, work};
+            }
+        }
+
         // --- Restart decision ---
         bool do_restart = false;
         if (total_count == N) {
@@ -1566,6 +1804,40 @@ LpResult PdlpSolver::solveGpu() {
             prev_pdhg_x_host.swap(cur_pdhg_x_host);
             prev_ax_host.swap(cur_ax_host);
             gpu_have_prev = true;
+        }
+
+        // --- Infeasibility / unboundedness detection (GPU path) ---
+        if (total_count >= 10 * N && total_count % (10 * N) == 0) {
+            // Download iterates for certificate checks.
+            std::vector<Real> pdhg_x_host(sn), pdhg_y_host(sm);
+            cudaMemcpy(pdhg_x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+            cudaMemcpy(pdhg_y_host.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+
+            // Unscale dual iterate to original space.
+            std::vector<Real> y_orig(sm);
+            Real inv_obj_sc = 1.0 / objective_scale_;
+            for (Index i = 0; i < m; ++i) {
+                y_orig[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i] * inv_obj_sc;
+            }
+            if (checkInfeasibilityCertificate(y_orig, original_, 1e-6)) {
+                status_ = Status::Infeasible;
+                iterations_ = total_count;
+                dual_orig_ = std::move(y_orig);
+                goto cleanup;
+            }
+
+            // Unscale primal iterate to original space.
+            std::vector<Real> x_orig(sn);
+            Real inv_con_sc = 1.0 / constraint_scale_;
+            for (Index j = 0; j < n; ++j) {
+                x_orig[j] = pdhg_x_host[j] * col_scale_[j] * inv_con_sc;
+            }
+            if (checkUnboundednessCertificate(x_orig, original_, 1e-6)) {
+                status_ = Status::Unbounded;
+                iterations_ = total_count;
+                primal_orig_ = std::move(x_orig);
+                goto cleanup;
+            }
         }
 
         // --- Restart decision ---
