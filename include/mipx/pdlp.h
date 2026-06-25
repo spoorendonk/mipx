@@ -42,6 +42,10 @@ struct PdlpOptions {
     Real restart_artificial_fraction = 0.36;
     Int termination_eval_frequency = 200;
 
+    // Matrix filtering: drop entries with |a_ij| < matrix_zero_tol before
+    // scaling/solve. 0 = disabled (default).
+    Real matrix_zero_tol = 0.0;
+
     // Scaling.
     bool do_ruiz_scaling = true;
     Int ruiz_iterations = 10;

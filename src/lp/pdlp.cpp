@@ -136,6 +136,27 @@ void PdlpSolver::buildScaledProblem() {
     std::vector<Index> col_indices(cols_span.begin(), cols_span.end());
     std::vector<Index> row_starts(rows_span.begin(), rows_span.end());
 
+    // Filter near-zero matrix entries when matrix_zero_tol > 0.
+    if (options_.matrix_zero_tol > 0.0 && !values.empty()) {
+        const Real tol = options_.matrix_zero_tol;
+        Index write = 0;
+        for (Index i = 0; i < m; ++i) {
+            const Index old_start = row_starts[i];
+            const Index old_end = row_starts[i + 1];
+            row_starts[i] = write;
+            for (Index k = old_start; k < old_end; ++k) {
+                if (std::abs(values[k]) >= tol) {
+                    values[write] = values[k];
+                    col_indices[write] = col_indices[k];
+                    ++write;
+                }
+            }
+        }
+        row_starts[m] = write;
+        values.resize(static_cast<size_t>(write));
+        col_indices.resize(static_cast<size_t>(write));
+    }
+
     // Ruiz scaling: alternating row/col inf-norm equilibration.
     if (options_.do_ruiz_scaling && m > 0 && n > 0 && !values.empty()) {
         std::vector<Real> col_norm(static_cast<size_t>(n), 0.0);

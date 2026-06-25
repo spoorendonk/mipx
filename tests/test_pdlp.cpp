@@ -608,3 +608,88 @@ TEST_CASE("PdlpSolver: GPU with rescaling matches CPU", "[pdlp][rescaling][gpu]"
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// Matrix zero tolerance filtering tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: matrix_zero_tol=0 leaves matrix unchanged", "[pdlp][filter]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 10000;
+    opts.matrix_zero_tol = 0.0;  // disabled (default)
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: matrix_zero_tol filters near-zero entries", "[pdlp][filter]") {
+    // Build LP with some near-zero noise entries that should not affect the
+    // optimal solution when filtered.
+    // min -x - y  s.t.  x + y + 1e-15*z <= 4,  x,y,z >= 0
+    LpProblem lp;
+    lp.name = "pdlp_filter";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-1.0, -1.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {4.0};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {0, 2, 1e-15},
+    };
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+
+    // Without filtering: 3 nonzeros.
+    auto baseline = solvePdlp(lp, quietOpts(50000, false, false));
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(-4.0, 1e-4));
+
+    // With filtering: the 1e-15 entry should be dropped.
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.do_bound_obj_rescaling = false;
+    opts.matrix_zero_tol = 1e-10;
+    auto filtered = solvePdlp(lp, opts);
+
+    REQUIRE(filtered.status == Status::Optimal);
+    CHECK_THAT(filtered.objective, WithinAbs(-4.0, 1e-4));
+    // Objectives should match closely.
+    CHECK_THAT(filtered.objective, WithinAbs(baseline.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: matrix_zero_tol on medium LP matches baseline", "[pdlp][filter]") {
+    auto lp = buildMediumLp();
+
+    auto baseline = solvePdlp(lp, quietOpts(500000, true, false));
+    REQUIRE(baseline.status == Status::Optimal);
+
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 500000;
+    opts.do_bound_obj_rescaling = true;
+    // Tolerance well below the smallest coefficient (0.1), so nothing should
+    // actually be dropped from the medium LP.
+    opts.matrix_zero_tol = 1e-12;
+    auto filtered = solvePdlp(lp, opts);
+
+    REQUIRE(filtered.status == Status::Optimal);
+    CHECK_THAT(filtered.objective, WithinAbs(baseline.objective, 1e-3));
+}
