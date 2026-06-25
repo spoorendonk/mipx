@@ -1,52 +1,19 @@
+#include "common.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
-
 namespace mipx {
 
-namespace {
+using namespace heuristic_detail;
 
-constexpr Real kObjectiveTol = 1e-6;
-constexpr Real kFeasTol = 1e-6;
-
-bool isIntegerVar(VarType t) {
-    return t != VarType::Continuous;
-}
-
-Real computeObjective(const LpProblem& problem, std::span<const Real> values) {
-    Real obj = problem.obj_offset;
-    for (Index j = 0; j < problem.num_cols; ++j) {
-        obj += problem.obj[j] * values[j];
-    }
-    return obj;
-}
-
-bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
-    for (Index i = 0; i < problem.num_rows; ++i) {
-        auto row = problem.matrix.row(i);
-        Real activity = 0.0;
-        for (Index k = 0; k < row.size(); ++k) {
-            activity += row.values[k] * values[row.indices[k]];
-        }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
-    }
-    return true;
-}
-
-}  // namespace
-
-std::optional<HeuristicSolution> ReducedCostHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> ReducedCostHeuristic::run(const LpProblem& problem,
+                                                           DualSimplexSolver& lp,
+                                                           std::span<const Real> primals,
+                                                           Real incumbent) {
     last_executed_solve_ = false;
     last_fixed_count_ = 0;
     last_lp_iterations_ = 0;
@@ -56,7 +23,9 @@ std::optional<HeuristicSolution> ReducedCostHeuristic::run(
 
     // Get reduced costs from the LP solver.
     auto reduced_costs = lp.getReducedCosts();
-    if (static_cast<Index>(reduced_costs.size()) < n) return std::nullopt;
+    if (static_cast<Index>(reduced_costs.size()) < n) {
+        return std::nullopt;
+    }
 
     struct SavedBound {
         Index col;
@@ -73,10 +42,14 @@ std::optional<HeuristicSolution> ReducedCostHeuristic::run(
     // A large |rc| suggests the variable is "expensive" to move away from
     // its current value, so fixing at its nearest bound is low risk.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j])) {
+            continue;
+        }
 
         Real rc = reduced_costs[j];
-        if (std::abs(rc) < rc_threshold_) continue;
+        if (std::abs(rc) < rc_threshold_) {
+            continue;
+        }
 
         Real rounded = std::round(primals[j]);
         Real lower = -kInf;
@@ -86,8 +59,7 @@ std::optional<HeuristicSolution> ReducedCostHeuristic::run(
         rounded = std::min(rounded, upper);
 
         // Skip if already effectively fixed.
-        if (std::abs(lower - rounded) <= kFeasTol &&
-            std::abs(upper - rounded) <= kFeasTol) {
+        if (std::abs(lower - rounded) <= kFeasTol && std::abs(upper - rounded) <= kFeasTol) {
             continue;
         }
 
@@ -117,11 +89,14 @@ std::optional<HeuristicSolution> ReducedCostHeuristic::run(
     last_work_units_ = result.work_units;
 
     std::optional<HeuristicSolution> best;
-    if (result.status == Status::Optimal && result.objective < incumbent - kObjectiveTol) {
+    if (result.status == Status::Optimal &&
+        betterObjective(problem.sense, result.objective, incumbent)) {
         auto candidate = lp.getPrimalValues();
         bool integer_feasible = true;
         for (Index j = 0; j < n; ++j) {
-            if (!isIntegerVar(problem.col_type[j])) continue;
+            if (!isIntegerVar(problem.col_type[j])) {
+                continue;
+            }
             if (!isIntegral(candidate[j], kFeasTol)) {
                 integer_feasible = false;
                 break;
@@ -132,18 +107,24 @@ std::optional<HeuristicSolution> ReducedCostHeuristic::run(
             best = HeuristicSolution{std::move(candidate), result.objective};
         } else if (enable_rounding_repair_) {
             for (Index j = 0; j < n; ++j) {
-                if (!isIntegerVar(problem.col_type[j])) continue;
+                if (!isIntegerVar(problem.col_type[j])) {
+                    continue;
+                }
                 Real lb = -kInf;
                 Real ub = kInf;
                 lp.getColBounds(j, lb, ub);
                 Real rounded = std::round(candidate[j]);
-                if (lb != -kInf) rounded = std::max(rounded, lb);
-                if (ub != kInf) rounded = std::min(rounded, ub);
+                if (lb != -kInf) {
+                    rounded = std::max(rounded, lb);
+                }
+                if (ub != kInf) {
+                    rounded = std::min(rounded, ub);
+                }
                 candidate[j] = rounded;
             }
             if (isRowFeasible(problem, candidate)) {
                 Real repaired_obj = computeObjective(problem, candidate);
-                if (repaired_obj < incumbent - kObjectiveTol) {
+                if (betterObjective(problem.sense, repaired_obj, incumbent)) {
                     best = HeuristicSolution{std::move(candidate), repaired_obj};
                 }
             }

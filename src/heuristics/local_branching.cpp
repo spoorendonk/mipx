@@ -1,68 +1,40 @@
+#include "common.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
-
 namespace mipx {
+
+using namespace heuristic_detail;
 
 namespace {
 
-constexpr Real kObjectiveTol = 1e-6;
-constexpr Real kFeasTol = 1e-6;
-
-bool isIntegerVar(VarType t) {
-    return t != VarType::Continuous;
-}
-
 bool isBinaryVar(const LpProblem& problem, Index j) {
-    if (problem.col_type[j] == VarType::Binary) return true;
-    if (problem.col_type[j] == VarType::Continuous) return false;
+    if (problem.col_type[j] == VarType::Binary) {
+        return true;
+    }
+    if (problem.col_type[j] == VarType::Continuous) {
+        return false;
+    }
     return problem.col_lower[j] >= -kFeasTol && problem.col_lower[j] <= kFeasTol &&
            problem.col_upper[j] >= 1.0 - kFeasTol && problem.col_upper[j] <= 1.0 + kFeasTol;
 }
 
-Real computeObjective(const LpProblem& problem, std::span<const Real> values) {
-    Real obj = problem.obj_offset;
-    for (Index j = 0; j < problem.num_cols; ++j) {
-        obj += problem.obj[j] * values[j];
-    }
-    return obj;
-}
-
-bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
-    for (Index i = 0; i < problem.num_rows; ++i) {
-        auto row = problem.matrix.row(i);
-        Real activity = 0.0;
-        for (Index k = 0; k < row.size(); ++k) {
-            activity += row.values[k] * values[row.indices[k]];
-        }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
-    }
-    return true;
-}
-
 }  // namespace
 
-std::optional<HeuristicSolution> LocalBranchingHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> LocalBranchingHeuristic::run(const LpProblem& problem,
+                                                              DualSimplexSolver& lp,
+                                                              std::span<const Real> primals,
+                                                              Real incumbent) {
     return run(problem, lp, primals, incumbent, {});
 }
 
 std::optional<HeuristicSolution> LocalBranchingHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> /*primals*/,
-    Real incumbent,
-    std::span<const Real> incumbent_values) {
-
+    const LpProblem& problem, DualSimplexSolver& lp, std::span<const Real> /*primals*/,
+    Real incumbent, std::span<const Real> incumbent_values) {
     last_executed_solve_ = false;
     last_skipped_no_incumbent_ = false;
     last_skipped_too_small_ = false;
@@ -130,11 +102,14 @@ std::optional<HeuristicSolution> LocalBranchingHeuristic::run(
     last_work_units_ = result.work_units;
 
     std::optional<HeuristicSolution> best;
-    if (result.status == Status::Optimal && result.objective < incumbent - kObjectiveTol) {
+    if (result.status == Status::Optimal &&
+        betterObjective(problem.sense, result.objective, incumbent)) {
         auto candidate = lp.getPrimalValues();
         bool integer_feasible = true;
         for (Index j = 0; j < n; ++j) {
-            if (!isIntegerVar(problem.col_type[j])) continue;
+            if (!isIntegerVar(problem.col_type[j])) {
+                continue;
+            }
             if (!isIntegral(candidate[j], kFeasTol)) {
                 integer_feasible = false;
                 break;
@@ -145,18 +120,24 @@ std::optional<HeuristicSolution> LocalBranchingHeuristic::run(
             best = HeuristicSolution{std::move(candidate), result.objective};
         } else if (enable_rounding_repair_) {
             for (Index j = 0; j < n; ++j) {
-                if (!isIntegerVar(problem.col_type[j])) continue;
+                if (!isIntegerVar(problem.col_type[j])) {
+                    continue;
+                }
                 Real lb = -kInf;
                 Real ub = kInf;
                 lp.getColBounds(j, lb, ub);
                 Real rounded = std::round(candidate[j]);
-                if (lb != -kInf) rounded = std::max(rounded, lb);
-                if (ub != kInf) rounded = std::min(rounded, ub);
+                if (lb != -kInf) {
+                    rounded = std::max(rounded, lb);
+                }
+                if (ub != kInf) {
+                    rounded = std::min(rounded, ub);
+                }
                 candidate[j] = rounded;
             }
             if (isRowFeasible(problem, candidate)) {
                 Real repaired_obj = computeObjective(problem, candidate);
-                if (repaired_obj < incumbent - kObjectiveTol) {
+                if (betterObjective(problem.sense, repaired_obj, incumbent)) {
                     best = HeuristicSolution{std::move(candidate), repaired_obj};
                 }
             }

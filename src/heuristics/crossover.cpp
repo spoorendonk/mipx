@@ -1,61 +1,27 @@
+#include "common.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
-
 namespace mipx {
 
-namespace {
+using namespace heuristic_detail;
 
-constexpr Real kObjectiveTol = 1e-6;
-constexpr Real kFeasTol = 1e-6;
-
-bool isIntegerVar(VarType t) {
-    return t != VarType::Continuous;
-}
-
-Real computeObjective(const LpProblem& problem, std::span<const Real> values) {
-    Real obj = problem.obj_offset;
-    for (Index j = 0; j < problem.num_cols; ++j) {
-        obj += problem.obj[j] * values[j];
-    }
-    return obj;
-}
-
-bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
-    for (Index i = 0; i < problem.num_rows; ++i) {
-        auto row = problem.matrix.row(i);
-        Real activity = 0.0;
-        for (Index k = 0; k < row.size(); ++k) {
-            activity += row.values[k] * values[row.indices[k]];
-        }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
-    }
-    return true;
-}
-
-}  // namespace
-
-std::optional<HeuristicSolution> CrossoverHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> CrossoverHeuristic::run(const LpProblem& problem,
+                                                         DualSimplexSolver& lp,
+                                                         std::span<const Real> primals,
+                                                         Real incumbent) {
     return run(problem, lp, primals, incumbent, {});
 }
 
-std::optional<HeuristicSolution> CrossoverHeuristic::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent,
-    std::span<const Real> incumbent_values) {
-
+std::optional<HeuristicSolution> CrossoverHeuristic::run(const LpProblem& problem,
+                                                         DualSimplexSolver& lp,
+                                                         std::span<const Real> primals,
+                                                         Real incumbent,
+                                                         std::span<const Real> incumbent_values) {
     last_fixed_count_ = 0;
     last_executed_solve_ = false;
     last_lp_iterations_ = 0;
@@ -80,20 +46,25 @@ std::optional<HeuristicSolution> CrossoverHeuristic::run(
     // Fix integer variables where LP relaxation and incumbent agree
     // (both round to the same integer value).
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j])) {
+            continue;
+        }
 
         Real lp_round = std::round(primals[j]);
         Real inc_round = std::round(incumbent_values[j]);
 
-        if (std::abs(lp_round - inc_round) > kFeasTol) continue;
+        if (std::abs(lp_round - inc_round) > kFeasTol) {
+            continue;
+        }
 
         Real lower = -kInf;
         Real upper = kInf;
         lp.getColBounds(j, lower, upper);
-        if (lp_round < lower - kFeasTol || lp_round > upper + kFeasTol) continue;
+        if (lp_round < lower - kFeasTol || lp_round > upper + kFeasTol) {
+            continue;
+        }
         // Skip if already fixed.
-        if (std::abs(lower - lp_round) <= kFeasTol &&
-            std::abs(upper - lp_round) <= kFeasTol) {
+        if (std::abs(lower - lp_round) <= kFeasTol && std::abs(upper - lp_round) <= kFeasTol) {
             continue;
         }
 
@@ -123,11 +94,14 @@ std::optional<HeuristicSolution> CrossoverHeuristic::run(
     last_work_units_ = result.work_units;
 
     std::optional<HeuristicSolution> best;
-    if (result.status == Status::Optimal && result.objective < incumbent - kObjectiveTol) {
+    if (result.status == Status::Optimal &&
+        betterObjective(problem.sense, result.objective, incumbent)) {
         auto candidate = lp.getPrimalValues();
         bool integer_feasible = true;
         for (Index j = 0; j < n; ++j) {
-            if (!isIntegerVar(problem.col_type[j])) continue;
+            if (!isIntegerVar(problem.col_type[j])) {
+                continue;
+            }
             if (!isIntegral(candidate[j], kFeasTol)) {
                 integer_feasible = false;
                 break;
@@ -138,18 +112,24 @@ std::optional<HeuristicSolution> CrossoverHeuristic::run(
             best = HeuristicSolution{std::move(candidate), result.objective};
         } else if (enable_rounding_repair_) {
             for (Index j = 0; j < n; ++j) {
-                if (!isIntegerVar(problem.col_type[j])) continue;
+                if (!isIntegerVar(problem.col_type[j])) {
+                    continue;
+                }
                 Real lb = -kInf;
                 Real ub = kInf;
                 lp.getColBounds(j, lb, ub);
                 Real rounded = std::round(candidate[j]);
-                if (lb != -kInf) rounded = std::max(rounded, lb);
-                if (ub != kInf) rounded = std::min(rounded, ub);
+                if (lb != -kInf) {
+                    rounded = std::max(rounded, lb);
+                }
+                if (ub != kInf) {
+                    rounded = std::min(rounded, ub);
+                }
                 candidate[j] = rounded;
             }
             if (isRowFeasible(problem, candidate)) {
                 Real repaired_obj = computeObjective(problem, candidate);
-                if (repaired_obj < incumbent - kObjectiveTol) {
+                if (betterObjective(problem.sense, repaired_obj, incumbent)) {
                     best = HeuristicSolution{std::move(candidate), repaired_obj};
                 }
             }

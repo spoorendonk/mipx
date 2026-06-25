@@ -345,7 +345,7 @@ Real clampValue(Real v, Real lb, Real ub) {
     return std::clamp(v, lo, hi);
 }
 
-bool betterObjective(Sense sense, Real candidate, Real incumbent) {
+bool improvesObjective(Sense sense, Real candidate, Real incumbent) {
     if (!std::isfinite(incumbent) || incumbent >= kInf) {
         return true;
     }
@@ -569,7 +569,7 @@ std::optional<HeuristicSolution> runLpFreeFeasJump(const LpProblem& problem,
         greedyRepair(problem, x, 6, work_units);
         if (isFeasiblePoint(problem, x, &work_units)) {
             const Real obj = objectiveValue(problem, x);
-            if (betterObjective(problem.sense, obj, incumbent)) {
+            if (improvesObjective(problem.sense, obj, incumbent)) {
                 return HeuristicSolution{.values = x, .objective = obj};
             }
         }
@@ -607,7 +607,7 @@ std::optional<HeuristicSolution> runLpFreeFeasJump(const LpProblem& problem,
         greedyRepair(problem, x, 4, work_units);
         if (isFeasiblePoint(problem, x, &work_units)) {
             const Real obj = objectiveValue(problem, x);
-            if (betterObjective(problem.sense, obj, incumbent)) {
+            if (improvesObjective(problem.sense, obj, incumbent)) {
                 return HeuristicSolution{.values = x, .objective = obj};
             }
         }
@@ -668,7 +668,7 @@ std::optional<HeuristicSolution> runLpFreeFpr(const LpProblem& problem,
         return std::nullopt;
     }
     const Real obj = objectiveValue(problem, x);
-    if (!betterObjective(problem.sense, obj, incumbent)) {
+    if (!improvesObjective(problem.sense, obj, incumbent)) {
         return std::nullopt;
     }
     return HeuristicSolution{.values = std::move(x), .objective = obj};
@@ -716,7 +716,7 @@ std::optional<HeuristicSolution> runLpFreeLocalMip(const LpProblem& problem,
                 continue;
             }
             const Real obj = objectiveValue(problem, trial);
-            if (betterObjective(problem.sense, obj, best_obj)) {
+            if (improvesObjective(problem.sense, obj, best_obj)) {
                 x = std::move(trial);
                 best_obj = obj;
                 improved = true;
@@ -724,7 +724,7 @@ std::optional<HeuristicSolution> runLpFreeLocalMip(const LpProblem& problem,
         }
     }
 
-    if (!improved || !betterObjective(problem.sense, best_obj, incumbent)) {
+    if (!improved || !improvesObjective(problem.sense, best_obj, incumbent)) {
         return std::nullopt;
     }
     return HeuristicSolution{.values = std::move(x), .objective = best_obj};
@@ -862,7 +862,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
             return std::nullopt;
         }
         const Real obj = objectiveValue(problem, sub_result.solution);
-        if (!betterObjective(problem.sense, obj, candidate.objective)) {
+        if (!improvesObjective(problem.sense, obj, candidate.objective)) {
             return std::nullopt;
         }
         return HeuristicSolution{.values = sub_result.solution, .objective = obj};
@@ -1217,7 +1217,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
         }
 
         const Real obj = objectiveValue(problem, x);
-        if (!betterObjective(problem.sense, obj, incumbent)) {
+        if (!improvesObjective(problem.sense, obj, incumbent)) {
             continue;
         }
 
@@ -1227,7 +1227,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
         }
 
         if (!best_candidate.has_value() ||
-            betterObjective(problem.sense, candidate.objective, best_candidate->objective)) {
+            improvesObjective(problem.sense, candidate.objective, best_candidate->objective)) {
             best_candidate = std::move(candidate);
         }
     }
@@ -1290,7 +1290,7 @@ std::optional<HeuristicSolution> runLpLightDiving(const LpProblem& problem,
         return std::nullopt;
     }
     const Real obj = objectiveValue(problem, x);
-    if (!betterObjective(problem.sense, obj, incumbent)) {
+    if (!improvesObjective(problem.sense, obj, incumbent)) {
         return std::nullopt;
     }
     return HeuristicSolution{.values = std::move(x), .objective = obj};
@@ -1343,13 +1343,11 @@ void MipSolver::runRootProbing() {
     }
 
     if (verbose_ && (stats.variables_probed > 0)) {
-        log_.log("Probing: %d vars probed, %d fixings, %d implications, "
-                 "%d VUBs, %d VLBs, %d equivalences, %d rounds, %.3fs\n",
-                 stats.variables_probed, fixings_applied,
-                 stats.implications_found,
-                 stats.vubs_found, stats.vlbs_found,
-                 stats.equivalences_found,
-                 stats.rounds, stats.time_seconds);
+        log_.log(
+            "Probing: %d vars probed, %d fixings, %d implications, "
+            "%d VUBs, %d VLBs, %d equivalences, %d rounds, %.3fs\n",
+            stats.variables_probed, fixings_applied, stats.implications_found, stats.vubs_found,
+            stats.vlbs_found, stats.equivalences_found, stats.rounds, stats.time_seconds);
     }
 }
 
@@ -1643,8 +1641,7 @@ Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals
             const Int imp_score = implication_graph_.implicationScore(j);
             score += 0.01 * static_cast<Real>(imp_score);
         }
-        if (score > best_score + 1e-12 ||
-            (std::abs(score - best_score) <= 1e-12 && j < best_var)) {
+        if (score > best_score + 1e-12 || (std::abs(score - best_score) <= 1e-12 && j < best_var)) {
             best_var = j;
             best_score = score;
         }
@@ -2231,19 +2228,17 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // scope (e.g., deeper nodes, models with continuous vars, or tree presolve
     // disabled).
     const bool tree_presolve_ran =
-        tree_presolve_enabled_ &&
-        tree_presolve_model_supported &&
-        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) &&
-        node.depth > 0 && node.depth <= tree_presolve_max_depth;
+        tree_presolve_enabled_ && tree_presolve_model_supported &&
+        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) && node.depth > 0 &&
+        node.depth <= tree_presolve_max_depth;
     // Local RC fixing is serial-only: rc_fixer_ stats are not thread-safe.
-    if (!tree_presolve_ran && num_threads_ <= 1 &&
-        rc_fixer_.loaded() && incumbent_snapshot < kInf &&
-        node_obj_out < incumbent_snapshot - 1e-6) {
+    if (!tree_presolve_ran && num_threads_ <= 1 && rc_fixer_.loaded() &&
+        incumbent_snapshot < kInf && node_obj_out < incumbent_snapshot - 1e-6) {
         auto node_rc = lp.getReducedCosts();
         std::vector<Index> rc_local_tightened;
-        bool rc_feasible = rc_fixer_.applyLocalFixing(
-            node_rc, node_primals_out, node_obj_out, incumbent_snapshot,
-            current_lower, current_upper, rc_local_tightened);
+        bool rc_feasible =
+            rc_fixer_.applyLocalFixing(node_rc, node_primals_out, node_obj_out, incumbent_snapshot,
+                                       current_lower, current_upper, rc_local_tightened);
         if (!rc_feasible) {
             if (use_conflicts) {
                 learnConflictFromNode(node.bound_changes, false);
@@ -2268,14 +2263,17 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (refresh.status == Status::Optimal) {
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
-                if (incumbent_snapshot < kInf &&
-                    node_obj_out >= incumbent_snapshot - 1e-6) {
+                if (incumbent_snapshot < kInf && node_obj_out >= incumbent_snapshot - 1e-6) {
                     return false;
                 }
                 frac_count = 0;
                 for (Index j = 0; j < problem_.num_cols; ++j) {
-                    if (problem_.col_type[j] == VarType::Continuous) continue;
-                    if (!isIntegral(node_primals_out[j], kIntTol)) ++frac_count;
+                    if (problem_.col_type[j] == VarType::Continuous) {
+                        continue;
+                    }
+                    if (!isIntegral(node_primals_out[j], kIntTol)) {
+                        ++frac_count;
+                    }
                 }
                 int_inf_out = frac_count;
             }
@@ -4938,11 +4936,13 @@ MipResult MipSolver::solve() {
     if (incumbent < kInf) {
         auto root_rc = lp.getReducedCosts();
         std::vector<Index> rc_tightened;
-        bool rc_feasible = rc_fixer_.applyGlobalFixing(
-            root_rc, root_primals, root_bound, incumbent,
-            problem_.col_lower, problem_.col_upper, rc_tightened);
+        bool rc_feasible =
+            rc_fixer_.applyGlobalFixing(root_rc, root_primals, root_bound, incumbent,
+                                        problem_.col_lower, problem_.col_upper, rc_tightened);
         if (!rc_feasible) {
-            if (verbose_) log_.log("Root RC fixing detected infeasibility.\n");
+            if (verbose_) {
+                log_.log("Root RC fixing detected infeasibility.\n");
+            }
             MipResult result;
             result.status = Status::Infeasible;
             result.nodes = 1;
@@ -4954,8 +4954,7 @@ MipResult MipSolver::solve() {
         }
         if (!rc_tightened.empty()) {
             for (Index j : rc_tightened) {
-                lp.setColBounds(j, problem_.col_lower[j],
-                                problem_.col_upper[j]);
+                lp.setColBounds(j, problem_.col_lower[j], problem_.col_upper[j]);
             }
             if (verbose_) {
                 log_.log("Root RC fixing: %d global tightenings, %d fixings\n",
@@ -5137,10 +5136,8 @@ MipResult MipSolver::solve() {
             rc_fixing_stats_.tree_local_fixings > 0 ||
             rc_fixing_stats_.tree_local_tightenings > 0) {
             log_.log("RCFixing: root_fix=%d root_tight=%d tree_fix=%d tree_tight=%d\n",
-                     rc_fixing_stats_.root_global_fixings,
-                     rc_fixing_stats_.root_global_tightenings,
-                     rc_fixing_stats_.tree_local_fixings,
-                     rc_fixing_stats_.tree_local_tightenings);
+                     rc_fixing_stats_.root_global_fixings, rc_fixing_stats_.root_global_tightenings,
+                     rc_fixing_stats_.tree_local_fixings, rc_fixing_stats_.tree_local_tightenings);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));

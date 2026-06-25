@@ -1,22 +1,21 @@
+#include "common.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <cmath>
 
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
-
 namespace mipx {
+
+using namespace heuristic_detail;
 
 // ---------------------------------------------------------------------------
 // DivingHeuristic: common diving loop
 // ---------------------------------------------------------------------------
 
-std::optional<HeuristicSolution> DivingHeuristic::dive(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> DivingHeuristic::dive(const LpProblem& problem,
+                                                       DualSimplexSolver& lp,
+                                                       std::span<const Real> primals,
+                                                       Real incumbent) {
     const Index n = problem.num_cols;
 
     // Save original bounds so we can restore them after diving.
@@ -38,11 +37,8 @@ std::optional<HeuristicSolution> DivingHeuristic::dive(
         auto [var, fix_val] = selectVariable(problem, current_primals, problem.obj);
         if (var < 0) {
             // All integer variables are integral - we have a feasible solution!
-            Real obj = problem.obj_offset;
-            for (Index j = 0; j < n; ++j) {
-                obj += problem.obj[j] * current_primals[j];
-            }
-            if (obj < incumbent - 1e-6) {
+            Real obj = computeObjective(problem, current_primals);
+            if (betterObjective(problem.sense, obj, incumbent)) {
                 best = HeuristicSolution{current_primals, obj};
             }
             break;
@@ -74,14 +70,16 @@ std::optional<HeuristicSolution> DivingHeuristic::dive(
         current_primals = lp.getPrimalValues();
 
         // Check if we improved over incumbent.
-        if (result.objective >= incumbent - 1e-6) {
+        if (!betterObjective(problem.sense, result.objective, incumbent)) {
             break;  // Can't beat incumbent, stop diving.
         }
 
         // Check if solution is integer feasible.
         bool feasible = true;
         for (Index j = 0; j < n; ++j) {
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (problem.col_type[j] == VarType::Continuous) {
+                continue;
+            }
             if (!isIntegral(current_primals[j])) {
                 feasible = false;
                 break;
@@ -89,11 +87,8 @@ std::optional<HeuristicSolution> DivingHeuristic::dive(
         }
 
         if (feasible) {
-            Real obj = problem.obj_offset;
-            for (Index j = 0; j < n; ++j) {
-                obj += problem.obj[j] * current_primals[j];
-            }
-            if (obj < incumbent - 1e-6) {
+            Real obj = computeObjective(problem, current_primals);
+            if (betterObjective(problem.sense, obj, incumbent)) {
                 best = HeuristicSolution{current_primals, obj};
             }
             break;
@@ -121,26 +116,27 @@ std::optional<HeuristicSolution> DivingHeuristic::dive(
 // FractionalDiving
 // ---------------------------------------------------------------------------
 
-std::optional<HeuristicSolution> FractionalDiving::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> FractionalDiving::run(const LpProblem& problem,
+                                                       DualSimplexSolver& lp,
+                                                       std::span<const Real> primals,
+                                                       Real incumbent) {
     return dive(problem, lp, primals, incumbent);
 }
 
 std::pair<Index, Real> FractionalDiving::selectVariable(
-    const LpProblem& problem,
-    std::span<const Real> primals,
+    const LpProblem& problem, std::span<const Real> primals,
     [[maybe_unused]] std::span<const Real> obj) const {
-
     // Select the most fractional integer variable (closest to 0.5).
     Index best_var = -1;
     Real best_frac = 0.0;
 
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
-        if (isIntegral(primals[j])) continue;
+        if (problem.col_type[j] == VarType::Continuous) {
+            continue;
+        }
+        if (isIntegral(primals[j])) {
+            continue;
+        }
 
         Real frac = fractionality(primals[j]);
         Real dist_to_half = std::abs(frac - 0.5);
@@ -151,7 +147,9 @@ std::pair<Index, Real> FractionalDiving::selectVariable(
         }
     }
 
-    if (best_var < 0) return {-1, 0.0};
+    if (best_var < 0) {
+        return {-1, 0.0};
+    }
 
     // Round to nearest integer.
     Real fix_val = std::round(primals[best_var]);
@@ -164,27 +162,28 @@ std::pair<Index, Real> FractionalDiving::selectVariable(
 // CoefficientDiving
 // ---------------------------------------------------------------------------
 
-std::optional<HeuristicSolution> CoefficientDiving::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> CoefficientDiving::run(const LpProblem& problem,
+                                                        DualSimplexSolver& lp,
+                                                        std::span<const Real> primals,
+                                                        Real incumbent) {
     return dive(problem, lp, primals, incumbent);
 }
 
-std::pair<Index, Real> CoefficientDiving::selectVariable(
-    const LpProblem& problem,
-    std::span<const Real> primals,
-    std::span<const Real> obj) const {
-
+std::pair<Index, Real> CoefficientDiving::selectVariable(const LpProblem& problem,
+                                                         std::span<const Real> primals,
+                                                         std::span<const Real> obj) const {
     // Select the fractional integer variable where rounding costs the least
     // in terms of objective degradation per unit change.
     Index best_var = -1;
     Real best_score = kInf;
 
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
-        if (isIntegral(primals[j])) continue;
+        if (problem.col_type[j] == VarType::Continuous) {
+            continue;
+        }
+        if (isIntegral(primals[j])) {
+            continue;
+        }
 
         Real val = primals[j];
         Real floor_val = std::floor(val);
@@ -202,7 +201,9 @@ std::pair<Index, Real> CoefficientDiving::selectVariable(
         }
     }
 
-    if (best_var < 0) return {-1, 0.0};
+    if (best_var < 0) {
+        return {-1, 0.0};
+    }
 
     // Round in the cheaper direction.
     Real val = primals[best_var];
@@ -226,19 +227,15 @@ std::pair<Index, Real> CoefficientDiving::selectVariable(
 // HeuristicScheduler
 // ---------------------------------------------------------------------------
 
-void HeuristicScheduler::addHeuristic(std::unique_ptr<Heuristic> heuristic,
-                                       HeuristicTiming timing,
-                                       Int frequency) {
+void HeuristicScheduler::addHeuristic(std::unique_ptr<Heuristic> heuristic, HeuristicTiming timing,
+                                      Int frequency) {
     entries_.push_back({std::move(heuristic), timing, frequency, 0});
 }
 
-std::optional<HeuristicSolution> HeuristicScheduler::run(
-    const LpProblem& problem,
-    DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent,
-    Int node_count) {
-
+std::optional<HeuristicSolution> HeuristicScheduler::run(const LpProblem& problem,
+                                                         DualSimplexSolver& lp,
+                                                         std::span<const Real> primals,
+                                                         Real incumbent, Int node_count) {
     std::optional<HeuristicSolution> best;
 
     for (auto& entry : entries_) {
@@ -256,14 +253,16 @@ std::optional<HeuristicSolution> HeuristicScheduler::run(
                 break;
         }
 
-        if (!should_run) continue;
+        if (!should_run) {
+            continue;
+        }
 
         auto result = entry.heuristic->run(problem, lp, primals, incumbent);
         if (result) {
             ++entry.solutions;
             ++total_solutions_;
             // Keep the best solution found.
-            if (!best || result->objective < best->objective) {
+            if (!best || betterObjective(problem.sense, result->objective, best->objective)) {
                 best = std::move(result);
                 incumbent = best->objective;  // Update for subsequent heuristics.
             }

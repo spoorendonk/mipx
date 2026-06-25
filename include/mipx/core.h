@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 namespace mipx {
 
 using Real = double;
@@ -35,5 +37,18 @@ enum class ConstraintSense {
     Eq,
     Range,
 };
+
+/// Compare objectives respecting optimization sense.
+/// A non-finite incumbent (e.g. +/-kInf) means "no incumbent yet", so any
+/// candidate is considered better.
+[[nodiscard]] inline bool betterObjective(Sense sense, Real candidate, Real incumbent) {
+    if (!std::isfinite(incumbent)) {
+        return true;
+    }
+    if (sense == Sense::Minimize) {
+        return candidate < incumbent - 1e-6;
+    }
+    return candidate > incumbent + 1e-6;
+}
 
 }  // namespace mipx
