@@ -60,12 +60,6 @@ public:
     void resetWorkUnits() { work_.reset(); }
 
 private:
-    /// Apply L eta vectors forward (for FTRAN).
-    void applyL(std::span<Real> x) const;
-
-    /// Apply L^T eta vectors backward (for BTRAN).
-    void applyLTranspose(std::span<Real> x) const;
-
     /// Apply Forrest-Tomlin update etas forward.
     void applyFT(std::span<Real> x) const;
 
@@ -204,6 +198,14 @@ private:
     // Floor on update count before the cost-based refactor trigger applies.
     // Prevents repeated tiny re-factorizations when ft_index_ briefly bursts.
     static constexpr Index kMinUpdatesForCostRefactor = 8;
+    // Upper bound on basis dimension for the cost-based refactor trigger.
+    // The trigger targets tiny bases (e.g. dim ~74) where max_updates=500 lets
+    // Forrest-Tomlin etas balloon to many times the base eta+U cost before a
+    // refactor fires. On larger bases a refactorization is O(nnz)-expensive and
+    // firing it speculatively (the 2x-base ratio is easy to reach when L/U are
+    // sparse) causes a refactor storm — this regressed MIPLIB "gen" (dim ~780)
+    // from optimal to a 20s timeout. Restrict the trigger to small bases.
+    static constexpr Index kCostRefactorMaxDim = 256;
     static constexpr Index kHyperSparseMinDim = 256;
     static constexpr Real kHyperSparseMaxDensity = 0.10;
     static constexpr Index kFtDenseMinDim = 512;

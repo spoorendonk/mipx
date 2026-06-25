@@ -822,11 +822,13 @@ bool BarrierSolver::runCrossover() {
             // Equality row — slack is fixed at zero.
             basis[ncols + i] = BasisStatus::Fixed;
         } else if (ru_finite && std::abs(ax[i] - ru) < tol) {
-            // Active at upper bound — slack at lower bound (zero).
-            basis[ncols + i] = BasisStatus::AtLower;
-        } else if (rl_finite && std::abs(ax[i] - rl) < tol) {
-            // Active at lower bound — slack at upper bound.
+            // Row active at its upper bound: slack value = activity = row_upper,
+            // so the slack is nonbasic at its upper bound. (mipx slack convention:
+            // s_i = a_i^T x with row_lower_i <= s_i <= row_upper_i.)
             basis[ncols + i] = BasisStatus::AtUpper;
+        } else if (rl_finite && std::abs(ax[i] - rl) < tol) {
+            // Row active at its lower bound: slack value = activity = row_lower.
+            basis[ncols + i] = BasisStatus::AtLower;
         } else {
             // Slack is interior — basic candidate.
             basis[ncols + i] = BasisStatus::Basic;

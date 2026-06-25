@@ -1319,34 +1319,6 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
 //  FTRAN: solve B*x = b
 // --------------------------------------------------------------------------
 
-void SparseLU::applyL(std::span<Real> x) const {
-    // Apply L eta vectors in forward order (step 0, 1, ..., dim-1).
-    for (Index step = 0; step < dim_; ++step) {
-        Index start = eta_start_[step];
-        Index end = eta_start_[step + 1];
-        Real pivot_x = x[row_perm_[step]];
-        if (pivot_x == 0.0) {
-            continue;
-        }
-        for (Index k = start; k < end; ++k) {
-            x[eta_index_[k]] -= eta_value_[k] * pivot_x;
-        }
-    }
-}
-
-void SparseLU::applyLTranspose(std::span<Real> x) const {
-    // Apply L^T in reverse order.
-    for (Index step = dim_ - 1; step >= 0; --step) {
-        Index start = eta_start_[step];
-        Index end = eta_start_[step + 1];
-        Real sum = 0.0;
-        for (Index k = start; k < end; ++k) {
-            sum += eta_value_[k] * x[eta_index_[k]];
-        }
-        x[row_perm_[step]] -= sum;
-    }
-}
-
 void SparseLU::applyFT(std::span<Real> x) const {
     // Product-form update: E^{-1} * x where E has column pivot_pos replaced by d.
     // E^{-1} * x: x'[p] = x[p] / d[p], x'[i] = x[i] - d[i] * x'[p] for i != p.
@@ -1374,12 +1346,9 @@ void SparseLU::applyFT(std::span<Real> x) const {
 void SparseLU::applyFTTranspose(std::span<Real> x) const {
     // (E^{-1})^T * x in reverse order.
     // (E^{-1})^T: x'[i] stays for i != p, x'[p] = (x[p] - sum d[i]*x[i]) / d[p].
-    // Tracks output density via EMA (stage 3) to guide upstream solve decisions.
     if (num_updates_ == 0) {
         return;
     }
-
-    const Index n = static_cast<Index>(x.size());
 
     for (Index u = num_updates_ - 1; u >= 0; --u) {
         Index pos = ft_pivot_pos_[u];
@@ -1399,19 +1368,6 @@ void SparseLU::applyFTTranspose(std::span<Real> x) const {
             }
         }
         x[pos] = (x[pos] - sum) * ft_pivot_inv_[u];
-    }
-
-    // Count output nonzeros and update EMA for BTRAN FT-transpose density (stage 3).
-    Index output_nnz = 0;
-    for (Index i = 0; i < n; ++i) {
-        if (std::abs(x[i]) > kZeroTol) {
-            ++output_nnz;
-        }
-    }
-    {
-        const Real actual_density =
-            static_cast<Real>(output_nnz) / static_cast<Real>(std::max<Index>(n, 1));
-        ema_density_[3] = kEmaAlpha * actual_density + (1.0 - kEmaAlpha) * ema_density_[3];
     }
 }
 
@@ -2382,11 +2338,18 @@ bool SparseLU::needsRefactorization() const {
     // small bases) the per-solve cost balloons relative to the eta+U
     // base. The crossover at 2x base cost is empirically near the point
     // where amortizing one O(nnz) refactor pays off.
-    const uint64_t base_cost =
-        static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size());
-    const uint64_t ft_cost = static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_;
-    if (base_cost > 0 && ft_cost > 2 * base_cost && num_updates_ >= kMinUpdatesForCostRefactor) {
-        return true;
+    //
+    // Only applied to small bases (dim < kCostRefactorMaxDim): on larger
+    // bases a refactorization is expensive and the 2x-base ratio is easy to
+    // reach when L/U are sparse, so firing speculatively triggers a refactor
+    // storm that is a net slowdown (see kCostRefactorMaxDim docs).
+    if (dim_ < kCostRefactorMaxDim && num_updates_ >= kMinUpdatesForCostRefactor) {
+        const uint64_t base_cost =
+            static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size());
+        const uint64_t ft_cost = static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_;
+        if (base_cost > 0 && ft_cost > 2 * base_cost) {
+            return true;
+        }
     }
     return false;
 }
