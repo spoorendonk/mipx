@@ -23,6 +23,7 @@ add_executable(mipx-tests
     test_pdlp.cpp
     test_exact_refinement.cpp
     test_conflict_graph.cpp
+    test_clique_table.cpp
     test_reduced_cost_fixer.cpp
 )
 

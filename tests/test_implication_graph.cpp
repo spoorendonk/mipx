@@ -1,23 +1,20 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
+#include "mipx/domain.h"
 #include "mipx/implication_graph.h"
+#include "mipx/lp_problem.h"
 #include "mipx/probing.h"
 #include "mipx/variable_bounds.h"
-#include "mipx/domain.h"
-#include "mipx/lp_problem.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
 namespace {
 
-LpProblem makeProblem(Index num_cols, Index num_rows,
-                      std::vector<Triplet> triplets,
-                      std::vector<Real> row_lower,
-                      std::vector<Real> row_upper,
-                      std::vector<Real> col_lower,
-                      std::vector<Real> col_upper,
+LpProblem makeProblem(Index num_cols, Index num_rows, std::vector<Triplet> triplets,
+                      std::vector<Real> row_lower, std::vector<Real> row_upper,
+                      std::vector<Real> col_lower, std::vector<Real> col_upper,
                       std::vector<VarType> col_type = {}) {
     LpProblem prob;
     prob.num_cols = num_cols;
@@ -118,9 +115,15 @@ TEST_CASE("ImplicationGraph: propagation", "[implication_graph]") {
     // Check all expected fixings are present.
     bool found1 = false, found2 = false, found3 = false;
     for (const auto& [var, val] : propagated) {
-        if (var == 1 && !val) found1 = true;
-        if (var == 2 && val) found2 = true;
-        if (var == 3 && !val) found3 = true;
+        if (var == 1 && !val) {
+            found1 = true;
+        }
+        if (var == 2 && val) {
+            found2 = true;
+        }
+        if (var == 3 && !val) {
+            found3 = true;
+        }
     }
     CHECK(found1);
     CHECK(found2);
@@ -155,7 +158,9 @@ TEST_CASE("ImplicationGraph: transitive closure", "[implication_graph]") {
     const auto& before = graph.implications(0, true);
     bool has_direct = false;
     for (const auto& imp : before) {
-        if (imp.to_var == 2 && imp.to_val == true) has_direct = true;
+        if (imp.to_var == 2 && imp.to_val == true) {
+            has_direct = true;
+        }
     }
     CHECK_FALSE(has_direct);
 
@@ -166,7 +171,9 @@ TEST_CASE("ImplicationGraph: transitive closure", "[implication_graph]") {
     const auto& after = graph.implications(0, true);
     has_direct = false;
     for (const auto& imp : after) {
-        if (imp.to_var == 2 && imp.to_val == true) has_direct = true;
+        if (imp.to_var == 2 && imp.to_val == true) {
+            has_direct = true;
+        }
     }
     CHECK(has_direct);
 }
@@ -207,6 +214,42 @@ TEST_CASE("ImplicationGraph: opposite-sense equivalence detection", "[implicatio
     CHECK(equivs[0].var_a == 0);
     CHECK(equivs[0].var_b == 1);
     CHECK(equivs[0].same_sense == false);
+}
+
+TEST_CASE("ImplicationGraph: transitive-chain equivalence detection", "[implication_graph]") {
+    // Chain of same-sense pairs: x0 == x1 and x1 == x2 (with contrapositives).
+    // The SCC-based detector must also derive the transitive pair x0 == x2,
+    // which has no direct implication between x0 and x2.
+    ImplicationGraph graph;
+    std::vector<Index> binaries = {0, 1, 2};
+    graph.init(3, binaries);
+
+    // x0 == x1
+    graph.addImplication(0, true, 1, true);
+    graph.addImplication(1, true, 0, true);
+    graph.addImplication(0, false, 1, false);
+    graph.addImplication(1, false, 0, false);
+    // x1 == x2
+    graph.addImplication(1, true, 2, true);
+    graph.addImplication(2, true, 1, true);
+    graph.addImplication(1, false, 2, false);
+    graph.addImplication(2, false, 1, false);
+
+    auto equivs = graph.detectEquivalences();
+    // All three pairs are same-sense equivalent: (0,1), (0,2), (1,2).
+    REQUIRE(equivs.size() == 3);
+    for (const auto& eq : equivs) {
+        CHECK(eq.same_sense == true);
+    }
+
+    // The transitive pair (0,2) — not directly linked — must be present.
+    bool found_0_2 = false;
+    for (const auto& eq : equivs) {
+        if (eq.var_a == 0 && eq.var_b == 2) {
+            found_0_2 = true;
+        }
+    }
+    CHECK(found_0_2);
 }
 
 TEST_CASE("ImplicationGraph: fixing detection", "[implication_graph]") {
@@ -394,13 +437,8 @@ TEST_CASE("Probing: detects fixing from infeasible branch", "[probing]") {
     // If x0=1: x1<=0, x2<=0, but x1+x2>=2 => infeasible.
     // So x0 must be 0.
     auto prob = makeProblem(
-        3, 3,
-        {{0, 0, 1.0}, {0, 1, 1.0},
-         {1, 0, 1.0}, {1, 2, 1.0},
-         {2, 1, 1.0}, {2, 2, 1.0}},
-        {-kInf, -kInf, 2.0},
-        {1.0, 1.0, kInf},
-        {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
+        3, 3, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0}},
+        {-kInf, -kInf, 2.0}, {1.0, 1.0, kInf}, {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
         {VarType::Binary, VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
@@ -428,12 +466,8 @@ TEST_CASE("Probing: detects fixing from infeasible branch", "[probing]") {
 TEST_CASE("Probing: learns binary implications", "[probing]") {
     // x0 + x1 <= 1 (both binary)
     // This means: x0=1 => x1=0 and x1=1 => x0=0
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {1.0},
-        {0.0, 0.0}, {1.0, 1.0},
-        {VarType::Binary, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {1.0}, {0.0, 0.0},
+                            {1.0, 1.0}, {VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -449,7 +483,9 @@ TEST_CASE("Probing: learns binary implications", "[probing]") {
     const auto& imp = graph.implications(0, true);
     bool found = false;
     for (const auto& i : imp) {
-        if (i.to_var == 1 && !i.to_val) found = true;
+        if (i.to_var == 1 && !i.to_val) {
+            found = true;
+        }
     }
     CHECK(found);
 }
@@ -459,12 +495,8 @@ TEST_CASE("Probing: learns VUBs from bound tightening", "[probing]") {
     // When y=0: x0 <= 5
     // When y=1: x0 <= 2
     // VUB: x0 <= -3*y + 5
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 3.0}},
-        {-kInf}, {5.0},
-        {0.0, 0.0}, {10.0, 1.0},
-        {VarType::Continuous, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 3.0}}, {-kInf}, {5.0}, {0.0, 0.0},
+                            {10.0, 1.0}, {VarType::Continuous, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -481,12 +513,8 @@ TEST_CASE("Probing: learns VUBs from bound tightening", "[probing]") {
 TEST_CASE("Probing: no fixings on fully feasible problem", "[probing]") {
     // x0 + x1 <= 3, both binary.
     // Both directions feasible for both variables.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {3.0},
-        {0.0, 0.0}, {1.0, 1.0},
-        {VarType::Binary, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {3.0}, {0.0, 0.0},
+                            {1.0, 1.0}, {VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -501,12 +529,8 @@ TEST_CASE("Probing: no fixings on fully feasible problem", "[probing]") {
 
 TEST_CASE("Probing: skips already fixed variables", "[probing]") {
     // x0 is already fixed (lb==ub==0), x1 binary.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {1.0},
-        {0.0, 0.0}, {0.0, 1.0},
-        {VarType::Binary, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {1.0}, {0.0, 0.0},
+                            {0.0, 1.0}, {VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -526,13 +550,8 @@ TEST_CASE("Probing: multiple rounds discover cascading fixings", "[probing]") {
     // Actually: if x2=0, x3>=2 which is >1, infeasible. So x2=1.
     // If x2=1: x1<=0, so x1=0. Then x0 can be 0 or 1.
     auto prob = makeProblem(
-        4, 3,
-        {{0, 0, 1.0}, {0, 1, 1.0},
-         {1, 1, 1.0}, {1, 2, 1.0},
-         {2, 2, 1.0}, {2, 3, 1.0}},
-        {-kInf, -kInf, 2.0},
-        {1.0, 1.0, kInf},
-        {0.0, 0.0, 0.0, 0.0}, {1.0, 1.0, 1.0, 1.0},
+        4, 3, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}, {2, 2, 1.0}, {2, 3, 1.0}},
+        {-kInf, -kInf, 2.0}, {1.0, 1.0, kInf}, {0.0, 0.0, 0.0, 0.0}, {1.0, 1.0, 1.0, 1.0},
         {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
@@ -549,12 +568,8 @@ TEST_CASE("Probing: multiple rounds discover cascading fixings", "[probing]") {
 
 TEST_CASE("Probing: empty binary set produces no work", "[probing]") {
     // All continuous variables.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {10.0},
-        {0.0, 0.0}, {5.0, 5.0},
-        {VarType::Continuous, VarType::Continuous});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {10.0}, {0.0, 0.0},
+                            {5.0, 5.0}, {VarType::Continuous, VarType::Continuous});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -571,12 +586,9 @@ TEST_CASE("Probing: empty binary set produces no work", "[probing]") {
 TEST_CASE("Probing: clique constraint learns mutual exclusion", "[probing]") {
     // x0 + x1 + x2 <= 1 (all binary)
     // Probing x0=1 should fix x1=0 and x2=0.
-    auto prob = makeProblem(
-        3, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}},
-        {-kInf}, {1.0},
-        {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
-        {VarType::Binary, VarType::Binary, VarType::Binary});
+    auto prob =
+        makeProblem(3, 1, {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}}, {-kInf}, {1.0}, {0.0, 0.0, 0.0},
+                    {1.0, 1.0, 1.0}, {VarType::Binary, VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
@@ -591,14 +603,18 @@ TEST_CASE("Probing: clique constraint learns mutual exclusion", "[probing]") {
     // x0=1 => x1=0
     bool found01 = false;
     for (const auto& imp : graph.implications(0, true)) {
-        if (imp.to_var == 1 && !imp.to_val) found01 = true;
+        if (imp.to_var == 1 && !imp.to_val) {
+            found01 = true;
+        }
     }
     CHECK(found01);
 
     // x0=1 => x2=0
     bool found02 = false;
     for (const auto& imp : graph.implications(0, true)) {
-        if (imp.to_var == 2 && !imp.to_val) found02 = true;
+        if (imp.to_var == 2 && !imp.to_val) {
+            found02 = true;
+        }
     }
     CHECK(found02);
 }
@@ -606,12 +622,8 @@ TEST_CASE("Probing: clique constraint learns mutual exclusion", "[probing]") {
 TEST_CASE("Probing: equivalence detection through probing", "[probing]") {
     // x0 + x1 = 1 (exactly one must be 1)
     // This means x0 = 1-x1 (opposite-sense equivalence).
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {1.0}, {1.0},
-        {0.0, 0.0}, {1.0, 1.0},
-        {VarType::Binary, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {1.0}, {1.0}, {0.0, 0.0}, {1.0, 1.0},
+                            {VarType::Binary, VarType::Binary});
 
     ImplicationGraph graph;
     VariableBoundStore vb_store;
