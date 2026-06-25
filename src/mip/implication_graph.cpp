@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <queue>
+#include <stack>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace mipx {
@@ -27,9 +29,10 @@ void ImplicationGraph::clear() {
     num_implications_ = 0;
 }
 
-bool ImplicationGraph::addImplication(Index from_var, bool from_val,
-                                      Index to_var, bool to_val) {
-    if (!hasIndex(from_var) || !hasIndex(to_var)) return true;
+bool ImplicationGraph::addImplication(Index from_var, bool from_val, Index to_var, bool to_val) {
+    if (!hasIndex(from_var) || !hasIndex(to_var)) {
+        return true;
+    }
 
     // Self-contradiction: x=v => x=!v
     if (from_var == to_var && from_val != to_val) {
@@ -39,13 +42,17 @@ bool ImplicationGraph::addImplication(Index from_var, bool from_val,
     }
 
     // Self-tautology: x=v => x=v
-    if (from_var == to_var && from_val == to_val) return true;
+    if (from_var == to_var && from_val == to_val) {
+        return true;
+    }
 
     Index s = slot(from_var, from_val);
 
     // Check for duplicate.
     for (const auto& imp : adj_[s]) {
-        if (imp.to_var == to_var && imp.to_val == to_val) return true;
+        if (imp.to_var == to_var && imp.to_val == to_val) {
+            return true;
+        }
     }
 
     // Check for contradiction with existing implications.
@@ -80,9 +87,10 @@ bool ImplicationGraph::addImplication(Index from_var, bool from_val,
     return !contradiction;
 }
 
-const std::vector<BinaryImplication>& ImplicationGraph::implications(
-    Index var, bool val) const {
-    if (!hasIndex(var)) return kEmpty;
+const std::vector<BinaryImplication>& ImplicationGraph::implications(Index var, bool val) const {
+    if (!hasIndex(var)) {
+        return kEmpty;
+    }
     return adj_[slot(var, val)];
 }
 
@@ -131,8 +139,12 @@ Int ImplicationGraph::computeTransitiveClosure() {
             for (Index j = 0; j < n; ++j) {
                 for (int w = 0; w <= 1; ++w) {
                     Index target = 2 * j + w;
-                    if (target == start) continue;
-                    if (!visited[target]) continue;
+                    if (target == start) {
+                        continue;
+                    }
+                    if (!visited[target]) {
+                        continue;
+                    }
 
                     Index to_var = binary_vars_[j];
                     bool to_val = (w == 1);
@@ -161,62 +173,192 @@ Int ImplicationGraph::computeTransitiveClosure() {
 std::vector<VariableEquivalence> ImplicationGraph::detectEquivalences() const {
     std::vector<VariableEquivalence> result;
     const Index n = static_cast<Index>(binary_vars_.size());
+    if (n == 0) {
+        return result;
+    }
+
+    // Use Tarjan's SCC on the implication digraph.
+    // Nodes are literal slots: 2*i + val for internal index i, value val.
+    // Edge: slot s has implications adj_[s], each pointing to slot(to_var, to_val).
+    // Variables in the same SCC are equivalent.
+    const Index num_nodes = 2 * n;
+
+    std::vector<Index> scc_id(static_cast<std::size_t>(num_nodes), -1);
+    std::vector<Index> disc(static_cast<std::size_t>(num_nodes), -1);
+    std::vector<Index> low(static_cast<std::size_t>(num_nodes), -1);
+    std::vector<bool> on_stack(static_cast<std::size_t>(num_nodes), false);
+    std::stack<Index> stk;
+    Index timer = 0;
+    Index num_sccs = 0;
+
+    // Iterative Tarjan's to avoid deep recursion.
+    // We use an explicit call stack with frames.
+    struct Frame {
+        Index node;
+        Index adj_idx;  // Next adjacency to process.
+    };
+
+    for (Index start = 0; start < num_nodes; ++start) {
+        if (disc[start] >= 0) {
+            continue;
+        }
+
+        std::stack<Frame> call_stack;
+        call_stack.push({start, 0});
+        disc[start] = low[start] = timer++;
+        on_stack[start] = true;
+        stk.push(start);
+
+        while (!call_stack.empty()) {
+            auto& frame = call_stack.top();
+            Index u = frame.node;
+            const auto& neighbors = adj_[u];
+
+            if (frame.adj_idx < static_cast<Index>(neighbors.size())) {
+                const auto& imp = neighbors[frame.adj_idx];
+                ++frame.adj_idx;
+
+                if (!hasIndex(imp.to_var)) {
+                    continue;
+                }
+                Index w = slot(imp.to_var, imp.to_val);
+
+                if (disc[w] < 0) {
+                    disc[w] = low[w] = timer++;
+                    on_stack[w] = true;
+                    stk.push(w);
+                    call_stack.push({w, 0});
+                } else if (on_stack[w]) {
+                    low[u] = std::min(low[u], disc[w]);
+                }
+            } else {
+                // All neighbors processed; check if u is SCC root.
+                if (low[u] == disc[u]) {
+                    // Pop SCC members.
+                    while (true) {
+                        Index v = stk.top();
+                        stk.pop();
+                        on_stack[v] = false;
+                        scc_id[v] = num_sccs;
+                        if (v == u) {
+                            break;
+                        }
+                    }
+                    ++num_sccs;
+                }
+
+                call_stack.pop();
+                // Update parent's low-link.
+                if (!call_stack.empty()) {
+                    Index parent = call_stack.top().node;
+                    low[parent] = std::min(low[parent], low[u]);
+                }
+            }
+        }
+    }
+
+    // Find equivalences: two literals of the same variable in the same SCC
+    // is a contradiction (handled elsewhere). Two different variables whose
+    // literal pairs share SCCs are equivalent.
+    //
+    // Same-sense: a=0 and b=0 in same SCC AND a=1 and b=1 in same SCC
+    //   => a == b
+    // Opposite-sense: a=0 and b=1 in same SCC AND a=1 and b=0 in same SCC
+    //   => a == 1-b
+
+    // Group internal indices by their SCC pairs.
+    // For each internal index i, compute (scc_id[2i], scc_id[2i+1]).
+    // Variables with the same SCC pair are same-sense equivalent.
+    // Variables where one's pair is the reverse of another's are opposite-sense.
+
+    // Build map from scc pair -> list of internal indices.
+    struct PairHash {
+        std::size_t operator()(const std::pair<Index, Index>& p) const {
+            return std::hash<Index>()(p.first) ^ (std::hash<Index>()(p.second) * 2654435761ULL);
+        }
+    };
+    std::unordered_map<std::pair<Index, Index>, std::vector<Index>, PairHash> same_map;
 
     for (Index i = 0; i < n; ++i) {
-        for (Index j = i + 1; j < n; ++j) {
-            Index var_a = binary_vars_[i];
-            Index var_b = binary_vars_[j];
+        Index scc0 = scc_id[2 * i];
+        Index scc1 = scc_id[2 * i + 1];
+        same_map[{scc0, scc1}].push_back(i);
+    }
 
-            // Check same-sense equivalence: a=0 => b=0 AND b=0 => a=0
-            // (equivalently, a=1 => b=1 AND b=1 => a=1)
-            bool a0_implies_b0 = false;
-            bool b0_implies_a0 = false;
-            bool a1_implies_b1 = false;
-            bool b1_implies_a1 = false;
-
-            for (const auto& imp : adj_[2 * i]) {  // a=0
-                if (imp.to_var == var_b && !imp.to_val) a0_implies_b0 = true;
-            }
-            for (const auto& imp : adj_[2 * j]) {  // b=0
-                if (imp.to_var == var_a && !imp.to_val) b0_implies_a0 = true;
-            }
-            for (const auto& imp : adj_[2 * i + 1]) {  // a=1
-                if (imp.to_var == var_b && imp.to_val) a1_implies_b1 = true;
-            }
-            for (const auto& imp : adj_[2 * j + 1]) {  // b=1
-                if (imp.to_var == var_a && imp.to_val) b1_implies_a1 = true;
-            }
-
-            if (a0_implies_b0 && b0_implies_a0 && a1_implies_b1 && b1_implies_a1) {
+    // Same-sense equivalences: variables sharing the same (scc0, scc1) pair.
+    for (const auto& [key, indices] : same_map) {
+        for (std::size_t a = 0; a < indices.size(); ++a) {
+            for (std::size_t b = a + 1; b < indices.size(); ++b) {
+                Index var_a = binary_vars_[indices[a]];
+                Index var_b = binary_vars_[indices[b]];
+                if (var_a > var_b) {
+                    std::swap(var_a, var_b);
+                }
                 result.push_back({var_a, var_b, true});
-                continue;
             }
+        }
+    }
 
-            // Check opposite-sense equivalence: a=0 => b=1 AND b=1 => a=0
-            // (equivalently, a=1 => b=0 AND b=0 => a=1)
-            bool a0_implies_b1 = false;
-            bool b1_implies_a0 = false;
-            bool a1_implies_b0 = false;
-            bool b0_implies_a1 = false;
+    // Opposite-sense equivalences: variable i with SCC pair (a, b) is the
+    // opposite of variable j with the reversed pair (b, a). So pair up the
+    // entries of same_map[(a, b)] with those of same_map[(b, a)].
+    std::unordered_set<std::pair<Index, Index>, PairHash> same_keys;
+    for (const auto& [key, indices] : same_map) {
+        same_keys.insert(key);
+    }
 
-            for (const auto& imp : adj_[2 * i]) {
-                if (imp.to_var == var_b && imp.to_val) a0_implies_b1 = true;
-            }
-            for (const auto& imp : adj_[2 * j + 1]) {
-                if (imp.to_var == var_a && !imp.to_val) b1_implies_a0 = true;
-            }
-            for (const auto& imp : adj_[2 * i + 1]) {
-                if (imp.to_var == var_b && !imp.to_val) a1_implies_b0 = true;
-            }
-            for (const auto& imp : adj_[2 * j]) {
-                if (imp.to_var == var_a && imp.to_val) b0_implies_a1 = true;
-            }
+    for (const auto& [key, indices] : same_map) {
+        auto [scc0, scc1] = key;
+        if (scc0 == scc1) {
+            continue;  // Same-sense already handled.
+        }
+        auto reversed = std::make_pair(scc1, scc0);
+        if (!same_keys.contains(reversed)) {
+            continue;
+        }
+        // Avoid processing both (a,b) and (b,a) -- only process once.
+        if (scc0 > scc1) {
+            continue;
+        }
 
-            if (a0_implies_b1 && b1_implies_a0 && a1_implies_b0 && b0_implies_a1) {
+        auto it = same_map.find(reversed);
+        if (it == same_map.end()) {
+            continue;
+        }
+        const auto& other_indices = it->second;
+
+        for (Index i_idx : indices) {
+            for (Index j_idx : other_indices) {
+                if (i_idx == j_idx) {
+                    continue;
+                }
+                Index var_a = binary_vars_[i_idx];
+                Index var_b = binary_vars_[j_idx];
+                if (var_a > var_b) {
+                    std::swap(var_a, var_b);
+                }
                 result.push_back({var_a, var_b, false});
             }
         }
     }
+
+    // Deduplicate results.
+    std::sort(result.begin(), result.end(),
+              [](const VariableEquivalence& a, const VariableEquivalence& b) {
+                  if (a.var_a != b.var_a) {
+                      return a.var_a < b.var_a;
+                  }
+                  if (a.var_b != b.var_b) {
+                      return a.var_b < b.var_b;
+                  }
+                  return a.same_sense && !b.same_sense;
+              });
+    result.erase(std::unique(result.begin(), result.end(),
+                             [](const VariableEquivalence& a, const VariableEquivalence& b) {
+                                 return a.var_a == b.var_a && a.var_b == b.var_b &&
+                                        a.same_sense == b.same_sense;
+                             }),
+                 result.end());
 
     return result;
 }
@@ -231,7 +373,9 @@ std::vector<std::pair<Index, bool>> ImplicationGraph::detectFixings() const {
         // Check if var=0 leads to contradiction (implies both y=0 and y=1 for some y).
         bool zero_infeasible = false;
         for (const auto& imp1 : adj_[2 * i]) {
-            if (zero_infeasible) break;
+            if (zero_infeasible) {
+                break;
+            }
             for (const auto& imp2 : adj_[2 * i]) {
                 if (imp1.to_var == imp2.to_var && imp1.to_val != imp2.to_val) {
                     zero_infeasible = true;
@@ -243,7 +387,9 @@ std::vector<std::pair<Index, bool>> ImplicationGraph::detectFixings() const {
         // Check if var=1 leads to contradiction.
         bool one_infeasible = false;
         for (const auto& imp1 : adj_[2 * i + 1]) {
-            if (one_infeasible) break;
+            if (one_infeasible) {
+                break;
+            }
             for (const auto& imp2 : adj_[2 * i + 1]) {
                 if (imp1.to_var == imp2.to_var && imp1.to_val != imp2.to_val) {
                     one_infeasible = true;
@@ -264,7 +410,9 @@ std::vector<std::pair<Index, bool>> ImplicationGraph::detectFixings() const {
 }
 
 Int ImplicationGraph::implicationScore(Index var) const {
-    if (!hasIndex(var)) return 0;
+    if (!hasIndex(var)) {
+        return 0;
+    }
     Index idx = var_to_index_[var];
     return static_cast<Int>(adj_[2 * idx].size() + adj_[2 * idx + 1].size());
 }
@@ -272,7 +420,9 @@ Int ImplicationGraph::implicationScore(Index var) const {
 bool ImplicationGraph::propagate(Index var, bool val,
                                  std::vector<std::pair<Index, bool>>& propagated) const {
     propagated.clear();
-    if (!hasIndex(var)) return true;
+    if (!hasIndex(var)) {
+        return true;
+    }
 
     const Index n = static_cast<Index>(binary_vars_.size());
     std::vector<int8_t> state(static_cast<std::size_t>(n), -1);  // -1=unknown, 0=false, 1=true
@@ -288,7 +438,9 @@ bool ImplicationGraph::propagate(Index var, bool val,
         queue.pop();
 
         for (const auto& imp : adj_[current]) {
-            if (!hasIndex(imp.to_var)) continue;
+            if (!hasIndex(imp.to_var)) {
+                continue;
+            }
             Index to_idx = var_to_index_[imp.to_var];
             int8_t required = imp.to_val ? 1 : 0;
 

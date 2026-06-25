@@ -1,10 +1,10 @@
 #include "mipx/domain.h"
 
-#include <algorithm>
-#include <cmath>
-
 #include "mipx/clique_table.h"
 #include "mipx/implication_graph.h"
+
+#include <algorithm>
+#include <cmath>
 
 namespace mipx {
 
@@ -30,7 +30,8 @@ void DomainPropagator::setCliqueTable(const CliqueTable* table) {
 }
 
 void DomainPropagator::setBound(Index col, Real lower, Real upper) {
-    recordChange(col);
+    Real old_lower = lower_[col];
+    Real old_upper = upper_[col];
     bool changed = false;
 
     if (lower > lower_[col] + kTol) {
@@ -57,15 +58,20 @@ void DomainPropagator::setBound(Index col, Real lower, Real upper) {
     }
 
     if (changed) {
+        changes_.push_back({col, old_lower, old_upper});
         enqueueColumn(col);
     }
 }
 
-Real DomainPropagator::getLower(Index col) const { return lower_[col]; }
+Real DomainPropagator::getLower(Index col) const {
+    return lower_[col];
+}
 
-Real DomainPropagator::getUpper(Index col) const { return upper_[col]; }
+Real DomainPropagator::getUpper(Index col) const {
+    return upper_[col];
+}
 
-bool DomainPropagator::propagate() {
+bool DomainPropagator::propagate(Int max_iterations) {
     // If queue is empty, seed with all rows.
     if (queue_.empty()) {
         for (Index i = 0; i < num_rows_; ++i) {
@@ -74,7 +80,12 @@ bool DomainPropagator::propagate() {
         }
     }
 
+    Int iterations = 0;
     while (!queue_.empty()) {
+        if (max_iterations > 0 && iterations >= max_iterations) {
+            break;
+        }
+
         Index row = queue_.back();
         queue_.pop_back();
         row_in_queue_[row] = false;
@@ -82,16 +93,17 @@ bool DomainPropagator::propagate() {
         if (!propagateRow(row)) {
             return false;
         }
+        ++iterations;
     }
 
     // Run clique propagation after row-based propagation converges.
-    if (clique_table_ != nullptr) {
+    if (clique_table_ != nullptr && queue_.empty()) {
         if (!propagateCliques()) {
             return false;
         }
         // If clique propagation changed bounds, re-run row propagation.
         if (!queue_.empty()) {
-            return propagate();
+            return propagate(max_iterations > 0 ? max_iterations - iterations : 0);
         }
     }
 
@@ -99,7 +111,9 @@ bool DomainPropagator::propagate() {
 }
 
 bool DomainPropagator::propagateCliques() {
-    if (clique_table_ == nullptr) return true;
+    if (clique_table_ == nullptr) {
+        return true;
+    }
 
     std::vector<CliqueTable::BoundUpdate> updates;
     if (!clique_table_->propagate(lower_, upper_, updates)) {
@@ -107,16 +121,25 @@ bool DomainPropagator::propagateCliques() {
     }
 
     for (const auto& upd : updates) {
-        if (upd.col < 0 || upd.col >= num_cols_) continue;
+        if (upd.col < 0 || upd.col >= num_cols_) {
+            continue;
+        }
 
         bool changed = false;
+        bool recorded = false;
         if (upd.new_lower > lower_[upd.col] + kTol) {
-            recordChange(upd.col);
+            if (!recorded) {
+                recordChange(upd.col);
+                recorded = true;
+            }
             lower_[upd.col] = upd.new_lower;
             changed = true;
         }
         if (upd.new_upper < upper_[upd.col] - kTol) {
-            recordChange(upd.col);
+            if (!recorded) {
+                recordChange(upd.col);
+                recorded = true;
+            }
             upper_[upd.col] = upd.new_upper;
             changed = true;
         }
@@ -155,9 +178,7 @@ void DomainPropagator::popCheckpoint() {
 }
 
 Int DomainPropagator::numTightened() const {
-    Index base = checkpoint_stack_.empty()
-                     ? 0
-                     : checkpoint_stack_.back();
+    Index base = checkpoint_stack_.empty() ? 0 : checkpoint_stack_.back();
     return static_cast<Int>(changes_.size()) - base;
 }
 
@@ -200,11 +221,17 @@ bool DomainPropagator::propagateRow(Index row) {
     }
 
     // Check infeasibility using the full activity bounds.
-    if (inf_min_count == 0 && act_min > ru + kTol) return false;
-    if (inf_max_count == 0 && act_max < rl - kTol) return false;
+    if (inf_min_count == 0 && act_min > ru + kTol) {
+        return false;
+    }
+    if (inf_max_count == 0 && act_max < rl - kTol) {
+        return false;
+    }
 
     // If both sides have 2+ infinite contributions, no tightening is possible.
-    if (inf_min_count >= 2 && inf_max_count >= 2) return true;
+    if (inf_min_count >= 2 && inf_max_count >= 2) {
+        return true;
+    }
 
     // Try to tighten each variable's bounds.
     for (Index k = 0; k < rv.size(); ++k) {
@@ -300,8 +327,7 @@ bool DomainPropagator::propagateRow(Index row) {
         if (changed) {
             enqueueColumn(j);
             // Propagate binary implications when a variable becomes fixed.
-            if (implication_graph_ != nullptr &&
-                col_type_[j] != VarType::Continuous &&
+            if (implication_graph_ != nullptr && col_type_[j] != VarType::Continuous &&
                 lower_[j] > upper_[j] - kTol) {
                 if (!propagateImplications(j)) {
                     return false;
@@ -314,42 +340,62 @@ bool DomainPropagator::propagateRow(Index row) {
 }
 
 bool DomainPropagator::propagateImplications(Index col) {
-    if (implication_graph_ == nullptr) return true;
-    if (!implication_graph_->isBinary(col)) return true;
+    if (implication_graph_ == nullptr) {
+        return true;
+    }
 
-    // Determine the fixed value.
-    bool fixed_val = (lower_[col] > 0.5);
+    std::vector<Index> worklist;
+    worklist.push_back(col);
 
-    const auto& imps = implication_graph_->implications(col, fixed_val);
-    for (const auto& imp : imps) {
-        Index j = imp.to_var;
-        if (j < 0 || j >= num_cols_) continue;
+    while (!worklist.empty()) {
+        Index cur = worklist.back();
+        worklist.pop_back();
 
-        Real new_lb = imp.to_val ? 1.0 : lower_[j];
-        Real new_ub = imp.to_val ? upper_[j] : 0.0;
-
-        bool bound_changed = false;
-        if (new_lb > lower_[j] + kTol) {
-            recordChange(j);
-            lower_[j] = new_lb;
-            bound_changed = true;
-        }
-        if (new_ub < upper_[j] - kTol) {
-            recordChange(j);
-            upper_[j] = new_ub;
-            bound_changed = true;
+        if (!implication_graph_->isBinary(cur)) {
+            continue;
         }
 
-        if (lower_[j] > upper_[j] + kTol) {
-            return false;
-        }
+        // Determine the fixed value.
+        bool fixed_val = (lower_[cur] > 0.5);
 
-        if (bound_changed) {
-            enqueueColumn(j);
-            // Recursively propagate if this variable also became fixed.
-            if (lower_[j] > upper_[j] - kTol) {
-                if (!propagateImplications(j)) {
-                    return false;
+        const auto& imps = implication_graph_->implications(cur, fixed_val);
+        for (const auto& imp : imps) {
+            Index j = imp.to_var;
+            if (j < 0 || j >= num_cols_) {
+                continue;
+            }
+
+            Real new_lb = imp.to_val ? 1.0 : lower_[j];
+            Real new_ub = imp.to_val ? upper_[j] : 0.0;
+
+            bool bound_changed = false;
+            bool recorded = false;
+            if (new_lb > lower_[j] + kTol) {
+                if (!recorded) {
+                    recordChange(j);
+                    recorded = true;
+                }
+                lower_[j] = new_lb;
+                bound_changed = true;
+            }
+            if (new_ub < upper_[j] - kTol) {
+                if (!recorded) {
+                    recordChange(j);
+                    recorded = true;
+                }
+                upper_[j] = new_ub;
+                bound_changed = true;
+            }
+
+            if (lower_[j] > upper_[j] + kTol) {
+                return false;
+            }
+
+            if (bound_changed) {
+                enqueueColumn(j);
+                // If this variable also became fixed, add to worklist.
+                if (lower_[j] > upper_[j] - kTol) {
+                    worklist.push_back(j);
                 }
             }
         }

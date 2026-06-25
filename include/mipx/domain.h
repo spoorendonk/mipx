@@ -1,10 +1,10 @@
 #pragma once
 
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/sparse_matrix.h"
+
+#include <vector>
 
 namespace mipx {
 
@@ -18,9 +18,7 @@ public:
 
     /// Set an implication graph to use during propagation. Optional.
     /// The graph pointer must remain valid for the lifetime of the propagator.
-    void setImplicationGraph(const ImplicationGraph* graph) {
-        implication_graph_ = graph;
-    }
+    void setImplicationGraph(const ImplicationGraph* graph) { implication_graph_ = graph; }
 
     /// Attach a clique table for clique-based propagation.
     /// The clique table must outlive the propagator.
@@ -34,7 +32,8 @@ public:
     [[nodiscard]] Real getUpper(Index col) const;
 
     /// Run propagation. Returns false if infeasibility detected.
-    bool propagate();
+    /// @param max_iterations  Maximum row propagation iterations (0 = unlimited).
+    bool propagate(Int max_iterations = 0);
 
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();

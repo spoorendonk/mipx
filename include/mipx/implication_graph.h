@@ -1,8 +1,8 @@
 #pragma once
 
-#include <vector>
-
 #include "mipx/core.h"
+
+#include <vector>
 
 namespace mipx {
 
@@ -46,16 +46,16 @@ public:
     bool addImplication(Index from_var, bool from_val, Index to_var, bool to_val);
 
     /// Get all implications triggered by fixing `var` to `val`.
-    [[nodiscard]] const std::vector<BinaryImplication>& implications(
-        Index var, bool val) const;
+    [[nodiscard]] const std::vector<BinaryImplication>& implications(Index var, bool val) const;
 
     /// Number of implications stored.
     [[nodiscard]] Int numImplications() const { return num_implications_; }
 
     /// Number of binary variables tracked.
-    [[nodiscard]] Int numBinaryVars() const {
-        return static_cast<Int>(binary_vars_.size());
-    }
+    [[nodiscard]] Int numBinaryVars() const { return static_cast<Int>(binary_vars_.size()); }
+
+    /// Access the list of tracked binary variable indices.
+    [[nodiscard]] const std::vector<Index>& binaryVars() const { return binary_vars_; }
 
     /// Check if a variable is tracked as binary.
     [[nodiscard]] bool isBinary(Index var) const;
@@ -80,8 +80,7 @@ public:
     /// Propagate implications given a variable fixing.
     /// Fills `propagated` with all implied fixings.
     /// Returns false if a contradiction is found.
-    bool propagate(Index var, bool val,
-                   std::vector<std::pair<Index, bool>>& propagated) const;
+    bool propagate(Index var, bool val, std::vector<std::pair<Index, bool>>& propagated) const;
 
 private:
     /// Adjacency list node index: 2*internal_idx + val gives the slot.
@@ -91,8 +90,8 @@ private:
     [[nodiscard]] bool hasIndex(Index var) const;
 
     Index num_cols_ = 0;
-    std::vector<Index> binary_vars_;       // Original variable indices.
-    std::vector<Index> var_to_index_;      // Original var -> internal index (-1 if not binary).
+    std::vector<Index> binary_vars_;   // Original variable indices.
+    std::vector<Index> var_to_index_;  // Original var -> internal index (-1 if not binary).
     // Adjacency lists: adj_[2*i] = implications when var i is fixed to 0,
     //                  adj_[2*i+1] = implications when var i is fixed to 1.
     std::vector<std::vector<BinaryImplication>> adj_;
