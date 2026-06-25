@@ -2,19 +2,13 @@
 
 #include <cuda_runtime.h>
 #include <cmath>
-#include <cfloat>
 
 namespace mipx {
 
 static constexpr int kBlockSize = 256;
-static constexpr Real kInf = 1e30;
 
 static inline int gridSize(int n) {
     return (n + kBlockSize - 1) / kBlockSize;
-}
-
-__device__ inline bool devIsFinite(Real v) {
-    return v > -kInf && v < kInf;
 }
 
 __device__ inline void atomicMaxReal(Real* addr, Real value) {
@@ -103,7 +97,8 @@ __global__ void dualHalpernStepKernel(
     Real* __restrict__ current_y, const Real* __restrict__ initial_y,
     Real* __restrict__ pdhg_y, Real* __restrict__ reflected_y,
     const Real* __restrict__ a_xrefl, const Real* __restrict__ sigma_base,
-    const Real* __restrict__ row_lower, const Real* __restrict__ row_upper)
+    const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
+    const Int* __restrict__ row_constraint_type)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= m) return;
@@ -116,15 +111,17 @@ __global__ void dualHalpernStepKernel(
     Real rl = row_lower[i];
     Real ru = row_upper[i];
 
+    // Constraint type: 0=equality, 1=upper-only, 2=lower-only, 3=ranged.
+    Int ct = row_constraint_type[i];
     Real py;
-    if (rl == ru) {
+    if (ct == 0) {
         // Equality constraint.
         py = v - sigma * rl;
-    } else if (!devIsFinite(rl)) {
+    } else if (ct == 1) {
         // Upper-bound only.
         py = v - sigma * ru;
         if (py < 0.0) py = 0.0;
-    } else if (!devIsFinite(ru)) {
+    } else if (ct == 2) {
         // Lower-bound only.
         py = v - sigma * rl;
         if (py > 0.0) py = 0.0;
@@ -149,13 +146,14 @@ void launchDualHalpernStep(
     Real* pdhg_y, Real* reflected_y,
     const Real* a_xrefl, const Real* sigma_base,
     const Real* row_lower, const Real* row_upper,
+    const Int* row_constraint_type,
     cudaStream_t stream)
 {
     if (m <= 0) return;
     dualHalpernStepKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
         m, d_lambda, d_step, d_primal_weight,
         current_y, initial_y, pdhg_y, reflected_y,
-        a_xrefl, sigma_base, row_lower, row_upper);
+        a_xrefl, sigma_base, row_lower, row_upper, row_constraint_type);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +165,7 @@ __global__ void convergenceMetricsColKernel(
     const Real* __restrict__ pdhg_x, const Real* __restrict__ initial_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
     const Real* __restrict__ col_lower, const Real* __restrict__ col_upper,
+    const Real* __restrict__ finite_col_lower, const Real* __restrict__ finite_col_upper,
     const Real* __restrict__ dual_resid_scale,
     const Real* __restrict__ at_delta_y,
     Real primal_weight, Real step,
@@ -194,11 +193,14 @@ __global__ void convergenceMetricsColKernel(
 
         pobj = cscaled[j] * xj;
 
+        // Dual residual: reduced cost projected to feasible sign.
+        // When lb is ±inf, xj <= lb + eps is always false (IEEE arithmetic),
+        // so no finiteness guard is needed on the original bound arrays.
         Real grad = cscaled[j] + at_y[j];
         Real dr = 0.0;
-        if (xj <= lb + 1e-12 && devIsFinite(lb)) {
+        if (xj <= lb + 1e-12) {
             if (grad < 0.0) dr = grad;
-        } else if (xj >= ub - 1e-12 && devIsFinite(ub)) {
+        } else if (xj >= ub - 1e-12) {
             if (grad > 0.0) dr = grad;
         } else {
             dr = grad;
@@ -207,13 +209,12 @@ __global__ void convergenceMetricsColKernel(
         drsq = dr_orig * dr_orig;
         drmax = fabs(dr_orig);
 
-        Real pg = grad;
-        if (!devIsFinite(lb)) pg = (pg < 0.0) ? pg : 0.0;
-        if (!devIsFinite(ub)) pg = (pg > 0.0) ? pg : 0.0;
-        if (pg > 0.0 && devIsFinite(lb))
-            dobj_col = pg * lb;
-        else if (pg < 0.0 && devIsFinite(ub))
-            dobj_col = pg * ub;
+        // Dual objective column contribution (branchless).
+        // finite_col_lower/upper have inf replaced with 0, so the
+        // multiplication naturally yields 0 for infinite bounds.
+        Real pg_pos = fmax(grad, 0.0);
+        Real pg_neg = fmin(grad, 0.0);
+        dobj_col = pg_pos * finite_col_lower[j] + pg_neg * finite_col_upper[j];
 
         mov = dx * dx * primal_weight;
         interact = at_delta_y[j] * dx * 2.0 * step;
@@ -258,6 +259,7 @@ void launchConvergenceMetricsCol(
     const Real* pdhg_x, const Real* initial_x,
     const Real* cscaled, const Real* at_y,
     const Real* col_lower, const Real* col_upper,
+    const Real* finite_col_lower, const Real* finite_col_upper,
     const Real* dual_resid_scale,
     const Real* at_delta_y,
     Real primal_weight, Real step,
@@ -266,7 +268,8 @@ void launchConvergenceMetricsCol(
 {
     if (n <= 0) return;
     convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper, dual_resid_scale,
+        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper,
+        finite_col_lower, finite_col_upper, dual_resid_scale,
         at_delta_y, primal_weight, step, d_metrics);
 }
 
@@ -279,6 +282,7 @@ __global__ void convergenceMetricsRowKernel(
     const Real* __restrict__ pdhg_y, const Real* __restrict__ initial_y,
     const Real* __restrict__ ax,
     const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
+    const Real* __restrict__ finite_row_lower, const Real* __restrict__ finite_row_upper,
     const Real* __restrict__ primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
@@ -307,15 +311,13 @@ __global__ void convergenceMetricsRowKernel(
         presid = violation * violation;
         presid_max = fabs(violation);
 
-        // Dual objective row contribution.
+        // Dual objective row contribution (branchless).
+        // finite_row_lower/upper have inf replaced with 0, so the
+        // multiplication naturally yields 0 for infinite bounds.
         Real yi = pdhg_y[i];
-        Real pyi = yi;
-        if (!devIsFinite(ru)) pyi = (pyi < 0.0) ? pyi : 0.0;
-        if (!devIsFinite(rl)) pyi = (pyi > 0.0) ? pyi : 0.0;
-        if (pyi > 0.0 && devIsFinite(ru))
-            dobj_row = -pyi * ru;
-        else if (pyi < 0.0 && devIsFinite(rl))
-            dobj_row = -pyi * rl;
+        Real pyi_pos = fmax(yi, 0.0);
+        Real pyi_neg = fmin(yi, 0.0);
+        dobj_row = -pyi_pos * finite_row_upper[i] - pyi_neg * finite_row_lower[i];
 
         // FPE movement (dual part).
         Real dy = yi - initial_y[i];
@@ -355,6 +357,7 @@ void launchConvergenceMetricsRow(
     const Real* pdhg_y, const Real* initial_y,
     const Real* ax,
     const Real* row_lower, const Real* row_upper,
+    const Real* finite_row_lower, const Real* finite_row_upper,
     const Real* primal_resid_scale,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
@@ -362,7 +365,8 @@ void launchConvergenceMetricsRow(
 {
     if (m <= 0) return;
     convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, pdhg_y, initial_y, ax, row_lower, row_upper, primal_resid_scale,
+        m, pdhg_y, initial_y, ax, row_lower, row_upper,
+        finite_row_lower, finite_row_upper, primal_resid_scale,
         primal_weight, d_metrics);
 }
 

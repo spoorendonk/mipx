@@ -113,6 +113,14 @@ private:
     Real constraint_scale_ = 1.0;
     std::vector<Real> sigma_base_, tau_base_;
 
+    // Finite-bound arrays for GPU kernels: infinities replaced with zero
+    // so that multiplication by a bound never produces ±inf in reductions.
+    std::vector<Real> finite_col_lower_, finite_col_upper_;
+    std::vector<Real> finite_row_lower_, finite_row_upper_;
+
+    // Constraint type per row: 0=equality, 1=upper-only, 2=lower-only, 3=ranged.
+    std::vector<Int> row_constraint_type_;
+
     // Explicit A^T CSR storage (for GPU path).
     std::vector<Real> at_values_;
     std::vector<Index> at_col_indices_;

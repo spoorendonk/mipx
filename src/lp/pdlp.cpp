@@ -278,6 +278,32 @@ void PdlpSolver::buildScaledProblem() {
                 scaled_col_upper_[j] *= constraint_scale_;
         }
     }
+
+    // Precompute finite-bound arrays (inf → 0) for branchless GPU reductions.
+    finite_col_lower_.resize(static_cast<size_t>(n));
+    finite_col_upper_.resize(static_cast<size_t>(n));
+    for (Index j = 0; j < n; ++j) {
+        finite_col_lower_[j] = isFinite(scaled_col_lower_[j]) ? scaled_col_lower_[j] : 0.0;
+        finite_col_upper_[j] = isFinite(scaled_col_upper_[j]) ? scaled_col_upper_[j] : 0.0;
+    }
+    finite_row_lower_.resize(static_cast<size_t>(m));
+    finite_row_upper_.resize(static_cast<size_t>(m));
+    row_constraint_type_.resize(static_cast<size_t>(m));
+    for (Index i = 0; i < m; ++i) {
+        Real rl = scaled_row_lower_[i];
+        Real ru = scaled_row_upper_[i];
+        finite_row_lower_[i] = isFinite(rl) ? rl : 0.0;
+        finite_row_upper_[i] = isFinite(ru) ? ru : 0.0;
+        if (rl == ru) {
+            row_constraint_type_[i] = 0;  // equality
+        } else if (!isFinite(rl)) {
+            row_constraint_type_[i] = 1;  // upper-bound only
+        } else if (!isFinite(ru)) {
+            row_constraint_type_[i] = 2;  // lower-bound only
+        } else {
+            row_constraint_type_[i] = 3;  // ranged
+        }
+    }
 }
 
 void PdlpSolver::buildTransposeCSR() {
@@ -860,7 +886,7 @@ LpResult PdlpSolver::solveGpu() {
 
     used_gpu_ = false;
 
-    // Arena layout: 12n + 11m + 5 doubles.
+    // Arena layout: 14n + 13m + 5 doubles.
     // Iterate vectors (8n + 7m):
     //   current_x(n), current_y(m), initial_x(n), initial_y(m),
     //   pdhg_x(n), pdhg_y(m), reflected_x(n), reflected_y(m),
@@ -868,12 +894,15 @@ LpResult PdlpSolver::solveGpu() {
     // Constant vectors (4n + 4m):
     //   cscaled(n), col_lower(n), col_upper(n), tau_base(n),
     //   row_lower(m), row_upper(m), sigma_base(m)
+    // Finite-bound arrays (2n + 2m):
+    //   finite_col_lower(n), finite_col_upper(n),
+    //   finite_row_lower(m), finite_row_upper(m)
     // Power iteration (2n + m): pi_x(n), pi_y(m), pi_x_new(n)
     // Scalars (5): scratch(1), lambda(1), inner_count(1 Int, 1-double slot),
     //              step(1), primal_weight(1)
     const size_t sn = static_cast<size_t>(n);
     const size_t sm = static_cast<size_t>(m);
-    const size_t arena_doubles = 12 * sn + 11 * sm + 5;
+    const size_t arena_doubles = 14 * sn + 13 * sm + 5;
 
     Real* d_arena = nullptr;
     if (!cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_arena), arena_doubles * sizeof(Real)))) {
@@ -902,7 +931,11 @@ LpResult PdlpSolver::solveGpu() {
     Real* d_row_upper = d_row_lower + m;
     Real* d_tau_base = d_row_upper + m;
     Real* d_sigma_base = d_tau_base + n;
-    Real* d_pi_x = d_sigma_base + m;
+    Real* d_finite_col_lower = d_sigma_base + m;
+    Real* d_finite_col_upper = d_finite_col_lower + n;
+    Real* d_finite_row_lower = d_finite_col_upper + n;
+    Real* d_finite_row_upper = d_finite_row_lower + m;
+    Real* d_pi_x = d_finite_row_upper + m;
     Real* d_pi_y = d_pi_x + n;
     Real* d_pi_x_new = d_pi_y + m;
     Real* d_scratch = d_pi_x_new + n;
@@ -924,6 +957,22 @@ LpResult PdlpSolver::solveGpu() {
     cudaMemcpy(d_row_upper, scaled_row_upper_.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_tau_base, tau_base_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_sigma_base, sigma_base_.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+
+    // Upload finite-bound arrays.
+    cudaMemcpy(d_finite_col_lower, finite_col_lower_.data(), sn * sizeof(Real),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_finite_col_upper, finite_col_upper_.data(), sn * sizeof(Real),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_finite_row_lower, finite_row_lower_.data(), sm * sizeof(Real),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_finite_row_upper, finite_row_upper_.data(), sm * sizeof(Real),
+               cudaMemcpyHostToDevice);
+
+    // Upload constraint type array (separate allocation for Int type).
+    Int* d_row_constraint_type = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_row_constraint_type), sm * sizeof(Int));
+    cudaMemcpy(d_row_constraint_type, row_constraint_type_.data(), sm * sizeof(Int),
+               cudaMemcpyHostToDevice);
 
     std::vector<Real> primal_resid_scale(static_cast<size_t>(m), 0.0);
     for (Index i = 0; i < m; ++i) {
@@ -1161,7 +1210,7 @@ LpResult PdlpSolver::solveGpu() {
                 return false;
             launchDualHalpernStep(m, d_lambda, d_step, d_primal_weight, d_current_y, d_initial_y,
                                   d_pdhg_y, d_reflected_y, d_a_xrefl, d_sigma_base, d_row_lower,
-                                  d_row_upper, stream);
+                                  d_row_upper, d_row_constraint_type, stream);
         }
         return true;
     };
@@ -1260,10 +1309,12 @@ LpResult PdlpSolver::solveGpu() {
         // Fused reduction.
         launchZeroMetrics(d_metrics, stream);
         launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_cscaled, d_at_y, d_col_lower,
-                                    d_col_upper, d_dual_resid_scale, d_at_delta_y, primal_weight,
-                                    step, d_metrics, stream);
+                                    d_col_upper, d_finite_col_lower, d_finite_col_upper,
+                                    d_dual_resid_scale, d_at_delta_y, primal_weight, step,
+                                    d_metrics, stream);
         launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_ax, d_row_lower, d_row_upper,
-                                    d_primal_resid_scale, primal_weight, d_metrics, stream);
+                                    d_finite_row_lower, d_finite_row_upper, d_primal_resid_scale,
+                                    primal_weight, d_metrics, stream);
 
         // Transfer metrics to host.
         cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
@@ -1477,6 +1528,8 @@ cleanup:
         cudaFree(d_at_col_indices);
     if (d_at_row_starts)
         cudaFree(d_at_row_starts);
+    if (d_row_constraint_type)
+        cudaFree(d_row_constraint_type);
     if (d_arena)
         cudaFree(d_arena);
 
