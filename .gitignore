@@ -23,3 +23,6 @@ tests/data/*_roundtrip.mps
 
 # Scratch planning docs
 plan-barrier.md
+
+# Solver run logs
+Highs.log
