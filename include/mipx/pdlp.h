@@ -53,6 +53,12 @@ struct PdlpOptions {
     // scaling/solve. 0 = disabled (default).
     Real matrix_zero_tol = 0.0;
 
+    // Feasibility polishing (post-solve).
+    bool enable_polishing = true;
+    Real polish_primal_tol = 1e-6;
+    Real polish_dual_tol = 1e-6;
+    Int polish_max_iter = 500000;
+
     // Scaling.
     bool do_ruiz_scaling = true;
     Int ruiz_iterations = 10;

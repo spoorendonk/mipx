@@ -1396,6 +1396,284 @@ LpResult PdlpSolver::solve() {
 
     iterations_ = total_count;
 
+    // -----------------------------------------------------------------------
+    // Feasibility polishing phase (cuPDLPx-style post-solve).
+    //
+    // After the main PDHG loop converges, one residual (primal or dual) may
+    // be nearly tight while the other stalls. We run additional PDHG
+    // iterations targeting the tighter polish tolerances. The polish reuses
+    // the restart logic and primal weight controller from the main loop.
+    // -----------------------------------------------------------------------
+    if (converged && options_.enable_polishing) {
+        // Check if either residual already meets the polish tolerance.
+        // Re-evaluate current residuals (rel_primal_term / rel_dual_term
+        // were computed just before exiting the main loop — reuse the
+        // last-computed pdhg_x / pdhg_y which are still valid).
+        scaled_a_.multiply(pdhg_x, ax);
+
+        Real polish_primal_sq = 0.0;
+        Real polish_primal_max = 0.0;
+        for (Index i = 0; i < m; ++i) {
+            Real viol = ax[i] - std::clamp(ax[i], scaled_row_lower_[i], scaled_row_upper_[i]);
+            Real v = viol / (constraint_scale_ * row_scale_[i]);
+            polish_primal_sq += v * v;
+            polish_primal_max = std::max(polish_primal_max, std::abs(v));
+        }
+        Real rp = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                      ? polish_primal_max / (1.0 + bound_norm)
+                      : std::sqrt(polish_primal_sq) / (1.0 + bound_norm);
+
+        scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
+        Real polish_dual_sq = 0.0;
+        Real polish_dual_max = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            Real grad = cscaled_[j] + at_pdhg_y[j];
+            Real xj = pdhg_x[j];
+            Real lb = scaled_col_lower_[j];
+            Real ub = scaled_col_upper_[j];
+            Real dr = 0.0;
+            if (xj <= lb + 1e-12 && isFinite(lb))
+                dr = std::min(grad, 0.0);
+            else if (xj >= ub - 1e-12 && isFinite(ub))
+                dr = std::max(grad, 0.0);
+            else
+                dr = grad;
+            Real dr_orig = dr / (objective_scale_ * col_scale_[j]);
+            polish_dual_sq += dr_orig * dr_orig;
+            polish_dual_max = std::max(polish_dual_max, std::abs(dr_orig));
+        }
+        Real rd = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                      ? polish_dual_max / (1.0 + c_norm)
+                      : std::sqrt(polish_dual_sq) / (1.0 + c_norm);
+
+        bool needs_polish = rp > options_.polish_primal_tol || rd > options_.polish_dual_tol;
+
+        if (needs_polish && !timeLimitReached(t0, options_.max_solve_seconds)) {
+            if (options_.verbose) {
+                std::printf("PDLP polish: entering polish phase  pinf=% .2e  dinf=% .2e\n", rp, rd);
+            }
+
+            // Continue PDHG from current iterate with polish tolerances.
+            // Restart state is set from pdhg_x / pdhg_y.
+            for (Index j = 0; j < n; ++j) {
+                initial_x[j] = pdhg_x[j];
+                current_x[j] = pdhg_x[j];
+            }
+            for (Index i = 0; i < m; ++i) {
+                initial_y[i] = pdhg_y[i];
+                current_y[i] = pdhg_y[i];
+            }
+            inner_count = 0;
+            initial_fpe = -1.0;
+            last_trial_fpe = std::numeric_limits<Real>::infinity();
+
+            Int polish_count = 0;
+            bool polish_converged = false;
+
+            while (polish_count < options_.polish_max_iter) {
+                if (timeLimitReached(t0, options_.max_solve_seconds))
+                    break;
+                if (options_.stop_flag != nullptr &&
+                    options_.stop_flag->load(std::memory_order_relaxed))
+                    break;
+
+                Int batch = std::min(N, options_.polish_max_iter - polish_count);
+                for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+                    if (timeLimitReached(t0, options_.max_solve_seconds))
+                        break;
+                    Real lambda = static_cast<Real>(inner_count + k_offset) /
+                                  static_cast<Real>(inner_count + k_offset + 1);
+
+                    scaled_a_.multiplyTranspose(current_y, at_current_y);
+                    for (Index j = 0; j < n; ++j) {
+                        Real tau = step * tau_base_[j] / primal_weight;
+                        Real temp = current_x[j] - tau * (cscaled_[j] + at_current_y[j]);
+                        pdhg_x[j] = std::clamp(temp, scaled_col_lower_[j], scaled_col_upper_[j]);
+                        reflected_x[j] = 2.0 * pdhg_x[j] - current_x[j];
+                        current_x[j] = lambda * reflected_x[j] + (1.0 - lambda) * initial_x[j];
+                    }
+
+                    scaled_a_.multiply(reflected_x, a_xrefl);
+
+                    for (Index i = 0; i < m; ++i) {
+                        Real sigma = step * sigma_base_[i] * primal_weight;
+                        Real v = current_y[i] + sigma * a_xrefl[i];
+                        Real rl = scaled_row_lower_[i];
+                        Real ru = scaled_row_upper_[i];
+
+                        Real pdhg_yi;
+                        if (rl == ru) {
+                            pdhg_yi = v - sigma * rl;
+                        } else if (!isFinite(rl)) {
+                            pdhg_yi = std::max(0.0, v - sigma * ru);
+                        } else if (!isFinite(ru)) {
+                            pdhg_yi = std::min(0.0, v - sigma * rl);
+                        } else {
+                            if (v >= sigma * ru)
+                                pdhg_yi = v - sigma * ru;
+                            else if (v <= sigma * rl)
+                                pdhg_yi = v - sigma * rl;
+                            else
+                                pdhg_yi = 0.0;
+                        }
+                        pdhg_y[i] = pdhg_yi;
+                        reflected_y[i] = 2.0 * pdhg_yi - current_y[i];
+                        current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
+                    }
+                }
+                inner_count += batch;
+                polish_count += batch;
+                total_count += batch;
+
+                // Fixed-point error.
+                Real movement = 0.0;
+                Real dx_sq = 0.0, dy_sq = 0.0;
+                for (Index j = 0; j < n; ++j) {
+                    Real dx = pdhg_x[j] - initial_x[j];
+                    dx_sq += dx * dx;
+                }
+                for (Index i = 0; i < m; ++i) {
+                    Real dy = pdhg_y[i] - initial_y[i];
+                    dy_sq += dy * dy;
+                }
+                movement = dx_sq * primal_weight + dy_sq / primal_weight;
+
+                for (Index i = 0; i < m; ++i)
+                    delta_y_vec[i] = pdhg_y[i] - initial_y[i];
+                scaled_a_.multiplyTranspose(delta_y_vec, at_delta_y);
+                Real interaction = 0.0;
+                for (Index j = 0; j < n; ++j) {
+                    interaction += at_delta_y[j] * (pdhg_x[j] - initial_x[j]);
+                }
+                interaction *= 2.0 * step;
+                Real fpe = std::sqrt(std::max(movement + interaction, 0.0));
+                if (initial_fpe < 0.0)
+                    initial_fpe = fpe;
+
+                // Convergence check with polish tolerances.
+                scaled_a_.multiply(pdhg_x, ax);
+
+                Real pr_sq = 0.0, pr_max = 0.0;
+                for (Index i = 0; i < m; ++i) {
+                    Real viol =
+                        ax[i] - std::clamp(ax[i], scaled_row_lower_[i], scaled_row_upper_[i]);
+                    Real v = viol / (constraint_scale_ * row_scale_[i]);
+                    pr_sq += v * v;
+                    pr_max = std::max(pr_max, std::abs(v));
+                }
+                Real rp_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                                  ? pr_max / (1.0 + bound_norm)
+                                  : std::sqrt(pr_sq) / (1.0 + bound_norm);
+
+                scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
+                Real dr_sq = 0.0, dr_max = 0.0;
+                for (Index j = 0; j < n; ++j) {
+                    Real grad = cscaled_[j] + at_pdhg_y[j];
+                    Real xj = pdhg_x[j];
+                    Real lb = scaled_col_lower_[j];
+                    Real ub = scaled_col_upper_[j];
+                    Real d = 0.0;
+                    if (xj <= lb + 1e-12 && isFinite(lb))
+                        d = std::min(grad, 0.0);
+                    else if (xj >= ub - 1e-12 && isFinite(ub))
+                        d = std::max(grad, 0.0);
+                    else
+                        d = grad;
+                    Real d_orig = d / (objective_scale_ * col_scale_[j]);
+                    dr_sq += d_orig * d_orig;
+                    dr_max = std::max(dr_max, std::abs(d_orig));
+                }
+                Real rd_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                                  ? dr_max / (1.0 + c_norm)
+                                  : std::sqrt(dr_sq) / (1.0 + c_norm);
+
+                Real rel_primal_resid_pol = std::sqrt(pr_sq) / (1.0 + bound_norm);
+                Real rel_dual_resid_pol = std::sqrt(dr_sq) / (1.0 + c_norm);
+
+                if (options_.verbose && polish_count % (10 * N) == 0) {
+                    std::printf(
+                        "PDLP polish %7d  pinf=% .2e  dinf=% .2e  "
+                        "fpe=% .2e\n",
+                        polish_count, rp_now, rd_now, fpe);
+                }
+
+                if (rp_now <= options_.polish_primal_tol && rd_now <= options_.polish_dual_tol) {
+                    polish_converged = true;
+                    break;
+                }
+
+                // Restart decision (same logic as main loop).
+                bool do_restart = false;
+                if (polish_count == batch) {
+                    do_restart = true;
+                } else if (initial_fpe > 0.0 &&
+                           fpe <= options_.restart_sufficient_decay * initial_fpe) {
+                    do_restart = true;
+                } else if (initial_fpe > 0.0 &&
+                           fpe <= options_.restart_necessary_decay * initial_fpe &&
+                           fpe > last_trial_fpe) {
+                    do_restart = true;
+                } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
+                                                           static_cast<Real>(polish_count))) {
+                    do_restart = true;
+                }
+
+                last_trial_fpe = fpe;
+
+                if (do_restart) {
+                    if (options_.update_primal_weight) {
+                        Real pdist = 0.0, ddist = 0.0;
+                        for (Index j = 0; j < n; ++j) {
+                            Real d = pdhg_x[j] - initial_x[j];
+                            pdist += d * d;
+                        }
+                        pdist = std::sqrt(pdist);
+                        for (Index i = 0; i < m; ++i) {
+                            Real d = pdhg_y[i] - initial_y[i];
+                            ddist += d * d;
+                        }
+                        ddist = std::sqrt(ddist);
+
+                        Real ratio = (rel_primal_resid_pol > 1e-15)
+                                         ? rel_dual_resid_pol / rel_primal_resid_pol
+                                         : 0.0;
+
+                        if (pdist > 1e-16 && ddist > 1e-16 && pdist < 1e12 && ddist < 1e12 &&
+                            ratio > 1e-8 && ratio < 1e8) {
+                            Real err = std::log(ddist) - std::log(pdist) - std::log(primal_weight);
+                            pw_error_sum = options_.pid_i_smooth * pw_error_sum + err;
+                            Real de = err - pw_last_error;
+                            primal_weight *=
+                                std::exp(options_.pid_kp * err + options_.pid_ki * pw_error_sum +
+                                         options_.pid_kd * de);
+                            primal_weight = std::clamp(primal_weight, 1e-4, 1e8);
+                            pw_last_error = err;
+                        }
+                    }
+
+                    for (Index j = 0; j < n; ++j) {
+                        initial_x[j] = pdhg_x[j];
+                        current_x[j] = pdhg_x[j];
+                    }
+                    for (Index i = 0; i < m; ++i) {
+                        initial_y[i] = pdhg_y[i];
+                        current_y[i] = pdhg_y[i];
+                    }
+                    inner_count = 0;
+                    initial_fpe = -1.0;
+                    last_trial_fpe = std::numeric_limits<Real>::infinity();
+                }
+            }
+
+            iterations_ = total_count;
+
+            if (options_.verbose) {
+                std::printf("PDLP polish: %s after %d iterations\n",
+                            polish_converged ? "converged" : "exhausted budget", polish_count);
+            }
+        }
+    }
+
     if (converged) {
         // Reconstruct original solution.
         // x_pdlp lives in scaled space: x_scaled = x_orig / col_scale * constraint_scale.
@@ -2192,6 +2470,210 @@ LpResult PdlpSolver::solveGpu() {
     }
 
     iterations_ = total_count;
+
+    // -------------------------------------------------------------------
+    // GPU feasibility polishing phase.
+    // -------------------------------------------------------------------
+    if (converged && options_.enable_polishing &&
+        !timeLimitReached(t0, options_.max_solve_seconds)) {
+        // Evaluate current residuals on host via the metrics struct.
+        if (!spmv_a(desc_pdhg_x, desc_ax)) {
+            failGpuSolve(total_count);
+            goto cleanup;
+        }
+        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
+            failGpuSolve(total_count);
+            goto cleanup;
+        }
+        launchSubtract(m, d_pdhg_y, d_initial_y, d_delta_y, stream);
+        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
+            failGpuSolve(total_count);
+            goto cleanup;
+        }
+
+        launchZeroMetrics(d_metrics, stream);
+        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_cscaled, d_at_y, d_col_lower,
+                                    d_col_upper, d_finite_col_lower, d_finite_col_upper,
+                                    d_dual_resid_scale, d_at_delta_y, primal_weight, step,
+                                    d_metrics, stream);
+        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_ax, d_row_lower, d_row_upper,
+                                    d_finite_row_lower, d_finite_row_upper, d_primal_resid_scale,
+                                    primal_weight, d_metrics, stream);
+        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
+                        stream);
+        cudaStreamSynchronize(stream);
+
+        Real rp_gpu = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                          ? h_metrics->primal_resid_max / (1.0 + bound_norm)
+                          : std::sqrt(h_metrics->primal_resid_sq) / (1.0 + bound_norm);
+        Real rd_gpu = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                          ? h_metrics->dual_resid_max / (1.0 + c_norm)
+                          : std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
+
+        bool needs_polish =
+            rp_gpu > options_.polish_primal_tol || rd_gpu > options_.polish_dual_tol;
+
+        if (needs_polish) {
+            if (options_.verbose) {
+                std::printf(
+                    "PDLP polish: entering polish phase  pinf=% .2e  "
+                    "dinf=% .2e  [GPU]\n",
+                    rp_gpu, rd_gpu);
+            }
+
+            // Restart iterates from current pdhg solution.
+            launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y, d_current_x,
+                              d_current_y, stream);
+            inner_count = 0;
+            initial_fpe = -1.0;
+            last_trial_fpe = std::numeric_limits<Real>::infinity();
+
+            // Invalidate the CUDA graph — polish phase may have
+            // different batch sizes and we don't want stale captures.
+            if (graphExec) {
+                cudaGraphExecDestroy(graphExec);
+                graphExec = nullptr;
+            }
+            if (graph) {
+                cudaGraphDestroy(graph);
+                graph = nullptr;
+            }
+
+            Int polish_count = 0;
+            bool polish_converged = false;
+
+            while (polish_count < options_.polish_max_iter) {
+                if (timeLimitReached(t0, options_.max_solve_seconds))
+                    break;
+                if (options_.stop_flag != nullptr &&
+                    options_.stop_flag->load(std::memory_order_relaxed))
+                    break;
+
+                Int batch = std::min(N, options_.polish_max_iter - polish_count);
+
+                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
+                                stream);
+                if (!launchBatch(batch)) {
+                    failGpuSolve(total_count + polish_count);
+                    goto cleanup;
+                }
+
+                inner_count += batch;
+                polish_count += batch;
+                total_count += batch;
+
+                // Convergence check.
+                if (!spmv_a(desc_pdhg_x, desc_ax)) {
+                    failGpuSolve(total_count);
+                    goto cleanup;
+                }
+                launchSubtract(m, d_pdhg_y, d_initial_y, d_delta_y, stream);
+                if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
+                    failGpuSolve(total_count);
+                    goto cleanup;
+                }
+                if (!spmv_at(desc_pdhg_y, desc_at_y)) {
+                    failGpuSolve(total_count);
+                    goto cleanup;
+                }
+
+                launchZeroMetrics(d_metrics, stream);
+                launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_cscaled, d_at_y,
+                                            d_col_lower, d_col_upper, d_finite_col_lower,
+                                            d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
+                                            primal_weight, step, d_metrics, stream);
+                launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_ax, d_row_lower,
+                                            d_row_upper, d_finite_row_lower, d_finite_row_upper,
+                                            d_primal_resid_scale, primal_weight, d_metrics, stream);
+                cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                                cudaMemcpyDeviceToHost, stream);
+                cudaStreamSynchronize(stream);
+
+                Real rp_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                                  ? h_metrics->primal_resid_max / (1.0 + bound_norm)
+                                  : std::sqrt(h_metrics->primal_resid_sq) / (1.0 + bound_norm);
+                Real rd_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
+                                  ? h_metrics->dual_resid_max / (1.0 + c_norm)
+                                  : std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
+
+                Real rel_primal_resid_pol =
+                    std::sqrt(h_metrics->primal_resid_sq) / (1.0 + bound_norm);
+                Real rel_dual_resid_pol = std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
+
+                Real fpe =
+                    std::sqrt(std::max(h_metrics->fpe_movement + h_metrics->fpe_interaction, 0.0));
+                if (initial_fpe < 0.0)
+                    initial_fpe = fpe;
+
+                if (options_.verbose && polish_count % (10 * N) == 0) {
+                    std::printf(
+                        "PDLP polish %7d  pinf=% .2e  dinf=% .2e  "
+                        "fpe=% .2e  [GPU]\n",
+                        polish_count, rp_now, rd_now, fpe);
+                }
+
+                if (rp_now <= options_.polish_primal_tol && rd_now <= options_.polish_dual_tol) {
+                    polish_converged = true;
+                    break;
+                }
+
+                // Restart decision.
+                bool do_restart = false;
+                if (polish_count == batch) {
+                    do_restart = true;
+                } else if (initial_fpe > 0.0 &&
+                           fpe <= options_.restart_sufficient_decay * initial_fpe) {
+                    do_restart = true;
+                } else if (initial_fpe > 0.0 &&
+                           fpe <= options_.restart_necessary_decay * initial_fpe &&
+                           fpe > last_trial_fpe) {
+                    do_restart = true;
+                } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
+                                                           static_cast<Real>(polish_count))) {
+                    do_restart = true;
+                }
+
+                last_trial_fpe = fpe;
+
+                if (do_restart) {
+                    if (options_.update_primal_weight) {
+                        Real pdist = std::sqrt(h_metrics->primal_dist_sq);
+                        Real ddist = std::sqrt(h_metrics->dual_dist_sq);
+                        Real ratio = (rel_primal_resid_pol > 1e-15)
+                                         ? rel_dual_resid_pol / rel_primal_resid_pol
+                                         : 0.0;
+
+                        if (pdist > 1e-16 && ddist > 1e-16 && pdist < 1e12 && ddist < 1e12 &&
+                            ratio > 1e-8 && ratio < 1e8) {
+                            Real err = std::log(ddist) - std::log(pdist) - std::log(primal_weight);
+                            pw_error_sum = options_.pid_i_smooth * pw_error_sum + err;
+                            Real de = err - pw_last_error;
+                            primal_weight *=
+                                std::exp(options_.pid_kp * err + options_.pid_ki * pw_error_sum +
+                                         options_.pid_kd * de);
+                            primal_weight = std::clamp(primal_weight, 1e-4, 1e8);
+                            pw_last_error = err;
+                        }
+                    }
+
+                    cudaMemcpyAsync(d_primal_weight, &primal_weight, sizeof(Real),
+                                    cudaMemcpyHostToDevice, stream);
+                    launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y,
+                                      d_current_x, d_current_y, stream);
+                    inner_count = 0;
+                    initial_fpe = -1.0;
+                    last_trial_fpe = std::numeric_limits<Real>::infinity();
+                }
+            }
+
+            iterations_ = total_count;
+
+            if (options_.verbose) {
+                std::printf("PDLP polish: %s after %d iterations  [GPU]\n",
+                            polish_converged ? "converged" : "exhausted budget", polish_count);
+            }
+        }
+    }
 
     if (converged) {
         // Download solution.

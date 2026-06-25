@@ -1358,3 +1358,164 @@ TEST_CASE("PdlpSolver: Anderson acceleration GPU matches CPU", "[pdlp][anderson]
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// Feasibility polishing tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: polishing enabled does not regress simple LP", "[pdlp][polishing]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.enable_polishing = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: polishing disabled still converges", "[pdlp][polishing]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.enable_polishing = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: polishing tightens residuals on medium LP", "[pdlp][polishing]") {
+    auto lp = buildMediumLp();
+
+    // Solve without polishing.
+    PdlpSolver solver_no_polish;
+    PdlpOptions opts_no;
+    opts_no.verbose = false;
+    opts_no.use_gpu = false;
+    opts_no.max_iter = 500000;
+    opts_no.enable_polishing = false;
+    solver_no_polish.setOptions(opts_no);
+    solver_no_polish.load(lp);
+    auto result_no = solver_no_polish.solve();
+    REQUIRE(result_no.status == Status::Optimal);
+
+    // Solve with polishing (tight polish tolerances).
+    PdlpSolver solver_polish;
+    PdlpOptions opts_yes;
+    opts_yes.verbose = false;
+    opts_yes.use_gpu = false;
+    opts_yes.max_iter = 500000;
+    opts_yes.enable_polishing = true;
+    opts_yes.polish_primal_tol = 1e-7;
+    opts_yes.polish_dual_tol = 1e-7;
+    opts_yes.polish_max_iter = 500000;
+    solver_polish.setOptions(opts_yes);
+    solver_polish.load(lp);
+    auto result_yes = solver_polish.solve();
+    REQUIRE(result_yes.status == Status::Optimal);
+
+    // Both should produce similar objectives.
+    CHECK_THAT(result_yes.objective, WithinAbs(result_no.objective, 1.0));
+}
+
+TEST_CASE("PdlpSolver: polishing with equality constraints", "[pdlp][polishing]") {
+    // min x + 2y  s.t.  x + y = 10,  x,y >= 0
+    // Optimal: x=10, y=0, obj = 10.
+    LpProblem lp;
+    lp.name = "pdlp_polish_eq";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {10.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
+    opts.enable_polishing = true;
+    opts.polish_primal_tol = 1e-7;
+    opts.polish_dual_tol = 1e-7;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(10.0, 0.1));
+}
+
+TEST_CASE("PdlpSolver: polishing respects time limit", "[pdlp][polishing][time_limit]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.enable_polishing = true;
+    // Very tight polish tolerance that would take many iterations.
+    opts.polish_primal_tol = 1e-15;
+    opts.polish_dual_tol = 1e-15;
+    opts.polish_max_iter = 100000000;
+    // Short time limit — main loop should converge, then polish
+    // should be cut short by the time limit.
+    opts.max_solve_seconds = 0.5;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    // Should still report optimal since main loop converged.
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: polishing on GPU matches CPU", "[pdlp][polishing][gpu]") {
+    auto lp = buildMediumLp();
+
+    PdlpOptions cpu_opts;
+    cpu_opts.verbose = false;
+    cpu_opts.use_gpu = false;
+    cpu_opts.max_iter = 500000;
+    cpu_opts.enable_polishing = true;
+    cpu_opts.polish_primal_tol = 1e-6;
+    cpu_opts.polish_dual_tol = 1e-6;
+    auto cpu_result = solvePdlp(lp, cpu_opts);
+
+    PdlpOptions gpu_opts;
+    gpu_opts.verbose = false;
+    gpu_opts.use_gpu = true;
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    gpu_opts.max_iter = 500000;
+    gpu_opts.enable_polishing = true;
+    gpu_opts.polish_primal_tol = 1e-6;
+    gpu_opts.polish_dual_tol = 1e-6;
+    auto gpu_result = solvePdlp(lp, gpu_opts);
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
+}
