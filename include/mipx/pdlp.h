@@ -52,6 +52,12 @@ struct PdlpOptions {
     bool do_pock_chambolle_scaling = true;
     bool do_bound_obj_rescaling = true;
 
+    // Preconditioner refresh: recompute sigma_base/tau_base at restart when
+    // primal_weight has drifted far from its value at last preconditioning.
+    // Off by default — experimental.
+    bool preconditioner_refresh = false;
+    Real preconditioner_refresh_ratio = 10.0;
+
     // GPU acceleration.
     bool use_gpu = true;
     Int gpu_min_rows = 512;
@@ -94,6 +100,7 @@ public:
 private:
     void buildScaledProblem();
     void buildTransposeCSR();
+    void refreshPreconditioner(Real primal_weight);
     Real estimateSpectralNorm() const;
 #ifdef MIPX_HAS_CUDA
     LpResult solveGpu();
@@ -112,6 +119,7 @@ private:
     Real objective_scale_ = 1.0;
     Real constraint_scale_ = 1.0;
     std::vector<Real> sigma_base_, tau_base_;
+    Real precond_primal_weight_ = 1.0;  // primal_weight when preconditioner was last computed
 
     // Finite-bound arrays for GPU kernels: infinities replaced with zero
     // so that multiplication by a bound never produces ±inf in reductions.

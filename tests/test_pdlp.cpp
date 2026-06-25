@@ -693,3 +693,112 @@ TEST_CASE("PdlpSolver: matrix_zero_tol on medium LP matches baseline", "[pdlp][f
     REQUIRE(filtered.status == Status::Optimal);
     CHECK_THAT(filtered.objective, WithinAbs(baseline.objective, 1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// Preconditioner refresh tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: preconditioner refresh off by default", "[pdlp][precond_refresh]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 10000;
+    solver.setOptions(opts);
+    CHECK_FALSE(solver.options().preconditioner_refresh);
+
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: preconditioner refresh enabled produces correct result",
+          "[pdlp][precond_refresh]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 10000;
+    opts.preconditioner_refresh = true;
+    opts.preconditioner_refresh_ratio = 10.0;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: preconditioner refresh on medium LP matches baseline",
+          "[pdlp][precond_refresh]") {
+    auto lp = buildMediumLp();
+
+    auto baseline = solvePdlp(lp, quietOpts(500000, true, false));
+    REQUIRE(baseline.status == Status::Optimal);
+
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 500000;
+    opts.do_bound_obj_rescaling = true;
+    opts.preconditioner_refresh = true;
+    opts.preconditioner_refresh_ratio = 10.0;
+    auto refresh_result = solvePdlp(lp, opts);
+
+    REQUIRE(refresh_result.status == Status::Optimal);
+    CHECK_THAT(refresh_result.objective, WithinAbs(baseline.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: preconditioner refresh with aggressive ratio on medium LP",
+          "[pdlp][precond_refresh]") {
+    // Use a very low ratio (2x) so refresh fires frequently.
+    auto lp = buildMediumLp();
+
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 500000;
+    opts.do_bound_obj_rescaling = true;
+    opts.preconditioner_refresh = true;
+    opts.preconditioner_refresh_ratio = 2.0;
+    auto result = solvePdlp(lp, opts);
+
+    REQUIRE(result.status == Status::Optimal);
+    // Should still converge to approximately the same objective.
+    auto baseline = solvePdlp(lp, quietOpts(500000, true, false));
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(baseline.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: GPU with preconditioner refresh matches CPU",
+          "[pdlp][precond_refresh][gpu]") {
+    auto lp = buildMediumLp();
+
+    PdlpOptions cpu_opts;
+    cpu_opts.verbose = false;
+    cpu_opts.use_gpu = false;
+    cpu_opts.max_iter = 500000;
+    cpu_opts.preconditioner_refresh = true;
+    cpu_opts.preconditioner_refresh_ratio = 10.0;
+    auto cpu_result = solvePdlp(lp, cpu_opts);
+
+    PdlpOptions gpu_opts;
+    gpu_opts.verbose = false;
+    gpu_opts.use_gpu = true;
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    gpu_opts.max_iter = 500000;
+    gpu_opts.preconditioner_refresh = true;
+    gpu_opts.preconditioner_refresh_ratio = 10.0;
+    auto gpu_result = solvePdlp(lp, gpu_opts);
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
+}

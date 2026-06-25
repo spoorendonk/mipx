@@ -304,6 +304,8 @@ void PdlpSolver::buildScaledProblem() {
             row_constraint_type_[i] = 3;  // ranged
         }
     }
+
+    precond_primal_weight_ = options_.primal_weight;
 }
 
 void PdlpSolver::buildTransposeCSR() {
@@ -342,6 +344,41 @@ void PdlpSolver::buildTransposeCSR() {
             at_values_[pos] = vals[k];
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Preconditioner refresh
+// ---------------------------------------------------------------------------
+
+void PdlpSolver::refreshPreconditioner(Real primal_weight) {
+    const Index m = scaled_a_.numRows();
+    const Index n = scaled_a_.numCols();
+    if (!options_.do_pock_chambolle_scaling || m == 0 || n == 0)
+        return;
+
+    // Recompute Pock-Chambolle diagonal preconditioner from current matrix
+    // norms. Records the primal_weight at refresh time so drift can be
+    // tracked for the next potential refresh.
+    std::vector<Real> row_sq(static_cast<size_t>(m), 0.0);
+    std::vector<Real> col_sq(static_cast<size_t>(n), 0.0);
+    auto vals = scaled_a_.csr_values();
+    auto cols = scaled_a_.csr_col_indices();
+    auto rows = scaled_a_.csr_row_starts();
+    for (Index i = 0; i < m; ++i) {
+        for (Index k = rows[i]; k < rows[i + 1]; ++k) {
+            Real a = vals[k];
+            Index j = cols[k];
+            row_sq[i] += a * a;
+            col_sq[j] += a * a;
+        }
+    }
+    for (Index i = 0; i < m; ++i) {
+        sigma_base_[i] = 1.0 / std::max(std::sqrt(row_sq[i]), 1e-8);
+    }
+    for (Index j = 0; j < n; ++j) {
+        tau_base_[j] = 1.0 / std::max(std::sqrt(col_sq[j]), 1e-8);
+    }
+    precond_primal_weight_ = primal_weight;
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +831,21 @@ LpResult PdlpSolver::solve() {
                     primal_weight = best_primal_weight;
                     pw_error_sum = 0.0;
                     pw_last_error = 0.0;
+                }
+            }
+
+            // Preconditioner refresh when primal weight has drifted.
+            if (options_.preconditioner_refresh && precond_primal_weight_ > 0.0) {
+                Real drift = primal_weight / precond_primal_weight_;
+                if (drift > options_.preconditioner_refresh_ratio ||
+                    drift < 1.0 / options_.preconditioner_refresh_ratio) {
+                    refreshPreconditioner(primal_weight);
+                    if (options_.verbose) {
+                        std::printf(
+                            "PDLP preconditioner refresh at iter %d "
+                            "(pw drift %.2e -> %.2e)\n",
+                            total_count, precond_primal_weight_, primal_weight);
+                    }
                 }
             }
 
@@ -1418,6 +1470,26 @@ LpResult PdlpSolver::solveGpu() {
             // via pointer indirection, so no graph re-capture needed.
             cudaMemcpyAsync(d_primal_weight, &primal_weight, sizeof(Real), cudaMemcpyHostToDevice,
                             stream);
+
+            // Preconditioner refresh when primal weight has drifted.
+            if (options_.preconditioner_refresh && precond_primal_weight_ > 0.0) {
+                Real drift = primal_weight / precond_primal_weight_;
+                if (drift > options_.preconditioner_refresh_ratio ||
+                    drift < 1.0 / options_.preconditioner_refresh_ratio) {
+                    refreshPreconditioner(primal_weight);
+                    // Re-upload updated preconditioner to device.
+                    cudaMemcpyAsync(d_tau_base, tau_base_.data(), sn * sizeof(Real),
+                                    cudaMemcpyHostToDevice, stream);
+                    cudaMemcpyAsync(d_sigma_base, sigma_base_.data(), sm * sizeof(Real),
+                                    cudaMemcpyHostToDevice, stream);
+                    if (options_.verbose) {
+                        std::printf(
+                            "PDLP preconditioner refresh at iter %d "
+                            "(pw drift %.2e -> %.2e) [GPU]\n",
+                            total_count, precond_primal_weight_, primal_weight);
+                    }
+                }
+            }
 
             launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y, d_current_x,
                               d_current_y, stream);
