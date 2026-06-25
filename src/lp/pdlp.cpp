@@ -101,9 +101,22 @@ void PdlpSolver::load(const LpProblem& problem) {
     status_ = Status::Error;
     objective_ = 0.0;
     iterations_ = 0;
+    has_warm_start_ = false;
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_orig_.assign(static_cast<size_t>(original_.num_rows), 0.0);
     buildScaledProblem();
+}
+
+void PdlpSolver::setWarmStart(std::span<const Real> x, std::span<const Real> y) {
+    warm_start_x_.assign(x.begin(), x.end());
+    warm_start_y_.assign(y.begin(), y.end());
+    has_warm_start_ = true;
+}
+
+void PdlpSolver::clearWarmStart() {
+    warm_start_x_.clear();
+    warm_start_y_.clear();
+    has_warm_start_ = false;
 }
 
 void PdlpSolver::buildScaledProblem() {
@@ -549,8 +562,25 @@ LpResult PdlpSolver::solve() {
     }
     bool have_prev_iterate = false;
 
-    // Initialize at origin (or could warm-start later).
+    // Initialize at origin unless warm-started below.
     // initial_x = current_x = 0, initial_y = current_y = 0.
+
+    // Warm-start: scale original-space vectors into the PDLP scaled space.
+    // Primal: x_scaled = x_orig / col_scale * constraint_scale.
+    // Dual:   y_scaled = y_orig * objective_scale / (obj_sign * row_scale).
+    if (has_warm_start_ && static_cast<Index>(warm_start_x_.size()) == original_.num_cols &&
+        static_cast<Index>(warm_start_y_.size()) == original_.num_rows) {
+        for (Index j = 0; j < n; ++j) {
+            Real xj = warm_start_x_[j] / col_scale_[j] * constraint_scale_;
+            current_x[j] = xj;
+            initial_x[j] = xj;
+        }
+        for (Index i = 0; i < m; ++i) {
+            Real yi = warm_start_y_[i] * objective_scale_ / (obj_sign_ * row_scale_[i]);
+            current_y[i] = yi;
+            initial_y[i] = yi;
+        }
+    }
 
     Int inner_count = 0;
     Int total_count = 0;
@@ -1054,6 +1084,23 @@ LpResult PdlpSolver::solveGpu() {
 
     // Zero all iterate vectors (constants are overwritten by uploads below).
     cudaMemset(d_arena, 0, arena_doubles * sizeof(Real));
+
+    // Warm-start: scale original-space vectors and upload to device.
+    if (has_warm_start_ && static_cast<Index>(warm_start_x_.size()) == original_.num_cols &&
+        static_cast<Index>(warm_start_y_.size()) == original_.num_rows) {
+        std::vector<Real> ws_x(sn);
+        std::vector<Real> ws_y(sm);
+        for (Index j = 0; j < n; ++j) {
+            ws_x[j] = warm_start_x_[j] / col_scale_[j] * constraint_scale_;
+        }
+        for (Index i = 0; i < m; ++i) {
+            ws_y[i] = warm_start_y_[i] * objective_scale_ / (obj_sign_ * row_scale_[i]);
+        }
+        cudaMemcpy(d_current_x, ws_x.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_initial_x, ws_x.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_current_y, ws_y.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_initial_y, ws_y.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
+    }
 
     // Upload constant vectors.
     cudaMemcpy(d_cscaled, cscaled_.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);

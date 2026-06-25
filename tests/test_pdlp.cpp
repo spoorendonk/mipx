@@ -930,3 +930,134 @@ TEST_CASE("PdlpSolver: GPU with preconditioner refresh matches CPU",
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// Warm-start tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: warm-start re-solve converges faster than cold start", "[pdlp][warmstart]") {
+    // Solve the medium LP, then tighten a column upper bound and re-solve.
+    // Warm-starting from the prior solution should converge in fewer iterations.
+    auto lp = buildMediumLp();
+
+    PdlpSolver solver;
+    auto opts = quietOpts(500000, true, false);
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result1 = solver.solve();
+    REQUIRE(result1.status == Status::Optimal);
+
+    auto primal = solver.getPrimalValues();
+    auto dual = solver.getDualValues();
+
+    // Tighten one column upper bound slightly.
+    lp.col_upper[0] = 50.0;
+
+    // Cold-start solve of the modified LP.
+    PdlpSolver cold_solver;
+    cold_solver.setOptions(opts);
+    cold_solver.load(lp);
+    auto cold_result = cold_solver.solve();
+    REQUIRE(cold_result.status == Status::Optimal);
+
+    // Warm-start solve of the modified LP.
+    PdlpSolver warm_solver;
+    warm_solver.setOptions(opts);
+    warm_solver.load(lp);
+    warm_solver.setWarmStart(primal, dual);
+    auto warm_result = warm_solver.solve();
+    REQUIRE(warm_result.status == Status::Optimal);
+
+    // Objectives should match (first-order tolerance).
+    CHECK_THAT(warm_result.objective, WithinAbs(cold_result.objective, 1.0));
+
+    // Warm start should converge in fewer iterations.
+    CHECK(warm_result.iterations < cold_result.iterations);
+}
+
+TEST_CASE("PdlpSolver: warm-start on simple LP after bound change", "[pdlp][warmstart]") {
+    // min -x - y  s.t.  x + y <= 4,  x,y >= 0
+    // Optimal: x+y=4, obj=-4.
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.max_iter = 50000;
+    opts.use_gpu = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result1 = solver.solve();
+    REQUIRE(result1.status == Status::Optimal);
+
+    auto primal = solver.getPrimalValues();
+    auto dual = solver.getDualValues();
+
+    // Change the row upper bound from 4 to 3.
+    lp.row_upper[0] = 3.0;
+
+    // Cold start.
+    PdlpSolver cold;
+    cold.setOptions(opts);
+    cold.load(lp);
+    auto cold_result = cold.solve();
+    REQUIRE(cold_result.status == Status::Optimal);
+    CHECK_THAT(cold_result.objective, WithinAbs(-3.0, 1e-3));
+
+    // Warm start — should produce the same objective.
+    PdlpSolver warm;
+    warm.setOptions(opts);
+    warm.load(lp);
+    warm.setWarmStart(primal, dual);
+    auto warm_result = warm.solve();
+    REQUIRE(warm_result.status == Status::Optimal);
+    CHECK_THAT(warm_result.objective, WithinAbs(-3.0, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: clearWarmStart disables warm-start", "[pdlp][warmstart]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.max_iter = 50000;
+    opts.use_gpu = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result1 = solver.solve();
+    REQUIRE(result1.status == Status::Optimal);
+
+    auto primal = solver.getPrimalValues();
+    auto dual = solver.getDualValues();
+
+    // Set and then clear warm-start.
+    solver.setWarmStart(primal, dual);
+    solver.clearWarmStart();
+
+    // Re-load and solve — should behave like cold start.
+    solver.load(lp);
+    auto result2 = solver.solve();
+    REQUIRE(result2.status == Status::Optimal);
+    CHECK_THAT(result2.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: warm-start with wrong dimensions is ignored", "[pdlp][warmstart]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.max_iter = 50000;
+    opts.use_gpu = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    // Set warm-start with wrong dimensions — should be silently ignored.
+    std::vector<Real> wrong_x = {1.0};  // num_cols == 2, only 1 provided
+    std::vector<Real> wrong_y = {};
+    solver.setWarmStart(wrong_x, wrong_y);
+
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}

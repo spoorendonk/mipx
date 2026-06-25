@@ -100,6 +100,14 @@ public:
     void setColBounds(Index col, Real lower, Real upper) override;
     void setObjective(std::span<const Real> obj) override;
 
+    /// Set warm-start primal/dual solution from the original (unscaled) space.
+    /// Vectors are scaled internally through the Ruiz/Pock-Chambolle/bound-obj
+    /// pipeline at solve() time.  Silently ignored when vector dimensions do
+    /// not match the loaded problem (e.g. after presolve changes the variable
+    /// space).  Cleared automatically by load().
+    void setWarmStart(std::span<const Real> x, std::span<const Real> y);
+    void clearWarmStart();
+
     void setOptions(const PdlpOptions& options) { options_ = options; }
     [[nodiscard]] const PdlpOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
@@ -147,6 +155,11 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+
+    // Warm-start (original/unscaled space).
+    std::vector<Real> warm_start_x_;
+    std::vector<Real> warm_start_y_;
+    bool has_warm_start_ = false;
 };
 
 }  // namespace mipx
