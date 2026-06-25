@@ -65,6 +65,11 @@ struct PdlpOptions {
     bool preconditioner_refresh = false;
     Real preconditioner_refresh_ratio = 10.0;
 
+    // Anderson acceleration (AA) for iterate extrapolation at restarts.
+    bool anderson_acceleration = false;
+    Int anderson_window_size = 5;
+    Real anderson_regularization = 1e-10;
+
     // GPU acceleration.
     bool use_gpu = true;
     Int gpu_min_rows = 512;

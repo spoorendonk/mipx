@@ -283,6 +283,159 @@ inline bool checkUnboundednessCertificate(std::span<const Real> x, const LpProbl
     return obj_sign * c_dot_ray < -tol;
 }
 
+// Anderson acceleration (Type-I, safeguarded) for restart extrapolation.
+//
+// Reference: Walker & Ni (2011), "Anderson acceleration for fixed-point
+// iterations"; Zhang, O'Donoghue, Boyd (2020), "Globally convergent
+// type-I Anderson acceleration for non-smooth fixed-point iterations".
+// ---------------------------------------------------------------------------
+
+class AndersonAccelerator {
+public:
+    AndersonAccelerator() = default;
+
+    void init(Int window_size, Index dim, Real regularization) {
+        window_ = window_size;
+        dim_ = dim;
+        reg_ = regularization;
+        count_ = 0;
+        iterates_.resize(static_cast<size_t>(window_));
+        residuals_.resize(static_cast<size_t>(window_));
+        for (Int i = 0; i < window_; ++i) {
+            iterates_[i].resize(static_cast<size_t>(dim_), 0.0);
+            residuals_[i].resize(static_cast<size_t>(dim_), 0.0);
+        }
+    }
+
+    void store(std::span<const Real> iterate, std::span<const Real> residual) {
+        Int slot = count_ % window_;
+        auto& xi = iterates_[slot];
+        auto& ri = residuals_[slot];
+        for (Index k = 0; k < dim_; ++k) {
+            xi[k] = iterate[k];
+            ri[k] = residual[k];
+        }
+        ++count_;
+    }
+
+    [[nodiscard]] bool extrapolate(std::span<Real> result) const {
+        Int depth = std::min(count_, static_cast<Int>(window_));
+        if (depth < 2)
+            return false;
+
+        const Int d = depth;
+        std::vector<Real> gram(static_cast<size_t>(d * d), 0.0);
+
+        auto slot_of = [&](Int i) -> Int { return static_cast<Int>((count_ - d + i) % window_); };
+
+        for (Int i = 0; i < d; ++i) {
+            const auto& ri = residuals_[slot_of(i)];
+            for (Int j = i; j < d; ++j) {
+                const auto& rj = residuals_[slot_of(j)];
+                Real s = 0.0;
+                for (Index k = 0; k < dim_; ++k)
+                    s += ri[k] * rj[k];
+                gram[i * d + j] = s;
+                gram[j * d + i] = s;
+            }
+        }
+
+        // Tikhonov regularization.
+        Real trace = 0.0;
+        for (Int i = 0; i < d; ++i)
+            trace += gram[i * d + i];
+        Real mu = reg_ * trace / static_cast<Real>(d);
+        for (Int i = 0; i < d; ++i)
+            gram[i * d + i] += mu;
+
+        // Cholesky factorization of (G + mu*I).
+        std::vector<Real> chol(static_cast<size_t>(d * d), 0.0);
+        for (Int i = 0; i < d; ++i) {
+            for (Int j = 0; j <= i; ++j) {
+                Real s = gram[i * d + j];
+                for (Int p = 0; p < j; ++p) {
+                    s -= chol[i * d + p] * chol[j * d + p];
+                }
+                if (i == j) {
+                    if (s <= 0.0)
+                        return false;
+                    chol[i * d + j] = std::sqrt(s);
+                } else {
+                    chol[i * d + j] = s / chol[j * d + j];
+                }
+            }
+        }
+
+        // Forward solve: L * z = e.
+        std::vector<Real> z(static_cast<size_t>(d), 0.0);
+        for (Int i = 0; i < d; ++i) {
+            Real s = 1.0;
+            for (Int p = 0; p < i; ++p)
+                s -= chol[i * d + p] * z[p];
+            z[i] = s / chol[i * d + i];
+        }
+
+        // Back solve: L^T * alpha = z.
+        std::vector<Real> alpha(static_cast<size_t>(d), 0.0);
+        for (Int i = d - 1; i >= 0; --i) {
+            Real s = z[i];
+            for (Int p = i + 1; p < d; ++p)
+                s -= chol[p * d + i] * alpha[p];
+            alpha[i] = s / chol[i * d + i];
+        }
+
+        // Normalize so sum(alpha) = 1.
+        Real sum_alpha = 0.0;
+        for (Int i = 0; i < d; ++i)
+            sum_alpha += alpha[i];
+        if (std::abs(sum_alpha) < 1e-15)
+            return false;
+        for (Int i = 0; i < d; ++i)
+            alpha[i] /= sum_alpha;
+
+        // Extrapolated iterate: x_aa = sum(alpha_i * x_i).
+        for (Index k = 0; k < dim_; ++k)
+            result[k] = 0.0;
+        for (Int i = 0; i < d; ++i) {
+            const auto& xi = iterates_[slot_of(i)];
+            Real ai = alpha[i];
+            for (Index k = 0; k < dim_; ++k) {
+                result[k] += ai * xi[k];
+            }
+        }
+
+        // Safeguard: accept only if the extrapolated residual is smaller
+        // than the latest iterate's residual.
+        Real aa_resid_sq = 0.0;
+        for (Index k = 0; k < dim_; ++k) {
+            Real r = 0.0;
+            for (Int i = 0; i < d; ++i) {
+                r += alpha[i] * residuals_[slot_of(i)][k];
+            }
+            aa_resid_sq += r * r;
+        }
+
+        Int latest = slot_of(d - 1);
+        Real latest_resid_sq = 0.0;
+        for (Index k = 0; k < dim_; ++k) {
+            Real r = residuals_[latest][k];
+            latest_resid_sq += r * r;
+        }
+
+        return aa_resid_sq < latest_resid_sq;
+    }
+
+    void reset() { count_ = 0; }
+
+private:
+    Int window_ = 0;
+    Index dim_ = 0;
+    Real reg_ = 1e-10;
+    Int count_ = 0;
+    std::vector<std::vector<Real>> iterates_;
+    std::vector<std::vector<Real>> residuals_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -796,6 +949,20 @@ LpResult PdlpSolver::solve() {
 
     bool converged = false;
 
+    // Anderson acceleration state.
+    AndersonAccelerator aa;
+    std::vector<Real> aa_iterate;
+    std::vector<Real> aa_residual;
+    std::vector<Real> aa_result;
+    const bool use_aa = options_.anderson_acceleration && options_.anderson_window_size >= 2;
+    if (use_aa) {
+        const Index aa_dim = n + m;
+        aa.init(options_.anderson_window_size, aa_dim, options_.anderson_regularization);
+        aa_iterate.resize(static_cast<size_t>(aa_dim));
+        aa_residual.resize(static_cast<size_t>(aa_dim));
+        aa_result.resize(static_cast<size_t>(aa_dim));
+    }
+
     while (total_count < options_.max_iter) {
         if (timeLimitReached(t0, options_.max_solve_seconds)) {
             status_ = Status::TimeLimit;
@@ -1170,14 +1337,55 @@ LpResult PdlpSolver::solve() {
                 }
             }
 
-            // Restart iterates.
-            for (Index j = 0; j < n; ++j) {
-                initial_x[j] = pdhg_x[j];
-                current_x[j] = pdhg_x[j];
-            }
-            for (Index i = 0; i < m; ++i) {
-                initial_y[i] = pdhg_y[i];
-                current_y[i] = pdhg_y[i];
+            // Restart iterates, possibly with Anderson acceleration.
+            if (use_aa) {
+                // Build concatenated iterate [pdhg_x; pdhg_y] and
+                // residual [pdhg_x - initial_x; pdhg_y - initial_y].
+                for (Index j = 0; j < n; ++j) {
+                    aa_iterate[j] = pdhg_x[j];
+                    aa_residual[j] = pdhg_x[j] - initial_x[j];
+                }
+                for (Index i = 0; i < m; ++i) {
+                    aa_iterate[n + i] = pdhg_y[i];
+                    aa_residual[n + i] = pdhg_y[i] - initial_y[i];
+                }
+                aa.store(aa_iterate, aa_residual);
+
+                // Try Anderson extrapolation.
+                bool aa_accepted = aa.extrapolate(aa_result);
+                if (aa_accepted) {
+                    // Use extrapolated point, projecting x onto bounds.
+                    for (Index j = 0; j < n; ++j) {
+                        Real xj =
+                            std::clamp(aa_result[j], scaled_col_lower_[j], scaled_col_upper_[j]);
+                        initial_x[j] = xj;
+                        current_x[j] = xj;
+                    }
+                    for (Index i = 0; i < m; ++i) {
+                        initial_y[i] = aa_result[n + i];
+                        current_y[i] = aa_result[n + i];
+                    }
+                } else {
+                    // Standard restart.
+                    for (Index j = 0; j < n; ++j) {
+                        initial_x[j] = pdhg_x[j];
+                        current_x[j] = pdhg_x[j];
+                    }
+                    for (Index i = 0; i < m; ++i) {
+                        initial_y[i] = pdhg_y[i];
+                        current_y[i] = pdhg_y[i];
+                    }
+                }
+            } else {
+                // Standard restart (no AA).
+                for (Index j = 0; j < n; ++j) {
+                    initial_x[j] = pdhg_x[j];
+                    current_x[j] = pdhg_x[j];
+                }
+                for (Index i = 0; i < m; ++i) {
+                    initial_y[i] = pdhg_y[i];
+                    current_y[i] = pdhg_y[i];
+                }
             }
             inner_count = 0;
             initial_fpe = -1.0;  // Will be set on next batch.
@@ -1593,6 +1801,20 @@ LpResult PdlpSolver::solveGpu() {
 
     bool converged = false;
 
+    // Anderson acceleration state (GPU path: AA runs on host at restart).
+    AndersonAccelerator gpu_aa;
+    std::vector<Real> gpu_aa_iterate;
+    std::vector<Real> gpu_aa_residual;
+    std::vector<Real> gpu_aa_result;
+    const bool gpu_use_aa = options_.anderson_acceleration && options_.anderson_window_size >= 2;
+    if (gpu_use_aa) {
+        const Index aa_dim = n + m;
+        gpu_aa.init(options_.anderson_window_size, aa_dim, options_.anderson_regularization);
+        gpu_aa_iterate.resize(static_cast<size_t>(aa_dim));
+        gpu_aa_residual.resize(static_cast<size_t>(aa_dim));
+        gpu_aa_result.resize(static_cast<size_t>(aa_dim));
+    }
+
     // Initialize d_inner_count on device.
     cudaMemset(d_inner_count, 0, sizeof(Int));
 
@@ -1915,8 +2137,52 @@ LpResult PdlpSolver::solveGpu() {
                 }
             }
 
-            launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y, d_current_x,
-                              d_current_y, stream);
+            if (gpu_use_aa) {
+                // Download pdhg and initial iterates to host for AA.
+                std::vector<Real> pdhg_x_h(sn), pdhg_y_h(sm);
+                std::vector<Real> init_x_h(sn), init_y_h(sm);
+                cudaMemcpy(pdhg_x_h.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+                cudaMemcpy(pdhg_y_h.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+                cudaMemcpy(init_x_h.data(), d_initial_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+                cudaMemcpy(init_y_h.data(), d_initial_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+
+                for (Index j = 0; j < n; ++j) {
+                    gpu_aa_iterate[j] = pdhg_x_h[j];
+                    gpu_aa_residual[j] = pdhg_x_h[j] - init_x_h[j];
+                }
+                for (Index i = 0; i < m; ++i) {
+                    gpu_aa_iterate[n + i] = pdhg_y_h[i];
+                    gpu_aa_residual[n + i] = pdhg_y_h[i] - init_y_h[i];
+                }
+                gpu_aa.store(gpu_aa_iterate, gpu_aa_residual);
+
+                bool aa_accepted = gpu_aa.extrapolate(gpu_aa_result);
+                if (aa_accepted) {
+                    // Project x onto bounds and upload to device.
+                    for (Index j = 0; j < n; ++j) {
+                        pdhg_x_h[j] = std::clamp(gpu_aa_result[j], scaled_col_lower_[j],
+                                                 scaled_col_upper_[j]);
+                    }
+                    for (Index i = 0; i < m; ++i) {
+                        pdhg_y_h[i] = gpu_aa_result[n + i];
+                    }
+                    // Upload AA result as both initial and current.
+                    cudaMemcpy(d_initial_x, pdhg_x_h.data(), sn * sizeof(Real),
+                               cudaMemcpyHostToDevice);
+                    cudaMemcpy(d_initial_y, pdhg_y_h.data(), sm * sizeof(Real),
+                               cudaMemcpyHostToDevice);
+                    cudaMemcpy(d_current_x, pdhg_x_h.data(), sn * sizeof(Real),
+                               cudaMemcpyHostToDevice);
+                    cudaMemcpy(d_current_y, pdhg_y_h.data(), sm * sizeof(Real),
+                               cudaMemcpyHostToDevice);
+                } else {
+                    launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y,
+                                      d_current_x, d_current_y, stream);
+                }
+            } else {
+                launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y, d_current_x,
+                                  d_current_y, stream);
+            }
             inner_count = 0;
             // d_inner_count will be updated at the start of the next batch.
             initial_fpe = -1.0;

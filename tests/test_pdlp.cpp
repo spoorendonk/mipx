@@ -1199,3 +1199,162 @@ TEST_CASE("PdlpSolver: warm-start with wrong dimensions is ignored", "[pdlp][war
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
 }
+
+// ---------------------------------------------------------------------------
+// Anderson acceleration tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: Anderson acceleration solves simple LP", "[pdlp][anderson]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.anderson_acceleration = true;
+    opts.anderson_window_size = 5;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration matches non-AA on simple LP", "[pdlp][anderson]") {
+    auto lp = buildSimpleLp();
+
+    auto opts_no_aa = quietOpts(50000, true, false);
+    auto result_no_aa = solvePdlp(lp, opts_no_aa);
+
+    auto opts_aa = quietOpts(50000, true, false);
+    opts_aa.anderson_acceleration = true;
+    opts_aa.anderson_window_size = 5;
+    auto result_aa = solvePdlp(lp, opts_aa);
+
+    REQUIRE(result_no_aa.status == Status::Optimal);
+    REQUIRE(result_aa.status == Status::Optimal);
+    CHECK_THAT(result_aa.objective, WithinAbs(result_no_aa.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration on medium LP", "[pdlp][anderson]") {
+    auto lp = buildMediumLp();
+
+    auto opts = quietOpts(500000, true, false);
+    opts.anderson_acceleration = true;
+    opts.anderson_window_size = 5;
+    auto result = solvePdlp(lp, opts);
+
+    REQUIRE(result.status == Status::Optimal);
+
+    // Verify objective matches non-AA result.
+    auto result_no_aa = solvePdlp(lp, quietOpts(500000, true, false));
+    REQUIRE(result_no_aa.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(result_no_aa.objective, 1.0));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration with equality constraints", "[pdlp][anderson]") {
+    // min x + 2y  s.t.  x + y = 10,  x,y >= 0
+    // Optimal: x=10, y=0, obj = 10.
+    LpProblem lp;
+    lp.name = "pdlp_aa_equality";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {10.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 100000;
+    opts.anderson_acceleration = true;
+    opts.anderson_window_size = 5;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(10.0, 0.1));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration with window size 2", "[pdlp][anderson]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.anderson_acceleration = true;
+    opts.anderson_window_size = 2;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration disabled does not change behavior",
+          "[pdlp][anderson]") {
+    auto lp = buildSimpleLp();
+
+    // Run with AA explicitly disabled.
+    PdlpSolver solver1;
+    PdlpOptions opts1;
+    opts1.verbose = false;
+    opts1.use_gpu = false;
+    opts1.max_iter = 10000;
+    opts1.anderson_acceleration = false;
+    solver1.setOptions(opts1);
+    solver1.load(lp);
+    auto result1 = solver1.solve();
+
+    // Run with default options (AA disabled by default).
+    PdlpSolver solver2;
+    PdlpOptions opts2;
+    opts2.verbose = false;
+    opts2.use_gpu = false;
+    opts2.max_iter = 10000;
+    solver2.setOptions(opts2);
+    solver2.load(lp);
+    auto result2 = solver2.solve();
+
+    REQUIRE(result1.status == Status::Optimal);
+    REQUIRE(result2.status == Status::Optimal);
+    // With identical options and no AA, results should be identical.
+    CHECK(result1.iterations == result2.iterations);
+    CHECK_THAT(result1.objective, WithinAbs(result2.objective, 1e-9));
+}
+
+TEST_CASE("PdlpSolver: Anderson acceleration GPU matches CPU", "[pdlp][anderson][gpu]") {
+    auto lp = buildMediumLp();
+
+    auto cpu_opts = quietOpts(500000, true, false);
+    cpu_opts.anderson_acceleration = true;
+    cpu_opts.anderson_window_size = 5;
+    auto cpu_result = solvePdlp(lp, cpu_opts);
+
+    auto gpu_opts = quietOpts(500000, true, true);
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    gpu_opts.anderson_acceleration = true;
+    gpu_opts.anderson_window_size = 5;
+    auto gpu_result = solvePdlp(lp, gpu_opts);
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
+}
