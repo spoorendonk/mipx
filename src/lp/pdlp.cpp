@@ -512,6 +512,12 @@ LpResult PdlpSolver::solve() {
     Real spectral = estimateSpectralNorm();
     Real step = 0.998 / spectral;
 
+    // Adaptive step size state (Malitsky-Tam style).
+    const bool adaptive = options_.adaptive_step;
+    const Real step_initial = step;
+    const Real step_lb = step_initial * options_.adaptive_step_min;
+    const Real step_ub = step_initial * options_.adaptive_step_max;
+
     // Primal weight initialization.
     Real primal_weight = options_.primal_weight;
 
@@ -533,6 +539,15 @@ LpResult PdlpSolver::solve() {
     std::vector<Real> ax(static_cast<size_t>(m), 0.0);
     std::vector<Real> delta_y_vec(static_cast<size_t>(m), 0.0);
     std::vector<Real> at_delta_y(static_cast<size_t>(n), 0.0);
+
+    // Previous A*reflected_x for adaptive step size (Malitsky-Tam).
+    std::vector<Real> prev_a_xrefl;
+    std::vector<Real> prev_reflected_x;
+    if (adaptive) {
+        prev_a_xrefl.assign(static_cast<size_t>(m), 0.0);
+        prev_reflected_x.assign(static_cast<size_t>(n), 0.0);
+    }
+    bool have_prev_iterate = false;
 
     // Initialize at origin (or could warm-start later).
     // initial_x = current_x = 0, initial_y = current_y = 0.
@@ -594,6 +609,44 @@ LpResult PdlpSolver::solve() {
 
             // 3. A * reflected_x → a_xrefl.
             scaled_a_.multiply(reflected_x, a_xrefl);
+
+            // 3b. Adaptive step size (Malitsky-Tam): estimate local Lipschitz
+            // from consecutive iterates and adjust step within bounded range.
+            if (adaptive && have_prev_iterate) {
+                // ||A*(x_k - x_{k-1})||^2 weighted by sigma_base.
+                Real a_diff_sq = 0.0;
+                for (Index i = 0; i < m; ++i) {
+                    Real d = a_xrefl[i] - prev_a_xrefl[i];
+                    a_diff_sq += sigma_base_[i] * d * d;
+                }
+                // ||x_k - x_{k-1}||^2 weighted by 1/tau_base.
+                Real x_diff_sq = 0.0;
+                for (Index j = 0; j < n; ++j) {
+                    Real d = reflected_x[j] - prev_reflected_x[j];
+                    x_diff_sq += d * d / tau_base_[j];
+                }
+                if (x_diff_sq > 1e-30) {
+                    // Local spectral norm estimate (preconditioned).
+                    Real local_lip_sq = a_diff_sq / x_diff_sq;
+                    // Malitsky-Tam: step <= 1/local_lip for safety.
+                    // Use geometric mean of current step and 1/local_lip.
+                    Real local_step = 0.998 / std::sqrt(std::max(local_lip_sq, 1e-30));
+                    Real new_step;
+                    if (step > local_step) {
+                        // Step too large — shrink.
+                        new_step = step * options_.adaptive_step_down;
+                    } else {
+                        // Step is safe — grow conservatively.
+                        new_step = step * options_.adaptive_step_up;
+                    }
+                    step = std::clamp(new_step, step_lb, step_ub);
+                }
+            }
+            if (adaptive) {
+                std::copy(a_xrefl.begin(), a_xrefl.end(), prev_a_xrefl.begin());
+                std::copy(reflected_x.begin(), reflected_x.end(), prev_reflected_x.begin());
+                have_prev_iterate = true;
+            }
 
             // 4. Dual step + proximal + reflect + Halpern.
             for (Index i = 0; i < m; ++i) {
@@ -861,6 +914,7 @@ LpResult PdlpSolver::solve() {
             inner_count = 0;
             initial_fpe = -1.0;  // Will be set on next batch.
             last_trial_fpe = std::numeric_limits<Real>::infinity();
+            have_prev_iterate = false;  // Reset adaptive state on restart.
         }
     }
 
@@ -1218,6 +1272,10 @@ LpResult PdlpSolver::solveGpu() {
     // Upload step and primal_weight to device-resident scalars so kernels
     // read via pointer indirection — this allows CUDA graphs to survive restarts.
     Real primal_weight = options_.primal_weight;
+    const bool adaptive = options_.adaptive_step;
+    const Real step_initial = step;
+    const Real step_lb = step_initial * options_.adaptive_step_min;
+    const Real step_ub = step_initial * options_.adaptive_step_max;
     cudaMemcpy(d_step, &step, sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_primal_weight, &primal_weight, sizeof(Real), cudaMemcpyHostToDevice);
     const Int N = options_.termination_eval_frequency;
@@ -1226,6 +1284,15 @@ LpResult PdlpSolver::solveGpu() {
     Int total_count = 0;
     Real initial_fpe = -1.0;
     Real last_trial_fpe = std::numeric_limits<Real>::infinity();
+
+    // Adaptive step state for GPU path: track previous pdhg_x and A*pdhg_x
+    // on host across convergence-check boundaries.
+    std::vector<Real> prev_pdhg_x_host, prev_ax_host;
+    bool gpu_have_prev = false;
+    if (adaptive) {
+        prev_pdhg_x_host.assign(sn, 0.0);
+        prev_ax_host.assign(sm, 0.0);
+    }
 
     // PI controller state.
     Real pw_error_sum = 0.0;
@@ -1416,6 +1483,44 @@ LpResult PdlpSolver::solveGpu() {
             break;
         }
 
+        // --- Adaptive step size (GPU path) ---
+        // Use pdhg_x and ax (= A*pdhg_x) already computed for convergence
+        // to estimate local Lipschitz constant between convergence checks.
+        if (adaptive) {
+            std::vector<Real> cur_pdhg_x_host(sn);
+            std::vector<Real> cur_ax_host(sm);
+            cudaMemcpy(cur_pdhg_x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+            cudaMemcpy(cur_ax_host.data(), d_ax, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+
+            if (gpu_have_prev) {
+                Real a_diff_sq = 0.0;
+                for (Index i = 0; i < m; ++i) {
+                    Real d = cur_ax_host[i] - prev_ax_host[i];
+                    a_diff_sq += sigma_base_[i] * d * d;
+                }
+                Real x_diff_sq = 0.0;
+                for (Index j = 0; j < n; ++j) {
+                    Real d = cur_pdhg_x_host[j] - prev_pdhg_x_host[j];
+                    x_diff_sq += d * d / tau_base_[j];
+                }
+                if (x_diff_sq > 1e-30) {
+                    Real local_lip_sq = a_diff_sq / x_diff_sq;
+                    Real local_step = 0.998 / std::sqrt(std::max(local_lip_sq, 1e-30));
+                    Real new_step;
+                    if (step > local_step) {
+                        new_step = step * options_.adaptive_step_down;
+                    } else {
+                        new_step = step * options_.adaptive_step_up;
+                    }
+                    step = std::clamp(new_step, step_lb, step_ub);
+                    cudaMemcpyAsync(d_step, &step, sizeof(Real), cudaMemcpyHostToDevice, stream);
+                }
+            }
+            prev_pdhg_x_host.swap(cur_pdhg_x_host);
+            prev_ax_host.swap(cur_ax_host);
+            gpu_have_prev = true;
+        }
+
         // --- Restart decision ---
         bool do_restart = false;
         if (total_count == N) {
@@ -1497,6 +1602,7 @@ LpResult PdlpSolver::solveGpu() {
             // d_inner_count will be updated at the start of the next batch.
             initial_fpe = -1.0;
             last_trial_fpe = std::numeric_limits<Real>::infinity();
+            gpu_have_prev = false;  // Reset adaptive state on restart.
         }
     }
 

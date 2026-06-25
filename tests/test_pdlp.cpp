@@ -594,6 +594,134 @@ TEST_CASE("PdlpSolver: rescaling does not regress iteration count on medium LP",
     CHECK(result_on.iterations <= result_off.iterations * 2);
 }
 
+// ---------------------------------------------------------------------------
+// Adaptive step size tests
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PdlpSolver: adaptive step solves simple LP", "[pdlp][adaptive]") {
+    auto lp = buildSimpleLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    opts.max_iter = 50000;
+    opts.adaptive_step = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: adaptive step solves bounds-only LP", "[pdlp][adaptive]") {
+    auto lp = buildBoundsOnlyLp();
+
+    PdlpSolver solver;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.adaptive_step = true;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("PdlpSolver: adaptive step matches fixed step on simple LP", "[pdlp][adaptive]") {
+    auto lp = buildSimpleLp();
+
+    auto fixed_opts = quietOpts(50000, true, false);
+    auto adaptive_opts = quietOpts(50000, true, false);
+    adaptive_opts.adaptive_step = true;
+
+    auto fixed_result = solvePdlp(lp, fixed_opts);
+    auto adaptive_result = solvePdlp(lp, adaptive_opts);
+
+    REQUIRE(fixed_result.status == Status::Optimal);
+    REQUIRE(adaptive_result.status == Status::Optimal);
+    CHECK_THAT(adaptive_result.objective, WithinAbs(fixed_result.objective, 1e-3));
+}
+
+TEST_CASE("PdlpSolver: adaptive step on medium LP", "[pdlp][adaptive]") {
+    auto lp = buildMediumLp();
+
+    auto opts = quietOpts(500000, true, false);
+    opts.adaptive_step = true;
+    auto result = solvePdlp(lp, opts);
+
+    REQUIRE(result.status == Status::Optimal);
+    // Should match the known objective from the fixed-step test.
+    auto fixed_result = solvePdlp(lp, quietOpts(500000, true, false));
+    REQUIRE(fixed_result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(fixed_result.objective, 1.0));
+}
+
+TEST_CASE("PdlpSolver: adaptive step does not regress iteration count",
+          "[pdlp][adaptive][performance]") {
+    auto lp = buildSimpleLp();
+
+    auto fixed_opts = quietOpts(50000, true, false);
+    auto adaptive_opts = quietOpts(50000, true, false);
+    adaptive_opts.adaptive_step = true;
+
+    auto fixed_result = solvePdlp(lp, fixed_opts);
+    auto adaptive_result = solvePdlp(lp, adaptive_opts);
+
+    REQUIRE(fixed_result.status == Status::Optimal);
+    REQUIRE(adaptive_result.status == Status::Optimal);
+    // Adaptive should not take more than 3x fixed iterations.
+    CHECK(adaptive_result.iterations <= fixed_result.iterations * 3);
+}
+
+TEST_CASE("PdlpSolver: adaptive step with equality constraints", "[pdlp][adaptive]") {
+    // min x + 2y  s.t.  x + y = 10,  x,y >= 0
+    // Optimal: x=10, y=0, obj = 10.
+    LpProblem lp;
+    lp.name = "adaptive_equality";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+
+    lp.num_rows = 1;
+    lp.row_lower = {10.0};
+    lp.row_upper = {10.0};
+    lp.row_names = {"eq"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    auto opts = quietOpts(100000, true, false);
+    opts.adaptive_step = true;
+    auto result = solvePdlp(lp, opts);
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(10.0, 0.1));
+}
+
+TEST_CASE("PdlpSolver: GPU with adaptive step matches CPU", "[pdlp][adaptive][gpu]") {
+    auto lp = buildMediumLp();
+
+    auto cpu_opts = quietOpts(500000, true, false);
+    cpu_opts.adaptive_step = true;
+    auto cpu_result = solvePdlp(lp, cpu_opts);
+
+    auto gpu_opts = quietOpts(500000, true, true);
+    gpu_opts.adaptive_step = true;
+    gpu_opts.gpu_min_rows = 0;
+    gpu_opts.gpu_min_nnz = 0;
+    auto gpu_result = solvePdlp(lp, gpu_opts);
+
+    REQUIRE(cpu_result.status == Status::Optimal);
+    REQUIRE(gpu_result.status == Status::Optimal);
+    CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
+}
+
 TEST_CASE("PdlpSolver: GPU with rescaling matches CPU", "[pdlp][rescaling][gpu]") {
     auto lp = buildMediumLp();
 

@@ -28,6 +28,13 @@ struct PdlpOptions {
     Int sv_max_iter = 5000;
     Real sv_tol = 1e-4;
 
+    // Adaptive step size (Malitsky-Tam style line search).
+    bool adaptive_step = false;
+    Real adaptive_step_down = 0.7;  // Shrink factor when descent violated.
+    Real adaptive_step_up = 1.0;    // Grow factor on successful steps.
+    Real adaptive_step_min = 1e-6;  // Lower bound relative to initial step.
+    Real adaptive_step_max = 1e3;   // Upper bound relative to initial step.
+
     // Primal weight (PI controller at restart).
     Real primal_weight = 1.0;
     bool update_primal_weight = true;
