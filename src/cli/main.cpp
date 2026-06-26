@@ -1,59 +1,60 @@
-#include <algorithm>
-#include <cstdio>
-#include <cstdint>
-#include <cstdlib>
-#include <exception>
-#include <cmath>
-#include <limits>
-#include <string>
-#include <thread>
-#include <chrono>
-
-#include "mipx/dual_simplex.h"
 #include "mipx/barrier.h"
-#include "mipx/pdlp.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/logger.h"
 #include "mipx/mip_solver.h"
+#include "mipx/pdlp.h"
 #include "mipx/presolve.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
+#include <limits>
+#include <string>
+#include <thread>
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::fprintf(stdout,
-            "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
-            "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-            "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
-            "[--conflicts|--no-conflicts] "
-            "[--tree-presolve|--no-tree-presolve] "
-            "[--tree-presolve-auto|--no-tree-presolve-auto] "
-            "[--tree-presolve-max-depth N] "
-            "[--tree-presolve-min-frac N] "
-            "[--tree-presolve-depth-frequency N] "
-            "[--tree-cuts|--no-tree-cuts] "
-            "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
-            "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
-            "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
-            "[--parallel-mode deterministic|opportunistic] [--seed N] "
-            "[--heur-deterministic|--heur-opportunistic] "
-            "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
-            "[--pre-root-rounds N] [--pre-root-no-early-stop] "
-            "[--pre-root-lplight|--no-pre-root-lplight] "
-            "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
-            "[--exact-refine-off|--exact-refine-auto|--exact-refine-on] "
-            "[--exact-rational-check|--exact-no-rational-check] "
-            "[--exact-warning-tol T] [--exact-cert-tol T] "
-            "[--exact-max-rounds N] [--exact-repair-passes N] "
-            "[--exact-rational-scale S] "
-            "[--dual-idiot-crash|--dual-no-idiot-crash] "
-            "[--dual-bfrt|--dual-no-bfrt] "
-            "[--dual-lu-update-limit N] "
-            "[--dual-lu-ft-drop-tol T] "
-            "[--search-stable|--search-default|--search-aggressive] "
-            "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
-            "[--pdlp-opt-norm l2|linf] "
-            "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
-            "[--relax-integrality] "
-            "[--verbose|--quiet] [--print-backend]\n");
+                     "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
+                     "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
+                     "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
+                     "[--conflicts|--no-conflicts] "
+                     "[--tree-presolve|--no-tree-presolve] "
+                     "[--tree-presolve-auto|--no-tree-presolve-auto] "
+                     "[--tree-presolve-max-depth N] "
+                     "[--tree-presolve-min-frac N] "
+                     "[--tree-presolve-depth-frequency N] "
+                     "[--tree-cuts|--no-tree-cuts] "
+                     "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
+                     "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
+                     "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
+                     "[--parallel-mode deterministic|opportunistic] [--seed N] "
+                     "[--heur-deterministic|--heur-opportunistic] "
+                     "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
+                     "[--pre-root-rounds N] [--pre-root-no-early-stop] "
+                     "[--pre-root-lplight|--no-pre-root-lplight] "
+                     "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
+                     "[--exact-refine-off|--exact-refine-auto|--exact-refine-on] "
+                     "[--exact-rational-check|--exact-no-rational-check] "
+                     "[--exact-warning-tol T] [--exact-cert-tol T] "
+                     "[--exact-max-rounds N] [--exact-repair-passes N] "
+                     "[--exact-rational-scale S] "
+                     "[--dual-idiot-crash|--dual-no-idiot-crash] "
+                     "[--dual-bfrt|--dual-no-bfrt] "
+                     "[--dual-lu-update-limit N] "
+                     "[--dual-lu-ft-drop-tol T] "
+                     "[--search-stable|--search-default|--search-aggressive] "
+                     "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
+                     "[--pdlp-opt-norm l2|linf] "
+                     "[--barrier-ordering auto|amd|nd|cudss] "
+                     "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
+                     "[--relax-integrality] "
+                     "[--verbose|--quiet] [--print-backend]\n");
         return 1;
     }
 
@@ -72,8 +73,8 @@ int main(int argc, char* argv[]) {
     enum class LpMode { Dual, Barrier, Pdlp, Concurrent };
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
-    mipx::PdlpOptimalityNorm pdlp_optimality_norm =
-        mipx::PdlpOptimalityNorm::L2;
+    mipx::BarrierOrdering barrier_ordering = mipx::BarrierOrdering::Auto;
+    mipx::PdlpOptimalityNorm pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
@@ -97,8 +98,7 @@ int main(int argc, char* argv[]) {
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
     bool search_profile_explicit = false;
     bool symmetry_enabled = true;
-    mipx::ExactRefinementMode exact_refine_mode =
-        mipx::ExactRefinementMode::Off;
+    mipx::ExactRefinementMode exact_refine_mode = mipx::ExactRefinementMode::Off;
     bool exact_rational_check = false;
     double exact_warning_tol = 1e-7;
     double exact_cert_tol = 1e-8;
@@ -108,8 +108,7 @@ int main(int argc, char* argv[]) {
     bool dual_idiot_crash = false;
     int dual_bfrt_override = -1;
     mipx::Int dual_lu_update_limit = std::numeric_limits<mipx::Int>::min();
-    mipx::Real dual_lu_ft_drop_tolerance =
-        std::numeric_limits<mipx::Real>::quiet_NaN();
+    mipx::Real dual_lu_ft_drop_tolerance = std::numeric_limits<mipx::Real>::quiet_NaN();
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -199,8 +198,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--heur-opportunistic") {
             parallel_mode = mipx::ParallelMode::Opportunistic;
         } else if (arg == "--seed" && i + 1 < argc) {
-            heuristic_seed = static_cast<uint64_t>(
-                std::strtoull(argv[++i], nullptr, 10));
+            heuristic_seed = static_cast<uint64_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (arg == "--root-heur-max-int-inf" && i + 1 < argc) {
             root_heur_max_int_inf =
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
@@ -214,8 +212,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--pre-root-work" && i + 1 < argc) {
             pre_root_work = std::max(1.0, std::atof(argv[++i]));
         } else if (arg == "--pre-root-rounds" && i + 1 < argc) {
-            pre_root_rounds =
-                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+            pre_root_rounds = std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--pre-root-no-early-stop") {
             pre_root_early_stop = false;
         } else if (arg == "--pre-root-lplight") {
@@ -294,6 +291,20 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--gpu-min-nnz" && i + 1 < argc) {
             barrier_gpu_min_nnz =
                 std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--barrier-ordering" && i + 1 < argc) {
+            std::string mode = argv[++i];
+            if (mode == "auto") {
+                barrier_ordering = mipx::BarrierOrdering::Auto;
+            } else if (mode == "amd") {
+                barrier_ordering = mipx::BarrierOrdering::Amd;
+            } else if (mode == "nd") {
+                barrier_ordering = mipx::BarrierOrdering::Nd;
+            } else if (mode == "cudss") {
+                barrier_ordering = mipx::BarrierOrdering::CuDSS;
+            } else {
+                std::fprintf(stderr, "Unknown barrier ordering: %s\n", mode.c_str());
+                return 1;
+            }
         } else if (arg == "--relax-integrality") {
             relax_integrality = true;
         } else {
@@ -309,20 +320,23 @@ int main(int argc, char* argv[]) {
     try {
         auto lp = mipx::readMps(filename);
         if (relax_integrality && lp.hasIntegers()) {
-            for (auto& t : lp.col_type) t = mipx::VarType::Continuous;
+            for (auto& t : lp.col_type) {
+                t = mipx::VarType::Continuous;
+            }
         }
         mipx::Logger log;
         mipx::PresolveOptions presolve_opts;
         presolve_opts.enable_forcing_rows = presolve_forcing_rows;
         presolve_opts.enable_dual_fixing = presolve_dual_fixing;
-        presolve_opts.enable_coefficient_tightening =
-            presolve_coefficient_tightening;
+        presolve_opts.enable_coefficient_tightening = presolve_coefficient_tightening;
 
         if (lp.hasIntegers()) {
             // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
             solver.setNumThreads(num_threads);
-            if (time_limit >= 0.0) solver.setTimeLimit(time_limit);
+            if (time_limit >= 0.0) {
+                solver.setTimeLimit(time_limit);
+            }
             solver.setNodeLimit(node_limit);
             solver.setGapTolerance(gap_tol);
             solver.setVerbose(verbose);
@@ -339,11 +353,11 @@ int main(int argc, char* argv[]) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::DualDefault);
             }
             solver.setBarrierUseGpu(barrier_gpu);
+            solver.setBarrierOrdering(barrier_ordering);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
-            solver.setRootHeuristicThresholds(root_heur_max_int_inf,
-                                              root_heur_max_int_vars);
+            solver.setRootHeuristicThresholds(root_heur_max_int_inf, root_heur_max_int_vars);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);
@@ -353,8 +367,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictsEnabled(conflicts_enabled);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
             solver.setTreePresolveAutoTuning(tree_presolve_auto);
-            solver.setTreePresolveControls(tree_presolve_max_depth,
-                                           tree_presolve_min_frac,
+            solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
             solver.setTreeCutsEnabled(tree_cuts_enabled);
             solver.setSymmetryEnabled(symmetry_enabled);
@@ -368,41 +381,47 @@ int main(int argc, char* argv[]) {
             solver.setSearchProfile(search_profile);
             solver.load(lp);
             auto result = solver.solve();
-            const char* parallel_mode_name =
-                (parallel_mode == mipx::ParallelMode::Deterministic)
-                    ? "deterministic"
-                    : "opportunistic";
+            const char* parallel_mode_name = (parallel_mode == mipx::ParallelMode::Deterministic)
+                                                 ? "deterministic"
+                                                 : "opportunistic";
             const char* search_profile_name = "default";
             if (search_profile == mipx::SearchProfile::Stable) {
                 search_profile_name = "stable";
             } else if (search_profile == mipx::SearchProfile::Aggressive) {
                 search_profile_name = "aggressive";
             }
-            log.log("Run profile: mode=%s seed=%llu threads=%d search=%s "
-                    "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
-                    "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s\n",
-                    parallel_mode_name,
-                    static_cast<unsigned long long>(heuristic_seed),
-                    num_threads,
-                    search_profile_name,
-                    conflicts_enabled ? "on" : "off",
-                    tree_presolve_enabled ? "on" : "off",
-                    tree_presolve_min_frac,
-                    tree_presolve_depth_frequency,
-                    tree_presolve_auto ? "on" : "off",
-                    tree_cuts_enabled ? "on" : "off");
+            log.log(
+                "Run profile: mode=%s seed=%llu threads=%d search=%s "
+                "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
+                "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s\n",
+                parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
+                search_profile_name, conflicts_enabled ? "on" : "off",
+                tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
+                tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
+                tree_cuts_enabled ? "on" : "off");
 
-            if (result.status == mipx::Status::Optimal &&
-                result.gap_limit_reached) {
+            if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");
             } else {
                 switch (result.status) {
-                    case mipx::Status::Optimal:    log.log("Status: Optimal\n"); break;
-                    case mipx::Status::Infeasible: log.log("Status: Infeasible\n"); break;
-                    case mipx::Status::Unbounded:  log.log("Status: Unbounded\n"); break;
-                    case mipx::Status::NodeLimit:  log.log("Status: Node limit\n"); break;
-                    case mipx::Status::TimeLimit:  log.log("Status: Time limit\n"); break;
-                    default:                       log.log("Status: Error\n"); break;
+                    case mipx::Status::Optimal:
+                        log.log("Status: Optimal\n");
+                        break;
+                    case mipx::Status::Infeasible:
+                        log.log("Status: Infeasible\n");
+                        break;
+                    case mipx::Status::Unbounded:
+                        log.log("Status: Unbounded\n");
+                        break;
+                    case mipx::Status::NodeLimit:
+                        log.log("Status: Node limit\n");
+                        break;
+                    case mipx::Status::TimeLimit:
+                        log.log("Status: Time limit\n");
+                        break;
+                    default:
+                        log.log("Status: Error\n");
+                        break;
                 }
             }
             log.log("Objective: %.10e\n", result.objective);
@@ -429,8 +448,8 @@ int main(int argc, char* argv[]) {
 #elif defined(__SSE4_2__)
             simd_str = ", SSE4.2";
 #endif
-            log.log("Thread count: %u logical processors, using up to 1 thread%s%s\n",
-                     logical, tbb_str, simd_str);
+            log.log("Thread count: %u logical processors, using up to 1 thread%s%s\n", logical,
+                    tbb_str, simd_str);
 
             // Presolve.
             mipx::Presolver presolver;
@@ -448,31 +467,25 @@ int main(int argc, char* argv[]) {
             }
 
             log.log("Solving LP with:\n");
-            log.log("  %d rows, %d cols, %d nonzeros\n",
-                     working.num_rows, working.num_cols,
-                     working.matrix.numNonzeros());
+            log.log("  %d rows, %d cols, %d nonzeros\n", working.num_rows, working.num_cols,
+                    working.matrix.numNonzeros());
             log.log("\n");
 
             if (did_presolve) {
                 const auto& stats = presolver.stats();
-                log.log("Presolve: %d vars removed, %d rows removed, "
-                         "%d bounds tightened, %d rounds (%d changed), %.3fs "
-                         "[rules: forcing=%d implied=%d abt=%d dual=%d coeff=%d "
-                         "doubleton=%d empty_col=%d dup_row=%d par_row=%d] "
-                         "[examined: %d rows, %d cols]\n\n",
-                         stats.vars_removed, stats.rows_removed,
-                         stats.bounds_tightened, stats.rounds,
-                         stats.rounds_with_changes, stats.time_seconds,
-                         stats.forcing_row_changes,
-                         stats.implied_equation_changes,
-                         stats.activity_bound_tightening_changes,
-                         stats.dual_fixing_changes,
-                         stats.coeff_tightening_changes,
-                         stats.doubleton_eq_changes,
-                         stats.empty_col_changes,
-                         stats.duplicate_row_changes,
-                         stats.parallel_row_changes,
-                         stats.rows_examined, stats.cols_examined);
+                log.log(
+                    "Presolve: %d vars removed, %d rows removed, "
+                    "%d bounds tightened, %d rounds (%d changed), %.3fs "
+                    "[rules: forcing=%d implied=%d abt=%d dual=%d coeff=%d "
+                    "doubleton=%d empty_col=%d dup_row=%d par_row=%d] "
+                    "[examined: %d rows, %d cols]\n\n",
+                    stats.vars_removed, stats.rows_removed, stats.bounds_tightened, stats.rounds,
+                    stats.rounds_with_changes, stats.time_seconds, stats.forcing_row_changes,
+                    stats.implied_equation_changes, stats.activity_bound_tightening_changes,
+                    stats.dual_fixing_changes, stats.coeff_tightening_changes,
+                    stats.doubleton_eq_changes, stats.empty_col_changes,
+                    stats.duplicate_row_changes, stats.parallel_row_changes, stats.rows_examined,
+                    stats.cols_examined);
             }
 
             auto t0 = std::chrono::steady_clock::now();
@@ -486,6 +499,7 @@ int main(int argc, char* argv[]) {
                 bopts.verbose = verbose;
                 bopts.algorithm = barrier_gpu ? mipx::BarrierAlgorithm::Auto
                                               : mipx::BarrierAlgorithm::CpuCholesky;
+                bopts.ordering = barrier_ordering;
                 solver.setOptions(bopts);
                 solver.load(working);
                 result = solver.solve();

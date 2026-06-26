@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mipx/barrier_presolve.h"
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/lp_solver.h"
@@ -19,17 +20,26 @@ enum class BarrierAlgorithm {
     GpuAugmented,
 };
 
+enum class BarrierOrdering {
+    Auto,   // Pick based on problem size/structure.
+    Amd,    // Approximate minimum degree.
+    Nd,     // Nested dissection.
+    CuDSS,  // cuDSS internal ordering (GPU only).
+};
+
 struct BarrierOptions {
     Int max_iter = 100;
     Real primal_dual_tol = 1e-8;
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
     BarrierAlgorithm algorithm = BarrierAlgorithm::Auto;
+    BarrierOrdering ordering = BarrierOrdering::Auto;
     Real dense_col_fraction = 0.1;
     Int ir_steps = 2;
     Int ruiz_iterations = 10;
     bool verbose = true;
     bool crossover = true;
+    bool presolve = true;
     const std::atomic<bool>* stop_flag = nullptr;
 };
 
@@ -73,6 +83,7 @@ private:
     };
 
     bool buildStandardForm();
+    void rebuildTransform();
     bool solveStandardForm(std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
                            Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
@@ -81,6 +92,9 @@ private:
 
     BarrierOptions options_{};
     LpProblem original_;
+    LpProblem presolved_;  // After barrier presolve (may alias original_).
+    BarrierPresolver presolver_;
+    bool presolve_active_ = false;
     bool loaded_ = false;
     bool transformed_ok_ = false;
     bool transformed_infeasible_ = false;

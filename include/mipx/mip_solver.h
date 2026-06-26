@@ -283,6 +283,7 @@ public:
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
+    void setBarrierOrdering(BarrierOrdering ord) { barrier_ordering_ = ord; }
     void setBarrierUseGpu(bool use_gpu) {
         barrier_algorithm_ = use_gpu ? BarrierAlgorithm::Auto : BarrierAlgorithm::CpuCholesky;
     }
@@ -496,6 +497,7 @@ private:
     double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
+    BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;

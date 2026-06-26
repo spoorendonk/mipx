@@ -1738,7 +1738,9 @@ struct GpuBarrierImpl {
 
         // Adaptive regularization.
         double reg_primal = base_reg;
-        double reg_dual = base_reg;
+        // The (2,2) block of the augmented system needs stronger regularization
+        // to stabilize the indefinite LDL' factorization.
+        double reg_dual = std::max(base_reg, 1e-6);
 
         // Stall detection.
         double prev_pinf = 1e30, prev_dinf = 1e30, prev_gap = 1e30;
@@ -1799,8 +1801,19 @@ struct GpuBarrierImpl {
             }
 
             // Instability detection: residual jump >100x.
-            if (iter > 0 && (pinf > 100.0 * prev_pinf + 1e-10 ||
-                             dinf > 100.0 * prev_dinf + 1e-10)) {
+            // Skip when residuals are genuinely close to tolerance — natural
+            // noise near convergence (especially after NE→augmented switch).
+            // Guard against false "near_converged" from corrupt iterates
+            // (NaN/zero) by requiring finite objectives and sane residuals.
+            bool residual_jump = iter > 0 &&
+                (pinf > 100.0 * prev_pinf + 1e-10 ||
+                 dinf > 100.0 * prev_dinf + 1e-10);
+            bool sane_iterate = std::isfinite(pobj) && std::isfinite(dobj) &&
+                                pinf < 1.0 && dinf < 1.0;
+            bool near_converged = sane_iterate &&
+                ((pinf < 10.0 * tol && dinf < 10.0 * tol) ||
+                 (gap < tol && pinf < 1e-4 && dinf < 1e-4));
+            if (residual_jump && !near_converged) {
                 if (verbose) {
                     std::printf("IPM: numerical instability at iter %d "
                                 "(pinf %.2e -> %.2e, dinf %.2e -> %.2e)\n",
@@ -1829,6 +1842,25 @@ struct GpuBarrierImpl {
                     downloadSolution(z_out, y_out, s_out);
                     return true;
                 }
+
+                // Try switching NE → augmented on instability and continue.
+                if (active_backend == Backend::NE) {
+                    if (verbose) {
+                        std::printf("IPM: NE instability — switching to augmented\n");
+                    }
+                    if (switchToAugmented()) {
+                        // Boost regularization after instability recovery.
+                        reg_primal = std::max(reg_primal, 1e-8);
+                        reg_dual = std::max(reg_dual, 1e-6);
+                        // Reset stall counter and continue from restored iterate.
+                        stagnant_iters = 0;
+                        pinf = prev_pinf;
+                        dinf = prev_dinf;
+                        gap = prev_gap;
+                        continue;
+                    }
+                }
+
                 *out_iters = iter;
                 *out_status = 1;  // Failed
                 return false;
@@ -1838,22 +1870,40 @@ struct GpuBarrierImpl {
             if (gap >= 0.99 * prev_gap && iter > 5) {
                 stagnant_iters++;
                 if (stagnant_iters >= 10) {
-                    if (verbose) {
-                        std::printf("IPM: stagnation detected (%d iters)\n",
-                                    stagnant_iters);
+                    // Try switching NE → augmented before giving up.
+                    if (active_backend == Backend::NE) {
+                        if (verbose) {
+                            std::printf("IPM: NE stagnation — switching to augmented\n");
+                        }
+                        if (switchToAugmented()) {
+                            stagnant_iters = 0;
+                            reg_primal = std::max(reg_primal, 1e-8);
+                            reg_dual = std::max(reg_dual, 1e-6);
+                            // Continue with augmented backend.
+                        } else {
+                            *out_iters = iter;
+                            *out_status = 1;
+                            return false;
+                        }
+                    } else {
+                        if (verbose) {
+                            std::printf("IPM: stagnation detected (%d iters)\n",
+                                        stagnant_iters);
+                        }
+                        *out_iters = iter;
+                        *out_status = 1;
+                        return false;
                     }
-                    *out_iters = iter;
-                    *out_status = 1;
-                    return false;
                 }
             } else {
                 stagnant_iters = 0;
             }
 
             // Adaptive regularization: decay when gap improves.
+            // Decay reg_dual more conservatively to keep LDL' stable.
             if (gap < 0.9 * prev_gap) {
                 reg_primal = std::max(reg_primal * 0.5, 1e-12);
-                reg_dual = std::max(reg_dual * 0.5, 1e-12);
+                reg_dual = std::max(reg_dual * 0.8, 1e-10);
             }
 
             prev_pinf = pinf;
@@ -1901,14 +1951,21 @@ struct GpuBarrierImpl {
 
             if (active_backend == Backend::Augmented && !factorized) {
                 cur_reg = reg_primal;
+                // Boost regularization near convergence for LDL' stability.
+                double cur_reg_dual = reg_dual;
+                if (gap < 1e-4) {
+                    cur_reg = std::max(cur_reg, 1e-8) * 10.0;
+                    cur_reg_dual = std::max(cur_reg_dual, 1e-6) * 10.0;
+                }
                 for (int attempt = 0; attempt < 3; ++attempt) {
-                    if (aug_solver.factorize(cur_reg, reg_dual)) {
+                    if (aug_solver.factorize(cur_reg, cur_reg_dual)) {
                         factorized = true;
                         break;
                     }
                     cur_reg *= 10.0;
+                    cur_reg_dual *= 10.0;
                     reg_primal = std::min(cur_reg, 1e-4);
-                    reg_dual = std::min(reg_dual * 10.0, 1e-4);
+                    reg_dual = std::min(cur_reg_dual, 1e-3);
                 }
                 if (!factorized) {
                     *out_iters = iter;

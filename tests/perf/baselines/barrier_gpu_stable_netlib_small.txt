@@ -1,6 +1,11 @@
 adlittle
 afiro
 blend
+kb2
+sc50a
 sc50b
+sc105
+sc205
+share1b
 share2b
 stocfor1

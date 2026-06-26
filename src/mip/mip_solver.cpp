@@ -4404,6 +4404,7 @@ MipResult MipSolver::solve() {
             BarrierOptions opts;
             opts.verbose = false;
             opts.algorithm = barrier_algorithm_;
+            opts.ordering = barrier_ordering_;
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);

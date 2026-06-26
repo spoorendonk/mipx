@@ -236,8 +236,8 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
         Real gap = std::abs(mu) / (1.0 + std::abs(obj_offset + dot(c, z)));
 
         if (opts.verbose) {
-            std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e\n", iter,
-                        obj_offset + dot(c, z), pinf, dinf, gap);
+            std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e  mu=% .2e\n", iter,
+                        obj_offset + dot(c, z), pinf, dinf, gap, mu);
         }
 
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
@@ -301,6 +301,15 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
         Real alpha_p = maxStepToBoundary(z, dz, opts.step_fraction);
         Real alpha_d = maxStepToBoundary(s, ds, opts.step_fraction);
 
+        if (opts.verbose) {
+            Real dz_norm = infNorm(std::span<const Real>(dz.data(), static_cast<size_t>(n)));
+            Real dy_norm = infNorm(std::span<const Real>(dy.data(), static_cast<size_t>(m)));
+            Real ds_norm = infNorm(std::span<const Real>(ds.data(), static_cast<size_t>(n)));
+            std::printf(
+                "        alpha_p=%.4e alpha_d=%.4e |dz|=%.2e |dy|=%.2e |ds|=%.2e sigma=%.4e\n",
+                alpha_p, alpha_d, dz_norm, dy_norm, ds_norm, sigma);
+        }
+
         for (Index j = 0; j < n; ++j) {
             z[j] += alpha_p * dz[j];
             s[j] += alpha_d * ds[j];
@@ -336,15 +345,18 @@ void BarrierSolver::load(const LpProblem& problem) {
     reduced_costs_std_.clear();
     basis_orig_.clear();
     used_gpu_ = false;
-    transformed_ok_ = buildStandardForm();
+    rebuildTransform();
 }
 
 bool BarrierSolver::buildStandardForm() {
+    // Use the presolved problem if presolve is active, otherwise original.
+    const auto& prob = presolve_active_ ? presolved_ : original_;
+
     transformed_infeasible_ = false;
     beq_.clear();
     cstd_.clear();
-    col_expr_.assign(static_cast<size_t>(original_.num_cols), OriginalColExpr{});
-    std_obj_offset_ = original_.obj_offset;
+    col_expr_.assign(static_cast<size_t>(prob.num_cols), OriginalColExpr{});
+    std_obj_offset_ = prob.obj_offset;
 
     std::vector<Triplet> trips;
 
@@ -364,12 +376,12 @@ bool BarrierSolver::buildStandardForm() {
         }
     };
 
-    const Real obj_sign = (original_.sense == Sense::Minimize) ? 1.0 : -1.0;
+    const Real obj_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
 
-    for (Index j = 0; j < original_.num_cols; ++j) {
-        Real lb = original_.col_lower[j];
-        Real ub = original_.col_upper[j];
-        Real obj = obj_sign * original_.obj[j];
+    for (Index j = 0; j < prob.num_cols; ++j) {
+        Real lb = prob.col_lower[j];
+        Real ub = prob.col_upper[j];
+        Real obj = obj_sign * prob.obj[j];
 
         bool lb_finite = isFinite(lb);
         bool ub_finite = isFinite(ub);
@@ -413,12 +425,12 @@ bool BarrierSolver::buildStandardForm() {
     }
 
     std::vector<std::pair<Index, Real>> entries;
-    for (Index i = 0; i < original_.num_rows; ++i) {
-        auto rv = original_.matrix.row(i);
+    for (Index i = 0; i < prob.num_rows; ++i) {
+        auto rv = prob.matrix.row(i);
 
-        if (isFinite(original_.row_upper[i])) {
+        if (isFinite(prob.row_upper[i])) {
             entries.clear();
-            Real rhs = original_.row_upper[i];
+            Real rhs = prob.row_upper[i];
             for (Index k = 0; k < rv.size(); ++k) {
                 Index j = rv.indices[k];
                 Real a = rv.values[k];
@@ -436,9 +448,9 @@ bool BarrierSolver::buildStandardForm() {
             addEqRow(entries, rhs);
         }
 
-        if (isFinite(original_.row_lower[i])) {
+        if (isFinite(prob.row_lower[i])) {
             entries.clear();
-            Real rhs = -original_.row_lower[i];
+            Real rhs = -prob.row_lower[i];
             for (Index k = 0; k < rv.size(); ++k) {
                 Index j = rv.indices[k];
                 Real a = rv.values[k];
@@ -465,6 +477,26 @@ bool BarrierSolver::buildStandardForm() {
     return true;
 }
 
+void BarrierSolver::rebuildTransform() {
+    presolve_active_ = false;
+    if (options_.presolve) {
+        presolver_ = BarrierPresolver{};
+        presolved_ = presolver_.presolve(original_);
+        if (presolver_.isInfeasible()) {
+            transformed_ok_ = false;
+            transformed_infeasible_ = true;
+            return;
+        }
+        if (presolved_.num_cols < original_.num_cols || presolved_.num_rows < original_.num_rows) {
+            presolve_active_ = true;
+            if (options_.verbose) {
+                presolver_.stats().print();
+            }
+        }
+    }
+    transformed_ok_ = buildStandardForm();
+}
+
 std::vector<Real> BarrierSolver::getPrimalValues() const {
     return primal_orig_;
 }
@@ -474,9 +506,12 @@ std::vector<Real> BarrierSolver::getDualValues() const {
 }
 
 std::vector<Real> BarrierSolver::getReducedCosts() const {
-    std::vector<Real> rc(static_cast<size_t>(original_.num_cols), 0.0);
-    const Real sense_sign = (original_.sense == Sense::Minimize) ? 1.0 : -1.0;
-    for (Index j = 0; j < original_.num_cols; ++j) {
+    const auto& prob = presolve_active_ ? presolved_ : original_;
+    const Real sense_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
+
+    // Compute reduced costs in the presolved/original space.
+    std::vector<Real> rc_prob(static_cast<size_t>(prob.num_cols), 0.0);
+    for (Index j = 0; j < prob.num_cols; ++j) {
         const auto& e = col_expr_[j];
         Real v = 0.0;
         if (e.col_a >= 0 && e.col_a < static_cast<Index>(reduced_costs_std_.size())) {
@@ -485,7 +520,18 @@ std::vector<Real> BarrierSolver::getReducedCosts() const {
         if (e.col_b >= 0 && e.col_b < static_cast<Index>(reduced_costs_std_.size())) {
             v += e.coeff_b * reduced_costs_std_[e.col_b];
         }
-        rc[j] = sense_sign * v;
+        rc_prob[j] = sense_sign * v;
+    }
+
+    if (!presolve_active_) {
+        return rc_prob;
+    }
+
+    // Map back to original space via presolver postsolve.
+    std::vector<Real> rc(static_cast<size_t>(original_.num_cols), 0.0);
+    const auto& col_map = presolver_.colMapping();
+    for (Index jj = 0; jj < static_cast<Index>(col_map.size()); ++jj) {
+        rc[col_map[jj]] = rc_prob[jj];
     }
     return rc;
 }
@@ -531,7 +577,7 @@ void BarrierSolver::addRows(std::span<const Index> starts, std::span<const Index
         original_.row_names.push_back("");
     }
     original_.num_rows += rows_to_add;
-    transformed_ok_ = buildStandardForm();
+    rebuildTransform();
 }
 
 void BarrierSolver::removeRows(std::span<const Index> rows) {
@@ -559,7 +605,7 @@ void BarrierSolver::removeRows(std::span<const Index> rows) {
         }
         --original_.num_rows;
     }
-    transformed_ok_ = buildStandardForm();
+    rebuildTransform();
 }
 
 void BarrierSolver::setColBounds(Index col, Real lower, Real upper) {
@@ -571,7 +617,7 @@ void BarrierSolver::setColBounds(Index col, Real lower, Real upper) {
     }
     original_.col_lower[col] = lower;
     original_.col_upper[col] = upper;
-    transformed_ok_ = buildStandardForm();
+    rebuildTransform();
 }
 
 void BarrierSolver::setObjective(std::span<const Real> obj) {
@@ -582,12 +628,15 @@ void BarrierSolver::setObjective(std::span<const Real> obj) {
         return;
     }
     original_.obj.assign(obj.begin(), obj.end());
-    transformed_ok_ = buildStandardForm();
+    rebuildTransform();
 }
 
 void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
-    primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
-    for (Index j = 0; j < original_.num_cols; ++j) {
+    const auto& prob = presolve_active_ ? presolved_ : original_;
+
+    // Reconstruct primals in the (possibly presolved) problem space.
+    std::vector<Real> primal_prob(static_cast<size_t>(prob.num_cols), 0.0);
+    for (Index j = 0; j < prob.num_cols; ++j) {
         const auto& e = col_expr_[j];
         Real x = e.offset;
         if (e.col_a >= 0 && e.col_a < static_cast<Index>(z.size())) {
@@ -596,13 +645,34 @@ void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
         if (e.col_b >= 0 && e.col_b < static_cast<Index>(z.size())) {
             x += e.coeff_b * z[e.col_b];
         }
-        if (isFinite(original_.col_lower[j])) {
-            x = std::max(x, original_.col_lower[j]);
+        if (isFinite(prob.col_lower[j])) {
+            x = std::max(x, prob.col_lower[j]);
         }
-        if (isFinite(original_.col_upper[j])) {
-            x = std::min(x, original_.col_upper[j]);
+        if (isFinite(prob.col_upper[j])) {
+            x = std::min(x, prob.col_upper[j]);
         }
-        primal_orig_[j] = x;
+        primal_prob[j] = x;
+    }
+
+    if (presolve_active_) {
+        // Postsolve to recover original-space primals.
+        std::vector<Real> dual_prob;  // Not used for primal reconstruction.
+        std::vector<Real> rc_prob;
+        std::vector<Real> dual_orig;
+        std::vector<Real> rc_orig;
+        presolver_.postsolve(primal_prob, dual_prob, rc_prob, primal_orig_, dual_orig, rc_orig);
+
+        // Clamp to original bounds.
+        for (Index j = 0; j < original_.num_cols; ++j) {
+            if (isFinite(original_.col_lower[j])) {
+                primal_orig_[j] = std::max(primal_orig_[j], original_.col_lower[j]);
+            }
+            if (isFinite(original_.col_upper[j])) {
+                primal_orig_[j] = std::min(primal_orig_[j], original_.col_upper[j]);
+            }
+        }
+    } else {
+        primal_orig_ = std::move(primal_prob);
     }
 }
 
@@ -670,7 +740,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
     std::unique_ptr<NewtonSolver> solver;
     auto algo = options_.algorithm;
 
-    const auto requested_algo = options_.algorithm;
+    [[maybe_unused]] const auto requested_algo = options_.algorithm;
     if (algo == BarrierAlgorithm::Auto) {
 #ifdef MIPX_HAS_CUDSS
         algo = use_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
