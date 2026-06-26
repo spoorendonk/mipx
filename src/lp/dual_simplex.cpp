@@ -790,6 +790,9 @@ LpResult DualSimplexSolver::solve() {
     bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
+    // Adaptive Harris (#159) numerical-incident tracking.
+    bfrt_high_flip_iters_ = 0;
+    adaptive_harris_stats_ = AdaptiveHarrisStats{};
 
     // Snapshot work at start of solve to compute delta.
     double work_at_start = work_.units();
@@ -2016,6 +2019,7 @@ LpResult DualSimplexSolver::solve() {
 
             // Two-pass expanding tolerance: start tight, expand if no good
             // candidate found, capped at harris_max.
+            bool harris_first_pass = true;
             for (Real harris_tol_p = harris_tight; harris_tol_p <= harris_max;
                  harris_tol_p *= harris_expand) {
                 min_step = kInf;
@@ -2033,6 +2037,7 @@ LpResult DualSimplexSolver::solve() {
                     const Real abs_f = std::abs(f);
                     const Real rel_pivot = abs_f / pivot_col_norm;
                     if (options_.enable_adaptive_harris && rel_pivot < min_rel_pivot) {
+                        ++adaptive_harris_stats_.rejected_pivots;
                         continue;
                     }
 
@@ -2067,8 +2072,15 @@ LpResult DualSimplexSolver::solve() {
                 }
 
                 if (leaving_row_p >= 0 || !options_.enable_adaptive_harris) {
+                    // A leaving row found only after expanding past the tight
+                    // tolerance signals a numerically marginal pivot (#159
+                    // expansion-frequency tracking).
+                    if (leaving_row_p >= 0 && !harris_first_pass) {
+                        ++adaptive_harris_stats_.primal_expansion_pivots;
+                    }
                     break;
                 }
+                harris_first_pass = false;
             }
 
             // Check entering variable's opposite bound.
@@ -2357,6 +2369,7 @@ LpResult DualSimplexSolver::solve() {
             const Real rp = std::abs(alpha) / cnorm;
             // Reject candidates with very poor relative pivot quality.
             if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot) {
+                ++adaptive_harris_stats_.rejected_pivots;
                 return;
             }
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
@@ -2396,6 +2409,7 @@ LpResult DualSimplexSolver::solve() {
                 const Real cnorm = col_norms[static_cast<std::size_t>(k)];
                 const Real rp = std::abs(alpha) / cnorm;
                 if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot) {
+                    ++adaptive_harris_stats_.rejected_pivots;
                     continue;
                 }
                 Real ratio = std::abs(reducedCostForPricing(k) / alpha);
@@ -2922,6 +2936,7 @@ LpResult DualSimplexSolver::solve() {
             lu_.numUpdates() >= 4) {
             should_refactorize = true;
             bfrt_high_flip_iters_ = 0;
+            ++adaptive_harris_stats_.bfrt_high_flip_refactors;
         }
 
         if (should_refactorize) {

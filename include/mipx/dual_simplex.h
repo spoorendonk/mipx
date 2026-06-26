@@ -227,6 +227,17 @@ public:
     /// Get the number of structural columns in the current problem.
     [[nodiscard]] Index numCols() const { return num_cols_; }
 
+    /// Diagnostics for the adaptive Harris ratio test (#159), accumulated over
+    /// the most recent solve(). Exposed for observability and testing.
+    struct AdaptiveHarrisStats {
+        Int primal_expansion_pivots = 0;   // primal pivots needing tolerance expansion
+        Int rejected_pivots = 0;           // candidates rejected for poor relative pivot quality
+        Int bfrt_high_flip_refactors = 0;  // refactorizations forced by high BFRT flip counts
+    };
+    [[nodiscard]] const AdaptiveHarrisStats& getAdaptiveHarrisStats() const {
+        return adaptive_harris_stats_;
+    }
+
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
@@ -334,8 +345,10 @@ private:
     WorkUnits work_;
     bool bound_perturb_active_ = false;
     Int bound_perturb_activations_ = 0;
-    Int bound_perturb_level_ = 0;            // current escalation level (0 = initial)
-    Int bfrt_high_flip_iters_ = 0;           // consecutive iterations with high flip count
+    Int bound_perturb_level_ = 0;   // current escalation level (0 = initial)
+    Int bfrt_high_flip_iters_ = 0;  // consecutive iterations with high flip count
+    // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
+    AdaptiveHarrisStats adaptive_harris_stats_{};
     std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
     std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
     DualSimplexOptions options_{};

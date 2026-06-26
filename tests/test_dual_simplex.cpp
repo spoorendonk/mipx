@@ -807,3 +807,143 @@ TEST_CASE("DualSimplex: tableau row from BTRAN support matches dense computation
         CHECK(col_norm > 1e-12);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive Harris ratio test (#159)
+// ---------------------------------------------------------------------------
+
+// Round-trip the adaptive Harris / BFRT-hygiene options through setOptions.
+TEST_CASE("DualSimplex: adaptive Harris options round-trip", "[dual_simplex][options][harris]") {
+    DualSimplexSolver solver;
+    DualSimplexOptions opts;
+    opts.enable_adaptive_harris = true;
+    opts.harris_tight_tol = 1e-11;
+    opts.harris_expand_factor = 8.0;
+    opts.harris_max_tol = 1e-4;
+    opts.harris_min_relative_pivot = 5e-9;
+    opts.bfrt_max_accumulated_change = 7e5;
+    opts.bfrt_max_flips = 321;
+    opts.bfrt_high_flip_refactor_threshold = 17;
+    solver.setOptions(opts);
+
+    const auto& applied = solver.getOptions();
+    CHECK(applied.enable_adaptive_harris);
+    CHECK(applied.harris_tight_tol == 1e-11);
+    CHECK(applied.harris_expand_factor == 8.0);
+    CHECK(applied.harris_max_tol == 1e-4);
+    CHECK(applied.harris_min_relative_pivot == 5e-9);
+    CHECK(applied.bfrt_max_accumulated_change == 7e5);
+    CHECK(applied.bfrt_max_flips == 321);
+    CHECK(applied.bfrt_high_flip_refactor_threshold == 17);
+}
+
+// Enabling/disabling the adaptive Harris ratio test must not change the optimum.
+TEST_CASE("DualSimplex: adaptive Harris does not change the optimum", "[dual_simplex][harris]") {
+    auto solveWith = [](const LpProblem& lp, bool adaptive) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts;
+        opts.enable_adaptive_harris = adaptive;
+        solver.setOptions(opts);
+        solver.load(lp);
+        return solver.solve();
+    };
+
+    SECTION("trivial LP") {
+        auto lp = buildTrivialLP();
+        auto on = solveWith(lp, true);
+        auto off = solveWith(lp, false);
+        REQUIRE(on.status == Status::Optimal);
+        REQUIRE(off.status == Status::Optimal);
+        CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
+    }
+
+    SECTION("netlib instances") {
+        struct Inst {
+            const char* name;
+            Real obj;
+        };
+        for (const auto& inst :
+             {Inst{"afiro", -4.6475314286e+02}, Inst{"blend", -3.0812149846e+01},
+              Inst{"sc50a", -6.4575077059e+01}, Inst{"adlittle", 2.2549496316e+05}}) {
+            std::string path = testDataDir() + "/netlib/" + inst.name + ".mps.gz";
+            if (!fs::exists(path)) {
+                continue;
+            }
+            auto lp = readMps(path);
+            auto on = solveWith(lp, true);
+            auto off = solveWith(lp, false);
+            REQUIRE(on.status == Status::Optimal);
+            REQUIRE(off.status == Status::Optimal);
+            // Both paths must reach the known optimum.
+            Real denom = std::max(1.0, std::abs(inst.obj));
+            CHECK(std::abs(on.objective - inst.obj) / denom < 1e-6);
+            CHECK(std::abs(off.objective - inst.obj) / denom < 1e-6);
+            CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-6 * denom));
+        }
+    }
+}
+
+// The numerical-incident metrics are wired: zero when the feature is off, and
+// non-negative / accessible when on.
+TEST_CASE("DualSimplex: adaptive Harris stats tracking", "[dual_simplex][harris]") {
+    std::string path = testDataDir() + "/netlib/blend.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance blend not downloaded");
+    }
+    auto lp = readMps(path);
+
+    // Feature disabled: no expansion/rejection/refactor incidents recorded.
+    {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts;
+        opts.enable_adaptive_harris = false;
+        solver.setOptions(opts);
+        solver.load(lp);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        const auto& stats = solver.getAdaptiveHarrisStats();
+        CHECK(stats.primal_expansion_pivots == 0);
+        CHECK(stats.rejected_pivots == 0);
+        CHECK(stats.bfrt_high_flip_refactors == 0);
+    }
+
+    // Feature enabled: solver still optimal and stats are sane (non-negative).
+    {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts;
+        opts.enable_adaptive_harris = true;
+        solver.setOptions(opts);
+        solver.load(lp);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        const auto& stats = solver.getAdaptiveHarrisStats();
+        CHECK(stats.primal_expansion_pivots >= 0);
+        CHECK(stats.rejected_pivots >= 0);
+        CHECK(stats.bfrt_high_flip_refactors >= 0);
+    }
+}
+
+// BFRT numerical-hygiene caps (tiny flip limits) must not break correctness.
+TEST_CASE("DualSimplex: BFRT hygiene caps preserve correctness", "[dual_simplex][harris][bfrt]") {
+    std::string path = testDataDir() + "/netlib/adlittle.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance adlittle not downloaded");
+    }
+    auto lp = readMps(path);
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts;
+    opts.enable_adaptive_harris = true;
+    opts.enable_bfrt = true;
+    opts.enable_adaptive_bfrt = false;  // force the BFRT path
+    opts.bfrt_max_flips = 1;            // aggressively cap flips per step
+    opts.bfrt_max_accumulated_change = 1e-3;
+    opts.bfrt_high_flip_refactor_threshold = 1;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    Real expected = 2.2549496316e+05;
+    CHECK(std::abs(result.objective - expected) / std::abs(expected) < 1e-6);
+}
