@@ -1,6 +1,8 @@
 .cache/
 build/
 build-*/
+.claude/settings.local.json
+.claude/worktrees/
 benchmark-results/
 dist/
 .venv/
