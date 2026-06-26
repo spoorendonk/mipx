@@ -1,13 +1,13 @@
 #pragma once
 
-#include <atomic>
-#include <span>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/lp_solver.h"
 #include "mipx/sparse_matrix.h"
+
+#include <atomic>
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -75,10 +75,8 @@ public:
     std::vector<BasisStatus> getBasis() const override;
     void setBasis(std::span<const BasisStatus> basis) override;
 
-    void addRows(std::span<const Index> starts,
-                 std::span<const Index> indices,
-                 std::span<const Real> values,
-                 std::span<const Real> lower,
+    void addRows(std::span<const Index> starts, std::span<const Index> indices,
+                 std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
     void removeRows(std::span<const Index> rows) override;
 

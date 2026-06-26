@@ -1,15 +1,14 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
-#include <filesystem>
-#include <random>
-#include <utility>
-
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
 #include "mipx/presolve.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <filesystem>
+#include <random>
+#include <utility>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -34,7 +33,8 @@ LpProblem buildSimpleLp() {
     lp.row_names = {"c1"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -72,7 +72,8 @@ LpProblem buildBranchingMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -80,7 +81,9 @@ LpProblem buildBranchingMip() {
 
 }  // namespace
 
-static std::string testDataDir() { return std::string(TEST_DATA_DIR); }
+static std::string testDataDir() {
+    return std::string(TEST_DATA_DIR);
+}
 
 TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     auto lp = buildSimpleLp();
@@ -220,8 +223,7 @@ TEST_CASE("Concurrent root policy: MIP objective matches dual root policy",
     CHECK(concurrent_result.work_units > 0.0);
 }
 
-TEST_CASE("Concurrent root deterministic mode is reproducible",
-          "[pdlp][mip][concurrent]") {
+TEST_CASE("Concurrent root deterministic mode is reproducible", "[pdlp][mip][concurrent]") {
     auto lp = buildBranchingMip();
 
     auto run_once = [&]() {
@@ -418,8 +420,7 @@ LpResult solvePdlp(const LpProblem& lp, PdlpOptions opts) {
     return solver.solve();
 }
 
-PdlpOptions quietOpts(Int max_iter = 50000, bool rescaling = true,
-                       bool gpu = false) {
+PdlpOptions quietOpts(Int max_iter = 50000, bool rescaling = true, bool gpu = false) {
     PdlpOptions opts;
     opts.verbose = false;
     opts.max_iter = max_iter;
@@ -434,7 +435,7 @@ TEST_CASE("PdlpSolver: bound-obj rescaling matches no-rescaling on simple LP",
           "[pdlp][rescaling]") {
     auto lp = buildSimpleLp();
 
-    auto result_on  = solvePdlp(lp, quietOpts(50000, true));
+    auto result_on = solvePdlp(lp, quietOpts(50000, true));
     auto result_off = solvePdlp(lp, quietOpts(50000, false));
 
     REQUIRE(result_on.status == Status::Optimal);
@@ -447,7 +448,7 @@ TEST_CASE("PdlpSolver: bound-obj rescaling matches no-rescaling on simple LP",
 TEST_CASE("PdlpSolver: bound-obj rescaling on medium LP", "[pdlp][rescaling]") {
     auto lp = buildMediumLp();
 
-    auto result_on  = solvePdlp(lp, quietOpts(500000, true));
+    auto result_on = solvePdlp(lp, quietOpts(500000, true));
     auto result_off = solvePdlp(lp, quietOpts(500000, false));
 
     REQUIRE(result_on.status == Status::Optimal);
@@ -584,7 +585,7 @@ TEST_CASE("PdlpSolver: rescaling does not regress iteration count on medium LP",
           "[pdlp][rescaling][performance]") {
     auto lp = buildMediumLp();
 
-    auto result_on  = solvePdlp(lp, quietOpts(500000, true));
+    auto result_on = solvePdlp(lp, quietOpts(500000, true));
     auto result_off = solvePdlp(lp, quietOpts(500000, false));
 
     REQUIRE(result_on.status == Status::Optimal);

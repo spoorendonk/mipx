@@ -8,10 +8,12 @@
 #include <random>
 
 #ifdef MIPX_HAS_CUDA
-#include "pdlp_kernels.cuh"
-
+// clang-format off
+// Order matters: cuda_runtime_api.h defines cudaStream_t, used by pdlp_kernels.cuh.
 #include <cuda_runtime_api.h>
 #include <cusparse.h>
+#include "pdlp_kernels.cuh"
+// clang-format on
 #endif
 
 namespace mipx {
