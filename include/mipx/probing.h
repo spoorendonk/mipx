@@ -33,7 +33,7 @@ struct ProbingConfig {
     Int max_probes_per_round = 10000;  // Work budget per round.
     Int max_depth = 1;                 // Propagation depth (1 = direct probing).
     bool detect_equivalences = true;   // Find variable equivalences.
-    bool detect_dominated = true;      // Find dominated variables.
+    bool detect_dominated = false;     // Find dominated variables (off: O(n^2), output unused).
     bool learn_vubs = true;            // Learn VUBs/VLBs from probing.
     bool learn_implications = true;    // Learn binary implications.
     double time_limit = 30.0;          // Time limit in seconds.

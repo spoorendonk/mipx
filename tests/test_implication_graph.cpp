@@ -638,3 +638,17 @@ TEST_CASE("Probing: equivalence detection through probing", "[probing]") {
     REQUIRE(engine.equivalences().size() == 1);
     CHECK(engine.equivalences()[0].same_sense == false);
 }
+
+TEST_CASE("Probing: proves infeasibility when both branches fail", "[probing]") {
+    // 2*x0 >= 1 forces x0=1; 2*x0 <= 1 forces x0=0. Both probe branches are
+    // infeasible under propagation, so probing must report infeasibility.
+    auto prob = makeProblem(1, 2, {{0, 0, 2.0}, {1, 0, 2.0}}, {1.0, -kInf}, {kInf, 1.0}, {0.0},
+                            {1.0}, {VarType::Binary});
+
+    ImplicationGraph graph;
+    VariableBoundStore vb_store;
+    ProbingEngine engine;
+
+    auto stats = engine.probe(prob, graph, vb_store);
+    CHECK(stats.infeasible);
+}

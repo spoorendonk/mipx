@@ -1,5 +1,25 @@
 #pragma once
 
+#include "mipx/barrier.h"
+#include "mipx/bnb_node.h"
+#include "mipx/branching.h"
+#include "mipx/core.h"
+#include "mipx/cut_manager.h"
+#include "mipx/cut_pool.h"
+#include "mipx/domain.h"
+#include "mipx/dual_simplex.h"
+#include "mipx/exact_refinement.h"
+#include "mipx/heuristic_runtime.h"
+#include "mipx/implication_graph.h"
+#include "mipx/logger.h"
+#include "mipx/lp_problem.h"
+#include "mipx/presolve.h"
+#include "mipx/probing.h"
+#include "mipx/reduced_cost_fixer.h"
+#include "mipx/separators.h"
+#include "mipx/symmetry.h"
+#include "mipx/variable_bounds.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -9,26 +29,6 @@
 #include <span>
 #include <unordered_map>
 #include <vector>
-
-#include "mipx/barrier.h"
-#include "mipx/bnb_node.h"
-#include "mipx/branching.h"
-#include "mipx/core.h"
-#include "mipx/cut_manager.h"
-#include "mipx/implication_graph.h"
-#include "mipx/probing.h"
-#include "mipx/symmetry.h"
-#include "mipx/cut_pool.h"
-#include "mipx/domain.h"
-#include "mipx/dual_simplex.h"
-#include "mipx/exact_refinement.h"
-#include "mipx/heuristic_runtime.h"
-#include "mipx/logger.h"
-#include "mipx/lp_problem.h"
-#include "mipx/presolve.h"
-#include "mipx/reduced_cost_fixer.h"
-#include "mipx/separators.h"
-#include "mipx/variable_bounds.h"
 
 namespace mipx {
 
@@ -214,7 +214,7 @@ struct MipResult {
     bool gap_limit_reached = false;
     Int nodes = 0;
     Int lp_iterations = 0;
-    double work_units = 0.0;   // deterministic work measure
+    double work_units = 0.0;  // deterministic work measure
     double time_seconds = 0.0;
     std::vector<Real> solution;
 };
@@ -230,11 +230,12 @@ public:
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
-    void setVerbose(bool v) { verbose_ = v; log_.setEnabled(v); }
-    void setPresolve(bool p) { presolve_ = p; }
-    void setRootPresolveOptions(const PresolveOptions& options) {
-        presolve_options_ = options;
+    void setVerbose(bool v) {
+        verbose_ = v;
+        log_.setEnabled(v);
     }
+    void setPresolve(bool p) { presolve_ = p; }
+    void setRootPresolveOptions(const PresolveOptions& options) { presolve_options_ = options; }
     [[nodiscard]] const PresolveOptions& getRootPresolveOptions() const {
         return presolve_options_;
     }
@@ -243,16 +244,31 @@ public:
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
     void setCutFamilyEnabled(CutFamily family, bool enabled) {
         switch (family) {
-            case CutFamily::Gomory: cut_family_config_.gomory = enabled; break;
-            case CutFamily::Mir: cut_family_config_.mir = enabled; break;
-            case CutFamily::Cover: cut_family_config_.cover = enabled; break;
-            case CutFamily::ImpliedBound: cut_family_config_.implied_bound = enabled; break;
-            case CutFamily::Clique: cut_family_config_.clique = enabled; break;
-            case CutFamily::ZeroHalf: cut_family_config_.zero_half = enabled; break;
-            case CutFamily::Mixing: cut_family_config_.mixing = enabled; break;
+            case CutFamily::Gomory:
+                cut_family_config_.gomory = enabled;
+                break;
+            case CutFamily::Mir:
+                cut_family_config_.mir = enabled;
+                break;
+            case CutFamily::Cover:
+                cut_family_config_.cover = enabled;
+                break;
+            case CutFamily::ImpliedBound:
+                cut_family_config_.implied_bound = enabled;
+                break;
+            case CutFamily::Clique:
+                cut_family_config_.clique = enabled;
+                break;
+            case CutFamily::ZeroHalf:
+                cut_family_config_.zero_half = enabled;
+                break;
+            case CutFamily::Mixing:
+                cut_family_config_.mixing = enabled;
+                break;
             case CutFamily::Unknown:
             case CutFamily::Count:
-            default: break;
+            default:
+                break;
         }
     }
     void setCutFamilyConfig(const CutFamilyConfig& config) { cut_family_config_ = config; }
@@ -268,8 +284,7 @@ public:
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
     void setBarrierUseGpu(bool use_gpu) {
-        barrier_algorithm_ = use_gpu ? BarrierAlgorithm::Auto
-                                     : BarrierAlgorithm::CpuCholesky;
+        barrier_algorithm_ = use_gpu ? BarrierAlgorithm::Auto : BarrierAlgorithm::CpuCholesky;
     }
     void setBarrierGpuThresholds(Int, Int) {
         // Legacy — thresholds now controlled via BarrierAlgorithm dispatch.
@@ -277,8 +292,8 @@ public:
     void setParallelMode(ParallelMode mode) { parallel_mode_ = mode; }
     void setHeuristicMode(HeuristicRuntimeMode mode) {
         parallel_mode_ = (mode == HeuristicRuntimeMode::Opportunistic)
-            ? ParallelMode::Opportunistic
-            : ParallelMode::Deterministic;
+                             ? ParallelMode::Opportunistic
+                             : ParallelMode::Deterministic;
     }
     void setHeuristicSeed(uint64_t seed) { heuristic_seed_ = seed; }
     void setRootHeuristicThresholds(Int max_int_inf, Int max_int_vars) {
@@ -355,12 +370,8 @@ public:
     }
     const BranchingTelemetry& getBranchingStats() const { return branching_stats_; }
     void setProbingEnabled(bool enabled) { probing_enabled_ = enabled; }
-    void setProbingMaxRounds(Int rounds) {
-        probing_max_rounds_ = std::max<Int>(1, rounds);
-    }
-    void setProbingTimeLimit(double seconds) {
-        probing_time_limit_ = std::max(0.1, seconds);
-    }
+    void setProbingMaxRounds(Int rounds) { probing_max_rounds_ = std::max<Int>(1, rounds); }
+    void setProbingTimeLimit(double seconds) { probing_time_limit_ = std::max(0.1, seconds); }
     const MipProbingStats& getProbingStats() const { return probing_stats_; }
     const ImplicationGraph& getImplicationGraph() const { return implication_graph_; }
     const VariableBoundStore& getVariableBoundStore() const { return vb_store_; }
@@ -399,23 +410,16 @@ private:
                          LpProblem* certificate_problem = nullptr);
 
     /// Serial branch-and-bound loop.
-    void solveSerial(DualSimplexSolver& lp, NodeQueue& queue,
-                     Int& nodes_explored, Int& total_lp_iters,
-                     double& total_work,
-                     HeuristicRuntime& heuristic_runtime,
-                     SolutionPool& solution_pool,
-                     Real& incumbent, std::vector<Real>& best_solution,
-                     Real root_bound,
-                     const std::function<double()>& elapsed);
+    void solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,
+                     Int& total_lp_iters, double& total_work, HeuristicRuntime& heuristic_runtime,
+                     SolutionPool& solution_pool, Real& incumbent, std::vector<Real>& best_solution,
+                     Real root_bound, const std::function<double()>& elapsed);
 
     /// Parallel branch-and-bound loop using TBB.
-    void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue,
-                       Int& nodes_explored, Int& total_lp_iters,
-                       double& total_work,
-                       HeuristicRuntime& heuristic_runtime,
-                       SolutionPool& solution_pool,
-                       Real& incumbent, std::vector<Real>& best_solution,
-                       Real root_bound,
+    void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue, Int& nodes_explored,
+                       Int& total_lp_iters, double& total_work, HeuristicRuntime& heuristic_runtime,
+                       SolutionPool& solution_pool, Real& incumbent,
+                       std::vector<Real>& best_solution, Real root_bound,
                        const std::function<double()>& elapsed);
 
     // Check if all integer variables are integral in the given solution.
@@ -426,24 +430,16 @@ private:
     Real computeGap(Real incumbent, Real best_bound) const;
 
     // Log a progress line.
-    void logProgress(Int nodes, Int open, Int lp_iters,
-                     Real incumbent, Real best_bound, double elapsed,
-                     bool new_incumbent = false, Int int_inf = -1) const;
+    void logProgress(Int nodes, Int open, Int lp_iters, Real incumbent, Real best_bound,
+                     double elapsed, bool new_incumbent = false, Int int_inf = -1) const;
 
     /// Process a single node. Returns true if children were created.
-    bool processNode(DualSimplexSolver& lp, BnbNode& node,
-                     Real incumbent_snapshot,
-                     std::vector<BnbNode>& children_out,
-                     Real& node_obj_out,
-                     std::vector<Real>& node_primals_out,
-                     Int& node_iters_out,
-                     double& node_work_out,
-                     std::vector<Real>& current_lower,
-                     std::vector<Real>& current_upper,
-                     std::vector<Index>& touched_vars,
-                     NodeScratch& node_scratch,
-                     NodeWorkStats& node_stats,
-                     Int& int_inf_out,
+    bool processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent_snapshot,
+                     std::vector<BnbNode>& children_out, Real& node_obj_out,
+                     std::vector<Real>& node_primals_out, Int& node_iters_out,
+                     double& node_work_out, std::vector<Real>& current_lower,
+                     std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
+                     NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                      Int strong_branch_budget_override = -1);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
@@ -451,15 +447,14 @@ private:
     bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
-                                            std::span<const Real> current_upper,
-                                            Index default_var);
+                                            std::span<const Real> current_upper, Index default_var);
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
 
     /// Run root probing and populate implication graph / variable bounds.
-    void runRootProbing();
+    /// Returns true if probing proved the problem infeasible.
+    [[nodiscard]] bool runRootProbing();
 
-    [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower,
-                                             std::vector<Real>& upper,
+    [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
                                              double* work_units = nullptr) const;
 

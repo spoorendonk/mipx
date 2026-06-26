@@ -1308,7 +1308,7 @@ void MipSolver::load(const LpProblem& problem) {
     loaded_ = true;
 }
 
-void MipSolver::runRootProbing() {
+bool MipSolver::runRootProbing() {
     probing_stats_ = {};
     probing_stats_.enabled = true;
 
@@ -1316,7 +1316,9 @@ void MipSolver::runRootProbing() {
     config.max_rounds = probing_max_rounds_;
     config.time_limit = probing_time_limit_;
     config.detect_equivalences = true;
-    config.detect_dominated = true;
+    // Domination detection is O(n^2) and its output is not yet consumed by
+    // branching/presolve, so leave it off by default.
+    config.detect_dominated = false;
     config.learn_vubs = true;
     config.learn_implications = true;
 
@@ -1331,6 +1333,16 @@ void MipSolver::runRootProbing() {
     probing_stats_.equivalences_found = stats.equivalences_found;
     probing_stats_.rounds = stats.rounds;
     probing_stats_.time_seconds = stats.time_seconds;
+
+    // Probing proved infeasibility (both branches of some probe were
+    // infeasible). This deduction is sound because propagation only tightens
+    // valid bounds, so report it to the caller.
+    if (stats.infeasible) {
+        if (verbose_) {
+            log_.log("Probing detected infeasibility.\n");
+        }
+        return true;
+    }
 
     // Apply fixings discovered by probing.
     Int fixings_applied = 0;
@@ -1349,6 +1361,8 @@ void MipSolver::runRootProbing() {
             stats.variables_probed, fixings_applied, stats.implications_found, stats.vubs_found,
             stats.vlbs_found, stats.equivalences_found, stats.rounds, stats.time_seconds);
     }
+
+    return false;
 }
 
 bool MipSolver::hasLpLightCapability() const {
@@ -3685,8 +3699,18 @@ MipResult MipSolver::solve() {
 
     // Root probing: discover implications, variable bounds, and fixings.
     if (probing_enabled_ && !discrete_vars.empty()) {
-        runRootProbing();
+        const bool probing_infeasible = runRootProbing();
         total_work += probing_stats_.time_seconds;  // Approximate work measure.
+        if (probing_infeasible) {
+            MipResult result;
+            result.status = Status::Infeasible;
+            result.nodes = 0;
+            result.lp_iterations = total_lp_iters;
+            result.work_units = canonicalReportedWork(total_work);
+            result.time_seconds = elapsed();
+            restoreProblem();
+            return result;
+        }
     }
 
     const bool pre_root_stage_enabled =
