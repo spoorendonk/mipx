@@ -2358,7 +2358,10 @@ LpResult DualSimplexSolver::solve() {
         if (bfrt_cands.capacity() < static_cast<std::size_t>(nnb)) {
             bfrt_cands.reserve(static_cast<std::size_t>(nnb));
         }
-        auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out) {
+        // `rejected` is taken by reference so the parallel candidate scan can
+        // accumulate into a thread-local counter (avoiding a data race on the
+        // shared stats member); serial callers pass the member directly.
+        auto appendCandidate = [&](Index pos, std::vector<BfrtCand>& out, Int& rejected) {
             Index k = nonbasic_[pos];
             Real alpha = pivot_row_alpha[k];
             if (!isEligible(k, alpha)) {
@@ -2369,7 +2372,7 @@ LpResult DualSimplexSolver::solve() {
             const Real rp = std::abs(alpha) / cnorm;
             // Reject candidates with very poor relative pivot quality.
             if (options_.enable_adaptive_harris && rp < options_.harris_min_relative_pivot) {
-                ++adaptive_harris_stats_.rejected_pivots;
+                ++rejected;
                 return;
             }
             Real ratio = std::abs(reducedCostForPricing(k) / alpha);
@@ -2388,11 +2391,11 @@ LpResult DualSimplexSolver::solve() {
             }
             Index first_end = std::min<Index>(nnb, offset + count);
             for (Index pos = offset; pos < first_end; ++pos) {
-                appendCandidate(pos, bfrt_cands);
+                appendCandidate(pos, bfrt_cands, adaptive_harris_stats_.rejected_pivots);
             }
             Index wrapped = count - (first_end - offset);
             for (Index pos = 0; pos < wrapped; ++pos) {
-                appendCandidate(pos, bfrt_cands);
+                appendCandidate(pos, bfrt_cands, adaptive_harris_stats_.rejected_pivots);
             }
         };
 
@@ -2429,11 +2432,13 @@ LpResult DualSimplexSolver::solve() {
                 count >= options_.sip_parallel_min_nonbasic && options_.sip_parallel_grain > 0 &&
                 sipThreadGatePass() && sip_numerical_gate) {
                 tbb::enumerable_thread_specific<std::vector<BfrtCand>> locals;
+                tbb::enumerable_thread_specific<Int> local_rejected(0);
                 const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
                 tbb::parallel_for(
                     tbb::blocked_range<Index>(0, count, grain),
                     [&](const tbb::blocked_range<Index>& range) {
                         auto& local = locals.local();
+                        Int& rejected = local_rejected.local();
                         local.reserve(local.size() + static_cast<std::size_t>(
                                                          (range.end() - range.begin()) / 4 + 8));
                         for (Index t = range.begin(); t < range.end(); ++t) {
@@ -2441,12 +2446,15 @@ LpResult DualSimplexSolver::solve() {
                             if (pos >= nnb) {
                                 pos -= nnb;
                             }
-                            appendCandidate(pos, local);
+                            appendCandidate(pos, local, rejected);
                         }
                     });
 
                 for (auto& local : locals) {
                     bfrt_cands.insert(bfrt_cands.end(), local.begin(), local.end());
+                }
+                for (Int r : local_rejected) {
+                    adaptive_harris_stats_.rejected_pivots += r;
                 }
                 return;
             }
