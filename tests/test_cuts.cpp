@@ -1,8 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <cmath>
-#include <filesystem>
-
 #include "mipx/cut_pool.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
@@ -10,6 +5,11 @@
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
 #include "mipx/separators.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cmath>
+#include <filesystem>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -157,8 +157,10 @@ static LpProblem buildCutTestMip() {
     lp.row_names = {"r1", "r2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 3.0}, {0, 1, 2.0},
-        {1, 0, 1.0}, {1, 1, 4.0},
+        {0, 0, 3.0},
+        {0, 1, 2.0},
+        {1, 0, 1.0},
+        {1, 1, 4.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
@@ -186,7 +188,8 @@ static LpProblem buildFractionalMip() {
     lp.row_names = {"cap"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -211,7 +214,9 @@ static LpProblem buildBinaryConflictMip() {
     lp.row_names = {"cap"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {0, 2, 1.0},
     };
     lp.matrix = SparseMatrix(1, 3, std::move(trips));
     return lp;
@@ -261,7 +266,9 @@ TEST_CASE("Gomory: generate cuts on small MIP", "[cuts][gomory]") {
     for (Index j = 0; j < problem.num_cols; ++j) {
         if (problem.col_type[j] != VarType::Continuous) {
             Real frac = std::abs(primals[j] - std::round(primals[j]));
-            if (frac > 1e-6) has_fractional = true;
+            if (frac > 1e-6) {
+                has_fractional = true;
+            }
         }
     }
     CHECK(has_fractional);
@@ -314,6 +321,12 @@ TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][famili
     config.clique = false;
     config.zero_half = false;
     config.mixing = false;
+    config.cmir = false;
+    config.strong_cg = false;
+    config.lifted_cover = false;
+    config.mod_k = false;
+    config.intersection_cut = false;
+    config.multi_row = false;
     manager.setConfig(config);
     manager.setMaxCutsPerFamily(10);
 
@@ -344,6 +357,12 @@ TEST_CASE("SeparatorManager: clique family generates conflict cuts", "[cuts][fam
     config.clique = true;
     config.zero_half = false;
     config.mixing = false;
+    config.cmir = false;
+    config.strong_cg = false;
+    config.lifted_cover = false;
+    config.mod_k = false;
+    config.intersection_cut = false;
+    config.multi_row = false;
     manager.setConfig(config);
     manager.setMaxCutsPerFamily(10);
 
@@ -520,7 +539,6 @@ TEST_CASE("MipSolver with cuts: MIPLIB gt2", "[cuts][miplib]") {
     if (result.status == Status::Optimal) {
         CHECK_THAT(result.objective, WithinAbs(21166.0, 1.0));
     }
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }

@@ -1,5 +1,7 @@
 #include "mipx/cut_strengthening.h"
 
+#include "mipx/lp_problem.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -14,7 +16,8 @@ constexpr Real kBoundTol = 1e-8;
 }  // namespace
 
 bool strengthenCut(Cut& cut, const LpProblem& problem) {
-    if (cut.indices.empty()) return false;
+    if (cut.indices.empty())
+        return false;
 
     bool changed = false;
 
@@ -30,11 +33,14 @@ bool strengthenCut(Cut& cut, const LpProblem& problem) {
         // Upper-bounded cut: sum a_j x_j <= b
         for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
             const Index j = cut.indices[k];
-            if (j < 0 || j >= problem.num_cols) continue;
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (j < 0 || j >= problem.num_cols)
+                continue;
+            if (problem.col_type[j] == VarType::Continuous)
+                continue;
 
             const Real a = cut.values[k];
-            if (std::abs(a) < kCoeffTol) continue;
+            if (std::abs(a) < kCoeffTol)
+                continue;
 
             // For integer variables, if the coefficient exceeds the RHS
             // minus the minimum contribution of other variables, we can tighten.
@@ -44,10 +50,12 @@ bool strengthenCut(Cut& cut, const LpProblem& problem) {
                 // = min(a, b - sum of negative contributions)
                 Real other_min = 0.0;
                 for (Index m = 0; m < static_cast<Index>(cut.indices.size()); ++m) {
-                    if (m == k) continue;
+                    if (m == k)
+                        continue;
                     const Index jm = cut.indices[m];
                     const Real am = cut.values[m];
-                    if (jm < 0 || jm >= problem.num_cols) continue;
+                    if (jm < 0 || jm >= problem.num_cols)
+                        continue;
                     if (am < 0.0) {
                         const Real ub = problem.col_upper[jm];
                         if (std::isfinite(ub)) {
@@ -74,21 +82,26 @@ bool strengthenCut(Cut& cut, const LpProblem& problem) {
         // Lower-bounded cut: sum a_j x_j >= b
         for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
             const Index j = cut.indices[k];
-            if (j < 0 || j >= problem.num_cols) continue;
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (j < 0 || j >= problem.num_cols)
+                continue;
+            if (problem.col_type[j] == VarType::Continuous)
+                continue;
 
             const Real a = cut.values[k];
-            if (std::abs(a) < kCoeffTol) continue;
+            if (std::abs(a) < kCoeffTol)
+                continue;
 
             // For binary variables with positive coefficient in a >= cut:
             // Tighten if coefficient is too large.
             if (a > 0.0 && problem.col_type[j] == VarType::Binary) {
                 Real other_max = 0.0;
                 for (Index m = 0; m < static_cast<Index>(cut.indices.size()); ++m) {
-                    if (m == k) continue;
+                    if (m == k)
+                        continue;
                     const Index jm = cut.indices[m];
                     const Real am = cut.values[m];
-                    if (jm < 0 || jm >= problem.num_cols) continue;
+                    if (jm < 0 || jm >= problem.num_cols)
+                        continue;
                     if (am > 0.0) {
                         const Real ub = problem.col_upper[jm];
                         if (std::isfinite(ub)) {
@@ -117,10 +130,11 @@ bool strengthenCut(Cut& cut, const LpProblem& problem) {
     return changed;
 }
 
-bool complementCut(Cut& cut, const LpProblem& problem,
-                   std::span<const Real> primals) {
-    if (cut.indices.empty()) return false;
-    if (cut.upper >= kInf && cut.lower <= -kInf) return false;
+bool complementCut(Cut& cut, const LpProblem& problem, std::span<const Real> primals) {
+    if (cut.indices.empty())
+        return false;
+    if (cut.upper >= kInf && cut.lower <= -kInf)
+        return false;
 
     bool changed = false;
 
@@ -135,15 +149,19 @@ bool complementCut(Cut& cut, const LpProblem& problem,
 
     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
         const Index j = cut.indices[k];
-        if (j < 0 || j >= problem.num_cols) continue;
-        if (problem.col_type[j] == VarType::Continuous) continue;
+        if (j < 0 || j >= problem.num_cols)
+            continue;
+        if (problem.col_type[j] == VarType::Continuous)
+            continue;
 
         const Real a = cut.values[k];
-        if (std::abs(a) < kCoeffTol) continue;
+        if (std::abs(a) < kCoeffTol)
+            continue;
 
         const Real lb = problem.col_lower[j];
         const Real ub = problem.col_upper[j];
-        if (!std::isfinite(lb) || !std::isfinite(ub)) continue;
+        if (!std::isfinite(lb) || !std::isfinite(ub))
+            continue;
 
         const Real x = (j < static_cast<Index>(primals.size())) ? primals[j] : lb;
 
@@ -172,7 +190,8 @@ bool complementCut(Cut& cut, const LpProblem& problem,
 }
 
 bool makeNumericallySafe(Cut& cut) {
-    if (cut.indices.empty()) return false;
+    if (cut.indices.empty())
+        return false;
 
     bool changed = false;
 
@@ -211,9 +230,12 @@ bool makeNumericallySafe(Cut& cut) {
     if (max_abs > 0.0 && min_abs > 0.0 && max_abs / min_abs > 1e6) {
         // Scale the entire cut by 1/max_abs to reduce dynamic range.
         const Real scale = 1.0 / max_abs;
-        for (Real& v : new_values) v *= scale;
-        if (cut.upper < kInf) cut.upper *= scale;
-        if (cut.lower > -kInf) cut.lower *= scale;
+        for (Real& v : new_values)
+            v *= scale;
+        if (cut.upper < kInf)
+            cut.upper *= scale;
+        if (cut.lower > -kInf)
+            cut.lower *= scale;
         changed = true;
     }
 
