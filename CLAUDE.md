@@ -40,7 +40,7 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 |---|---|---|
 | `MIPX_USE_TBB` | auto-detect | Parallel tree search (`apt install libtbb-dev`) |
 | `MIPX_USE_CUDA` | ON | GPU acceleration (barrier, PDLP) |
-| `MIPX_BUILD_PYTHON` | OFF | Build nanobind Python extension |
+| `MIPX_BUILD_PYTHON` | auto-detect | Build nanobind Python extension (ON when Python 3.12 dev is found) |
 | `MIPX_BUILD_CLI` | ON | Build `mipx-solve` CLI |
 | `MIPX_SIMD_ISA` | native | SIMD codegen: `off`, `avx2`, `native` |
 | `MIPX_STRICT_WARNINGS` | ON | `-Werror` |

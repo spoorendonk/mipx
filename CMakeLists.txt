@@ -41,7 +41,11 @@ option(MIPX_STRICT_WARNINGS
        ON)
 option(MIPX_BUILD_CLI "Build mipx CLI executable" ON)
 option(MIPX_BUILD_TESTS "Build and run C++ test suite" ON)
-option(MIPX_BUILD_PYTHON "Build Python nanobind extension module" OFF)
+# Build the Python bindings by default when a suitable Python development
+# environment is present; fall back to OFF on C++-only systems. Matches the
+# auto-detect convention used for TBB/GPU/BZip2 above.
+find_package(Python 3.12 QUIET COMPONENTS Interpreter Development.Module)
+option(MIPX_BUILD_PYTHON "Build Python nanobind extension module" ${Python_FOUND})
 
 set(MIPX_CUDA_BACKEND_ENABLED OFF)
 set(MIPX_HAS_CUDSS OFF)
