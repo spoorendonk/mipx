@@ -4,7 +4,6 @@
 #include "newton_solver.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -1003,8 +1002,6 @@ LpResult BarrierSolver::solve() {
         return {status_, 0.0, 0, 0.0};
     }
 
-    auto t0 = std::chrono::steady_clock::now();
-
     if (!transformed_ok_) {
         status_ = transformed_infeasible_ ? Status::Infeasible : Status::Error;
         if (status_ == Status::Error) {
@@ -1072,11 +1069,13 @@ LpResult BarrierSolver::solve() {
         }
     }
 
-    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
+    // Work units must be a deterministic function of the computation
+    // performed (barrier iterations x per-iteration cost), never wall-clock
+    // time. Folding elapsed seconds into the work measure makes it
+    // non-reproducible under machine load, which breaks the deterministic
+    // concurrent-root race (the race sums every arm's work_units).
     double work = static_cast<double>(iters) * (4.0 * static_cast<double>(aeq_.numNonzeros()) +
                                                 10.0 * static_cast<double>(aeq_.numRows()));
-    work += seconds * 1e-6;
 
     return {status_, objective_, iterations_, work};
 }

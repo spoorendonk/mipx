@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cuda_runtime_api.h>  // cudaStream_t — keep self-contained so include
+                               // order in .cpp includers can't break the build
 #include <cstdint>
 
 namespace mipx {

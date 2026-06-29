@@ -4528,10 +4528,16 @@ MipResult MipSolver::solve() {
                 continue;
             }
             const auto& w = race_results[*winner];
-            if (c.seconds + 1e-12 < w.seconds) {
-                winner = i;
-            } else if (std::abs(c.seconds - w.seconds) <= 1e-12 &&
-                       backendWarmStartRank(c.backend) < backendWarmStartRank(w.backend)) {
+            // Deterministic tie-break among equal-objective arms: prefer the
+            // arm whose result gives the strongest B&B warm-start. Dual yields
+            // a simplex basis, Barrier a basis only after crossover, and PDLP
+            // none — so a lower backendWarmStartRank means a better warm start
+            // and avoids handing the search a basis-less root. This depends
+            // only on the deterministic backend identity, never on wall-clock
+            // time (which varies with machine load) nor on the per-backend
+            // work_units magnitude (computed on incommensurable scales), so the
+            // selected root basis is reproducible regardless of load.
+            if (backendWarmStartRank(c.backend) < backendWarmStartRank(w.backend)) {
                 winner = i;
             }
         }
