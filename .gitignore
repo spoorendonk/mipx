@@ -20,3 +20,6 @@ tests/data/**/*.mps
 tests/data/**/*.mps.gz
 tests/data/**/*.mps.bz2
 tests/data/*_roundtrip.mps
+
+# Scratch planning docs
+plan-barrier.md
