@@ -43,6 +43,10 @@ struct BpSingletonCol {
     Real col_upper;
     Real row_lower;  // Original row bounds (before adjustment).
     Real row_upper;
+    // The other columns in the eliminated row, for primal reconstruction:
+    // x_j must absorb the row's residual slack, not merely sit at a bound.
+    std::vector<Index> row_col_indices;
+    std::vector<Real> row_col_coeffs;
 };
 
 /// A free column singleton (free variable in a single constraint) was
@@ -72,6 +76,7 @@ struct BpEmptyCol {
     Real obj_coeff;
     Real col_lower;
     Real col_upper;
+    Real value;  // Fixing value chosen by presolve (sense-aware).
 };
 
 using BpPostsolveOp = std::variant<BpFixVariable, BpSingletonRow, BpSingletonCol,

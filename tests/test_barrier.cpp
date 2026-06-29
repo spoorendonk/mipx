@@ -268,8 +268,10 @@ TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]"
     solver.load(lp);
     auto result = solver.solve();
 
+    // CPU augmented LDL' is not yet numerically stable on this LP (see #162);
+    // the scatterAugColumn ordering fix is necessary but not sufficient.
     if (result.status != Status::Optimal) {
-        SKIP("CPU augmented backend is not yet stable on triangle LP.");
+        SKIP("CPU augmented backend is not yet stable on triangle LP (#162).");
     }
     CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
 }
@@ -299,7 +301,7 @@ TEST_CASE("BarrierSolver Auto: objectives match across backends", "[barrier][aut
 
     REQUIRE(chol_result.status == Status::Optimal);
     if (aug_result.status != Status::Optimal) {
-        SKIP("CPU augmented backend is not yet stable on triangle LP.");
+        SKIP("CPU augmented backend is not yet stable on triangle LP (#162).");
     }
     CHECK_THAT(chol_result.objective, WithinAbs(aug_result.objective, 1e-6));
 }
@@ -1125,4 +1127,47 @@ TEST_CASE("Barrier presolve: free column singleton", "[barrier][presolve]") {
     CHECK_THAT(result.objective, WithinAbs(0.0, 1e-5));
     auto x = solver.getPrimalValues();
     CHECK_THAT(x[2], WithinAbs(5.0, 1e-4));  // z = 5 - x
+}
+
+TEST_CASE("Barrier presolve: zero-cost singleton column reconstructs from row",
+          "[barrier][presolve]") {
+    // min x  s.t.  x + y = 5,  x >= 0,  y in [0, 10] (zero cost).
+    // y is a zero-cost singleton column -> eliminated by presolve; its value
+    // must be recovered from the row (y = 5 - x), not pinned to a bound.
+    // Pinning y to its lower bound would make x + y != 5 -> reported infeasible.
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 1;
+    lp.row_lower = {5.0};
+    lp.row_upper = {5.0};
+    lp.row_names = {"eq"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    BarrierPresolver presolver;
+    auto reduced = presolver.presolve(lp);
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().singleton_cols >= 1);
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(0.0, 1e-5));
+    auto x = solver.getPrimalValues();
+    REQUIRE(x.size() == 2);
+    // Feasibility: x + y == 5, with the singleton y recovered from the row.
+    CHECK_THAT(x[0] + x[1], WithinAbs(5.0, 1e-4));
+    CHECK_THAT(x[1], WithinAbs(5.0, 1e-4));
 }

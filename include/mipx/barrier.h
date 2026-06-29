@@ -33,6 +33,9 @@ struct BarrierOptions {
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
     BarrierAlgorithm algorithm = BarrierAlgorithm::Auto;
+    // Fill-reducing ordering for the sparse augmented (LDL') CPU path only.
+    // The dense normal-equations path has no sparsity to preserve, and the GPU
+    // path delegates ordering to cuDSS, so this is ignored by both.
     BarrierOrdering ordering = BarrierOrdering::Auto;
     Real dense_col_fraction = 0.1;
     Int ir_steps = 2;

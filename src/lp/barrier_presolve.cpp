@@ -217,7 +217,9 @@ Index BarrierPresolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& co
         Real lb = lp.col_lower[j];
         Real ub = lp.col_upper[j];
 
-        // Record postsolve op before modifying bounds.
+        // Record postsolve op before modifying bounds. Capture the row's other
+        // active columns so postsolve can recover x_j from the row activity
+        // (pinning to a bound generally violates equality/range rows).
         BpSingletonCol op;
         op.orig_col = j;
         op.orig_row = row;
@@ -227,6 +229,15 @@ Index BarrierPresolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& co
         op.col_upper = ub;
         op.row_lower = lp.row_lower[row];
         op.row_upper = lp.row_upper[row];
+        auto row_view = lp.matrix.row(row);
+        for (Index k = 0; k < row_view.size(); ++k) {
+            Index other = row_view.indices[k];
+            if (other == j || col_removed[other]) {
+                continue;
+            }
+            op.row_col_indices.push_back(other);
+            op.row_col_coeffs.push_back(row_view.values[k]);
+        }
         ops_.push_back(std::move(op));
 
         // Adjust row bounds to absorb x_j.
@@ -406,6 +417,7 @@ Index BarrierPresolver::removeEmptyRowsCols(LpProblem& lp, std::vector<bool>& co
         op.obj_coeff = obj;
         op.col_lower = lb;
         op.col_upper = ub;
+        op.value = val;
         ops_.push_back(std::move(op));
 
         obj_offset_delta_ += obj * val;
@@ -846,12 +858,44 @@ void BarrierPresolver::postsolve(const std::vector<Real>& primal_reduced,
                     dual_orig[op.orig_row] = 0.0;
 
                 } else if constexpr (std::is_same_v<T, BpSingletonCol>) {
-                    // x_j had zero cost and was in a single row.
-                    // Since this is a zero-cost variable, any feasible value works.
-                    // Default to lower bound.
-                    Real val = isFinite(op.col_lower)
-                                   ? op.col_lower
-                                   : (isFinite(op.col_upper) ? op.col_upper : 0.0);
+                    // x_j had zero cost and was in a single row, which was kept
+                    // (its bounds relaxed to absorb x_j). x_j must now take a
+                    // value that satisfies that row given the other columns, not
+                    // merely sit at a bound. Recover the feasible x_j interval
+                    // from the row activity and column bounds; any point in it is
+                    // optimal (zero cost), so prefer the one nearest zero.
+                    Real rest = 0.0;
+                    for (Index k = 0; k < static_cast<Index>(op.row_col_indices.size()); ++k) {
+                        rest += op.row_col_coeffs[k] * primal_orig[op.row_col_indices[k]];
+                    }
+                    Real target_lo = -kInf;
+                    Real target_hi = kInf;
+                    if (op.coeff > 0) {
+                        if (isFinite(op.row_lower)) {
+                            target_lo = (op.row_lower - rest) / op.coeff;
+                        }
+                        if (isFinite(op.row_upper)) {
+                            target_hi = (op.row_upper - rest) / op.coeff;
+                        }
+                    } else {
+                        if (isFinite(op.row_upper)) {
+                            target_lo = (op.row_upper - rest) / op.coeff;
+                        }
+                        if (isFinite(op.row_lower)) {
+                            target_hi = (op.row_lower - rest) / op.coeff;
+                        }
+                    }
+                    Real lo = std::max(target_lo, isFinite(op.col_lower) ? op.col_lower : -kInf);
+                    Real hi = std::min(target_hi, isFinite(op.col_upper) ? op.col_upper : kInf);
+                    Real val;
+                    if (lo <= hi) {
+                        val = std::clamp(0.0, lo, hi);
+                    } else {
+                        // Empty interval from numerical slack: fall back to a bound.
+                        val = isFinite(op.col_lower)
+                                  ? op.col_lower
+                                  : (isFinite(op.col_upper) ? op.col_upper : 0.0);
+                    }
                     primal_orig[op.orig_col] = val;
                     rc_orig[op.orig_col] = 0.0;
 
@@ -885,19 +929,10 @@ void BarrierPresolver::postsolve(const std::vector<Real>& primal_reduced,
                     dual_orig[op.orig_row] = 0.0;
 
                 } else if constexpr (std::is_same_v<T, BpEmptyCol>) {
-                    Real val;
-                    if (isFinite(op.col_lower) && op.obj_coeff >= 0) {
-                        val = op.col_lower;
-                    } else if (isFinite(op.col_upper) && op.obj_coeff <= 0) {
-                        val = op.col_upper;
-                    } else if (isFinite(op.col_lower)) {
-                        val = op.col_lower;
-                    } else if (isFinite(op.col_upper)) {
-                        val = op.col_upper;
-                    } else {
-                        val = 0.0;
-                    }
-                    primal_orig[op.orig_col] = val;
+                    // Reuse the sense-aware value chosen by presolve; recomputing
+                    // from the raw objective sign here would pick the wrong bound
+                    // for Maximize problems.
+                    primal_orig[op.orig_col] = op.value;
                     rc_orig[op.orig_col] = op.obj_coeff;
                 }
             },

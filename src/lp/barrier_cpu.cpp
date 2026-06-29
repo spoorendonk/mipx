@@ -737,93 +737,6 @@ static void symbolicAnalyze(Index n, const std::vector<Index>& col_starts,
 }
 
 // ============================================================================
-// NE sparsity pattern: lower-triangle CSC of M = A*A' (structure only)
-// ============================================================================
-
-static void computeNePattern(const SparseMatrix& A, Index m, Index n,
-                             std::vector<Index>& col_starts, std::vector<Index>& row_indices) {
-    // Column→row lists (CSC of A transposed).
-    std::vector<std::vector<Index>> col_rows(static_cast<size_t>(n));
-    for (Index i = 0; i < m; ++i) {
-        auto rv = A.row(i);
-        for (Index k = 0; k < rv.size(); ++k) {
-            col_rows[rv.indices[k]].push_back(i);
-        }
-    }
-    for (Index k = 0; k < n; ++k) {
-        auto& rows = col_rows[k];
-        std::sort(rows.begin(), rows.end());
-        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
-    }
-
-    // Build NE pattern using row-wise scatter: for each column k of A,
-    // generate all pairs (rows[a], rows[b]) with a <= b. Use a marker
-    // array to avoid duplicate entries instead of std::set.
-    std::vector<std::vector<Index>> ne_cols(static_cast<size_t>(m));
-
-    // Estimate total NE nonzeros for reservation.
-    Index est_nnz = 0;
-    for (Index k = 0; k < n; ++k) {
-        Index rk = static_cast<Index>(col_rows[k].size());
-        est_nnz += rk * (rk + 1) / 2;
-    }
-    // This over-counts duplicates, but is a good upper bound.
-
-    // Use a marker array for deduplication.
-    std::vector<Index> marker(static_cast<size_t>(m), -1);
-
-    for (Index j = 0; j < m; ++j) {
-        // Column j of NE: find all i >= j such that A_row_j and A_row_i
-        // share a column.
-        // Scatter: for each column k in row j, mark all rows >= j in col k.
-        auto rv = A.row(j);
-        for (Index p = 0; p < rv.size(); ++p) {
-            Index k = rv.indices[p];
-            for (Index i : col_rows[k]) {
-                if (i >= j && marker[i] != j) {
-                    marker[i] = j;
-                    ne_cols[j].push_back(i);
-                }
-            }
-        }
-        std::sort(ne_cols[j].begin(), ne_cols[j].end());
-    }
-
-    col_starts.resize(static_cast<size_t>(m + 1));
-    row_indices.clear();
-    row_indices.reserve(static_cast<size_t>(est_nnz));
-    col_starts[0] = 0;
-    for (Index j = 0; j < m; ++j) {
-        for (Index i : ne_cols[j]) {
-            row_indices.push_back(i);
-        }
-        col_starts[j + 1] = static_cast<Index>(row_indices.size());
-    }
-}
-
-// Merge-join rows of A to compute a single NE entry.
-[[maybe_unused]]
-static Real mergeJoinNE(const SparseMatrix& A, Index row_i, Index row_j,
-                        std::span<const Real> theta) {
-    auto ri = A.row(row_i);
-    auto rj = A.row(row_j);
-    Real val = 0.0;
-    Index pi = 0, pj = 0;
-    while (pi < ri.size() && pj < rj.size()) {
-        if (ri.indices[pi] == rj.indices[pj]) {
-            val += ri.values[pi] * theta[ri.indices[pi]] * rj.values[pj];
-            ++pi;
-            ++pj;
-        } else if (ri.indices[pi] < rj.indices[pj]) {
-            ++pi;
-        } else {
-            ++pj;
-        }
-    }
-    return val;
-}
-
-// ============================================================================
 // Augmented sparsity pattern
 // ============================================================================
 
@@ -873,35 +786,6 @@ static void computeAugPattern(const SparseMatrix& A, Index m, Index n,
 // Forward / backward solves
 // ============================================================================
 
-// Forward solve: L * x = b  (L lower triangular with explicit diagonal).
-// Overwrites b in-place.
-[[maybe_unused]]
-static void forwardSolveLL(const SymbolicFact& sym, const std::vector<Real>& l_val,
-                           const std::vector<Real>& l_diag, std::span<Real> b) {
-    const Index n = sym.n;
-    for (Index j = 0; j < n; ++j) {
-        b[j] /= l_diag[j];
-        Real bj = b[j];
-        for (Index p = sym.l_col_ptr[j]; p < sym.l_col_ptr[j + 1]; ++p) {
-            b[sym.l_row_idx[p]] -= l_val[p] * bj;
-        }
-    }
-}
-
-// Backward solve: L' * x = b  (L' upper triangular).
-// Overwrites b in-place.
-[[maybe_unused]]
-static void backwardSolveLL(const SymbolicFact& sym, const std::vector<Real>& l_val,
-                            const std::vector<Real>& l_diag, std::span<Real> b) {
-    const Index n = sym.n;
-    for (Index j = n - 1; j >= 0; --j) {
-        for (Index p = sym.l_col_ptr[j]; p < sym.l_col_ptr[j + 1]; ++p) {
-            b[j] -= l_val[p] * b[sym.l_row_idx[p]];
-        }
-        b[j] /= l_diag[j];
-    }
-}
-
 // LDL' forward solve: L * x = b  (L unit lower triangular).
 static void forwardSolveLDL(const SymbolicFact& sym, const std::vector<Real>& l_val,
                             std::span<Real> b) {
@@ -947,8 +831,14 @@ static Index findInColumn(const SymbolicFact& sym, Index k, Index j) {
 }  // anonymous namespace
 
 // ============================================================================
-// CpuCholeskySolver: Normal Equations + sparse LL'
+// CpuCholeskySolver: Normal Equations + dense LL'
 // ============================================================================
+//
+// Forms M = A*Theta*A' + reg*I densely each iteration and factors it with a
+// dense Cholesky. The fill-reducing orderings selected by BarrierOptions::
+// ordering do not apply here: a dense factor has no sparsity to preserve.
+// Ordering is consumed only by the sparse augmented path (CpuAugmentedSolver);
+// the GPU path delegates ordering to cuDSS internally.
 
 class CpuCholeskySolver final : public NewtonSolver {
 public:
@@ -958,15 +848,6 @@ public:
         n_ = n;
         ir_steps_ = opts.ir_steps;
 
-        // NE sparsity pattern.
-        std::vector<Index> ne_cptr, ne_ridx;
-        computeNePattern(A, m, n, ne_cptr, ne_ridx);
-
-        // Symbolic analysis with selected ordering.
-        symbolicAnalyze(m, ne_cptr, ne_ridx, sym_, opts.ordering, opts.verbose);
-
-        l_val_.resize(static_cast<size_t>(sym_.l_nnz), 0.0);
-        l_diag_.resize(static_cast<size_t>(m), 0.0);
         theta_.resize(static_cast<size_t>(n), 0.0);
         s_copy_.resize(static_cast<size_t>(n), 0.0);
 
@@ -1053,17 +934,13 @@ public:
     }
 
 private:
-    // Left-looking numeric LL' factorization with dynamic pivot modification.
-    //
-    // The NE matrix diagonal uses only the fixed `reg_` (matching what
-    // iterative refinement expects).  If a pivot is too small or negative
-    // after Cholesky updates, we perturb it just enough to make the factor
-    // well-conditioned.  IR then corrects for the perturbation error.
     // Dense NE matrix construction + dense LL' factorization.
-    // Correct reference implementation for Netlib-scale problems.
-    // For each IPM iteration, forms M = A*Theta*A' + reg*I densely
-    // and computes its Cholesky factor L stored densely (column-major,
-    // lower triangle).
+    // Reference implementation for Netlib-scale problems: for each IPM
+    // iteration, forms M = A*Theta*A' + reg*I densely and computes its
+    // Cholesky factor L stored densely (column-major, lower triangle).
+    // If a pivot is too small or negative after the Cholesky updates it is
+    // perturbed just enough to keep the factor well-conditioned; iterative
+    // refinement then corrects for the perturbation error.
     bool numericLL() {
         const Index m = m_;
         ne_dense_.assign(static_cast<size_t>(m) * static_cast<size_t>(m), 0.0);
@@ -1153,9 +1030,6 @@ private:
     Int ir_steps_ = 2;
     Real reg_ = 1e-8;
 
-    SymbolicFact sym_;
-    std::vector<Real> l_val_;
-    std::vector<Real> l_diag_;
     std::vector<Real> ne_dense_;  // Dense NE matrix / Cholesky factor (col-major)
     std::vector<Real> theta_;
     std::vector<Real> s_copy_;
@@ -1375,8 +1249,21 @@ private:
                 // above-diagonal entry in column perm_row.
             }
         } else {
-            // Constraint column: diagonal = reg (δI block).
+            // Constraint column orig_j = n_ + i: diagonal = reg (δI block),
+            // plus A-coupling entries whose variable column was permuted *after*
+            // this constraint (perm_row > j). The variable-column branch only
+            // scatters couplings with the constraint permuted after the variable
+            // (perm_row > j there); the opposite orientation belongs here, and
+            // without it the entry is silently dropped from the factorization.
+            Index i = orig_j - n_;
             w[j] = reg_;
+            auto rv = a_->row(i);
+            for (Index k = 0; k < rv.size(); ++k) {
+                Index perm_row = sym_.iperm[rv.indices[k]];
+                if (perm_row > j) {
+                    w[perm_row] = rv.values[k];
+                }
+            }
         }
     }
 
