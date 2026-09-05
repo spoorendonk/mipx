@@ -1234,3 +1234,61 @@ TEST_CASE("DualSimplex: force_dense_pivot_row option round-trips",
     CHECK(stats.fill_in_fallbacks == 0);
     CHECK(stats.ema_alpha_density == 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// A warm-started basis can outlive the bounds it was taken under: a
+// branch-and-bound node installs the basis saved at its parent, whose bounds
+// were tighter. A stale status is not cosmetic -- a variable marked Fixed is
+// ineligible to enter the basis, so a variable that is no longer fixed stays
+// pinned at a bound and the solve stops early and reports the result optimal.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("DualSimplex: warm basis with stale Fixed statuses still reaches the optimum",
+          "[dual_simplex][warm_start]") {
+    LpProblem lp;
+    lp.name = "warm_start_stale_fixed";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.num_rows = 4;
+    lp.obj = {-3.0, -3.0, 1.0, 2.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 4.0, 4.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Integer, VarType::Integer};
+    lp.col_names = {"x0", "x1", "x2", "x3"};
+    lp.row_lower = {-4.0, -7.0, -5.0, -kInf};
+    lp.row_upper = {kInf, 11.0, kInf, 6.0};
+    lp.row_names = {"R0", "R1", "R2", "R3"};
+    std::vector<Triplet> trips = {
+        {0, 0, 5.0},  {1, 1, -5.0}, {1, 2, 5.0},  {1, 3, -5.0}, {2, 0, -5.0},
+        {2, 2, 2.0},  {2, 3, -1.0}, {3, 0, -3.0}, {3, 1, 3.0},  {3, 3, -5.0},
+    };
+    lp.matrix = SparseMatrix(4, 4, std::move(trips));
+
+    // Bounds of a node deeper in a tree, and a basis saved where x0, x2 and x3
+    // were each fixed by branching. Under these bounds none of them is fixed.
+    const std::vector<Real> node_lower = {0.0, 0.0, 0.0, 0.0};
+    const std::vector<Real> node_upper = {1.0, 2.0, 1.0, 1.0};
+    const std::vector<BasisStatus> stale_basis = {
+        BasisStatus::Fixed, BasisStatus::Basic,   BasisStatus::Fixed, BasisStatus::Fixed,
+        BasisStatus::Basic, BasisStatus::AtLower, BasisStatus::Basic, BasisStatus::Basic};
+
+    DualSimplexSolver warm;
+    warm.load(lp);
+    warm.solve();
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        warm.setColBounds(j, node_lower[j], node_upper[j]);
+    }
+    warm.setBasis(stale_basis);
+    auto warm_result = warm.solve();
+
+    DualSimplexSolver fresh;
+    fresh.load(lp);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        fresh.setColBounds(j, node_lower[j], node_upper[j]);
+    }
+    auto fresh_result = fresh.solve();
+
+    REQUIRE(fresh_result.status == Status::Optimal);
+    REQUIRE(warm_result.status == fresh_result.status);
+    CHECK_THAT(warm_result.objective, WithinAbs(fresh_result.objective, 1e-9));
+}

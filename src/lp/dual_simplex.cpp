@@ -782,6 +782,16 @@ LpResult DualSimplexSolver::solve() {
         augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
     }
 
+    // A warm basis may have been assembled by any route -- setBasis, repeated
+    // setColBounds calls, or an earlier solve on this object whose bounds have
+    // since moved. Bring every nonbasic status back in line with the current
+    // bounds before iterating.
+    if (has_basis_ && static_cast<Index>(var_status_.size()) == numVars()) {
+        for (Index k : nonbasic_) {
+            reconcileNonbasicStatus(k);
+        }
+    }
+
     // Reset iteration counter for this solve call.
     iterations_ = 0;
     solve_start_ = std::chrono::steady_clock::now();
@@ -3154,6 +3164,47 @@ std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
                                     var_status_.begin() + num_cols_ + num_rows_);
 }
 
+// Reconcile one nonbasic variable's status with the bounds in force now.
+//
+// A basis can outlive the bounds it was taken under: a branch-and-bound node
+// installs a basis saved at its parent, and setColBounds can move a bound under
+// a status that is already installed. A stale status is not cosmetic -- a
+// variable marked Fixed is ineligible to enter the basis, so a variable that is
+// no longer fixed stays pinned at a bound and the solve stops at a suboptimal
+// point and reports it as optimal.
+void DualSimplexSolver::reconcileNonbasicStatus(Index k) {
+    const Real lo = varLower(k);
+    const Real up = varUpper(k);
+    const bool lo_finite = lo != -kInf;
+    const bool up_finite = up != kInf;
+
+    BasisStatus st = var_status_[k];
+    if (lo_finite && up_finite && std::abs(up - lo) < kZeroTol) {
+        st = BasisStatus::Fixed;
+    } else if (st == BasisStatus::Fixed || st == BasisStatus::AtLower) {
+        st = lo_finite ? BasisStatus::AtLower
+                       : (up_finite ? BasisStatus::AtUpper : BasisStatus::Free);
+    } else if (st == BasisStatus::AtUpper) {
+        st = up_finite ? BasisStatus::AtUpper
+                       : (lo_finite ? BasisStatus::AtLower : BasisStatus::Free);
+    } else {  // Free
+        if (lo_finite) {
+            st = BasisStatus::AtLower;
+        } else if (up_finite) {
+            st = BasisStatus::AtUpper;
+        }
+    }
+
+    var_status_[k] = st;
+    if (st == BasisStatus::AtUpper) {
+        primal_[k] = up;
+    } else if (st == BasisStatus::Free) {
+        primal_[k] = 0.0;
+    } else {
+        primal_[k] = lo;
+    }
+}
+
 void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     // External basis: first num_cols are structural, next num_rows are slacks.
     Index n = numVars();
@@ -3186,21 +3237,18 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     basis_pos_.assign(n, -1);
 
     for (Index k = 0; k < n; ++k) {
-        var_status_[k] = basis[k];
         if (basis[k] == BasisStatus::Basic) {
+            var_status_[k] = BasisStatus::Basic;
             basis_pos_[k] = static_cast<Index>(basis_.size());
             basis_.push_back(k);
-        } else {
-            nonbasic_.push_back(k);
-            nonbasic_pos_[k] = static_cast<Index>(nonbasic_.size() - 1);
-            if (basis[k] == BasisStatus::AtLower || basis[k] == BasisStatus::Fixed) {
-                primal_[k] = varLower(k);
-            } else if (basis[k] == BasisStatus::AtUpper) {
-                primal_[k] = varUpper(k);
-            } else {
-                primal_[k] = 0.0;
-            }
+            continue;
         }
+
+        nonbasic_.push_back(k);
+        nonbasic_pos_[k] = static_cast<Index>(nonbasic_.size() - 1);
+
+        var_status_[k] = basis[k];
+        reconcileNonbasicStatus(k);
     }
     has_basis_ = true;
 }

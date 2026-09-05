@@ -284,6 +284,8 @@ private:
 
     // Variable bounds (structural + slack).
     Real varLower(Index k) const;
+    /// Bring one nonbasic variable's status and value in line with its bounds.
+    void reconcileNonbasicStatus(Index k);
     Real varUpper(Index k) const;
     Real varCost(Index k) const;
 
