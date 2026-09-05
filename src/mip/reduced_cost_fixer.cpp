@@ -130,8 +130,13 @@ bool ReducedCostFixer::applyGlobalFixing(std::span<const Real> reduced_costs,
     if (count < 0)
         return false;
 
-    // Record global changes and update global bounds.
-    for (Index j : tightened_vars) {
+    // Record global changes and update global bounds. Only the entries this
+    // call appended are ours -- the caller may pass a scratch vector that
+    // already holds indices, and re-recording those would promote another
+    // pass's node-local tightening to a global bound.
+    const auto first_new = tightened_vars.size() - static_cast<std::size_t>(count);
+    for (std::size_t i = first_new; i < tightened_vars.size(); ++i) {
+        const Index j = tightened_vars[i];
         if (col_lower[j] > global_lower_[j] + kBoundTol ||
             col_upper[j] < global_upper_[j] - kBoundTol) {
             global_changes_.push_back({

@@ -1642,3 +1642,51 @@ TEST_CASE("MipSolver: node reduced-cost fixing runs with more than one thread",
     CHECK(parallel_stats.root_global_fixings == serial_stats.root_global_fixings);
     CHECK(parallel_stats.root_global_tightenings == serial_stats.root_global_tightenings);
 }
+
+// Root reduced-cost fixing tightens the loaded problem in place, using bounds
+// derived from the incumbent of the solve that is running. Those bounds must
+// not survive the call: a second solve on the same object would otherwise
+// start inside the first solve's optimality box and can report a worse
+// objective as optimal.
+TEST_CASE("MipSolver: a second solve is not narrowed by the first solve's RC fixing",
+          "[mip][rcfixer]") {
+    LpProblem lp;
+    lp.name = "rc_fixing_repeated_solve";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 5;
+    lp.num_rows = 2;
+    lp.obj = {-2.0, -4.0, 1.0, 2.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {2.0, 1.0, 4.0, 1.0, 2.0};
+    lp.col_type.assign(5, VarType::Integer);
+    lp.col_names = {"x0", "x1", "x2", "x3", "x4"};
+    lp.row_lower = {-2.0, -kInf};
+    lp.row_upper = {1.0, 9.0};
+    lp.row_names = {"R0", "R1"};
+    std::vector<Triplet> trips = {
+        {0, 0, -5.0}, {0, 1, 1.0}, {0, 2, -5.0}, {0, 4, -3.0},
+        {1, 0, 4.0},  {1, 1, -3.0}, {1, 4, 5.0},
+    };
+    lp.matrix = SparseMatrix(2, 5, std::move(trips));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.load(lp);
+
+    auto first = solver.solve();
+    REQUIRE(first.status == Status::Optimal);
+    CHECK_THAT(first.objective, WithinAbs(-5.0, 1e-9));
+
+    auto second = solver.solve();
+    REQUIRE(second.status == first.status);
+    CHECK_THAT(second.objective, WithinAbs(first.objective, 1e-9));
+
+    // Re-loading the same model is the other way a caller expects the original
+    // bounds back.
+    solver.load(lp);
+    auto third = solver.solve();
+    REQUIRE(third.status == first.status);
+    CHECK_THAT(third.objective, WithinAbs(first.objective, 1e-9));
+}

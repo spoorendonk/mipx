@@ -3737,7 +3737,20 @@ MipResult MipSolver::solve() {
         problem_ = std::move(working_problem);
         refreshTreePresolveProfile();
     }
+    // Root reduced-cost fixing tightens problem_ in place, and those bounds are
+    // derived from this solve's incumbent. Keep the pre-fixing bounds so a
+    // second solve() on the same object does not start inside the first
+    // solve's optimality box.
+    std::vector<Real> rc_root_saved_lower;
+    std::vector<Real> rc_root_saved_upper;
+
     auto restoreProblem = [&]() {
+        if (!rc_root_saved_lower.empty()) {
+            problem_.col_lower = std::move(rc_root_saved_lower);
+            problem_.col_upper = std::move(rc_root_saved_upper);
+            rc_root_saved_lower.clear();
+            rc_root_saved_upper.clear();
+        }
         if (!using_transformed_problem) {
             return;
         }
@@ -5081,6 +5094,8 @@ MipResult MipSolver::solve() {
     rc_fixer_.load(problem_);
     if (incumbent < kInf) {
         auto root_rc = lp.getReducedCosts();
+        rc_root_saved_lower = problem_.col_lower;
+        rc_root_saved_upper = problem_.col_upper;
         std::vector<Index> rc_tightened;
         bool rc_feasible =
             rc_fixer_.applyGlobalFixing(root_rc, root_primals, root_bound, incumbent,
