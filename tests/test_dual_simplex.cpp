@@ -1084,6 +1084,14 @@ TEST_CASE("DualSimplex: sparse row-price alpha matches the dense assembly exactl
             solver.setIterationLimit(iter_limit);
         }
         auto result = solver.solve();
+        // Keep the comparison self-contained: assert here, not in a sibling
+        // test case, that this run really took the path it is named for.
+        const auto& stats = solver.getRowPriceStats();
+        if (force_dense) {
+            CHECK(stats.sparse_assemblies == 0);
+        } else {
+            CHECK(stats.sparse_assemblies > 0);
+        }
         return std::tuple{result, solver.getReducedCosts(), solver.getDualValues(),
                           solver.getPrimalValues(), solver.getBasis()};
     };

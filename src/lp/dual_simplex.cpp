@@ -1391,8 +1391,12 @@ LpResult DualSimplexSolver::solve() {
         bool completed_sparse = false;
         if (use_sparse_row_support) {
             std::sort(touched_rows.begin(), touched_rows.end());
-            const auto fill_in_limit = static_cast<std::size_t>(
-                kRowPriceFillInFactor * kRowPriceMaxDensity * static_cast<Real>(numVars()));
+            // Floor of 1: on models narrower than a handful of columns the
+            // budget truncates to zero, which would report every sparse
+            // assembly as a fill-in fallback after its first row.
+            const auto fill_in_limit = std::max<std::size_t>(
+                1, static_cast<std::size_t>(kRowPriceFillInFactor * kRowPriceMaxDensity *
+                                            static_cast<Real>(numVars())));
             completed_sparse = true;
             for (Index i : touched_rows) {
                 accumulateRow(i);
