@@ -576,7 +576,10 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             }
             has_fix = true;
         } else {
-            // Row contains only this variable; objective-only fixing is safe.
+            // Row contains only this variable. The objective picks which bound
+            // to take, but the row still restricts it: earlier reductions fold
+            // the values of the columns they remove into the row bounds, so
+            // what is left of the row is a real constraint on this variable.
             if (objective_prefers_lower()) {
                 if (!lb_finite) continue;
                 fix_at_lower = true;
@@ -595,6 +598,23 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
         if (!has_fix) continue;
 
         const Real fix_value = fix_at_lower ? lp.col_lower[j] : lp.col_upper[j];
+
+        if (remaining_in_row == 0) {
+            // Only this variable is left in the row, so the row reduces to a
+            // bound on it. Take the fix only when the chosen value satisfies
+            // that bound. Singleton-row tightening narrows the column to the
+            // row-implied range on a later pass, after which the same fix is
+            // valid -- so skipping here costs the reduction nothing.
+            const Real activity = singleton_coeff * fix_value;
+            if (!std::isinf(lp.row_lower[singleton_row]) &&
+                activity < lp.row_lower[singleton_row] - kTol) {
+                continue;
+            }
+            if (!std::isinf(lp.row_upper[singleton_row]) &&
+                activity > lp.row_upper[singleton_row] + kTol) {
+                continue;
+            }
+        }
 
         removeActiveColumn(lp, j, col_removed, row_removed, row_active_nnz,
                            col_active_nnz, next_dirty_rows, next_dirty_cols);

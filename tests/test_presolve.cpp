@@ -1190,3 +1190,69 @@ TEST_CASE("Presolve: redundant upper row is not treated as forcing", "[presolve]
     CHECK(full[1] <= 2.0 + 1e-6);
     CHECK(full[0] + full[1] <= 25.0 + 1e-6);
 }
+
+// ---------------------------------------------------------------------------
+// A singleton column that is the last variable left in its row is still bound
+// by that row. Earlier reductions fold the values of the columns they remove
+// into the row bounds, so the remainder is a real constraint -- fixing on the
+// objective alone declared feasible models infeasible.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Presolve: last column in a row respects the row bound", "[presolve]") {
+    // min x0 - x1 - 2*x2 - 5*x3
+    //   R0: 4*x0 + 4*x3 <= 4
+    //   R1: -3*x1 + 4*x2 <= 4
+    // Optimum -8 at x0=0, x1=1, x2=1, x3=1.
+    //
+    // Every column is a singleton. Fixing x1 to its upper bound is valid (it
+    // relaxes R1 and improves the objective) and leaves R1 as 4*x2 <= 7, so x2
+    // is capped at 1 -- fixing it to its upper bound of 2 makes R1 infeasible.
+    LpProblem lp;
+    lp.name = "singleton_col_row_bound";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.num_rows = 2;
+    lp.obj = {1.0, -1.0, -2.0, -5.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 2.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Integer, VarType::Integer, VarType::Binary};
+    lp.col_names = {"x0", "x1", "x2", "x3"};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {4.0, 4.0};
+    lp.row_names = {"R0", "R1"};
+    std::vector<Triplet> trips = {
+        {0, 0, 4.0}, {0, 3, 4.0}, {1, 1, -3.0}, {1, 2, 4.0},
+    };
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.load(reduced);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    auto full = presolver.postsolve(result.solution);
+    REQUIRE(full.size() == static_cast<std::size_t>(lp.num_cols));
+
+    Real objective = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        objective += lp.obj[j] * full[static_cast<std::size_t>(j)];
+    }
+    CHECK_THAT(objective, WithinAbs(-8.0, 1e-9));
+
+    // The recovered point must satisfy the original rows.
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        auto row = lp.matrix.row(i);
+        Real activity = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            activity += row.values[k] * full[static_cast<std::size_t>(row.indices[k])];
+        }
+        INFO("row " << i);
+        CHECK(activity <= lp.row_upper[i] + 1e-9);
+    }
+}
