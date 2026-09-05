@@ -143,6 +143,7 @@ Real originalObjective(const LpProblem& lp, std::span<const Real> x) {
     return obj;
 }
 
+#ifdef MIPX_HAS_CUDSS
 std::string testDataDir() {
     return std::string(TEST_DATA_DIR);
 }
@@ -169,6 +170,7 @@ void testBarrierNetlib(const std::string& name, Real expected_obj, BarrierAlgori
     Real rel_err = std::abs(result.objective - expected_obj) / denom;
     CHECK(rel_err < rel_tol);
 }
+#endif  // MIPX_HAS_CUDSS
 
 }  // namespace
 

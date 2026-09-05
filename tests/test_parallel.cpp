@@ -37,6 +37,7 @@ static LpProblem buildBranchingMip() {
     return lp;
 }
 
+#ifdef MIPX_HAS_TBB
 static LpProblem buildSymmetryBranchingMip() {
     LpProblem lp;
     lp.name = "symmetry_branching_mip";
@@ -115,7 +116,6 @@ static LpProblem buildSearchStagnationMip() {
     return lp;
 }
 
-#ifdef MIPX_HAS_TBB
 // ---------------------------------------------------------------------------
 // Helper: Knapsack MIP
 // max 6x1 + 5x2 + 4x3 s.t. 3x1 + 2x2 + 2x3 <= 5, x binary
