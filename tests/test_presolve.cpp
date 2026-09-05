@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <algorithm>
 #include <cmath>
 
 #include "mipx/mip_solver.h"
@@ -1255,4 +1256,260 @@ TEST_CASE("Presolve: last column in a row respects the row bound", "[presolve]")
         INFO("row " << i);
         CHECK(activity <= lp.row_upper[i] + 1e-9);
     }
+}
+
+// =============================================================================
+// Tests: Probing inside presolve
+// =============================================================================
+
+/// min -x - y - z  s.t.  x + y <= 1, x + z <= 1, y + z >= 1, all binary.
+/// x = 1 propagates to y = z = 0, which violates the third row, so x = 0 is
+/// forced. No single-row reduction sees that; probing does.
+static LpProblem buildProbingFixingMip() {
+    LpProblem lp;
+    lp.name = "probing_fixing";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, 1.0};
+    lp.row_upper = {1.0, 1.0, kInf};
+    lp.row_names = {"c1", "c2", "c3"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
+/// Same as above plus y <= x and z <= x, which makes x = 0 infeasible too:
+/// both probing branches fail, so the model is infeasible.
+static LpProblem buildProbingInfeasibleMip() {
+    LpProblem lp = buildProbingFixingMip();
+    lp.name = "probing_infeasible";
+    lp.num_rows = 5;
+    lp.row_lower = {-kInf, -kInf, 1.0, -kInf, -kInf};
+    lp.row_upper = {1.0, 1.0, kInf, 0.0, 0.0};
+    lp.row_names = {"c1", "c2", "c3", "c4", "c5"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0},
+        {1, 0, 1.0}, {1, 2, 1.0},
+        {2, 1, 1.0}, {2, 2, 1.0},
+        {3, 1, 1.0}, {3, 0, -1.0},
+        {4, 2, 1.0}, {4, 0, -1.0},
+    };
+    lp.matrix = SparseMatrix(5, 3, std::move(trips));
+    return lp;
+}
+
+/// min -x - z - y0 - y1 with a variable-upper-bound structure:
+///   r0: x - 5*y0 <= 0     (probing learns x <= 10*y0, i.e. y0 = 0 => x = 0)
+///   r1: 3*y0 + x + z <= 4 (coefficient of y0 is strengthened using that VUB)
+///   r2: y0 + y1 <= 1
+///   r3: z - 2*y1 <= 0
+static LpProblem buildProbingStrengtheningMip() {
+    LpProblem lp;
+    lp.name = "probing_strengthening";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-1.0, -1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 10.0, 2.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous,
+                   VarType::Continuous};
+    lp.col_names = {"y0", "y1", "x", "z"};
+
+    lp.num_rows = 4;
+    lp.row_lower = {-kInf, -kInf, -kInf, -kInf};
+    lp.row_upper = {0.0, 4.0, 1.0, 0.0};
+    lp.row_names = {"r0", "r1", "r2", "r3"};
+
+    std::vector<Triplet> trips = {
+        {0, 2, 1.0},  {0, 0, -5.0},
+        {1, 0, 3.0},  {1, 2, 1.0},  {1, 3, 1.0},
+        {2, 0, 1.0},  {2, 1, 1.0},
+        {3, 3, 1.0},  {3, 1, -2.0},
+    };
+    lp.matrix = SparseMatrix(4, 4, std::move(trips));
+    return lp;
+}
+
+static bool columnKept(const std::vector<Index>& mapping, Index orig_col) {
+    return std::find(mapping.begin(), mapping.end(), orig_col) != mapping.end();
+}
+
+TEST_CASE("Presolve: probing fixes a variable other reductions miss", "[presolve]") {
+    auto lp = buildProbingFixingMip();
+
+    // Without probing the variable survives presolve.
+    Presolver baseline;
+    auto reduced_off = baseline.presolve(lp);
+    REQUIRE_FALSE(baseline.isInfeasible());
+    CHECK(baseline.stats().probing_fixings == 0);
+    CHECK(baseline.stats().probing_changes == 0);
+    CHECK(columnKept(baseline.colMapping(), 0));
+
+    // With probing it is fixed to 0 and removed.
+    PresolveOptions options;
+    options.enable_probing = true;
+    Presolver presolver;
+    presolver.setOptions(options);
+    auto reduced = presolver.presolve(lp);
+
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().probing_fixings >= 1);
+    CHECK(presolver.stats().probing_changes >= 1);
+    CHECK_FALSE(columnKept(presolver.colMapping(), 0));
+    CHECK(reduced.num_cols < reduced_off.num_cols);
+}
+
+TEST_CASE("Presolve: probing fixing survives postsolve round-trip", "[presolve]") {
+    auto lp = buildProbingFixingMip();
+
+    MipSolver direct_solver;
+    direct_solver.setVerbose(false);
+    direct_solver.load(lp);
+    auto direct_result = direct_solver.solve();
+    REQUIRE(direct_result.status == Status::Optimal);
+
+    PresolveOptions options;
+    options.enable_probing = true;
+    Presolver presolver;
+    presolver.setOptions(options);
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    std::vector<Real> presolved_solution;
+    // MipSolver already folds obj_offset into the objective it reports, so an
+    // empty reduced problem is worth exactly the offset.
+    Real presolved_obj = reduced.obj_offset;
+    if (reduced.num_cols > 0) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.load(reduced);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        presolved_solution = result.solution;
+        presolved_obj = result.objective;
+    }
+
+    auto full = presolver.postsolve(presolved_solution);
+    REQUIRE(full.size() == 3);
+
+    // The probing-fixed variable comes back at its fixed value.
+    CHECK_THAT(full[0], WithinAbs(0.0, 1e-6));
+
+    // The reconstructed solution is feasible for the original model and has the
+    // same objective as the direct solve.
+    CHECK(full[0] + full[1] <= 1.0 + 1e-6);
+    CHECK(full[0] + full[2] <= 1.0 + 1e-6);
+    CHECK(full[1] + full[2] >= 1.0 - 1e-6);
+    Real full_obj = 0.0;
+    for (Index j = 0; j < 3; ++j) {
+        CHECK(full[j] >= -1e-6);
+        CHECK(full[j] <= 1.0 + 1e-6);
+        full_obj += lp.obj[j] * full[j];
+    }
+    CHECK_THAT(full_obj, WithinAbs(direct_result.objective, 1e-6));
+    CHECK_THAT(presolved_obj, WithinAbs(direct_result.objective, 1e-6));
+}
+
+TEST_CASE("Presolve: probing reports infeasibility", "[presolve]") {
+    auto lp = buildProbingInfeasibleMip();
+
+    // Neither branch of x is feasible, but no cheap reduction sees it.
+    Presolver baseline;
+    baseline.presolve(lp);
+    CHECK_FALSE(baseline.isInfeasible());
+
+    PresolveOptions options;
+    options.enable_probing = true;
+    Presolver presolver;
+    presolver.setOptions(options);
+    presolver.presolve(lp);
+
+    CHECK(presolver.isInfeasible());
+}
+
+TEST_CASE("Presolve: probing-strengthened MIP matches direct solve", "[presolve]") {
+    auto lp = buildProbingStrengtheningMip();
+
+    MipSolver direct_solver;
+    direct_solver.setVerbose(false);
+    direct_solver.load(lp);
+    auto direct_result = direct_solver.solve();
+    REQUIRE(direct_result.status == Status::Optimal);
+
+    PresolveOptions options;
+    options.enable_probing = true;
+    Presolver presolver;
+    presolver.setOptions(options);
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    // The implication-based coefficient strengthening has a production caller.
+    CHECK(presolver.stats().probing_coeff_strengthenings >= 1);
+
+    std::vector<Real> presolved_solution;
+    // MipSolver already folds obj_offset into the objective it reports, so an
+    // empty reduced problem is worth exactly the offset.
+    Real presolved_obj = reduced.obj_offset;
+    if (reduced.num_cols > 0) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.load(reduced);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        presolved_solution = result.solution;
+        presolved_obj = result.objective;
+    }
+    CHECK_THAT(presolved_obj, WithinAbs(direct_result.objective, 1e-6));
+
+    // The postsolved solution is feasible for the original model.
+    auto full = presolver.postsolve(presolved_solution);
+    REQUIRE(full.size() == 4);
+    CHECK(full[2] - 5.0 * full[0] <= 1e-6);
+    CHECK(3.0 * full[0] + full[2] + full[3] <= 4.0 + 1e-6);
+    CHECK(full[0] + full[1] <= 1.0 + 1e-6);
+    CHECK(full[3] - 2.0 * full[1] <= 1e-6);
+    Real full_obj = 0.0;
+    for (Index j = 0; j < 4; ++j) {
+        CHECK(full[j] >= lp.col_lower[j] - 1e-6);
+        CHECK(full[j] <= lp.col_upper[j] + 1e-6);
+        full_obj += lp.obj[j] * full[j];
+    }
+    CHECK_THAT(full_obj, WithinAbs(direct_result.objective, 1e-6));
+}
+
+TEST_CASE("Presolve: probing off leaves output untouched", "[presolve]") {
+    // Same model, presolved with the option off and with the default options:
+    // identical reductions, no probing statistics.
+    auto lp = buildProbingStrengtheningMip();
+
+    Presolver defaults;
+    auto reduced_default = defaults.presolve(lp);
+
+    PresolveOptions options;
+    options.enable_probing = false;
+    Presolver explicit_off;
+    explicit_off.setOptions(options);
+    auto reduced_off = explicit_off.presolve(lp);
+
+    CHECK(reduced_default.num_cols == reduced_off.num_cols);
+    CHECK(reduced_default.num_rows == reduced_off.num_rows);
+    CHECK(defaults.colMapping() == explicit_off.colMapping());
+    CHECK(defaults.stats().probing_changes == 0);
+    CHECK(defaults.stats().probing_fixings == 0);
+    CHECK(defaults.stats().probing_coeff_strengthenings == 0);
+    CHECK(explicit_off.stats().probing_coeff_strengthenings == 0);
+    CHECK(reduced_default.row_upper == reduced_off.row_upper);
 }

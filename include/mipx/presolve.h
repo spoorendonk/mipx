@@ -11,6 +11,8 @@
 
 namespace mipx {
 
+class VariableBoundStore;
+
 // ---- Postsolve operations ---------------------------------------------------
 
 /// A variable was fixed to a value and removed.
@@ -128,6 +130,9 @@ struct PresolveStats {
     Index duplicate_row_changes = 0;
     Index parallel_row_changes = 0;
     Index doubleton_eq_changes = 0;
+    Index probing_changes = 0;
+    Index probing_fixings = 0;
+    Index probing_coeff_strengthenings = 0;
     Index rounds = 0;
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
@@ -141,6 +146,10 @@ struct PresolveOptions {
     bool enable_coefficient_tightening = false;
     bool enable_doubleton_aggregation = true;
     bool enable_parallel_rows = true;
+    /// Run root probing inside the reduction loop (fixings + implication-based
+    /// coefficient strengthening). Off by default: probing is the most
+    /// expensive pass and its default is decided by benchmarking.
+    bool enable_probing = false;
 };
 
 // ---- Presolver --------------------------------------------------------------
@@ -255,6 +264,19 @@ private:
                                         const std::vector<Index>& dirty_rows,
                                         std::vector<uint8_t>& next_dirty_rows,
                                         std::vector<uint8_t>& next_dirty_cols);
+    // Root probing: fixes variables whose opposite branch propagates to
+    // infeasibility, and strengthens coefficients with the learned variable
+    // bounds. Runs at most once per presolve call.
+    Index probingPass(LpProblem& lp, const std::vector<bool>& col_removed,
+                      const std::vector<bool>& row_removed,
+                      std::vector<uint8_t>& next_dirty_rows,
+                      std::vector<uint8_t>& next_dirty_cols);
+    Index strengthenCoefficientsFromVarBounds(
+        LpProblem& lp, const VariableBoundStore& vb_store,
+        const std::vector<bool>& col_removed,
+        const std::vector<bool>& row_removed,
+        std::vector<uint8_t>& next_dirty_rows,
+        std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                std::vector<bool>& row_removed,
                                const std::vector<Index>& dirty_rows,
@@ -273,6 +295,7 @@ private:
     PresolveOptions options_{};
     Index max_rounds_ = 20;
     bool infeasible_ = false;
+    bool probing_done_ = false;
     std::unordered_map<uint64_t, Real> coeff_overrides_{};
 
     static constexpr Real kTol = 1e-8;

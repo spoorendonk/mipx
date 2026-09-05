@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 
 #include "mipx/lp_problem.h"
@@ -129,79 +130,87 @@ Real VariableBoundStore::bestVLB(Index var, const std::vector<Real>& primals) co
     return best;
 }
 
+Real VariableBoundStore::impliedUpper(Index var, Index binary_var,
+                                      bool binary_val) const {
+    if (var < 0 || var >= num_cols_) return kInf;
+    Real best = kInf;
+    for (const auto& vub : vubs_[var]) {
+        if (vub.binary_var != binary_var) continue;
+        const Real bound = binary_val ? vub.coeff + vub.constant : vub.constant;
+        if (std::isfinite(bound)) best = std::min(best, bound);
+    }
+    return best;
+}
+
+Real VariableBoundStore::impliedLower(Index var, Index binary_var,
+                                      bool binary_val) const {
+    if (var < 0 || var >= num_cols_) return -kInf;
+    Real best = -kInf;
+    for (const auto& vlb : vlbs_[var]) {
+        if (vlb.binary_var != binary_var) continue;
+        const Real bound = binary_val ? vlb.coeff + vlb.constant : vlb.constant;
+        if (std::isfinite(bound)) best = std::max(best, bound);
+    }
+    return best;
+}
+
 VariableBoundStore::CoefficientStrengthening VariableBoundStore::strengthenCoefficient(
-    Index var, Real coeff, Real rhs,
+    Index binary_var, Real coeff, Real rhs,
+    std::span<const Index> row_indices,
+    std::span<const Real> row_values,
     const std::vector<Real>& col_lower,
     const std::vector<Real>& col_upper) const {
 
+    constexpr Real kTol = 1e-8;
+
     CoefficientStrengthening result{coeff, 0.0, false};
 
-    if (var < 0 || var >= num_cols_) return result;
+    if (binary_var < 0 || binary_var >= num_cols_) return result;
     if (!std::isfinite(coeff) || !std::isfinite(rhs)) return result;
-    if (std::abs(coeff) < 1e-10) return result;
+    if (std::abs(coeff) <= kTol) return result;
+    if (row_indices.size() != row_values.size()) return result;
 
-    // For positive coefficient a_j > 0 with VUB x_j <= c*y + d:
-    // In constraint sum(a_i*x_i) <= rhs, we can strengthen a_j to a_j'
-    // where a_j' = a_j - surplus and the rhs is adjusted accordingly.
-    if (coeff > 0.0 && !vubs_[var].empty()) {
-        for (const auto& vub : vubs_[var]) {
-            if (vub.binary_var < 0 ||
-                vub.binary_var >= static_cast<Index>(col_upper.size())) continue;
+    // Branch in which the row has to be slack: y = 0 for a positive
+    // coefficient, y = 1 for a negative one (i.e. complementing y).
+    const bool branch_val = coeff < 0.0;
 
-            // The VUB says: x_j <= vub.coeff * y + vub.constant
-            // When y=0: x_j <= vub.constant
-            // When y=1: x_j <= vub.coeff + vub.constant
-            Real ub_at0 = vub.constant;
-            Real ub_at1 = vub.coeff + vub.constant;
-
-            if (!std::isfinite(ub_at0) || !std::isfinite(ub_at1)) continue;
-            if (ub_at0 <= 0.0) continue;  // Only useful when VUB is binding.
-
-            // The contribution of x_j is at most coeff * ub_at0 when y=0
-            // and coeff * ub_at1 when y=1.
-            // If coeff * ub_at0 > coeff * ub_at1, the bound at y=0 is dominant
-            // and we can potentially tighten.
-            Real surplus = coeff * (ub_at0 - ub_at1);
-            if (surplus > 1e-8) {
-                Real new_coeff = coeff * ub_at1 / ub_at0;
-                Real delta = coeff * ub_at0 - new_coeff * ub_at0;
-                if (new_coeff < coeff - 1e-8 && new_coeff > 1e-10) {
-                    result.new_coeff = new_coeff;
-                    result.rhs_delta = -delta;
-                    result.strengthened = true;
-                    return result;
-                }
-            }
+    // Maximum activity of the remaining terms in that branch, using the
+    // implied bounds contributed by the VUBs/VLBs keyed on `binary_var`.
+    Real max_activity = 0.0;
+    for (std::size_t k = 0; k < row_indices.size(); ++k) {
+        const Index j = row_indices[k];
+        if (j == binary_var) continue;
+        if (j < 0 || j >= static_cast<Index>(col_lower.size()) ||
+            j >= static_cast<Index>(col_upper.size())) {
+            return result;
         }
+        const Real a = row_values[k];
+        if (a == 0.0) continue;
+
+        const Real lo = std::max(col_lower[j], impliedLower(j, binary_var, branch_val));
+        const Real hi = std::min(col_upper[j], impliedUpper(j, binary_var, branch_val));
+        if (lo > hi + kTol) return result;  // Branch is infeasible; not our job.
+
+        const Real contrib = (a > 0.0) ? a * hi : a * lo;
+        if (!std::isfinite(contrib)) return result;
+        max_activity += contrib;
     }
 
-    // For negative coefficient a_j < 0 with VLB x_j >= c*y + d:
-    if (coeff < 0.0 && !vlbs_[var].empty()) {
-        for (const auto& vlb : vlbs_[var]) {
-            if (vlb.binary_var < 0 ||
-                vlb.binary_var >= static_cast<Index>(col_lower.size())) continue;
+    // Right-hand side left to the other terms once y's own contribution in the
+    // branch is accounted for (0 when y = 0, `coeff` when y = 1).
+    const Real branch_rhs = (coeff > 0.0) ? rhs : rhs - coeff;
+    const Real delta = branch_rhs - max_activity;
+    const Real magnitude = std::abs(coeff);
+    if (!(delta > kTol && delta < magnitude - kTol)) return result;
 
-            Real lb_at0 = vlb.constant;
-            Real lb_at1 = vlb.coeff + vlb.constant;
-
-            if (!std::isfinite(lb_at0) || !std::isfinite(lb_at1)) continue;
-
-            // For negative coeff, smaller x_j gives larger contribution.
-            // VLB at y=0 is lb_at0, at y=1 is lb_at1.
-            Real surplus = coeff * (lb_at0 - lb_at1);  // coeff < 0
-            if (surplus > 1e-8) {
-                Real new_coeff = coeff * lb_at1 / lb_at0;
-                Real delta = coeff * lb_at0 - new_coeff * lb_at0;
-                if (new_coeff > coeff + 1e-8 && new_coeff < -1e-10) {
-                    result.new_coeff = new_coeff;
-                    result.rhs_delta = -delta;
-                    result.strengthened = true;
-                    return result;
-                }
-            }
-        }
+    if (coeff > 0.0) {
+        result.new_coeff = coeff - delta;
+        result.rhs_delta = -delta;
+    } else {
+        result.new_coeff = coeff + delta;
+        result.rhs_delta = 0.0;
     }
-
+    result.strengthened = true;
     return result;
 }
 

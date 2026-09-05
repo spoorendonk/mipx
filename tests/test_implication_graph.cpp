@@ -417,6 +417,118 @@ TEST_CASE("VariableBoundStore: clear resets state", "[variable_bounds]") {
     CHECK_FALSE(store.hasVLB(0));
 }
 
+TEST_CASE("VariableBoundStore: coefficient strengthening from a VUB",
+          "[variable_bounds]") {
+    // Model: y binary (col 0), x continuous in [0, 10] (col 1) with the
+    // variable upper bound x <= 5*y, z continuous in [0, 2] (col 2).
+    //   row:  3*y + x + z <= 4
+    // In the y = 0 branch the VUB forces x = 0, so the other terms reach at
+    // most z = 2. The surplus is 4 - 2 = 2 < 3, so the row is equivalent to
+    //   1*y + x + z <= 2.
+    VariableBoundStore store;
+    store.init(3);
+    store.addVUB(1, 0, 5.0, 0.0);  // x <= 5*y + 0
+
+    const std::vector<Index> idx = {0, 1, 2};
+    const std::vector<Real> vals = {3.0, 1.0, 1.0};
+    const std::vector<Real> lower = {0.0, 0.0, 0.0};
+    const std::vector<Real> upper = {1.0, 10.0, 2.0};
+
+    const auto res =
+        store.strengthenCoefficient(0, 3.0, 4.0, idx, vals, lower, upper);
+    REQUIRE(res.strengthened);
+    CHECK_THAT(res.new_coeff, WithinAbs(1.0, 1e-9));
+    CHECK_THAT(res.rhs_delta, WithinAbs(-2.0, 1e-9));
+
+    // The strengthened row cuts off no point that is feasible for the original
+    // model (row + variable upper bound + column bounds).
+    const Real new_rhs = 4.0 + res.rhs_delta;
+    bool all_preserved = true;
+    for (int yi = 0; yi <= 1 && all_preserved; ++yi) {
+        const Real y = static_cast<Real>(yi);
+        for (int xi = 0; xi <= 100 && all_preserved; ++xi) {
+            const Real x = 0.1 * xi;
+            if (x > 5.0 * y + 1e-12) continue;  // Violates the VUB.
+            for (int zi = 0; zi <= 20; ++zi) {
+                const Real z = 0.1 * zi;
+                if (3.0 * y + x + z > 4.0 + 1e-9) continue;  // Violates the row.
+                if (res.new_coeff * y + x + z > new_rhs + 1e-9) {
+                    all_preserved = false;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(all_preserved);
+
+    // The strengthened row is genuinely tighter: (y, x, z) = (0.5, 2.5, 0)
+    // satisfies the original row and the VUB but violates the new one.
+    CHECK(3.0 * 0.5 + 2.5 + 0.0 <= 4.0 + 1e-9);
+    CHECK(2.5 <= 5.0 * 0.5 + 1e-9);
+    CHECK(res.new_coeff * 0.5 + 2.5 > new_rhs + 1e-9);
+}
+
+TEST_CASE("VariableBoundStore: no strengthening without a variable bound",
+          "[variable_bounds]") {
+    // Same row as above, but without the VUB the y = 0 branch only knows
+    // x <= 10, so the row is not slack there and nothing can be deduced.
+    VariableBoundStore store;
+    store.init(3);
+
+    const std::vector<Index> idx = {0, 1, 2};
+    const std::vector<Real> vals = {3.0, 1.0, 1.0};
+    const std::vector<Real> lower = {0.0, 0.0, 0.0};
+    const std::vector<Real> upper = {1.0, 10.0, 2.0};
+
+    const auto res =
+        store.strengthenCoefficient(0, 3.0, 4.0, idx, vals, lower, upper);
+    CHECK_FALSE(res.strengthened);
+    CHECK_THAT(res.new_coeff, WithinAbs(3.0, 1e-12));
+    CHECK_THAT(res.rhs_delta, WithinAbs(0.0, 1e-12));
+}
+
+TEST_CASE("VariableBoundStore: coefficient strengthening from a VLB",
+          "[variable_bounds]") {
+    // y binary (col 0), x continuous in [0, 10] (col 1) with x >= 5*y,
+    // z continuous in [0, 2] (col 2).
+    //   row:  -3*y - x + z <= -4
+    // The y = 1 branch is slack (x >= 5, z <= 2 gives activity -3 - 5 + 2),
+    // with surplus 2 < 3, so the coefficient of y shrinks to -1.
+    VariableBoundStore store;
+    store.init(3);
+    store.addVLB(1, 0, 5.0, 0.0);  // x >= 5*y + 0
+
+    const std::vector<Index> idx = {0, 1, 2};
+    const std::vector<Real> vals = {-3.0, -1.0, 1.0};
+    const std::vector<Real> lower = {0.0, 0.0, 0.0};
+    const std::vector<Real> upper = {1.0, 10.0, 2.0};
+
+    const auto res =
+        store.strengthenCoefficient(0, -3.0, -4.0, idx, vals, lower, upper);
+    REQUIRE(res.strengthened);
+    CHECK_THAT(res.new_coeff, WithinAbs(-1.0, 1e-9));
+    CHECK_THAT(res.rhs_delta, WithinAbs(0.0, 1e-12));
+
+    const Real new_rhs = -4.0 + res.rhs_delta;
+    bool all_preserved = true;
+    for (int yi = 0; yi <= 1 && all_preserved; ++yi) {
+        const Real y = static_cast<Real>(yi);
+        for (int xi = 0; xi <= 100 && all_preserved; ++xi) {
+            const Real x = 0.1 * xi;
+            if (x < 5.0 * y - 1e-12) continue;  // Violates the VLB.
+            for (int zi = 0; zi <= 20; ++zi) {
+                const Real z = 0.1 * zi;
+                if (-3.0 * y - x + z > -4.0 + 1e-9) continue;  // Violates the row.
+                if (res.new_coeff * y - x + z > new_rhs + 1e-9) {
+                    all_preserved = false;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(all_preserved);
+}
+
 TEST_CASE("VariableBoundStore: out of range access", "[variable_bounds]") {
     VariableBoundStore store;
     store.init(3);

@@ -1,5 +1,9 @@
 #include "mipx/presolve.h"
 
+#include "mipx/implication_graph.h"
+#include "mipx/probing.h"
+#include "mipx/variable_bounds.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1547,6 +1551,182 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
     return changes;
 }
 
+// =============================================================================
+// Presolver — root probing
+// =============================================================================
+
+namespace {
+
+// Work budget for the probing pass. Probing runs once per presolve call, so
+// the budget is per call, not per round.
+constexpr Int kProbingMaxRounds = 2;
+constexpr Int kProbingMaxProbesPerRound = 5000;
+constexpr double kProbingTimeLimit = 5.0;
+
+/// Returns true when the column behaves as a 0/1 variable.
+inline bool isBinaryCol(const LpProblem& lp, Index col) {
+    if (lp.col_type[col] == VarType::Continuous) return false;
+    return lp.col_lower[col] > -1e-8 && lp.col_lower[col] < 1e-8 &&
+           lp.col_upper[col] > 1.0 - 1e-8 && lp.col_upper[col] < 1.0 + 1e-8;
+}
+
+}  // namespace
+
+Index Presolver::probingPass(LpProblem& lp, const std::vector<bool>& col_removed,
+                             const std::vector<bool>& row_removed,
+                             std::vector<uint8_t>& next_dirty_rows,
+                             std::vector<uint8_t>& next_dirty_cols) {
+    // Probing view of the current reduced problem, in the same row/column
+    // indexing as `lp`: removed rows are made vacuous, removed columns are
+    // detached (their contribution has already been folded into the row
+    // bounds) and coefficient overrides are materialized. This is exactly what
+    // buildReducedProblem() produces, minus the reindexing.
+    LpProblem view;
+    view.sense = lp.sense;
+    view.num_cols = lp.num_cols;
+    view.num_rows = lp.num_rows;
+    view.obj.assign(static_cast<std::size_t>(lp.num_cols), 0.0);
+    view.col_lower = lp.col_lower;
+    view.col_upper = lp.col_upper;
+    view.col_type = lp.col_type;
+    view.row_lower = lp.row_lower;
+    view.row_upper = lp.row_upper;
+
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (!col_removed[j]) continue;
+        view.col_lower[j] = 0.0;
+        view.col_upper[j] = 0.0;
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!row_removed[i]) continue;
+        view.row_lower[i] = -kInf;
+        view.row_upper[i] = kInf;
+    }
+
+    std::vector<Triplet> triplets;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (row_removed[i]) continue;
+        auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            if (col_removed[j]) continue;
+            triplets.push_back(
+                {i, j, effectiveCoeff(coeff_overrides_, i, j, rv.values[k])});
+        }
+    }
+    view.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(triplets));
+
+    ProbingConfig config;
+    config.max_rounds = kProbingMaxRounds;
+    config.max_probes_per_round = kProbingMaxProbesPerRound;
+    config.time_limit = kProbingTimeLimit;
+    // Equivalence and domination output has no consumer in presolve yet.
+    config.detect_equivalences = false;
+    config.detect_dominated = false;
+    config.learn_vubs = true;
+    config.learn_implications = true;
+
+    ImplicationGraph graph;
+    VariableBoundStore vb_store;
+    ProbingEngine engine;
+    const ProbingStats probing_stats = engine.probe(view, graph, vb_store, config);
+
+    // Both branches of some binary propagate to infeasibility: propagation only
+    // ever tightens valid bounds, so the model itself is infeasible.
+    if (probing_stats.infeasible) {
+        infeasible_ = true;
+        return 0;
+    }
+
+    Index changes = 0;
+
+    // Probing fixings ride the ordinary fixed-variable path: tightening the
+    // column bounds makes removeFixedVariables() remove the column and record
+    // the PostsolveFixVariable operation in the next round.
+    for (const auto& [var, value] : engine.fixings()) {
+        if (var < 0 || var >= lp.num_cols) continue;
+        if (col_removed[var]) continue;
+        if (value < lp.col_lower[var] - kTol || value > lp.col_upper[var] + kTol) {
+            infeasible_ = true;
+            return changes;
+        }
+        if (lp.col_upper[var] - lp.col_lower[var] <= kTol) continue;  // Already fixed.
+
+        lp.col_lower[var] = value;
+        lp.col_upper[var] = value;
+        next_dirty_cols[var] = 1;
+        markRowsTouchingCol(lp, var, row_removed, next_dirty_rows);
+        ++changes;
+        ++stats_.probing_fixings;
+    }
+
+    changes += strengthenCoefficientsFromVarBounds(
+        lp, vb_store, col_removed, row_removed, next_dirty_rows, next_dirty_cols);
+
+    return changes;
+}
+
+Index Presolver::strengthenCoefficientsFromVarBounds(
+    LpProblem& lp, const VariableBoundStore& vb_store,
+    const std::vector<bool>& col_removed,
+    const std::vector<bool>& row_removed,
+    std::vector<uint8_t>& next_dirty_rows,
+    std::vector<uint8_t>& next_dirty_cols) {
+    if (vb_store.numVUBs() == 0 && vb_store.numVLBs() == 0) return 0;
+
+    Index changes = 0;
+    std::vector<Index> row_cols;
+    std::vector<Real> row_vals;
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (row_removed[i]) continue;
+        // One-sided <= rows only: the reduction rewrites a coefficient, which
+        // would also move the other side of a ranged or equality row.
+        if (std::isinf(lp.row_upper[i])) continue;
+        if (!std::isinf(lp.row_lower[i])) continue;
+
+        row_cols.clear();
+        row_vals.clear();
+        auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            if (col_removed[j]) continue;
+            row_cols.push_back(j);
+            row_vals.push_back(effectiveCoeff(coeff_overrides_, i, j, rv.values[k]));
+        }
+        if (row_cols.size() < 2) continue;
+
+        Real rhs = lp.row_upper[i];
+        for (std::size_t k = 0; k < row_cols.size(); ++k) {
+            const Index j = row_cols[k];
+            if (!isBinaryCol(lp, j)) continue;
+
+            const auto res = vb_store.strengthenCoefficient(
+                j, row_vals[k], rhs, row_cols, row_vals, lp.col_lower, lp.col_upper);
+            if (!res.strengthened) continue;
+
+            const Real new_rhs = rhs + res.rhs_delta;
+            if (!std::isfinite(new_rhs) || !std::isfinite(res.new_coeff)) continue;
+
+            postsolve_stack_.push(PostsolveCoeffTightening{
+                i, j, row_vals[k], res.new_coeff, rhs, new_rhs});
+
+            coeff_overrides_[coeffKey(i, j)] = res.new_coeff;
+            row_vals[k] = res.new_coeff;
+            rhs = new_rhs;
+            lp.row_upper[i] = new_rhs;
+
+            markRowsTouchingCol(lp, j, row_removed, next_dirty_rows);
+            markColsInRow(lp, i, col_removed, next_dirty_cols);
+            ++changes;
+            ++stats_.coeffs_tightened;
+            ++stats_.probing_coeff_strengthenings;
+        }
+    }
+
+    return changes;
+}
+
 Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
                                       std::vector<bool>& row_removed,
                                       const std::vector<Index>& dirty_rows,
@@ -1654,6 +1834,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     orig_num_cols_ = 0;
     stats_ = PresolveStats{};
     infeasible_ = false;
+    probing_done_ = false;
     coeff_overrides_.clear();
 
     // Work on a copy.
@@ -1776,6 +1957,22 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                      dirty_row_list, next_dirty_rows, next_dirty_cols);
             stats_.coeff_tightening_changes += ch;
             total_changes += ch;
+        }
+
+        // Probing is the most expensive pass, so it runs once, on the first
+        // round where the cheap reductions have reached their fixpoint. Any
+        // fixing it finds re-triggers the loop.
+        if (options_.enable_probing && !probing_done_ && total_changes == 0) {
+            probing_done_ = true;
+            ch = probingPass(lp, col_removed, row_removed,
+                             next_dirty_rows, next_dirty_cols);
+            stats_.probing_changes += ch;
+            total_changes += ch;
+            if (infeasible_) {
+                ++stats_.rounds;
+                if (total_changes > 0) ++stats_.rounds_with_changes;
+                break;
+            }
         }
 
         ++stats_.rounds;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <vector>
 
 #include "mipx/core.h"
@@ -74,17 +75,53 @@ public:
     /// Total number of VLBs stored.
     [[nodiscard]] Int numVLBs() const { return num_vlbs_; }
 
-    /// Strengthen coefficient of `var` in a <= constraint using VUBs/VLBs.
-    /// Given: a_j * x_j in constraint sum(a_i * x_i) <= rhs,
-    /// if x_j has VUB x_j <= c * y + d, we can potentially tighten a_j.
-    /// Returns {new_coeff, new_rhs_delta} or {original_coeff, 0} if no strengthening.
+    /// Tightest upper bound implied for `var` in the branch where the binary
+    /// `binary_var` takes value `binary_val`, taken over the stored VUBs that
+    /// reference `binary_var`. Returns +inf when no such VUB exists.
+    [[nodiscard]] Real impliedUpper(Index var, Index binary_var, bool binary_val) const;
+
+    /// Tightest lower bound implied for `var` in the branch where the binary
+    /// `binary_var` takes value `binary_val`. Returns -inf when none exists.
+    [[nodiscard]] Real impliedLower(Index var, Index binary_var, bool binary_val) const;
+
+    /// Result of implication-based coefficient strengthening: the row
+    ///     coeff * y + (other terms) <= rhs
+    /// may be replaced by
+    ///     new_coeff * y + (other terms) <= rhs + rhs_delta.
     struct CoefficientStrengthening {
         Real new_coeff;
         Real rhs_delta;
         bool strengthened = false;
     };
+
+    /// Implication-based coefficient strengthening of a binary variable in a
+    /// <= row, using the VUBs/VLBs that reference that binary.
+    ///
+    /// The row is  coeff * y + sum_{k != y} a_k * x_k <= rhs  with `y` =
+    /// `binary_var` binary and (row_indices, row_values) listing every term of
+    /// the row, including y's own term. The branch in which the row must be
+    /// slack is y = 0 for coeff > 0 and y = 1 for coeff < 0. The maximum
+    /// activity M of the other terms in that branch is computed from the
+    /// column bounds intersected with the VUB/VLB-implied bounds for that
+    /// branch — this is where the implications pay off: a term x_k with
+    /// x_k <= c*y + d contributes only d in the y = 0 branch, not its global
+    /// upper bound.
+    ///
+    /// With surplus delta = (rhs - y's contribution in the branch) - M, and
+    /// 0 < delta < |coeff|, the row can be replaced by an equivalent one that
+    /// is tighter for the LP relaxation:
+    ///   coeff > 0:  (coeff - delta) * y + ... <= rhs - delta
+    ///   coeff < 0:  (coeff + delta) * y + ... <= rhs
+    /// Both branches of y reproduce the original row exactly, so no point that
+    /// is feasible for the model is cut off.
+    ///
+    /// The caller must ensure `binary_var` is binary (bounds [0, 1]) and that
+    /// `row_values` are the effective coefficients of the row.
+    /// Returns {coeff, 0, false} when no strengthening applies.
     [[nodiscard]] CoefficientStrengthening strengthenCoefficient(
-        Index var, Real coeff, Real rhs,
+        Index binary_var, Real coeff, Real rhs,
+        std::span<const Index> row_indices,
+        std::span<const Real> row_values,
         const std::vector<Real>& col_lower,
         const std::vector<Real>& col_upper) const;
 
