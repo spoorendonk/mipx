@@ -1,17 +1,15 @@
+#include "mipx/reduced_cost_fixer.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-
-#include "mipx/reduced_cost_fixer.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
 namespace {
 
-LpProblem makeSimpleProblem(Index num_cols,
-                            std::vector<VarType> col_type,
-                            std::vector<Real> col_lower,
-                            std::vector<Real> col_upper) {
+LpProblem makeSimpleProblem(Index num_cols, std::vector<VarType> col_type,
+                            std::vector<Real> col_lower, std::vector<Real> col_upper) {
     LpProblem prob;
     prob.num_cols = num_cols;
     prob.num_rows = 0;
@@ -29,9 +27,8 @@ TEST_CASE("ReducedCostFixer: load and check state", "[rcfixer]") {
     ReducedCostFixer fixer;
     REQUIRE_FALSE(fixer.loaded());
 
-    auto prob = makeSimpleProblem(3,
-        {VarType::Binary, VarType::Integer, VarType::Continuous},
-        {0.0, 0.0, 0.0}, {1.0, 10.0, 100.0});
+    auto prob = makeSimpleProblem(3, {VarType::Binary, VarType::Integer, VarType::Continuous},
+                                  {0.0, 0.0, 0.0}, {1.0, 10.0, 100.0});
     fixer.load(prob);
     REQUIRE(fixer.loaded());
     CHECK(fixer.numGlobalFixings() == 0);
@@ -39,17 +36,14 @@ TEST_CASE("ReducedCostFixer: load and check state", "[rcfixer]") {
     CHECK_THAT(fixer.globalUpper(0), WithinAbs(1.0, 1e-12));
 }
 
-TEST_CASE("ReducedCostFixer: global fixing tightens upper bound with positive RC",
-          "[rcfixer]") {
+TEST_CASE("ReducedCostFixer: global fixing tightens upper bound with positive RC", "[rcfixer]") {
     // Binary variable x with rc = 2.0, at lower bound.
     // gap = incumbent - lp_obj = 10.0 - 5.0 = 5.0
     // new_ub = lb + gap / rc = 0.0 + 5.0 / 2.0 = 2.5
     // For binary: floor(2.5 + 1e-6) = 2 => capped at 1.0 (original ub).
     // Integer variable y with rc = 3.0, at lower bound.
     // new_ub = 0.0 + 5.0 / 3.0 = 1.667 => floor(1.667 + 1e-6) = 1.
-    auto prob = makeSimpleProblem(2,
-        {VarType::Binary, VarType::Integer},
-        {0.0, 0.0}, {1.0, 10.0});
+    auto prob = makeSimpleProblem(2, {VarType::Binary, VarType::Integer}, {0.0, 0.0}, {1.0, 10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -59,8 +53,7 @@ TEST_CASE("ReducedCostFixer: global fixing tightens upper bound with positive RC
     std::vector<Real> col_upper = {1.0, 10.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 10.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 10.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     // x: new_ub = 0 + 5/3 = 1.667, floor(1.667 + 1e-6) = 1.0, same as original.
     CHECK_THAT(col_upper[0], WithinAbs(1.0, 1e-9));
@@ -70,15 +63,12 @@ TEST_CASE("ReducedCostFixer: global fixing tightens upper bound with positive RC
     CHECK(fixer.stats().root_global_tightenings > 0);
 }
 
-TEST_CASE("ReducedCostFixer: global fixing tightens lower bound with negative RC",
-          "[rcfixer]") {
+TEST_CASE("ReducedCostFixer: global fixing tightens lower bound with negative RC", "[rcfixer]") {
     // Variable x in [0, 10], rc = -4.0 (at upper bound).
     // gap = 20.0 - 8.0 = 12.0
     // new_lb = ub + gap / rc = 10.0 + 12.0 / (-4.0) = 10.0 - 3.0 = 7.0
     // For integer: ceil(7.0 - 1e-6) = 7.
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {0.0}, {10.0});
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -88,8 +78,7 @@ TEST_CASE("ReducedCostFixer: global fixing tightens lower bound with negative RC
     std::vector<Real> col_upper = {10.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyGlobalFixing(rc, primals, 8.0, 20.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 8.0, 20.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK_THAT(col_lower[0], WithinAbs(7.0, 1e-9));
     CHECK(col_upper[0] == 10.0);
@@ -98,9 +87,7 @@ TEST_CASE("ReducedCostFixer: global fixing tightens lower bound with negative RC
 }
 
 TEST_CASE("ReducedCostFixer: no fixing when gap is zero", "[rcfixer]") {
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {0.0}, {10.0});
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -111,17 +98,14 @@ TEST_CASE("ReducedCostFixer: no fixing when gap is zero", "[rcfixer]") {
     std::vector<Index> tightened;
 
     // incumbent == lp_objective => gap = 0 => no tightening.
-    bool ok = fixer.applyGlobalFixing(rc, primals, 10.0, 10.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 10.0, 10.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK(tightened.empty());
     CHECK(col_upper[0] == 10.0);
 }
 
 TEST_CASE("ReducedCostFixer: no fixing when no incumbent", "[rcfixer]") {
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {0.0}, {10.0});
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -131,16 +115,14 @@ TEST_CASE("ReducedCostFixer: no fixing when no incumbent", "[rcfixer]") {
     std::vector<Real> col_upper = {10.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, kInf,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, kInf, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK(tightened.empty());
 }
 
 TEST_CASE("ReducedCostFixer: local fixing at tree node", "[rcfixer]") {
-    auto prob = makeSimpleProblem(2,
-        {VarType::Integer, VarType::Continuous},
-        {0.0, 0.0}, {10.0, 100.0});
+    auto prob =
+        makeSimpleProblem(2, {VarType::Integer, VarType::Continuous}, {0.0, 0.0}, {10.0, 100.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -152,20 +134,18 @@ TEST_CASE("ReducedCostFixer: local fixing at tree node", "[rcfixer]") {
     std::vector<Real> col_upper = {10.0, 100.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyLocalFixing(rc, primals, 7.0, 10.0,
-                                      col_lower, col_upper, tightened);
+    bool ok = fixer.applyLocalFixing(rc, primals, 7.0, 10.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK_THAT(col_upper[0], WithinAbs(0.0, 1e-9));  // integer, fixed at 0
-    CHECK_THAT(col_upper[1], WithinAbs(1.5, 1e-9));   // continuous, tightened
+    CHECK_THAT(col_upper[1], WithinAbs(1.5, 1e-9));  // continuous, tightened
     CHECK(tightened.size() == 2);
     CHECK(fixer.stats().tree_local_fixings == 1);
     CHECK(fixer.stats().tree_local_tightenings == 1);
 }
 
 TEST_CASE("ReducedCostFixer: enforce global fixings at node", "[rcfixer]") {
-    auto prob = makeSimpleProblem(2,
-        {VarType::Integer, VarType::Integer},
-        {0.0, 0.0}, {10.0, 10.0});
+    auto prob =
+        makeSimpleProblem(2, {VarType::Integer, VarType::Integer}, {0.0, 0.0}, {10.0, 10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -177,8 +157,7 @@ TEST_CASE("ReducedCostFixer: enforce global fixings at node", "[rcfixer]") {
     std::vector<Index> tightened;
 
     // gap = 20 - 5 = 15, new_ub = 0 + 15/5 = 3, floor(3 + 1e-6) = 3.
-    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK_THAT(col_upper[0], WithinAbs(3.0, 1e-9));
     CHECK_THAT(col_upper[1], WithinAbs(3.0, 1e-9));
@@ -195,9 +174,7 @@ TEST_CASE("ReducedCostFixer: enforce global fixings at node", "[rcfixer]") {
 }
 
 TEST_CASE("ReducedCostFixer: reset clears state", "[rcfixer]") {
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {0.0}, {10.0});
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -206,8 +183,7 @@ TEST_CASE("ReducedCostFixer: reset clears state", "[rcfixer]") {
     std::vector<Real> col_lower = {0.0};
     std::vector<Real> col_upper = {10.0};
     std::vector<Index> tightened;
-    fixer.applyGlobalFixing(rc, primals, 5.0, 20.0,
-                             col_lower, col_upper, tightened);
+    fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened);
     CHECK(fixer.numGlobalFixings() > 0);
 
     fixer.reset();
@@ -218,9 +194,7 @@ TEST_CASE("ReducedCostFixer: reset clears state", "[rcfixer]") {
 
 TEST_CASE("ReducedCostFixer: continuous variable tightening", "[rcfixer]") {
     // Continuous variable: no integer rounding.
-    auto prob = makeSimpleProblem(1,
-        {VarType::Continuous},
-        {0.0}, {100.0});
+    auto prob = makeSimpleProblem(1, {VarType::Continuous}, {0.0}, {100.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -231,16 +205,13 @@ TEST_CASE("ReducedCostFixer: continuous variable tightening", "[rcfixer]") {
     std::vector<Index> tightened;
 
     // gap = 10 - 2 = 8, new_ub = 0 + 8/4 = 2.0 (no rounding for continuous).
-    bool ok = fixer.applyGlobalFixing(rc, primals, 2.0, 10.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 2.0, 10.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK_THAT(col_upper[0], WithinAbs(2.0, 1e-9));
 }
 
 TEST_CASE("ReducedCostFixer: small RC below tolerance is ignored", "[rcfixer]") {
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {0.0}, {10.0});
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -251,16 +222,13 @@ TEST_CASE("ReducedCostFixer: small RC below tolerance is ignored", "[rcfixer]") 
     std::vector<Real> col_upper = {10.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK(tightened.empty());
 }
 
 TEST_CASE("ReducedCostFixer: fixed variables are skipped", "[rcfixer]") {
-    auto prob = makeSimpleProblem(1,
-        {VarType::Integer},
-        {5.0}, {5.0});  // Already fixed.
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {5.0}, {5.0});  // Already fixed.
     ReducedCostFixer fixer;
     fixer.load(prob);
 
@@ -270,8 +238,159 @@ TEST_CASE("ReducedCostFixer: fixed variables are skipped", "[rcfixer]") {
     std::vector<Real> col_upper = {5.0};
     std::vector<Index> tightened;
 
-    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0,
-                                       col_lower, col_upper, tightened);
+    bool ok = fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened);
     REQUIRE(ok);
     CHECK(tightened.empty());
+}
+
+TEST_CASE("ReducedCostFixer: enforce tightens looser node bounds and reports crossing",
+          "[rcfixer]") {
+    auto prob =
+        makeSimpleProblem(2, {VarType::Integer, VarType::Integer}, {0.0, 0.0}, {10.0, 10.0});
+    ReducedCostFixer fixer;
+    fixer.load(prob);
+
+    // gap = 20 - 5 = 15, new_ub = 0 + 15/5 = 3 for both columns.
+    std::vector<Real> rc = {5.0, 5.0};
+    std::vector<Real> primals = {0.0, 0.0};
+    std::vector<Real> root_lower = {0.0, 0.0};
+    std::vector<Real> root_upper = {10.0, 10.0};
+    std::vector<Index> tightened;
+    REQUIRE(fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, root_lower, root_upper, tightened));
+    REQUIRE(fixer.numGlobalFixings() == 2);
+
+    // A node that arrived with bounds looser than the global record gets
+    // tightened back down, without any reduced cost being consulted.
+    std::vector<Real> node_lower = {0.0, 0.0};
+    std::vector<Real> node_upper = {10.0, 7.0};
+    std::vector<Index> node_tightened;
+    REQUIRE(fixer.enforceGlobalFixings(node_lower, node_upper, node_tightened));
+    CHECK_THAT(node_upper[0], WithinAbs(3.0, 1e-9));
+    CHECK_THAT(node_upper[1], WithinAbs(3.0, 1e-9));
+    CHECK(node_tightened.size() == 2);
+
+    // A node whose local lower bound has moved above the global upper bound is
+    // infeasible.
+    std::vector<Real> crossing_lower = {5.0, 0.0};
+    std::vector<Real> crossing_upper = {10.0, 10.0};
+    std::vector<Index> crossing_tightened;
+    CHECK_FALSE(fixer.enforceGlobalFixings(crossing_lower, crossing_upper, crossing_tightened));
+}
+
+TEST_CASE("ReducedCostFixer: reset rolls global bounds back to the loaded bounds", "[rcfixer]") {
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
+    ReducedCostFixer fixer;
+    fixer.load(prob);
+
+    std::vector<Real> rc = {5.0};
+    std::vector<Real> primals = {0.0};
+    std::vector<Real> col_lower = {0.0};
+    std::vector<Real> col_upper = {10.0};
+    std::vector<Index> tightened;
+    REQUIRE(fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened));
+    REQUIRE(fixer.numGlobalFixings() == 1);
+    CHECK_THAT(fixer.globalUpper(0), WithinAbs(3.0, 1e-9));
+
+    fixer.reset();
+    CHECK(fixer.numGlobalFixings() == 0);
+    // The tightened global array must be rolled back too, not just the log.
+    CHECK_THAT(fixer.globalLower(0), WithinAbs(0.0, 1e-9));
+    CHECK_THAT(fixer.globalUpper(0), WithinAbs(10.0, 1e-9));
+
+    std::vector<Real> node_lower = {0.0};
+    std::vector<Real> node_upper = {10.0};
+    std::vector<Index> node_tightened;
+    REQUIRE(fixer.enforceGlobalFixings(node_lower, node_upper, node_tightened));
+    CHECK(node_tightened.empty());
+    CHECK_THAT(node_upper[0], WithinAbs(10.0, 1e-9));
+}
+
+TEST_CASE("ReducedCostFixer: tightening requires the variable to sit at the priced bound",
+          "[rcfixer]") {
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
+
+    // gap = 20 - 5 = 15, rc = 5 => the bound-anchored formula would give ub = 3.
+    std::vector<Real> rc = {5.0};
+
+    SECTION("interior primal is not tightened") {
+        ReducedCostFixer fixer;
+        fixer.load(prob);
+        std::vector<Real> primals = {4.0};  // basic / interior, not at a bound
+        std::vector<Real> col_lower = {0.0};
+        std::vector<Real> col_upper = {10.0};
+        std::vector<Index> tightened;
+        REQUIRE(fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened));
+        CHECK(tightened.empty());
+        CHECK_THAT(col_upper[0], WithinAbs(10.0, 1e-9));
+    }
+
+    SECTION("primal at the lower bound is tightened") {
+        ReducedCostFixer fixer;
+        fixer.load(prob);
+        std::vector<Real> primals = {0.0};
+        std::vector<Real> col_lower = {0.0};
+        std::vector<Real> col_upper = {10.0};
+        std::vector<Index> tightened;
+        REQUIRE(fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, col_lower, col_upper, tightened));
+        REQUIRE(tightened.size() == 1);
+        CHECK_THAT(col_upper[0], WithinAbs(3.0, 1e-9));
+    }
+
+    SECTION("interior primal at the upper end is not tightened") {
+        ReducedCostFixer fixer;
+        fixer.load(prob);
+        std::vector<Real> neg_rc = {-5.0};
+        std::vector<Real> primals = {6.0};
+        std::vector<Real> col_lower = {0.0};
+        std::vector<Real> col_upper = {10.0};
+        std::vector<Index> tightened;
+        REQUIRE(
+            fixer.applyGlobalFixing(neg_rc, primals, 5.0, 20.0, col_lower, col_upper, tightened));
+        CHECK(tightened.empty());
+        CHECK_THAT(col_lower[0], WithinAbs(0.0, 1e-9));
+    }
+}
+
+TEST_CASE("ReducedCostFixer: node-local fixing never touches global state", "[rcfixer]") {
+    auto prob = makeSimpleProblem(1, {VarType::Integer}, {0.0}, {10.0});
+    ReducedCostFixer fixer;
+    fixer.load(prob);
+
+    // Root: ub 10 -> 3 globally.
+    std::vector<Real> rc = {5.0};
+    std::vector<Real> primals = {0.0};
+    std::vector<Real> root_lower = {0.0};
+    std::vector<Real> root_upper = {10.0};
+    std::vector<Index> root_tightened;
+    REQUIRE(
+        fixer.applyGlobalFixing(rc, primals, 5.0, 20.0, root_lower, root_upper, root_tightened));
+    const Int global_fixings_after_root = fixer.numGlobalFixings();
+    REQUIRE(global_fixings_after_root == 1);
+    REQUIRE_THAT(fixer.globalUpper(0), WithinAbs(3.0, 1e-9));
+
+    // A node tightens further using node-local information: gap = 12 - 8 = 4,
+    // rc = 4 => ub = 0 + 1 = 1.
+    std::vector<Real> node_rc = {4.0};
+    std::vector<Real> node_lower = {0.0};
+    std::vector<Real> node_upper = {3.0};
+    std::vector<Index> node_tightened;
+    RcFixingStats delta{};
+    REQUIRE(fixer.applyLocalFixing(node_rc, primals, 8.0, 12.0, node_lower, node_upper,
+                                   node_tightened, delta));
+    REQUIRE(node_tightened.size() == 1);
+    CHECK_THAT(node_upper[0], WithinAbs(1.0, 1e-9));
+    CHECK(delta.tree_local_tightenings == 1);
+
+    // Global record is untouched: count, bounds, and engine statistics.
+    CHECK(fixer.numGlobalFixings() == global_fixings_after_root);
+    CHECK_THAT(fixer.globalUpper(0), WithinAbs(3.0, 1e-9));
+    CHECK(fixer.stats().tree_local_tightenings == 0);
+    CHECK(fixer.stats().tree_local_fixings == 0);
+
+    // A sibling node sees the global fixing but not the other node's local one.
+    std::vector<Real> sibling_lower = {0.0};
+    std::vector<Real> sibling_upper = {10.0};
+    std::vector<Index> sibling_tightened;
+    REQUIRE(fixer.enforceGlobalFixings(sibling_lower, sibling_upper, sibling_tightened));
+    CHECK_THAT(sibling_upper[0], WithinAbs(3.0, 1e-9));
 }

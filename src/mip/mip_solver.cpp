@@ -1396,6 +1396,17 @@ void MipSolver::mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta) {
     tree_presolve_stats_.lp_delta += delta.lp_delta;
 }
 
+void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
+    if (delta.tree_local_fixings == 0 && delta.tree_local_tightenings == 0 &&
+        delta.propagation_triggers == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(rc_fixing_stats_mutex_);
+    rc_fixing_stats_.tree_local_fixings += delta.tree_local_fixings;
+    rc_fixing_stats_.tree_local_tightenings += delta.tree_local_tightenings;
+    rc_fixing_stats_.propagation_triggers += delta.propagation_triggers;
+}
+
 HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     HeuristicRuntimeConfig config;
     config.mode = heuristicRuntimeMode(parallel_mode_);
@@ -1648,8 +1659,7 @@ Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals
         if (isIntegral(primals[j], kIntTol)) {
             continue;
         }
-        Real score =
-            (j < static_cast<Index>(conflict_scores_.size())) ? conflict_scores_[j] : 0.0;
+        Real score = (j < static_cast<Index>(conflict_scores_.size())) ? conflict_scores_[j] : 0.0;
         // Boost score for variables with rich implication structure.
         if (implication_graph_.numImplications() > 0) {
             const Int imp_score = implication_graph_.implicationScore(j);
@@ -1930,6 +1940,30 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         lp.setColBounds(j, current_lower[j], current_upper[j]);
         touched_vars.push_back(j);
     }
+
+    // Carry the root-derived global reduced-cost fixings into this node's bound
+    // vectors. This is a replay of recorded bound changes, not a recomputation:
+    // no reduced costs are consulted here. Bounds looser than the global record
+    // are tightened; a crossing means the node is infeasible.
+    if (rc_fixer_.loaded()) {
+        auto& rc_global_tightened = node_scratch.rc_tightened;
+        rc_global_tightened.clear();
+        const bool rc_global_ok =
+            rc_fixer_.enforceGlobalFixings(current_lower, current_upper, rc_global_tightened);
+        for (Index j : rc_global_tightened) {
+            lp.setColBounds(j, current_lower[j], current_upper[j]);
+            touched_vars.push_back(j);
+        }
+        if (!rc_global_ok) {
+            if (use_conflicts) {
+                learnConflictFromNode(node.bound_changes, false);
+            }
+            node_stats.bound_apply_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return false;
+        }
+    }
+
     node_stats.bound_apply_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (use_conflicts && isConflictTriggered(node_scratch)) {
@@ -2031,6 +2065,22 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
     const bool tree_presolve_model_supported = (model_continuous_vars_ == 0);
 
+    // Node-local reduced-cost fixing statistics are accumulated in this
+    // stack-local delta and flushed once per node, mirroring the tree-presolve
+    // stats pattern; nothing shared is touched on the hot path.
+    RcFixingStats rc_delta{};
+    // Set when the node-level RC pass has already run for this node's LP
+    // solution inside the tree-presolve block below, so the standalone pass
+    // does not repeat it (which would both double-count the tightenings and
+    // trigger a second LP resolve for the same information).
+    bool node_rc_pass_ran = false;
+    // Flushing zeroes the delta, so calling it more than once (or out of order
+    // with the tree-presolve flush) can never double-count.
+    auto flushRcStats = [&]() {
+        mergeRcFixingStatsDelta(rc_delta);
+        rc_delta = {};
+    };
+
     // In-tree presolve: currently limited to all-discrete models. Mixed
     // continuous MIPs need additional hardening before row-activity tightening
     // is trusted in-tree.
@@ -2046,6 +2096,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 return;
             }
             mergeTreePresolveStatsDelta(tree_presolve_delta);
+            flushRcStats();
             tree_presolve_stats_flushed = true;
         };
         const bool depth_gate = (node.depth % tree_presolve_depth_frequency == 0);
@@ -2137,41 +2188,45 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 ++activity_tight;
             }
 
-            if (incumbent_snapshot < kInf && node_obj_out < incumbent_snapshot - 1e-6) {
+            // Node-local reduced-cost fixing, owned by the standalone engine so
+            // that tree-presolve nodes and plain nodes run exactly the same
+            // rule (including integer rounding and the complementarity check).
+            // The engine is the single producer of RC tightenings at a node;
+            // the tree-presolve counter below records the subset produced while
+            // inside this block, which is what the benefit heuristic reads.
+            if (rc_fixer_.loaded() && incumbent_snapshot < kInf &&
+                node_obj_out < incumbent_snapshot - 1e-6) {
+                node_rc_pass_ran = true;
+                auto& rc_tightened = node_scratch.rc_tightened;
+                rc_tightened.clear();
                 const auto reduced = lp.getReducedCosts();
-                if (static_cast<Index>(reduced.size()) >= problem_.num_cols) {
-                    const Real gap = incumbent_snapshot - node_obj_out;
-                    for (Index j = 0; j < problem_.num_cols; ++j) {
-                        if (!std::isfinite(current_lower[j]) || !std::isfinite(current_upper[j])) {
-                            continue;
-                        }
-                        if (current_lower[j] >= current_upper[j] - 1e-9) {
-                            continue;
-                        }
-
-                        const Real rc = reduced[j];
-                        if (rc > 1e-7 && std::abs(node_primals_out[j] - current_lower[j]) <= 1e-6) {
-                            const Real new_ub = current_lower[j] + gap / rc;
-                            if (!applyTightening(j, current_lower[j], new_ub, true)) {
-                                if (use_conflicts) {
-                                    learnConflictFromNode(node.bound_changes, false);
-                                }
-                                return false;
-                            }
-                        } else if (rc < -1e-7 &&
-                                   std::abs(node_primals_out[j] - current_upper[j]) <= 1e-6) {
-                            const Real new_lb = current_upper[j] + gap / rc;  // rc is negative
-                            if (!applyTightening(j, new_lb, current_upper[j], true)) {
-                                if (use_conflicts) {
-                                    learnConflictFromNode(node.bound_changes, false);
-                                }
-                                return false;
-                            }
-                        }
+                const bool rc_feasible = rc_fixer_.applyLocalFixing(
+                    reduced, node_primals_out, node_obj_out, incumbent_snapshot, current_lower,
+                    current_upper, rc_tightened, rc_delta);
+                // Register every touched column even on the infeasible path, so
+                // the next node's restore loop puts these bounds back.
+                for (Index j : rc_tightened) {
+                    lp.setColBounds(j, current_lower[j], current_upper[j]);
+                    touched_vars.push_back(j);
+                    ++rc_tight;
+                }
+                if (!rc_feasible) {
+                    ++tree_presolve_delta.infeasible;
+                    flushTreePresolveStats();
+                    if (use_conflicts) {
+                        learnConflictFromNode(node.bound_changes, false);
                     }
-                    symmetry_tightened.clear();
-                    if (!enforceSymmetryBounds(current_lower, current_upper, &symmetry_tightened,
-                                               &node_work_out)) {
+                    return false;
+                }
+
+                if (!rc_tightened.empty()) {
+                    // Reduced-cost fixing shrank at least one domain, so the
+                    // propagator gets another pass over the new domains.
+                    ++rc_delta.propagation_triggers;
+                    for (Index j : rc_tightened) {
+                        dp.setBound(j, current_lower[j], current_upper[j]);
+                    }
+                    if (!dp.propagate()) {
                         ++tree_presolve_delta.infeasible;
                         flushTreePresolveStats();
                         if (use_conflicts) {
@@ -2179,11 +2234,31 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         }
                         return false;
                     }
-                    for (Index j : symmetry_tightened) {
-                        lp.setColBounds(j, current_lower[j], current_upper[j]);
-                        touched_vars.push_back(j);
-                        ++rc_tight;
+                    for (Index j = 0; j < problem_.num_cols; ++j) {
+                        if (!applyTightening(j, dp.getLower(j), dp.getUpper(j), false)) {
+                            flushTreePresolveStats();
+                            if (use_conflicts) {
+                                learnConflictFromNode(node.bound_changes, false);
+                            }
+                            return false;
+                        }
                     }
+                }
+
+                symmetry_tightened.clear();
+                if (!enforceSymmetryBounds(current_lower, current_upper, &symmetry_tightened,
+                                           &node_work_out)) {
+                    ++tree_presolve_delta.infeasible;
+                    flushTreePresolveStats();
+                    if (use_conflicts) {
+                        learnConflictFromNode(node.bound_changes, false);
+                    }
+                    return false;
+                }
+                for (Index j : symmetry_tightened) {
+                    lp.setColBounds(j, current_lower[j], current_upper[j]);
+                    touched_vars.push_back(j);
+                    ++rc_tight;
                 }
             }
 
@@ -2236,34 +2311,72 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
     }
 
-    // Standalone local reduced-cost fixing when tree presolve did not run.
-    // The tree presolve block already does inline RC tightening, so we only
-    // apply the dedicated fixer as a fallback for nodes outside tree presolve
-    // scope (e.g., deeper nodes, models with continuous vars, or tree presolve
-    // disabled).
-    const bool tree_presolve_ran =
-        tree_presolve_enabled_ && tree_presolve_model_supported &&
-        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) && node.depth > 0 &&
-        node.depth <= tree_presolve_max_depth;
-    // Local RC fixing is serial-only: rc_fixer_ stats are not thread-safe.
-    if (!tree_presolve_ran && num_threads_ <= 1 && rc_fixer_.loaded() &&
-        incumbent_snapshot < kInf && node_obj_out < incumbent_snapshot - 1e-6) {
+    // Standalone node-local reduced-cost fixing. This runs at every node, in
+    // serial and parallel alike: the only node where it is skipped is one whose
+    // LP solution the tree-presolve block already ran the very same engine over.
+    // Statistics go into the stack-local rc_delta and are flushed exactly once.
+    if (!node_rc_pass_ran && rc_fixer_.loaded() && incumbent_snapshot < kInf &&
+        node_obj_out < incumbent_snapshot - 1e-6) {
         auto node_rc = lp.getReducedCosts();
-        std::vector<Index> rc_local_tightened;
-        bool rc_feasible =
+        auto& rc_local_tightened = node_scratch.rc_tightened;
+        rc_local_tightened.clear();
+        const bool rc_feasible =
             rc_fixer_.applyLocalFixing(node_rc, node_primals_out, node_obj_out, incumbent_snapshot,
-                                       current_lower, current_upper, rc_local_tightened);
+                                       current_lower, current_upper, rc_local_tightened, rc_delta);
+        // Register every touched column even on the infeasible path, so the
+        // next node's restore loop puts these bounds back.
+        for (Index j : rc_local_tightened) {
+            lp.setColBounds(j, current_lower[j], current_upper[j]);
+            touched_vars.push_back(j);
+        }
         if (!rc_feasible) {
+            flushRcStats();
             if (use_conflicts) {
                 learnConflictFromNode(node.bound_changes, false);
             }
             return false;
         }
         if (!rc_local_tightened.empty()) {
-            for (Index j : rc_local_tightened) {
-                lp.setColBounds(j, current_lower[j], current_upper[j]);
-                touched_vars.push_back(j);
+            // Reduced-cost fixing shrank at least one domain, so re-run domain
+            // propagation for this node before the LP is re-solved.
+            ++rc_delta.propagation_triggers;
+            DomainPropagator rc_dp;
+            rc_dp.load(problem_);
+            if (implication_graph_.numImplications() > 0) {
+                rc_dp.setImplicationGraph(&implication_graph_);
             }
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
+                    current_upper[j] < problem_.col_upper[j] - 1e-9) {
+                    rc_dp.setBound(j, current_lower[j], current_upper[j]);
+                }
+            }
+            if (!rc_dp.propagate()) {
+                flushRcStats();
+                if (use_conflicts) {
+                    learnConflictFromNode(node.bound_changes, false);
+                }
+                return false;
+            }
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                const Real lb = std::max(current_lower[j], rc_dp.getLower(j));
+                const Real ub = std::min(current_upper[j], rc_dp.getUpper(j));
+                if (lb > ub + 1e-12) {
+                    flushRcStats();
+                    if (use_conflicts) {
+                        learnConflictFromNode(node.bound_changes, false);
+                    }
+                    return false;
+                }
+                if (lb > current_lower[j] + 1e-9 || ub < current_upper[j] - 1e-9) {
+                    lp.setColBounds(j, lb, ub);
+                    current_lower[j] = lb;
+                    current_upper[j] = ub;
+                    touched_vars.push_back(j);
+                }
+            }
+            flushRcStats();
+
             // Re-solve LP with tightened bounds.
             auto refresh = lp.solve();
             node_iters_out += refresh.iterations;
@@ -2293,6 +2406,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
         }
     }
+    flushRcStats();
 
     std::vector<Cut> node_local_cuts = std::move(node.local_cuts);
     if (!node_local_cuts.empty()) {
@@ -3575,10 +3689,11 @@ MipResult MipSolver::solve() {
             symmetry_stats_.cut_work_units = cut_work;
             if (verbose_) {
                 const auto& orbits = symmetry_manager_.orbits();
-                log_.log("Symmetry detected %zu orbit%s ("
-                         "%d symmetry cut%s added).\n",
-                         orbits.size(), orbits.size() == 1 ? "" : "s", symmetry_cuts_added,
-                         symmetry_cuts_added == 1 ? "" : "s");
+                log_.log(
+                    "Symmetry detected %zu orbit%s ("
+                    "%d symmetry cut%s added).\n",
+                    orbits.size(), orbits.size() == 1 ? "" : "s", symmetry_cuts_added,
+                    symmetry_cuts_added == 1 ? "" : "s");
             }
         }
     } else {
@@ -5098,6 +5213,16 @@ MipResult MipSolver::solve() {
     applyPostsolve(result);
     restoreProblem();
 
+    // Reduced-cost fixing statistics, by phase. The root/global counters live
+    // on the engine (root work is single-threaded); the tree/local counters and
+    // the re-propagation trigger count were merged in from the node workers.
+    {
+        const RcFixingStats& root_rc_stats = rc_fixer_.stats();
+        std::lock_guard<std::mutex> rc_lock(rc_fixing_stats_mutex_);
+        rc_fixing_stats_.root_global_fixings = root_rc_stats.root_global_fixings;
+        rc_fixing_stats_.root_global_tightenings = root_rc_stats.root_global_tightenings;
+    }
+
     if (verbose_) {
         if (branching_stats_.selections > 0) {
             const double avg_probe_iters =
@@ -5161,14 +5286,17 @@ MipResult MipSolver::solve() {
                 tree_presolve_stats_.reduced_cost_tightenings, tree_presolve_stats_.lp_resolves,
                 tree_presolve_stats_.lp_delta);
         }
-        rc_fixing_stats_ = rc_fixer_.stats();
         if (rc_fixing_stats_.root_global_fixings > 0 ||
             rc_fixing_stats_.root_global_tightenings > 0 ||
             rc_fixing_stats_.tree_local_fixings > 0 ||
-            rc_fixing_stats_.tree_local_tightenings > 0) {
-            log_.log("RCFixing: root_fix=%d root_tight=%d tree_fix=%d tree_tight=%d\n",
-                     rc_fixing_stats_.root_global_fixings, rc_fixing_stats_.root_global_tightenings,
-                     rc_fixing_stats_.tree_local_fixings, rc_fixing_stats_.tree_local_tightenings);
+            rc_fixing_stats_.tree_local_tightenings > 0 ||
+            rc_fixing_stats_.propagation_triggers > 0) {
+            log_.log(
+                "RCFixing: root_global_fix=%d root_global_tight=%d "
+                "tree_local_fix=%d tree_local_tight=%d prop_triggers=%d\n",
+                rc_fixing_stats_.root_global_fixings, rc_fixing_stats_.root_global_tightenings,
+                rc_fixing_stats_.tree_local_fixings, rc_fixing_stats_.tree_local_tightenings,
+                rc_fixing_stats_.propagation_triggers);
         }
         char node_buf[16], iter_buf[16];
         Logger::formatCount(result.nodes, node_buf, sizeof(node_buf));

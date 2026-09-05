@@ -16,22 +16,31 @@ void ReducedCostFixer::load(const LpProblem& problem) {
 }
 
 void ReducedCostFixer::reset() {
+    // Roll the recorded tightenings back out of the global bound arrays, in
+    // reverse order, so the arrays return to the bounds seen at load(). Simply
+    // dropping the change log would leave the tightened arrays in place, and
+    // enforceGlobalFixings() would then be free to re-apply bounds that are no
+    // longer justified as soon as a new change is recorded.
+    for (auto it = global_changes_.rbegin(); it != global_changes_.rend(); ++it) {
+        global_lower_[it->variable] = it->old_lower;
+        global_upper_[it->variable] = it->old_upper;
+    }
     global_changes_.clear();
     stats_ = {};
-    if (loaded_) {
-        // Keep dimensions but clear global tightenings by resetting to
-        // initial bounds. The caller should re-load or re-apply.
-    }
 }
 
-Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs,
-                                std::span<const Real> /*primals*/,
-                                Real gap,
-                                std::vector<Real>& col_lower,
+Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs, std::span<const Real> primals,
+                                Real gap, std::vector<Real>& col_lower,
                                 std::vector<Real>& col_upper,
-                                std::vector<Index>& tightened_vars) {
-    if (gap <= 0.0 || !std::isfinite(gap)) return 0;
-    if (static_cast<Index>(reduced_costs.size()) < num_cols_) return 0;
+                                std::vector<Index>& tightened_vars) const {
+    if (gap <= 0.0 || !std::isfinite(gap))
+        return 0;
+    if (static_cast<Index>(reduced_costs.size()) < num_cols_)
+        return 0;
+    // Without the primal point complementarity cannot be verified, and the
+    // tightening below would be unsound for any non-vertex LP solution.
+    if (static_cast<Index>(primals.size()) < num_cols_)
+        return 0;
 
     Int count = 0;
 
@@ -39,7 +48,8 @@ Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs,
         if (!std::isfinite(col_lower[j]) || !std::isfinite(col_upper[j])) {
             continue;
         }
-        if (col_lower[j] >= col_upper[j] - kBoundTol) continue;
+        if (col_lower[j] >= col_upper[j] - kBoundTol)
+            continue;
 
         const Real rc = reduced_costs[j];
 
@@ -48,8 +58,13 @@ Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs,
         //   rc * delta_ub >= gap => new_ub = lb + gap / rc.
         //   Negative RC => variable wants to increase => at upper bound.
         //   |rc| * delta_lb >= gap => new_lb = ub - gap / |rc| = ub + gap / rc.
+        const Real x = primals[j];
+
         if (rc > kRcTol) {
-            // Variable at or near lower bound with positive reduced cost.
+            // Variable must actually sit at its lower bound for the reduced
+            // cost to price that bound; otherwise skip it.
+            if (std::abs(x - col_lower[j]) > kPrimalTol)
+                continue;
             // New upper bound: lb + gap / rc.
             const Real new_ub = col_lower[j] + gap / rc;
             if (new_ub < col_upper[j] - kBoundTol) {
@@ -69,7 +84,9 @@ Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs,
                 }
             }
         } else if (rc < -kRcTol) {
-            // Variable at or near upper bound with negative reduced cost.
+            // Mirror case: the variable must actually sit at its upper bound.
+            if (std::abs(x - col_upper[j]) > kPrimalTol)
+                continue;
             // New lower bound: ub + gap / rc (rc is negative, so this increases lb).
             const Real new_lb = col_upper[j] + gap / rc;
             if (new_lb > col_lower[j] + kBoundTol) {
@@ -95,22 +112,23 @@ Int ReducedCostFixer::rcTighten(std::span<const Real> reduced_costs,
 }
 
 bool ReducedCostFixer::applyGlobalFixing(std::span<const Real> reduced_costs,
-                                          std::span<const Real> primals,
-                                          Real lp_objective,
-                                          Real incumbent,
-                                          std::vector<Real>& col_lower,
-                                          std::vector<Real>& col_upper,
-                                          std::vector<Index>& tightened_vars) {
-    if (!loaded_) return true;
-    if (incumbent >= kInf) return true;
-    if (lp_objective >= incumbent - kBoundTol) return true;
+                                         std::span<const Real> primals, Real lp_objective,
+                                         Real incumbent, std::vector<Real>& col_lower,
+                                         std::vector<Real>& col_upper,
+                                         std::vector<Index>& tightened_vars) {
+    if (!loaded_)
+        return true;
+    if (incumbent >= kInf)
+        return true;
+    if (lp_objective >= incumbent - kBoundTol)
+        return true;
 
     const Real gap = incumbent - lp_objective;
 
-    Int count = rcTighten(reduced_costs, primals, gap,
-                          col_lower, col_upper, tightened_vars);
+    Int count = rcTighten(reduced_costs, primals, gap, col_lower, col_upper, tightened_vars);
 
-    if (count < 0) return false;
+    if (count < 0)
+        return false;
 
     // Record global changes and update global bounds.
     for (Index j : tightened_vars) {
@@ -139,42 +157,60 @@ bool ReducedCostFixer::applyGlobalFixing(std::span<const Real> reduced_costs,
 }
 
 bool ReducedCostFixer::applyLocalFixing(std::span<const Real> reduced_costs,
-                                         std::span<const Real> primals,
-                                         Real node_objective,
-                                         Real incumbent,
-                                         std::vector<Real>& col_lower,
-                                         std::vector<Real>& col_upper,
-                                         std::vector<Index>& tightened_vars) {
-    if (!loaded_) return true;
-    if (incumbent >= kInf) return true;
-    if (node_objective >= incumbent - kBoundTol) return true;
+                                        std::span<const Real> primals, Real node_objective,
+                                        Real incumbent, std::vector<Real>& col_lower,
+                                        std::vector<Real>& col_upper,
+                                        std::vector<Index>& tightened_vars,
+                                        RcFixingStats& delta) const {
+    if (!loaded_)
+        return true;
+    if (incumbent >= kInf)
+        return true;
+    if (node_objective >= incumbent - kBoundTol)
+        return true;
 
     const Real gap = incumbent - node_objective;
 
-    Int count = rcTighten(reduced_costs, primals, gap,
-                          col_lower, col_upper, tightened_vars);
+    Int count = rcTighten(reduced_costs, primals, gap, col_lower, col_upper, tightened_vars);
 
-    if (count < 0) return false;
+    if (count < 0)
+        return false;
 
-    // Count fixings vs tightenings among the newly appended entries.
+    // Count fixings vs tightenings among the newly appended entries. Node-local
+    // tightening deliberately touches neither global_lower_/global_upper_ nor
+    // global_changes_: it is valid only in this node's subtree.
     const auto start = tightened_vars.size() - static_cast<std::size_t>(count);
     for (std::size_t i = start; i < tightened_vars.size(); ++i) {
         Index j = tightened_vars[i];
         if (std::abs(col_lower[j] - col_upper[j]) <= kBoundTol) {
-            ++stats_.tree_local_fixings;
+            ++delta.tree_local_fixings;
         } else {
-            ++stats_.tree_local_tightenings;
+            ++delta.tree_local_tightenings;
         }
     }
 
     return true;
 }
 
+bool ReducedCostFixer::applyLocalFixing(std::span<const Real> reduced_costs,
+                                        std::span<const Real> primals, Real node_objective,
+                                        Real incumbent, std::vector<Real>& col_lower,
+                                        std::vector<Real>& col_upper,
+                                        std::vector<Index>& tightened_vars) {
+    RcFixingStats delta{};
+    const bool ok = applyLocalFixing(reduced_costs, primals, node_objective, incumbent, col_lower,
+                                     col_upper, tightened_vars, delta);
+    stats_.tree_local_fixings += delta.tree_local_fixings;
+    stats_.tree_local_tightenings += delta.tree_local_tightenings;
+    stats_.propagation_triggers += delta.propagation_triggers;
+    return ok;
+}
+
 bool ReducedCostFixer::enforceGlobalFixings(std::vector<Real>& col_lower,
-                                             std::vector<Real>& col_upper,
-                                             std::vector<Index>& tightened_vars) const {
-    if (!loaded_) return true;
-    if (global_changes_.empty()) return true;
+                                            std::vector<Real>& col_upper,
+                                            std::vector<Index>& tightened_vars) const {
+    if (!loaded_)
+        return true;
 
     for (const auto& change : global_changes_) {
         Index j = change.variable;
@@ -189,12 +225,14 @@ bool ReducedCostFixer::enforceGlobalFixings(std::vector<Real>& col_lower,
             changed = true;
         }
 
-        if (col_lower[j] > col_upper[j] + kBoundTol) {
-            return false;
-        }
-
+        // Report the change before bailing out: the caller must be able to
+        // undo every bound this call touched, including the one that crossed.
         if (changed) {
             tightened_vars.push_back(j);
+        }
+
+        if (col_lower[j] > col_upper[j] + kBoundTol) {
+            return false;
         }
     }
 

@@ -1,10 +1,10 @@
 #pragma once
 
-#include <span>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
+
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -43,7 +43,11 @@ public:
     /// Initialize with problem dimensions and variable types.
     void load(const LpProblem& problem);
 
-    /// Reset all state (global fixings, stats).
+    /// Reset all state: rolls the recorded global tightenings back out of the
+    /// global bound arrays, then drops the change log and statistics. The
+    /// engine stays loaded with the same dimensions, so a subsequent
+    /// enforceGlobalFixings() is a genuine no-op rather than one that silently
+    /// re-applies stale bounds.
     void reset();
 
     /// Apply global reduced-cost fixing at the root node.
@@ -56,13 +60,9 @@ public:
     /// \param col_upper      Current upper bounds (modified in place).
     /// \param tightened_vars Output: indices of variables whose bounds changed.
     /// \return false if infeasibility detected.
-    bool applyGlobalFixing(std::span<const Real> reduced_costs,
-                           std::span<const Real> primals,
-                           Real lp_objective,
-                           Real incumbent,
-                           std::vector<Real>& col_lower,
-                           std::vector<Real>& col_upper,
-                           std::vector<Index>& tightened_vars);
+    bool applyGlobalFixing(std::span<const Real> reduced_costs, std::span<const Real> primals,
+                           Real lp_objective, Real incumbent, std::vector<Real>& col_lower,
+                           std::vector<Real>& col_upper, std::vector<Index>& tightened_vars);
 
     /// Apply local reduced-cost tightening at a tree node.
     ///
@@ -73,14 +73,20 @@ public:
     /// \param col_lower      Current lower bounds (modified in place).
     /// \param col_upper      Current upper bounds (modified in place).
     /// \param tightened_vars Output: indices of variables whose bounds changed.
+    /// \param delta          Output: per-call statistics, to be merged by the
+    ///                       caller. Nothing shared is mutated, so this overload
+    ///                       is safe to call concurrently from tree workers.
     /// \return false if infeasibility detected.
-    bool applyLocalFixing(std::span<const Real> reduced_costs,
-                          std::span<const Real> primals,
-                          Real node_objective,
-                          Real incumbent,
-                          std::vector<Real>& col_lower,
-                          std::vector<Real>& col_upper,
-                          std::vector<Index>& tightened_vars);
+    bool applyLocalFixing(std::span<const Real> reduced_costs, std::span<const Real> primals,
+                          Real node_objective, Real incumbent, std::vector<Real>& col_lower,
+                          std::vector<Real>& col_upper, std::vector<Index>& tightened_vars,
+                          RcFixingStats& delta) const;
+
+    /// Single-threaded convenience overload: accumulates the per-call delta
+    /// into the engine's own statistics. Not safe to call concurrently.
+    bool applyLocalFixing(std::span<const Real> reduced_costs, std::span<const Real> primals,
+                          Real node_objective, Real incumbent, std::vector<Real>& col_lower,
+                          std::vector<Real>& col_upper, std::vector<Index>& tightened_vars);
 
     /// Enforce previously computed global fixings on the given bounds.
     /// Call at each tree node to carry forward root fixings without
@@ -90,14 +96,11 @@ public:
     /// \param col_upper  Current upper bounds (modified in place).
     /// \param tightened_vars Output: indices of variables whose bounds changed.
     /// \return false if infeasibility detected.
-    bool enforceGlobalFixings(std::vector<Real>& col_lower,
-                              std::vector<Real>& col_upper,
+    bool enforceGlobalFixings(std::vector<Real>& col_lower, std::vector<Real>& col_upper,
                               std::vector<Index>& tightened_vars) const;
 
     /// Get the number of globally fixed variables.
-    [[nodiscard]] Int numGlobalFixings() const {
-        return static_cast<Int>(global_changes_.size());
-    }
+    [[nodiscard]] Int numGlobalFixings() const { return static_cast<Int>(global_changes_.size()); }
 
     /// Get the global lower bound for a variable (after global RC fixing).
     [[nodiscard]] Real globalLower(Index col) const { return global_lower_[col]; }
@@ -113,13 +116,18 @@ public:
 
 private:
     /// Core RC tightening logic shared by global and local fixing.
+    ///
+    /// The tightening x_j <= l_j + gap / d_j (and its mirror at the upper
+    /// bound) is only valid when the LP solution is complementary at j, i.e.
+    /// the variable actually sits at the bound the reduced cost is priced
+    /// against. That holds automatically at a simplex vertex, but not for an
+    /// interior barrier/PDLP point without crossover, so the primal value is
+    /// checked explicitly here rather than assumed.
+    ///
     /// Returns number of bounds tightened, or -1 on infeasibility.
-    Int rcTighten(std::span<const Real> reduced_costs,
-                  std::span<const Real> primals,
-                  Real gap,
-                  std::vector<Real>& col_lower,
-                  std::vector<Real>& col_upper,
-                  std::vector<Index>& tightened_vars);
+    Int rcTighten(std::span<const Real> reduced_costs, std::span<const Real> primals, Real gap,
+                  std::vector<Real>& col_lower, std::vector<Real>& col_upper,
+                  std::vector<Index>& tightened_vars) const;
 
     bool loaded_ = false;
     Index num_cols_ = 0;
@@ -137,6 +145,8 @@ private:
     static constexpr Real kRcTol = 1e-7;
     static constexpr Real kBoundTol = 1e-9;
     static constexpr Real kFeasTol = 1e-6;
+    /// Tolerance for "the variable sits at this bound" in the LP solution.
+    static constexpr Real kPrimalTol = 1e-6;
 };
 
 }  // namespace mipx

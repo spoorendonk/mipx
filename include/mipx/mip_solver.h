@@ -381,6 +381,10 @@ private:
     void refreshTreePresolveProfile();
     [[nodiscard]] MipTreePresolveStats treePresolveStatsSnapshot() const;
     void mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta);
+    /// Merge a node-local reduced-cost fixing delta into the solver totals.
+    /// Node workers accumulate into a stack-local RcFixingStats and flush once
+    /// per node, so the hot path stays lock-free.
+    void mergeRcFixingStatsDelta(const RcFixingStats& delta);
 
     struct NodeWorkStats {
         double bound_apply_seconds = 0.0;
@@ -404,6 +408,7 @@ private:
         std::vector<Real> row_lower;
         std::vector<Real> row_upper;
         std::vector<Cut> kept_cuts;
+        std::vector<Index> rc_tightened;
     };
 
     /// Run cutting plane rounds at the root node.
@@ -556,6 +561,7 @@ private:
     BranchingTelemetry branching_stats_{};
     std::mutex branching_mutex_;
     mutable std::mutex tree_presolve_stats_mutex_;
+    mutable std::mutex rc_fixing_stats_mutex_;
     SymmetryManager symmetry_manager_;
     bool symmetry_enabled_ = true;
 

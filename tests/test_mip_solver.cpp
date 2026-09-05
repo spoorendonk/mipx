@@ -1,10 +1,10 @@
+#include "mipx/io.h"
+#include "mipx/mip_solver.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
-
-#include "mipx/io.h"
-#include "mipx/mip_solver.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -33,7 +33,8 @@ static LpProblem buildSimpleMip() {
     lp.row_names = {"sum", "ub_x", "ub_y"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
         {1, 0, 1.0},
         {2, 1, 1.0},
     };
@@ -66,7 +67,8 @@ static LpProblem buildBranchingMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -142,13 +144,11 @@ static LpProblem buildLpLightScyllaProbeMip() {
     lp.name = "lplight_scylla_probe_mip";
     lp.sense = Sense::Minimize;
     lp.num_cols = n;
-    lp.obj = {-12.0, -11.0, -10.0, -9.0, -8.0, -7.0,
-              -6.0,  -5.0,  -4.0,  -3.0, -2.0, -1.0};
+    lp.obj = {-12.0, -11.0, -10.0, -9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0};
     lp.col_lower.assign(n, 0.0);
     lp.col_upper.assign(n, 1.0);
     lp.col_type.assign(n, VarType::Binary);
-    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6",
-                    "x7", "x8", "x9", "x10", "x11", "x12"};
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12"};
 
     lp.num_rows = 1;
     lp.row_lower = {-kInf};
@@ -253,7 +253,9 @@ static LpProblem buildKnapsackMip() {
     lp.row_names = {"capacity"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 3.0}, {0, 1, 2.0}, {0, 2, 2.0},
+        {0, 0, 3.0},
+        {0, 1, 2.0},
+        {0, 2, 2.0},
     };
     lp.matrix = SparseMatrix(1, 3, std::move(trips));
     return lp;
@@ -281,7 +283,9 @@ static LpProblem buildTreeCutMip() {
     lp.row_names = {"cap"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {0, 2, 1.0},
     };
     lp.matrix = SparseMatrix(1, 3, std::move(trips));
     return lp;
@@ -342,7 +346,8 @@ static LpProblem buildConflictLearningMip() {
     lp.row_names = {"eq"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -363,8 +368,7 @@ static LpProblem buildSearchStagnationMip() {
     lp.col_lower.assign(n, 0.0);
     lp.col_upper.assign(n, 1.0);
     lp.col_type.assign(n, VarType::Binary);
-    lp.col_names = {"x1", "x2", "x3", "x4", "x5",
-                    "x6", "x7", "x8", "x9", "x10"};
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10"};
 
     lp.num_rows = 1;
     lp.row_lower = {4.5};
@@ -377,6 +381,103 @@ static LpProblem buildSearchStagnationMip() {
         trips.push_back({0, j, 1.0});
     }
     lp.matrix = SparseMatrix(1, n, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: bounded general-integer knapsack whose reduced costs are exploitable
+// once an incumbent exists, so that both root global and node-local
+// reduced-cost fixing fire. Single constraint, so the true optimum is
+// available from a small dynamic program (see rcKnapsackOptimum below).
+// ---------------------------------------------------------------------------
+
+static constexpr Index kRcKnapsackCols = 10;
+static constexpr Real kRcKnapsackCapacity = 82.0;
+static constexpr Real kRcKnapsackVarUpper = 5.0;
+static constexpr Real kRcKnapsackObj[kRcKnapsackCols] = {-15.0, -14.0, -17.0, -17.0, -2.0,
+                                                         -17.0, -14.0, -8.0,  -14.0, -13.0};
+static constexpr Real kRcKnapsackWeight[kRcKnapsackCols] = {5.0, 5.0, 4.0, 9.0, 7.0,
+                                                            5.0, 3.0, 5.0, 3.0, 1.0};
+
+static LpProblem buildRcFixingKnapsackMip() {
+    LpProblem lp;
+    lp.name = "rc_fixing_knapsack";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = kRcKnapsackCols;
+    lp.obj.assign(kRcKnapsackObj, kRcKnapsackObj + kRcKnapsackCols);
+    lp.col_lower.assign(kRcKnapsackCols, 0.0);
+    lp.col_upper.assign(kRcKnapsackCols, kRcKnapsackVarUpper);
+    lp.col_type.assign(kRcKnapsackCols, VarType::Integer);
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {kRcKnapsackCapacity};
+    lp.row_names = {"capacity"};
+
+    std::vector<Triplet> trips;
+    trips.reserve(kRcKnapsackCols);
+    for (Index j = 0; j < kRcKnapsackCols; ++j) {
+        trips.push_back({0, j, kRcKnapsackWeight[j]});
+    }
+    lp.matrix = SparseMatrix(1, kRcKnapsackCols, std::move(trips));
+    return lp;
+}
+
+// Independent ground truth for buildRcFixingKnapsackMip: bounded knapsack DP.
+static Real rcKnapsackOptimum() {
+    const int cap = static_cast<int>(kRcKnapsackCapacity);
+    const int mult = static_cast<int>(kRcKnapsackVarUpper);
+    std::vector<Real> dp(static_cast<std::size_t>(cap) + 1, 0.0);
+    for (Index j = 0; j < kRcKnapsackCols; ++j) {
+        const int w = static_cast<int>(kRcKnapsackWeight[j]);
+        const Real value = -kRcKnapsackObj[j];
+        std::vector<Real> next = dp;
+        for (int c = 0; c <= cap; ++c) {
+            for (int k = 1; k <= mult; ++k) {
+                const int used = k * w;
+                if (used > c)
+                    break;
+                next[static_cast<std::size_t>(c)] =
+                    std::max(next[static_cast<std::size_t>(c)],
+                             dp[static_cast<std::size_t>(c - used)] + static_cast<Real>(k) * value);
+            }
+        }
+        dp = std::move(next);
+    }
+    return -dp[static_cast<std::size_t>(cap)];
+}
+
+// ---------------------------------------------------------------------------
+// Helper: two-constraint bounded integer program that keeps enough fractional
+// variables at shallow depths for the in-tree presolve gates to open, so the
+// reduced-cost pass inside the tree-presolve block is exercised too.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildRcFixingTreePresolveMip() {
+    constexpr Index n = 8;
+    LpProblem lp;
+    lp.name = "rc_fixing_tree_presolve";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj = {-17.0, -14.0, -13.0, -11.0, -9.0, -7.0, -5.0, -3.0};
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 8.0);
+    lp.col_type.assign(n, VarType::Integer);
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {37.0, 29.0};
+    lp.row_names = {"c1", "c2"};
+
+    const Real a[n] = {7.0, 6.0, 6.0, 5.0, 4.0, 3.0, 3.0, 2.0};
+    const Real d[n] = {3.0, 5.0, 4.0, 6.0, 2.0, 5.0, 4.0, 3.0};
+    std::vector<Triplet> trips;
+    trips.reserve(2 * n);
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({0, j, a[j]});
+        trips.push_back({1, j, d[j]});
+    }
+    lp.matrix = SparseMatrix(2, n, std::move(trips));
     return lp;
 }
 
@@ -401,7 +502,8 @@ static LpProblem buildSymmetryProbeMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -559,8 +661,7 @@ TEST_CASE("MipSolver: in-tree cut telemetry is populated", "[mip][cuts]") {
     solver.load(lp);
     auto result = solver.solve();
 
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
     const auto& cut_stats = solver.getCutStats();
     CHECK(cut_stats.tree_nodes_with_cuts + cut_stats.tree_nodes_skipped >= 1);
@@ -586,11 +687,9 @@ TEST_CASE("MipSolver: symmetry cuts are applied when presolve is off", "[mip][sy
     with_symmetry.load(lp);
     const auto on = with_symmetry.solve();
 
-    CHECK((off.status == Status::Optimal ||
-           off.status == Status::NodeLimit ||
+    CHECK((off.status == Status::Optimal || off.status == Status::NodeLimit ||
            off.status == Status::TimeLimit));
-    CHECK((on.status == Status::Optimal ||
-           on.status == Status::NodeLimit ||
+    CHECK((on.status == Status::Optimal || on.status == Status::NodeLimit ||
            on.status == Status::TimeLimit));
     CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
 
@@ -628,8 +727,7 @@ TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {
         CHECK_THAT(result.objective, WithinAbs(21166.0, 1.0));
     }
     // If not solved to optimality, at least it shouldn't crash.
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }
 
@@ -672,8 +770,7 @@ TEST_CASE("MipSolver: exact refinement default remains off and non-regressive",
     CHECK(default_stats.evaluation_work_units == 0.0);
 }
 
-TEST_CASE("MipSolver: exact refinement forced mode is deterministic",
-          "[mip][exact_refinement]") {
+TEST_CASE("MipSolver: exact refinement forced mode is deterministic", "[mip][exact_refinement]") {
     auto lp = buildBranchingMip();
 
     MipSolver solver_a;
@@ -844,8 +941,7 @@ TEST_CASE("MipSolver: pre-root LP-free stage is disabled by default",
     solver.load(lp);
     auto result = solver.solve();
 
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
     const auto& stats = solver.getPreRootStats();
     CHECK_FALSE(stats.enabled);
@@ -1026,7 +1122,7 @@ TEST_CASE("MipSolver: pre-root LP-light fixed schedule runs Scylla-FPR arm first
     solver.setPreRootLpLightEnabled(true);
     solver.setPreRootPortfolioEnabled(false);  // fixed schedule
     solver.setPreRootLpFreeEarlyStop(false);
-    solver.setPreRootLpFreeMaxRounds(1);       // single arm call
+    solver.setPreRootLpFreeMaxRounds(1);  // single arm call
     solver.setPreRootLpFreeWorkBudget(1.0e9);
     solver.load(lp);
     const auto result = solver.solve();
@@ -1218,8 +1314,8 @@ TEST_CASE("MipSolver: pre-root adaptive portfolio tracks telemetry",
     CHECK((stats.portfolio_enabled || stats.calls <= 1));
     CHECK(stats.portfolio_epochs == stats.calls);
     CHECK(stats.effort_scale_final > 0.0);
-    CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls +
-              stats.lp_light_fpr_calls + stats.lp_light_diving_calls ==
+    CHECK(stats.fj_calls + stats.fpr_calls + stats.local_mip_calls + stats.lp_light_fpr_calls +
+              stats.lp_light_diving_calls ==
           stats.calls);
 }
 
@@ -1337,8 +1433,7 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     solver.load(lp);
     const auto result = solver.solve();
 
-    CHECK((result.status == Status::Infeasible ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Infeasible || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
     const auto& sstats = solver.getSearchStats();
     CHECK(sstats.policy_switches >= 1);
@@ -1359,8 +1454,7 @@ TEST_CASE("MipSolver: in-tree presolve telemetry is populated", "[mip][presolve]
     solver.load(lp);
     const auto result = solver.solve();
 
-    CHECK((result.status == Status::Infeasible ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Infeasible || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
     const auto& stats = solver.getTreePresolveStats();
     CHECK(stats.attempts >= 1);
@@ -1441,4 +1535,110 @@ TEST_CASE("MipSolver: presolve does not double-count objective offset",
     CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
     CHECK_THAT(on.solution[0], WithinAbs(1.0, 1e-9));
     CHECK_THAT(off.solution[0], WithinAbs(1.0, 1e-9));
+}
+
+// ---------------------------------------------------------------------------
+// Reduced-cost fixing as a tree tool (#124).
+// ---------------------------------------------------------------------------
+
+static MipResult solveRcFixing(const LpProblem& lp, bool tree_presolve, Int threads,
+                               RcFixingStats& stats_out, MipTreePresolveStats& tp_stats_out) {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(tree_presolve);
+    solver.setNumThreads(threads);
+    solver.setSearchProfile(SearchProfile::Stable);
+    solver.load(lp);
+    const auto result = solver.solve();
+    stats_out = solver.getRcFixingStats();
+    tp_stats_out = solver.getTreePresolveStats();
+    return result;
+}
+
+TEST_CASE("MipSolver: reduced-cost fixing reports root and tree phases separately",
+          "[mip][rcfixer]") {
+    const auto lp = buildRcFixingKnapsackMip();
+
+    RcFixingStats stats{};
+    MipTreePresolveStats tp_stats{};
+    const auto result = solveRcFixing(lp, /*tree_presolve=*/false, /*threads=*/1, stats, tp_stats);
+
+    REQUIRE(result.status == Status::Optimal);
+    // Independent ground truth from the bounded-knapsack DP.
+    CHECK_THAT(result.objective, WithinAbs(rcKnapsackOptimum(), 1e-9));
+
+    // Statistics reach the getter without verbose logging enabled, split by
+    // phase: root/global and tree/local.
+    CHECK((stats.root_global_fixings + stats.root_global_tightenings) > 0);
+    CHECK((stats.tree_local_fixings + stats.tree_local_tightenings) > 0);
+}
+
+TEST_CASE("MipSolver: node reduced-cost fixing re-triggers domain propagation", "[mip][rcfixer]") {
+    const auto lp = buildRcFixingKnapsackMip();
+
+    RcFixingStats stats{};
+    MipTreePresolveStats tp_stats{};
+    const auto result = solveRcFixing(lp, /*tree_presolve=*/false, /*threads=*/1, stats, tp_stats);
+
+    REQUIRE(result.status == Status::Optimal);
+    const Int tree_changes = stats.tree_local_fixings + stats.tree_local_tightenings;
+    REQUIRE(tree_changes > 0);
+    // One re-propagation per node whose bounds were tightened, and a node can
+    // only trigger it after at least one tightening.
+    CHECK(stats.propagation_triggers > 0);
+    CHECK(stats.propagation_triggers <= tree_changes);
+}
+
+TEST_CASE("MipSolver: node reduced-cost fixing runs with in-tree presolve enabled",
+          "[mip][rcfixer][tree]") {
+    const auto lp = buildRcFixingTreePresolveMip();
+
+    RcFixingStats off_stats{};
+    MipTreePresolveStats off_tp{};
+    const auto off = solveRcFixing(lp, /*tree_presolve=*/false, /*threads=*/1, off_stats, off_tp);
+
+    RcFixingStats on_stats{};
+    MipTreePresolveStats on_tp{};
+    const auto on = solveRcFixing(lp, /*tree_presolve=*/true, /*threads=*/1, on_stats, on_tp);
+
+    REQUIRE(off.status == Status::Optimal);
+    REQUIRE(on.status == Status::Optimal);
+    CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-9));
+
+    // The node-level pass no longer requires tree presolve to have been skipped.
+    CHECK((on_stats.tree_local_fixings + on_stats.tree_local_tightenings) > 0);
+    CHECK(on_stats.propagation_triggers > 0);
+    // The reduced-cost pass inside the tree-presolve block is the same engine,
+    // so its counter moves together with the tree-local counters.
+    CHECK(on_tp.reduced_cost_tightenings > 0);
+}
+
+TEST_CASE("MipSolver: node reduced-cost fixing runs with more than one thread",
+          "[mip][rcfixer][parallel]") {
+    const auto lp = buildRcFixingKnapsackMip();
+
+    RcFixingStats serial_stats{};
+    MipTreePresolveStats serial_tp{};
+    const auto serial =
+        solveRcFixing(lp, /*tree_presolve=*/true, /*threads=*/1, serial_stats, serial_tp);
+
+    RcFixingStats parallel_stats{};
+    MipTreePresolveStats parallel_tp{};
+    const auto parallel =
+        solveRcFixing(lp, /*tree_presolve=*/true, /*threads=*/4, parallel_stats, parallel_tp);
+
+    REQUIRE(serial.status == Status::Optimal);
+    REQUIRE(parallel.status == Status::Optimal);
+    CHECK_THAT(parallel.objective, WithinAbs(serial.objective, 1e-9));
+    CHECK_THAT(parallel.objective, WithinAbs(rcKnapsackOptimum(), 1e-9));
+
+    CHECK((parallel_stats.tree_local_fixings + parallel_stats.tree_local_tightenings) > 0);
+    CHECK(parallel_stats.propagation_triggers > 0);
+
+    // Node-local fixings never feed the global counters, however many threads
+    // produced them.
+    CHECK(parallel_stats.root_global_fixings == serial_stats.root_global_fixings);
+    CHECK(parallel_stats.root_global_tightenings == serial_stats.root_global_tightenings);
 }
