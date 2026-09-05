@@ -55,8 +55,15 @@ CmirResult applyCmir(const std::vector<Index>& row_indices,
                 result.valid = false;
                 return result;
             }
+            // x_j' = u_j - x_j is nonnegative for x_j <= u_j.
             mod_rhs -= a * ub;
             a = -a;
+        } else if (problem.col_lower[j] < -kCoeffTol) {
+            // MIR is derived over nonnegative variables; a variable that can go
+            // negative invalidates both the integer rounding and the slack
+            // argument for the continuous terms.
+            result.valid = false;
+            return result;
         }
 
         mod_indices.push_back(j);
@@ -78,13 +85,14 @@ CmirResult applyCmir(const std::vector<Index>& row_indices,
         const Real a = mod_values[k];
 
         if (problem.col_type[j] == VarType::Continuous) {
-            // Continuous: coefficient is max(a, 0) / f0 for >= side,
-            // but for <= cut: if a > 0, coeff = a/f0; if a < 0, coeff = a/(f0-1)
-            if (a >= 0.0) {
-                cut_values[k] = a / f0;
-            } else {
-                cut_values[k] = a / (f0 - 1.0);
-            }
+            // MIR treats the continuous part as a nonnegative slack on the
+            // right-hand side: from sum_I a_j x_j <= b + s with s >= 0,
+            //   sum_I (floor(a_j) + (f_j - f0)^+/(1 - f0)) x_j <= floor(b) + s/(1 - f0).
+            // Only negative coefficients form that slack (a_j y_j = -|a_j| y_j
+            // with y_j >= 0). A positive continuous term sits on the wrong side
+            // and can only be relaxed away: dropping it weakens the base row,
+            // which is valid because a_j y_j >= 0.
+            cut_values[k] = std::min(a, 0.0) / (1.0 - f0);
         } else {
             // Integer: apply MIR formula
             Real fj = a - std::floor(a);

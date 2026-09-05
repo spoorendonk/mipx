@@ -542,3 +542,163 @@ TEST_CASE("MipSolver with cuts: MIPLIB gt2", "[cuts][miplib]") {
     CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }
+
+// ---------------------------------------------------------------------------
+// CMIR validity.
+//
+// The MIR inequality is derived over nonnegative variables, treating the
+// continuous terms as a nonnegative slack on the right-hand side. Only
+// negative continuous coefficients belong in the cut, scaled by 1/(1-f0); a
+// positive continuous term can only be relaxed away. Reading positive terms as
+// a/f0 (and negative ones with a flipped sign) produces cuts that remove
+// integer-feasible points, which the branch-and-bound then reports as an
+// optimal solution worse than the true optimum.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Mixed-integer model with continuous columns of both signs in a <= row whose
+// right-hand side has a fractional part, and a known integer-feasible point.
+LpProblem buildCmirValidityMip() {
+    LpProblem lp;
+    lp.name = "cmir_validity";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 7;
+    lp.num_rows = 5;
+    lp.obj = {2.0, -5.0, 5.0, 3.0, 0.0, -5.0, -2.0};
+    lp.obj_offset = -2.0;
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 3.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 1.0, 10.0, 6.0, 8.8};
+    lp.col_type = {VarType::Binary,     VarType::Binary,     VarType::Binary,
+                   VarType::Binary,     VarType::Continuous, VarType::Continuous,
+                   VarType::Continuous};
+    lp.col_names = {"c0", "c1", "c2", "c3", "c4", "c5", "c6"};
+
+    lp.row_lower = {-18.0, -kInf, 4.0, -kInf, 15.0};
+    lp.row_upper = {kInf, 29.4, 4.0, 3.0, 15.0};
+    lp.row_names = {"R0", "R1", "R2", "R3", "R4"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 4.0},  {0, 2, -5.0}, {0, 6, -2.0}, {1, 1, -3.4}, {1, 3, 0.4},  {1, 5, 1.0},
+        {1, 6, 3.0},  {2, 1, 2.0},  {2, 2, -3.0}, {2, 3, -3.0}, {2, 5, 1.0},  {3, 0, -4.0},
+        {3, 2, -2.0}, {3, 6, 1.0},  {4, 0, -4.0}, {4, 3, -5.0}, {4, 4, -2.0}, {4, 6, 5.0},
+    };
+    lp.matrix = SparseMatrix(5, 7, std::move(trips));
+    return lp;
+}
+
+// Feasible for every row of buildCmirValidityMip, integral on the binaries,
+// objective -41 (the model's optimum).
+const std::vector<Real>& cmirValidityOptimum() {
+    static const std::vector<Real> point = {1.0, 1.0, 0.0, 1.0, 5.5, 5.0, 7.0};
+    return point;
+}
+
+CutFamilyConfig onlyCmirConfig() {
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = false;
+    config.cover = false;
+    config.implied_bound = false;
+    config.clique = false;
+    config.zero_half = false;
+    config.mixing = false;
+    config.cmir = true;
+    config.strong_cg = false;
+    config.lifted_cover = false;
+    config.mod_k = false;
+    config.intersection_cut = false;
+    config.multi_row = false;
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE("SeparatorManager: CMIR cuts keep every integer-feasible point", "[cuts][cmir]") {
+    auto problem = buildCmirValidityMip();
+    const auto& x = cmirValidityOptimum();
+
+    // The reference point really is feasible for the model.
+    for (Index i = 0; i < problem.num_rows; ++i) {
+        auto row = problem.matrix.row(i);
+        Real activity = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            activity += row.values[k] * x[static_cast<std::size_t>(row.indices[k])];
+        }
+        INFO("row " << i);
+        CHECK(activity <= problem.row_upper[i] + 1e-9);
+        CHECK(activity >= problem.row_lower[i] - 1e-9);
+    }
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    manager.setConfig(onlyCmirConfig());
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+
+    for (Index c = 0; c < pool.size(); ++c) {
+        const Cut& cut = pool[c];
+        Real activity = 0.0;
+        for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+            activity += cut.values[k] * x[static_cast<std::size_t>(cut.indices[k])];
+        }
+        INFO("cut " << c << " activity " << activity << " in [" << cut.lower << ", " << cut.upper
+                    << "]");
+        CHECK(activity <= cut.upper + 1e-7);
+        CHECK(activity >= cut.lower - 1e-7);
+    }
+}
+
+TEST_CASE("MipSolver: CMIR cuts do not cut off the optimum", "[cuts][cmir]") {
+    auto problem = buildCmirValidityMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.load(problem);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-41.0, 1e-6));
+}
+
+TEST_CASE("SeparatorManager: CMIR skips rows with negative lower bounds", "[cuts][cmir]") {
+    // MIR needs every variable nonnegative after complementation. A free
+    // integer column invalidates the rounding argument, so no cut may be
+    // produced from a row containing one.
+    LpProblem lp;
+    lp.name = "cmir_negative_lower";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.num_rows = 1;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {-5.0, 0.0, 0.0};
+    lp.col_upper = {5.0, 10.0, 10.0};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Continuous};
+    lp.col_names = {"z", "y", "s"};
+    lp.row_lower = {-kInf};
+    lp.row_upper = {7.5};
+    lp.row_names = {"R0"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 2.0}, {0, 2, 1.0}};
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+
+    DualSimplexSolver solver;
+    solver.load(lp);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    manager.setConfig(onlyCmirConfig());
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    manager.separate(solver, lp, solver.getPrimalValues(), pool, stats);
+    CHECK(pool.size() == 0);
+}
