@@ -5,9 +5,12 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
+#include <tuple>
+#include <vector>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinULP;
 namespace fs = std::filesystem;
 
 static std::string testDataDir() {
@@ -946,4 +949,280 @@ TEST_CASE("DualSimplex: BFRT hygiene caps preserve correctness", "[dual_simplex]
     REQUIRE(result.status == Status::Optimal);
     Real expected = 2.2549496316e+05;
     CHECK(std::abs(result.objective - expected) / std::abs(expected) < 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+// Hyper-sparse row-price kernel with adaptive dense fallback (#131)
+// ---------------------------------------------------------------------------
+
+// Block-diagonal LP: `num_blocks` independent blocks of 4 rows over
+// `cols_per_block` columns each, every row dense within its own block. The
+// basis matrix is block diagonal for any basis, so B^{-T} e_p has support
+// confined to a single block — at most 4 of the 4*num_blocks rows. The BTRAN
+// output density therefore stays far below the row-price threshold, while
+// `cols_per_block` controls how dense the assembled alpha row becomes.
+static LpProblem buildBlockDiagonalLP(Index num_blocks, Index cols_per_block) {
+    LpProblem lp;
+    lp.name = "block_diagonal";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = cols_per_block * num_blocks;
+    lp.num_rows = 4 * num_blocks;
+
+    std::vector<Real> values;
+    std::vector<Index> col_indices;
+    std::vector<Index> row_starts = {0};
+
+    for (Index b = 0; b < num_blocks; ++b) {
+        const Index first_col = cols_per_block * b;
+        for (Index j = 0; j < cols_per_block; ++j) {
+            lp.obj.push_back(1.0 + static_cast<Real>(j % 4));
+            lp.col_lower.push_back(0.0);
+            lp.col_upper.push_back(kInf);
+            lp.col_type.push_back(VarType::Continuous);
+        }
+        for (Index r = 0; r < 4; ++r) {
+            for (Index j = 0; j < cols_per_block; ++j) {
+                values.push_back(1.0 + static_cast<Real>((r + j) % 3));
+                col_indices.push_back(first_col + j);
+            }
+            row_starts.push_back(static_cast<Index>(col_indices.size()));
+            lp.row_lower.push_back(1.0 + static_cast<Real>(r));
+            lp.row_upper.push_back(kInf);
+        }
+    }
+
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, values, col_indices, row_starts);
+    return lp;
+}
+
+// Fully dense LP. The first BTRAN on the all-slack basis has support {p}, so
+// the sparse kernel is selected; the assembled alpha row is immediately dense,
+// which drives the density history above the threshold and switches subsequent
+// assemblies to the dense kernel. The instance therefore crosses the threshold
+// mid-solve and exercises the adaptive fallback.
+static LpProblem buildDenseLP(Index num_rows, Index num_cols) {
+    LpProblem lp;
+    lp.name = "dense_rows";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = num_cols;
+    lp.num_rows = num_rows;
+    lp.obj.assign(static_cast<std::size_t>(num_cols), 0.0);
+    for (Index j = 0; j < num_cols; ++j) {
+        lp.obj[static_cast<std::size_t>(j)] = 1.0 + static_cast<Real>(j % 4);
+    }
+    lp.col_lower.assign(static_cast<std::size_t>(num_cols), 0.0);
+    lp.col_upper.assign(static_cast<std::size_t>(num_cols), 20.0);
+    lp.col_type.assign(static_cast<std::size_t>(num_cols), VarType::Continuous);
+
+    std::vector<Real> values;
+    std::vector<Index> col_indices;
+    std::vector<Index> row_starts = {0};
+    for (Index i = 0; i < num_rows; ++i) {
+        for (Index j = 0; j < num_cols; ++j) {
+            values.push_back(1.0 + static_cast<Real>((i * 7 + j * 3) % 5));
+            col_indices.push_back(j);
+        }
+        row_starts.push_back(static_cast<Index>(col_indices.size()));
+        lp.row_lower.push_back(10.0 + static_cast<Real>(i % 7));
+        lp.row_upper.push_back(kInf);
+    }
+    lp.matrix = SparseMatrix(num_rows, num_cols, values, col_indices, row_starts);
+    return lp;
+}
+
+// Criterion 1: the sparse kernel is actually selected when the BTRAN output
+// density is below the threshold, and the toggle really forces the dense one.
+TEST_CASE("DualSimplex: sparse row-price kernel runs on a block-diagonal LP",
+          "[dual_simplex][row_price]") {
+    auto lp = buildBlockDiagonalLP(60, 4);  // 240 rows, 240 columns
+
+    DualSimplexSolver sparse_solver;
+    sparse_solver.load(lp);
+    auto sparse_result = sparse_solver.solve();
+    REQUIRE(sparse_result.status == Status::Optimal);
+
+    const auto& sparse_stats = sparse_solver.getRowPriceStats();
+    // BTRAN support is at most 4 of 240 rows (1.7%), well under the threshold.
+    CHECK(sparse_stats.sparse_assemblies > 0);
+    CHECK(sparse_stats.dense_assemblies == 0);
+    CHECK(sparse_stats.fill_in_fallbacks == 0);
+    CHECK(sparse_stats.ema_alpha_density < 0.12);
+
+    DualSimplexSolver dense_solver;
+    DualSimplexOptions opts;
+    opts.force_dense_pivot_row = true;
+    dense_solver.setOptions(opts);
+    dense_solver.load(lp);
+    auto dense_result = dense_solver.solve();
+    REQUIRE(dense_result.status == Status::Optimal);
+
+    const auto& dense_stats = dense_solver.getRowPriceStats();
+    CHECK(dense_stats.sparse_assemblies == 0);
+    CHECK(dense_stats.dense_assemblies > 0);
+    CHECK(dense_stats.dense_assemblies == sparse_stats.sparse_assemblies);
+}
+
+// Criterion 3a: the sparse-assembled alpha row equals the dense-assembled row
+// entry for entry.
+//
+// alpha is solver-internal, but it is observable through the dual update: after
+// a single dual iteration reduced_cost[k] = rc0[k] - theta_d * alpha[k], with
+// rc0 and theta_d identical between the two runs. Bit-exact agreement of the
+// reduced costs is therefore bit-exact agreement of the alpha row. Running both
+// solves to optimality repeats the check for every iteration of the solve.
+TEST_CASE("DualSimplex: sparse row-price alpha matches the dense assembly exactly",
+          "[dual_simplex][row_price]") {
+    auto lp = buildBlockDiagonalLP(60, 4);
+
+    auto run = [&](bool force_dense, Int iter_limit) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts;
+        opts.force_dense_pivot_row = force_dense;
+        solver.setOptions(opts);
+        solver.load(lp);
+        if (iter_limit > 0) {
+            solver.setIterationLimit(iter_limit);
+        }
+        auto result = solver.solve();
+        return std::tuple{result, solver.getReducedCosts(), solver.getDualValues(),
+                          solver.getPrimalValues(), solver.getBasis()};
+    };
+
+    // One iteration: a direct entry-for-entry comparison of a single alpha row.
+    {
+        auto [sparse_res, sparse_rc, sparse_dual, sparse_primal, sparse_basis] = run(false, 1);
+        auto [dense_res, dense_rc, dense_dual, dense_primal, dense_basis] = run(true, 1);
+        REQUIRE(sparse_rc.size() == dense_rc.size());
+        REQUIRE(!sparse_rc.empty());
+        for (std::size_t k = 0; k < sparse_rc.size(); ++k) {
+            INFO("var=" << k);
+            CHECK_THAT(sparse_rc[k], WithinULP(dense_rc[k], 0));
+        }
+    }
+
+    // Full solve: the same comparison repeated over every iteration.
+    auto [sparse_res, sparse_rc, sparse_dual, sparse_primal, sparse_basis] = run(false, 0);
+    auto [dense_res, dense_rc, dense_dual, dense_primal, dense_basis] = run(true, 0);
+    REQUIRE(sparse_res.status == Status::Optimal);
+    REQUIRE(dense_res.status == Status::Optimal);
+    CHECK_THAT(sparse_res.objective, WithinULP(dense_res.objective, 0));
+    REQUIRE(sparse_rc.size() == dense_rc.size());
+    for (std::size_t k = 0; k < sparse_rc.size(); ++k) {
+        INFO("var=" << k);
+        CHECK_THAT(sparse_rc[k], WithinULP(dense_rc[k], 0));
+        CHECK_THAT(sparse_primal[k], WithinULP(dense_primal[k], 0));
+    }
+    REQUIRE(sparse_dual.size() == dense_dual.size());
+    for (std::size_t i = 0; i < sparse_dual.size(); ++i) {
+        INFO("row=" << i);
+        CHECK_THAT(sparse_dual[i], WithinULP(dense_dual[i], 0));
+    }
+    CHECK(sparse_basis == dense_basis);
+}
+
+// Criteria 2 and 3b (density history): sc205 starts hyper-sparse from the
+// all-slack basis and fills in as the basis develops, so the adaptive kernel
+// begins on the sparse path and the density history moves it to the dense one.
+// Because both kernels accumulate in the same row order they agree bit for bit,
+// so forcing dense must reproduce the same optimum, objective and basis.
+TEST_CASE("DualSimplex: density history switches row-price to the dense kernel",
+          "[dual_simplex][row_price][netlib]") {
+    std::string path = testDataDir() + "/netlib/sc205.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance sc205 not downloaded");
+    }
+    auto lp = readMps(path);
+
+    DualSimplexSolver adaptive;
+    adaptive.setVerbose(false);
+    adaptive.load(lp);
+    auto adaptive_result = adaptive.solve();
+    REQUIRE(adaptive_result.status == Status::Optimal);
+
+    const auto& stats = adaptive.getRowPriceStats();
+    CHECK(stats.sparse_assemblies > 0);
+    CHECK(stats.dense_assemblies > 0);
+    CHECK(stats.fill_in_fallbacks == 0);  // the history gate fires, not the bail-out
+    CHECK(stats.ema_alpha_density > 0.12);
+
+    DualSimplexSolver forced_dense;
+    DualSimplexOptions opts;
+    opts.force_dense_pivot_row = true;
+    forced_dense.setVerbose(false);
+    forced_dense.setOptions(opts);
+    forced_dense.load(lp);
+    auto forced_result = forced_dense.solve();
+    REQUIRE(forced_result.status == Status::Optimal);
+
+    const auto& forced_stats = forced_dense.getRowPriceStats();
+    CHECK(forced_stats.sparse_assemblies == 0);
+    CHECK(forced_stats.fill_in_fallbacks == 0);
+    CHECK(forced_stats.dense_assemblies == stats.sparse_assemblies + stats.dense_assemblies);
+
+    CHECK_THAT(adaptive_result.objective, WithinULP(forced_result.objective, 0));
+    CHECK(adaptive.getBasis() == forced_dense.getBasis());
+    auto adaptive_primal = adaptive.getPrimalValues();
+    auto forced_primal = forced_dense.getPrimalValues();
+    REQUIRE(adaptive_primal.size() == forced_primal.size());
+    for (std::size_t j = 0; j < adaptive_primal.size(); ++j) {
+        INFO("col=" << j);
+        CHECK_THAT(adaptive_primal[j], WithinULP(forced_primal[j], 0));
+    }
+}
+
+// Criterion 2 (mid-assembly fill-in): a fully dense LP passes the BTRAN density
+// gate on the all-slack basis (support {p}) but fills alpha past the budget
+// while the sparse walk is running, so the walk is abandoned and the dense scan
+// finishes the row. Forced-dense must reach the same optimum.
+TEST_CASE("DualSimplex: row-price bails out to dense on mid-assembly fill-in",
+          "[dual_simplex][row_price]") {
+    auto lp = buildDenseLP(40, 30);
+
+    DualSimplexSolver adaptive;
+    adaptive.load(lp);
+    auto adaptive_result = adaptive.solve();
+    REQUIRE(adaptive_result.status == Status::Optimal);
+
+    const auto& stats = adaptive.getRowPriceStats();
+    CHECK(stats.fill_in_fallbacks > 0);
+    CHECK(stats.dense_assemblies > 0);
+    CHECK(stats.sparse_assemblies == 0);
+
+    DualSimplexSolver forced_dense;
+    DualSimplexOptions opts;
+    opts.force_dense_pivot_row = true;
+    forced_dense.setOptions(opts);
+    forced_dense.load(lp);
+    auto forced_result = forced_dense.solve();
+    REQUIRE(forced_result.status == Status::Optimal);
+    CHECK(forced_dense.getRowPriceStats().fill_in_fallbacks == 0);
+
+    CHECK_THAT(adaptive_result.objective, WithinAbs(forced_result.objective, 1e-9));
+    CHECK(adaptive.getBasis() == forced_dense.getBasis());
+    auto adaptive_primal = adaptive.getPrimalValues();
+    auto forced_primal = forced_dense.getPrimalValues();
+    REQUIRE(adaptive_primal.size() == forced_primal.size());
+    for (std::size_t j = 0; j < adaptive_primal.size(); ++j) {
+        INFO("col=" << j);
+        CHECK_THAT(adaptive_primal[j], WithinAbs(forced_primal[j], 1e-9));
+    }
+}
+
+// The force-dense toggle round-trips through setOptions and defaults to off.
+TEST_CASE("DualSimplex: force_dense_pivot_row option round-trips",
+          "[dual_simplex][options][row_price]") {
+    DualSimplexSolver solver;
+    CHECK(solver.getOptions().force_dense_pivot_row == false);
+
+    DualSimplexOptions opts;
+    opts.force_dense_pivot_row = true;
+    solver.setOptions(opts);
+    CHECK(solver.getOptions().force_dense_pivot_row == true);
+
+    // Stats start empty and stay empty until a solve runs.
+    const auto& stats = solver.getRowPriceStats();
+    CHECK(stats.sparse_assemblies == 0);
+    CHECK(stats.dense_assemblies == 0);
+    CHECK(stats.fill_in_fallbacks == 0);
+    CHECK(stats.ema_alpha_density == 0.0);
 }

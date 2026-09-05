@@ -164,6 +164,12 @@ struct DualSimplexOptions {
     Int sip_parallel_min_rows = 2048;
     Int sip_parallel_row_grain = 256;
 
+    // Hyper-sparse pivot-row ("row price") assembly (#131).
+    // Forces the dense assembly kernel unconditionally, bypassing both the
+    // BTRAN-density gate and the EMA history. Provided so the sparse and dense
+    // kernels can be compared directly; the adaptive path is the default.
+    bool force_dense_pivot_row = false;
+
     // Optional cooperative stop flag for externally orchestrated solves.
     const std::atomic<bool>* stop_flag = nullptr;
 };
@@ -237,6 +243,17 @@ public:
     [[nodiscard]] const AdaptiveHarrisStats& getAdaptiveHarrisStats() const {
         return adaptive_harris_stats_;
     }
+
+    /// Diagnostics for the hyper-sparse pivot-row ("row price") kernel (#131),
+    /// accumulated over the most recent solve(). Exposed for observability and
+    /// testing, so the path actually taken can be asserted.
+    struct RowPriceStats {
+        Int sparse_assemblies = 0;     // assemblies completed by the sparse kernel
+        Int dense_assemblies = 0;      // assemblies completed by the dense kernel
+        Int fill_in_fallbacks = 0;     // sparse assemblies abandoned mid-way for fill-in
+        Real ema_alpha_density = 0.0;  // EMA of assembled alpha-row density (live state)
+    };
+    [[nodiscard]] const RowPriceStats& getRowPriceStats() const { return row_price_stats_; }
 
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
@@ -338,6 +355,18 @@ private:
     static constexpr Real kZeroTol = 1e-13;
     static constexpr Int kLogFrequency = 200;
 
+    // Hyper-sparse pivot-row ("row price") switching constants (#131).
+    // Lifted from the EMA-density-guided switching in the LU hyper-sparse
+    // solves (SparseLU::kHyperSparseMaxDensity / kEmaAlpha): below this
+    // density the indexed walk over the BTRAN support beats a full O(m) scan
+    // of rho; above it the sequential dense scan wins on locality.
+    static constexpr Real kRowPriceMaxDensity = 0.12;
+    static constexpr Real kRowPriceEmaAlpha = 0.15;
+    // Mid-assembly bail-out budget, as a multiple of kRowPriceMaxDensity.
+    // Matches the LU solves, which bail from the hyper-sparse iteration to a
+    // dense scan once the output exceeds 2x the entry threshold.
+    static constexpr Real kRowPriceFillInFactor = 2.0;
+
     // Timing for iteration log.
     std::chrono::steady_clock::time_point solve_start_;
 
@@ -349,6 +378,9 @@ private:
     Int bfrt_high_flip_iters_ = 0;  // consecutive iterations with high flip count
     // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
     AdaptiveHarrisStats adaptive_harris_stats_{};
+    // Hyper-sparse row-price (#131) path tracking and density history,
+    // reset each solve().
+    RowPriceStats row_price_stats_{};
     std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
     std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
     DualSimplexOptions options_{};

@@ -793,6 +793,8 @@ LpResult DualSimplexSolver::solve() {
     // Adaptive Harris (#159) numerical-incident tracking.
     bfrt_high_flip_iters_ = 0;
     adaptive_harris_stats_ = AdaptiveHarrisStats{};
+    // Hyper-sparse row-price (#131) path tracking and density history.
+    row_price_stats_ = RowPriceStats{};
 
     // Snapshot work at start of solve to compute delta.
     double work_at_start = work_.units();
@@ -1335,6 +1337,28 @@ LpResult DualSimplexSolver::solve() {
             ++value;
         }
     };
+    // Hyper-sparse pivot-row ("row price") assembly, #131.
+    //
+    // alpha = rho^T A with alpha_{n+i} = -rho_i. The sparse kernel walks only
+    // the BTRAN support of rho; the dense kernel scans all m rows. Three gates
+    // decide, all lifted from the EMA-density-guided switching used by the LU
+    // hyper-sparse solves (SparseLU::kHyperSparseMaxDensity, kEmaAlpha):
+    //   1. This iteration's measured BTRAN output density must be below
+    //      kRowPriceMaxDensity.
+    //   2. The EMA of recent assembled alpha-row densities must also be below
+    //      it. LU predicts a stage's density from history because it is not
+    //      known before the stage runs; the same applies here, where a thin
+    //      rho can still scatter into a near-dense alpha row and the scatter,
+    //      not the walk, then dominates. Until history exists (first assembly
+    //      of a solve) only gate 1 applies, matching the LU ternary.
+    //   3. Mid-assembly fill-in: if alpha crosses kRowPriceFillInFactor times
+    //      the density budget while the sparse walk is running, the walk is
+    //      abandoned and the dense scan finishes the remaining rows.
+    //
+    // The support is walked in ascending row order, so the sparse kernel
+    // accumulates in exactly the order the dense kernel does. That makes the
+    // two kernels agree entry-for-entry and lets a mid-assembly bail-out
+    // resume the dense scan at the first row the walk has not yet reached.
     auto buildPivotRowAlphaFromWork = [&]() {
         pivot_row_alpha.clear();
 
@@ -1352,18 +1376,51 @@ LpResult DualSimplexSolver::solve() {
             pivot_row_alpha.set(slack, -rho_i);
         };
 
-        auto touched_rows = btran_work.touched();
+        auto& touched_rows = btran_work.touchedMut();
+        const Real btran_density =
+            num_rows_ > 0 ? static_cast<Real>(touched_rows.size()) / static_cast<Real>(num_rows_)
+                          : 1.0;
+        const Real predicted_density = row_price_stats_.ema_alpha_density;
         const bool use_sparse_row_support =
-            !touched_rows.empty() && static_cast<Index>(touched_rows.size()) * 2 < num_rows_;
+            !options_.force_dense_pivot_row && !touched_rows.empty() &&
+            btran_density < kRowPriceMaxDensity &&
+            (predicted_density <= 0.0 || predicted_density < kRowPriceMaxDensity);
+
+        // First row not yet accumulated; the dense scan resumes here.
+        Index dense_scan_from = 0;
+        bool completed_sparse = false;
         if (use_sparse_row_support) {
+            std::sort(touched_rows.begin(), touched_rows.end());
+            const auto fill_in_limit = static_cast<std::size_t>(
+                kRowPriceFillInFactor * kRowPriceMaxDensity * static_cast<Real>(numVars()));
+            completed_sparse = true;
             for (Index i : touched_rows) {
                 accumulateRow(i);
+                if (pivot_row_alpha.touched().size() > fill_in_limit) {
+                    dense_scan_from = i + 1;
+                    completed_sparse = false;
+                    ++row_price_stats_.fill_in_fallbacks;
+                    break;
+                }
             }
-            return;
         }
-        for (Index i = 0; i < num_rows_; ++i) {
-            accumulateRow(i);
+        if (!completed_sparse) {
+            for (Index i = dense_scan_from; i < num_rows_; ++i) {
+                accumulateRow(i);
+            }
         }
+
+        if (completed_sparse) {
+            ++row_price_stats_.sparse_assemblies;
+        } else {
+            ++row_price_stats_.dense_assemblies;
+        }
+        // Density history for the next assembly's gate 2.
+        const Real alpha_density = static_cast<Real>(pivot_row_alpha.touched().size()) /
+                                   static_cast<Real>(std::max<Index>(numVars(), 1));
+        row_price_stats_.ema_alpha_density =
+            kRowPriceEmaAlpha * alpha_density +
+            (1.0 - kRowPriceEmaAlpha) * row_price_stats_.ema_alpha_density;
     };
     auto resetPrimalFeasibleProgress = [&]() {
         primal_feasible_dual_progress_reference = kInf;
