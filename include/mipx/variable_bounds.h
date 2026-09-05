@@ -112,8 +112,11 @@ public:
     /// is tighter for the LP relaxation:
     ///   coeff > 0:  (coeff - delta) * y + ... <= rhs - delta
     ///   coeff < 0:  (coeff + delta) * y + ... <= rhs
-    /// Both branches of y reproduce the original row exactly, so no point that
-    /// is feasible for the model is cut off.
+    /// In the branch where y is tight the strengthened row reduces to the
+    /// original one; in the slack branch it reduces to "other terms <= M",
+    /// which the bounds valid in that branch already imply. So no point that
+    /// is feasible for the model is cut off, while the LP relaxation is
+    /// strictly tighter.
     ///
     /// The caller must ensure `binary_var` is binary (bounds [0, 1]) and that
     /// `row_values` are the effective coefficients of the row.
