@@ -5679,6 +5679,19 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         CutSeparationStats round_family_stats;
         Int new_cuts = separators.separate(lp, problem_, primals, pool, round_family_stats);
 
+        // Fold the separation counters in before the early exits below, so the
+        // reported per-family stats cover every round that actually separated,
+        // including a final round that produced nothing.
+        for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
+            auto& dst = total_family_stats.families[fi];
+            const auto& src = round_family_stats.families[fi];
+            dst.attempted += src.attempted;
+            dst.generated += src.generated;
+            dst.accepted += src.accepted;
+            dst.efficacy_sum += src.efficacy_sum;
+            dst.time_seconds += src.time_seconds;
+        }
+
         if (new_cuts == 0) {
             break;
         }
@@ -5783,19 +5796,15 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             round_family_stats.families.begin(), round_family_stats.families.end(), 0.0,
             [](double acc, const CutFamilyStats& s) { return acc + s.time_seconds; });
 
+        // The counters were folded in right after separation; only the LP-delta
+        // attribution, which needs this round's selection, is left to add.
         for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
-            auto& dst = total_family_stats.families[fi];
             auto& src = round_family_stats.families[fi];
             if (selected_total > 0 && selected_by_family[fi] > 0) {
                 src.lp_delta += improvement * static_cast<Real>(selected_by_family[fi]) /
                                 static_cast<Real>(selected_total);
             }
-            dst.attempted += src.attempted;
-            dst.generated += src.generated;
-            dst.accepted += src.accepted;
-            dst.efficacy_sum += src.efficacy_sum;
-            dst.lp_delta += src.lp_delta;
-            dst.time_seconds += src.time_seconds;
+            total_family_stats.families[fi].lp_delta += src.lp_delta;
         }
         cut_manager.recordRound(round_family_stats, selected_by_family, improvement, orthogonality,
                                 separation_seconds, result.work_units, true, 0);
