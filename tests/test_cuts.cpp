@@ -1035,7 +1035,11 @@ TEST_CASE("SeparatorManager: Strong CG does not round a coefficient up", "[cuts]
     // x = 1001, z = 0 is integer-feasible; the pre-fix cut x <= 1000 removes it.
     const std::vector<Real> optimum = {1001.0, 0.0};
 
-    separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig());
+    // Require a non-empty pool so the per-cut validity loop is genuinely
+    // exercised: R2 (2z <= 1) still yields the valid cut z <= 0 at t = 0.5.
+    // Without this the check would pass on an empty pool if the separator
+    // stopped emitting anything at all.
+    CHECK(separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig()) > 0);
 }
 
 TEST_CASE("MipSolver: Strong CG keeps an optimum under a near-integer coefficient",
