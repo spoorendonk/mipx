@@ -5201,6 +5201,18 @@ MipResult MipSolver::solve() {
 
     // Check if root solution is integer feasible.
     root_basis = lp.getBasis();
+    // Snapshot the root relaxation's reduced costs *here*, next to the basis and
+    // alongside root_primals/root_bound. Root heuristics below re-solve `lp` with
+    // substituted objectives (aux-objective, zero-objective, feasibility pump,
+    // proximity) and with fixed column bounds (RENS, RINS, local branching,
+    // undercover, ...). They restore the objective vector, the bounds and the
+    // basis, but the solver's cached duals are whatever its last simplex solve
+    // produced, and setBasis() does not recompute them. Reading
+    // lp.getReducedCosts() after the portfolio therefore yields the duals of a
+    // heuristic subproblem, which are not dual-feasible for the root relaxation.
+    // Pairing those with root_primals/root_bound made global reduced-cost fixing
+    // unsound and silently cut off optimal solutions.
+    std::vector<Real> root_reduced_costs = lp.getReducedCosts();
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
     HeuristicRuntime root_runtime(runtime_config);
@@ -5305,12 +5317,14 @@ MipResult MipSolver::solve() {
     // Reduced-cost fixing: load engine and apply global fixings at root.
     rc_fixer_.load(problem_);
     if (incumbent < kInf) {
-        auto root_rc = lp.getReducedCosts();
+        // root_reduced_costs is the snapshot taken with root_basis, not a fresh
+        // lp.getReducedCosts(): the heuristic portfolio above may have left the
+        // solver's cached duals belonging to one of its subproblems.
         rc_root_saved_lower = problem_.col_lower;
         rc_root_saved_upper = problem_.col_upper;
         std::vector<Index> rc_tightened;
         bool rc_feasible =
-            rc_fixer_.applyGlobalFixing(root_rc, root_primals, root_bound, incumbent,
+            rc_fixer_.applyGlobalFixing(root_reduced_costs, root_primals, root_bound, incumbent,
                                         problem_.col_lower, problem_.col_upper, rc_tightened);
         if (!rc_feasible) {
             if (verbose_) {

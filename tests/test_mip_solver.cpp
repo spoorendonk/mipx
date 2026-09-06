@@ -511,6 +511,75 @@ static LpProblem buildSymmetryProbeMip() {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers: the two asymmetric models from issue #185. Both were reported as
+// "symmetry removes the optimum", but neither has any orbit: toggling symmetry
+// only shifted the work-unit budget, which changed how many root heuristics
+// ran and therefore whether root reduced-cost fixing had an incumbent to work
+// with. That fixing then read the LP's cached duals, which the heuristic
+// portfolio had left pointing at one of its own subproblems.
+// ---------------------------------------------------------------------------
+
+// min 4x0 + 0x1 + 3x2 - 4x3 - 4x4 + 2x5 - 4
+// R0: -3x0 + 5x1 - 4x2 + 2x3 + 5x4 - 2x5 <= 20
+// R1: -4x0 - 5x1               + 5x3 - x5 <=  9
+// Optimum by enumeration: -23 at x = (0, 1, 1, 3, 3, 1).
+static LpProblem buildIssue185ModelA() {
+    LpProblem lp;
+    lp.name = "issue185_a";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 6;
+    lp.obj = {4.0, 0.0, 3.0, -4.0, -4.0, 2.0};
+    lp.obj_offset = -4.0;
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 3.0, 3.0, 3.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Binary,  VarType::Integer,
+                   VarType::Integer, VarType::Integer, VarType::Binary};
+    lp.col_names = {"x0", "x1", "x2", "x3", "x4", "x5"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {20.0, 9.0};
+    lp.row_names = {"R0", "R1"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, -3.0}, {0, 1, 5.0},  {0, 2, -4.0}, {0, 3, 2.0}, {0, 4, 5.0},
+        {0, 5, -2.0}, {1, 0, -4.0}, {1, 1, -5.0}, {1, 3, 5.0}, {1, 5, -1.0},
+    };
+    lp.matrix = SparseMatrix(2, 6, std::move(trips));
+    return lp;
+}
+
+// min -16x0 + 21x1 + 14x2 + 18x3 - x4 - 8x5
+// R0: 2x0 + 6x1 + x2 + 3x4 in [27, 28]
+// R1: 2x0 - 3x1 + 3x4 + 2x5 <= 8
+// R2: -5x0 + 8x1 + 9x2 + 5x3 + 9x4 - 5x5 <= 57
+// Optimum by enumeration: -11 at x = (4, 3, 1, 0, 0, 3).
+static LpProblem buildIssue185ModelB() {
+    LpProblem lp;
+    lp.name = "issue185_b";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 6;
+    lp.obj = {-16.0, 21.0, 14.0, 18.0, -1.0, -8.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {4.0, 4.0, 2.0, 3.0, 2.0, 3.0};
+    lp.col_type = std::vector<VarType>(6, VarType::Integer);
+    lp.col_names = {"x0", "x1", "x2", "x3", "x4", "x5"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {27.0, -kInf, -kInf};
+    lp.row_upper = {28.0, 8.0, 57.0};
+    lp.row_names = {"R0", "R1", "R2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 2.0},  {0, 1, 6.0},  {0, 2, 1.0}, {0, 4, 3.0},  {1, 0, 2.0},
+        {1, 1, -3.0}, {1, 4, 3.0},  {1, 5, 2.0}, {2, 0, -5.0}, {2, 1, 8.0},
+        {2, 2, 9.0},  {2, 3, 5.0},  {2, 4, 9.0}, {2, 5, -5.0},
+    };
+    lp.matrix = SparseMatrix(3, 6, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -705,6 +774,64 @@ TEST_CASE("MipSolver: symmetry cuts are applied when presolve is off", "[mip][sy
     CHECK(on_stats.cuts_applied);
     CHECK(on_stats.detect_work_units > 0.0);
     CHECK(on_stats.cut_work_units > 0.0);
+}
+
+TEST_CASE("MipSolver: issue 185 model A keeps the optimum at defaults", "[mip][symmetry]") {
+    const auto lp = buildIssue185ModelA();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    const auto on = solver.solve();
+
+    REQUIRE(on.status == Status::Optimal);
+    CHECK_THAT(on.objective, WithinAbs(-23.0, 1e-6));
+
+    MipSolver without_symmetry;
+    without_symmetry.setVerbose(false);
+    without_symmetry.setSymmetryEnabled(false);
+    without_symmetry.load(lp);
+    const auto off = without_symmetry.solve();
+
+    REQUIRE(off.status == Status::Optimal);
+    CHECK_THAT(off.objective, WithinAbs(on.objective, 1e-6));
+}
+
+TEST_CASE("MipSolver: issue 185 model B keeps the optimum at defaults", "[mip][symmetry]") {
+    const auto lp = buildIssue185ModelB();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    const auto on = solver.solve();
+
+    REQUIRE(on.status == Status::Optimal);
+    CHECK_THAT(on.objective, WithinAbs(-11.0, 1e-6));
+
+    // The reported point must satisfy R0..R2, not just carry the right value.
+    REQUIRE(on.solution.size() == 6);
+    const auto activity = [&](Index row) {
+        Real sum = 0.0;
+        auto r = lp.matrix.row(row);
+        for (Index k = 0; k < r.size(); ++k) {
+            sum += r.values[k] * on.solution[static_cast<std::size_t>(r.indices[k])];
+        }
+        return sum;
+    };
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const Real act = activity(i);
+        CHECK(act >= lp.row_lower[static_cast<std::size_t>(i)] - 1e-6);
+        CHECK(act <= lp.row_upper[static_cast<std::size_t>(i)] + 1e-6);
+    }
+
+    MipSolver without_symmetry;
+    without_symmetry.setVerbose(false);
+    without_symmetry.setSymmetryEnabled(false);
+    without_symmetry.load(lp);
+    const auto off = without_symmetry.solve();
+
+    REQUIRE(off.status == Status::Optimal);
+    CHECK_THAT(off.objective, WithinAbs(on.objective, 1e-6));
 }
 
 TEST_CASE("MipSolver: MIPLIB gt2", "[mip][miplib]") {
