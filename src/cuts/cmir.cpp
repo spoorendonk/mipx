@@ -284,6 +284,8 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
     // For each row: sum a_j x_j <= b
     // CG cut: sum floor(a_j) x_j <= floor(b) for integer variables.
     // Strong CG: multiply row by a scalar t before rounding.
+    // Continuous columns cannot be rounded, so they are relaxed away before the
+    // right-hand side is floored (see the loop below).
     // We try several multipliers t to find the best violation.
     Int accepted = 0;
 
@@ -335,26 +337,35 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
                 const Index j = row.indices[p];
                 const Real a = row.values[p];
                 const Real scaled_a = t * a;
-                if (scaled_a < -kCoeffTol) {
-                    // Negative coefficient on nonneg var: skip this multiplier.
+                if (scaled_a < 0.0) {
+                    // Negative coefficient on a nonnegative variable: the term
+                    // could only be dropped by *raising* the left-hand side, so
+                    // no cut may be taken with this multiplier. The test is
+                    // exact rather than tolerance-based because dropping even a
+                    // tiny negative coefficient scales with the column's upper
+                    // bound.
                     changed = false;
                     break;
                 }
                 if (problem.col_type[j] == VarType::Continuous) {
-                    // Keep continuous coefficients as-is (they bound the cut).
-                    if (scaled_a > kCoeffTol) {
-                        cut.indices.push_back(j);
-                        cut.values.push_back(scaled_a);
-                    }
-                } else {
-                    const Real rounded = std::floor(scaled_a + 1e-9);
-                    if (rounded <= 0.0)
-                        continue;
-                    if (rounded + 1e-9 < scaled_a)
-                        changed = true;
-                    cut.indices.push_back(j);
-                    cut.values.push_back(rounded);
+                    // Rounding the right-hand side down is only valid when the
+                    // left-hand side is integral, and a continuous term never
+                    // is. Keeping it while flooring the right-hand side makes
+                    // the cut stronger than the row implies and removes
+                    // integer-feasible points. Such a term can only be relaxed
+                    // away: x_j >= 0 and t*a_j >= 0 here (a negative scaled
+                    // coefficient rejected the multiplier above), so
+                    // t*a_j*x_j >= 0 and dropping it weakens the scaled row.
+                    continue;
                 }
+
+                const Real rounded = std::floor(scaled_a + 1e-9);
+                if (rounded <= 0.0)
+                    continue;
+                if (rounded + 1e-9 < scaled_a)
+                    changed = true;
+                cut.indices.push_back(j);
+                cut.values.push_back(rounded);
             }
 
             if (!changed || cut.indices.empty())
