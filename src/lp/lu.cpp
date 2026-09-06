@@ -401,7 +401,10 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         detectBTF(dim_, matrix, basis_cols, btf_row_perm, btf_col_perm, btf_block_start);
     // detectBTF returns 0 when BTF is not applicable (too small, no perfect
     // matching, or a single SCC); in that case the whole basis is one block.
-    num_btf_blocks_ = num_blocks > 1 ? num_blocks : 1;
+    // Block-wise elimination is opt-in (see setBtfBlockElimination): without it
+    // the BTF permutation is still applied, but the pivot search is not confined.
+    const bool use_btf = btf_block_elimination_ && num_blocks > 1;
+    num_btf_blocks_ = use_btf ? num_blocks : 1;
 
     // Build the effective row and column mapping.
     // If BTF detected blocks, we use the BTF permutation to reorder the
@@ -645,12 +648,16 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     // which keeps them out of the count buckets while addEntry/removeEntry still
     // maintain their counts, and they are admitted when their block starts.
     //
-    // The strictly-lower off-diagonal blocks are still eliminated into L (they
-    // become A_{b'b} * U_b^{-1}); that is inherent to holding a single monolithic
-    // L*U rather than deferring the off-diagonal blocks to a block
-    // back-substitution, and it is what the existing FTRAN/BTRAN/Forrest-Tomlin
-    // paths already expect.
-    const bool use_btf = num_blocks > 1;
+    // Caveat, and why this is opt-in (setBtfBlockElimination, default off):
+    // the strictly-lower off-diagonal blocks are still eliminated into L, where
+    // they become A_{b'b} * U_b^{-1}. That densening is inherent to holding a
+    // single monolithic L*U -- avoiding it means leaving the off-diagonal blocks
+    // alone and doing block forward/back substitution in FTRAN/BTRAN, i.e. a new
+    // solve engine, not a change to pivot selection. Confining the pivot search
+    // without that gives up global Markowitz freedom over the off-diagonal
+    // region and buys only a cheaper search: measured on the Netlib bases that
+    // reach kBtfMinDim it costs 0.7-14% more L+U nonzeros, which is per-iteration
+    // solve cost. See issue #179.
     Index btf_block = 0;
     Index block_end = use_btf ? btf_block_start[1] : dim_;
 
@@ -811,7 +818,7 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         // eliminated. Block b spans exactly the elimination steps
         // [btf_block_start[b], btf_block_start[b+1]) because every step consumes
         // one row and one column of the active block.
-        if (use_btf && step == block_end) {
+        while (use_btf && step == block_end && btf_block + 1 < num_blocks) {
             ++btf_block;
             const Index next_end = btf_block_start[static_cast<std::size_t>(btf_block + 1)];
             activateBlockRange(block_end, next_end);
@@ -834,6 +841,11 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
             }
             const Index eidx = col_head[j];
             if (eidx < 0 || e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                continue;
+            }
+            // Under block-wise elimination the singleton may sit in a row of a
+            // later block; such a row is not an admissible pivot for this block.
+            if (row_active[static_cast<std::size_t>(e_row[static_cast<std::size_t>(eidx)])] == 0) {
                 continue;
             }
             const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
@@ -909,7 +921,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
                         Real col_max = 0.0;
                         for (Index eidx = col_head[j]; eidx >= 0;
                              eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-                            if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                            if (e_alive[static_cast<std::size_t>(eidx)] == 0 ||
+                                row_active[static_cast<std::size_t>(
+                                    e_row[static_cast<std::size_t>(eidx)])] == 0) {
                                 continue;
                             }
                             const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);
@@ -932,10 +946,16 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
                     }
 
                     // Two-pass thresholded Markowitz scan for this column.
+                    // Both passes skip rows of later BTF blocks: they are not
+                    // admissible pivots here, and letting them set col_max could
+                    // threshold away every admissible candidate and make a
+                    // nonsingular block look singular.
                     Real col_max = 0.0;
                     for (Index eidx = col_head[j]; eidx >= 0;
                          eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-                        if (e_alive[static_cast<std::size_t>(eidx)] != 0) {
+                        if (e_alive[static_cast<std::size_t>(eidx)] != 0 &&
+                            row_active[static_cast<std::size_t>(
+                                e_row[static_cast<std::size_t>(eidx)])] != 0) {
                             col_max =
                                 std::max(col_max, std::abs(e_val[static_cast<std::size_t>(eidx)]));
                         }
@@ -943,7 +963,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
                     const Real threshold = kPivotTol * col_max;
                     for (Index eidx = col_head[j]; eidx >= 0;
                          eidx = e_next_col[static_cast<std::size_t>(eidx)]) {
-                        if (e_alive[static_cast<std::size_t>(eidx)] == 0) {
+                        if (e_alive[static_cast<std::size_t>(eidx)] == 0 ||
+                            row_active[static_cast<std::size_t>(
+                                e_row[static_cast<std::size_t>(eidx)])] == 0) {
                             continue;
                         }
                         const Real absval = std::abs(e_val[static_cast<std::size_t>(eidx)]);

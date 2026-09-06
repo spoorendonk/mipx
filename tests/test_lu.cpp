@@ -12,6 +12,7 @@
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 // Helper: build a dense column from a SparseMatrix column.
 static std::vector<Real> denseColumn(const SparseMatrix& A, Index j) {
@@ -1531,6 +1532,15 @@ namespace {
 // block triangular but not block diagonal. Rows and columns are scattered by
 // fixed coprime-stride permutations, so the block structure is only recoverable
 // by an actual BTF decomposition and not from the input ordering.
+//
+// The fixture is deliberately adversarial for pivot confinement. Earlier blocks
+// are dense and later blocks sparse, and the coupling entries are large enough
+// to clear the |a_ij| >= kPivotTol * max|a_*j| threshold. A later block's rows
+// are therefore both admissible and much cheaper by Markowitz count than the
+// current block's own rows, so any search path that forgets to exclude inactive
+// rows will happily pivot across blocks. A uniform-density fixture does not
+// discriminate: the coupling either loses on Markowitz count or gets filtered
+// out by the threshold, and cross-block pivots never appear.
 struct BlockTriangularBasis {
     Index num_blocks = 0;
     Index block_size = 0;
@@ -1574,19 +1584,26 @@ BlockTriangularBasis makeBlockTriangularBasis(Index num_blocks, Index block_size
 
     for (Index blk = 0; blk < num_blocks; ++blk) {
         const Index base = blk * block_size;
-        // Diagonal block: a diagonally dominant directed cycle. The cycle makes
-        // the block a single strongly connected component, so BTF cannot split
-        // it further.
+        // Diagonal block: a diagonally dominant directed cycle, plus a band
+        // whose width shrinks with the block index. Block 0 is the densest and
+        // the last block is a bare cycle, which is exactly the shape that
+        // tempts Markowitz to reach forward into a later, sparser block.
+        const Index band =
+            1 + (block_size - 3) * (num_blocks - 1 - blk) / std::max<Index>(1, num_blocks - 1);
         for (Index i = 0; i < block_size; ++i) {
-            emit(base + i, base + i, 5.0 + 0.01 * static_cast<Real>(i));
-            emit(base + ((i + 1) % block_size), base + i, 1.0);
+            emit(base + i, base + i, 11.0 + 0.01 * static_cast<Real>(i));
+            for (Index d = 1; d <= band; ++d) {
+                emit(base + ((i + d) % block_size), base + i, 0.9);
+            }
         }
         // Coupling into the previous block: entries at (row in block blk,
         // column in block blk-1). This is the strictly block-lower part; it
-        // carries no cycle back, so the blocks stay separate SCCs.
+        // carries no cycle back, so the blocks stay separate SCCs. The value is
+        // above kPivotTol * 11.0, so these entries are admissible pivots on
+        // stability grounds and only the block confinement rules them out.
         if (blk > 0) {
-            for (Index i = 0; i < 3 && i < block_size; ++i) {
-                emit(base + i, base - block_size + i, 0.7);
+            for (Index i = 0; i < block_size; ++i) {
+                emit(base + i, base - block_size + i, 2.0);
             }
         }
     }
@@ -1662,6 +1679,7 @@ TEST_CASE("SparseLU: BTF confines Markowitz pivoting to diagonal blocks", "[lu][
     std::iota(basis.begin(), basis.end(), 0);
 
     SparseLU lu;
+    lu.setBtfBlockElimination(true);
     lu.factorize(A, basis);
 
     SECTION("block structure was detected and used") {
@@ -1750,8 +1768,22 @@ TEST_CASE("SparseLU: Forrest-Tomlin updates stay correct after a BTF factorizati
     std::iota(basis.begin(), basis.end(), 0);
 
     SparseLU lu;
+    lu.setBtfBlockElimination(true);
     lu.factorize(A, basis);
     REQUIRE(lu.numBtfBlocks() == num_blocks);
+
+    // AC4 must fail if the factorization it updates was not block-confined, so
+    // assert the confinement here too rather than only round-tripping.
+    {
+        auto row_perm = lu.rowPermutation();
+        auto col_perm = lu.colPermutation();
+        for (Index k = 0; k < spec.dim; ++k) {
+            const Index rb = spec.blockOfRow(row_perm[static_cast<std::size_t>(k)]);
+            const Index cb = spec.blockOfColumn(
+                basis[static_cast<std::size_t>(col_perm[static_cast<std::size_t>(k)])]);
+            CHECK(rb == cb);
+        }
+    }
 
     auto verify = [&](Real seed) {
         auto b = makeRhs(spec.dim, seed);
@@ -1800,6 +1832,7 @@ TEST_CASE("SparseLU: irreducible basis above the BTF threshold falls back to Mar
     std::iota(basis.begin(), basis.end(), 0);
 
     SparseLU lu;
+    lu.setBtfBlockElimination(true);
     lu.factorize(A, basis);
 
     CHECK(lu.numBtfBlocks() == 1);
@@ -1859,7 +1892,8 @@ TEST_CASE("SparseLU: nested eta patterns form dense supernodal panels", "[lu][su
             CHECK_THAT(Bx[static_cast<std::size_t>(i)],
                        WithinAbs(b[static_cast<std::size_t>(i)], 1e-10));
             CHECK_THAT(x[static_cast<std::size_t>(i)],
-                       WithinAbs(x_scalar[static_cast<std::size_t>(i)], 1e-12));
+                       WithinRel(x_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(x_scalar[static_cast<std::size_t>(i)], 1e-300));
         }
     }
 
@@ -1873,7 +1907,8 @@ TEST_CASE("SparseLU: nested eta patterns form dense supernodal panels", "[lu][su
             CHECK_THAT(Bty[static_cast<std::size_t>(i)],
                        WithinAbs(b[static_cast<std::size_t>(i)], 1e-10));
             CHECK_THAT(y[static_cast<std::size_t>(i)],
-                       WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-12));
+                       WithinRel(y_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-300));
         }
     }
 
@@ -1886,7 +1921,8 @@ TEST_CASE("SparseLU: nested eta patterns form dense supernodal panels", "[lu][su
         scalar_lu.btran(y_scalar, nz_scalar);
         for (Index i = 0; i < n; ++i) {
             CHECK_THAT(y[static_cast<std::size_t>(i)],
-                       WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-12));
+                       WithinRel(y_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-300));
         }
     }
 }
@@ -1982,6 +2018,41 @@ TEST_CASE("SparseLU: basis without nested etas takes the scalar L-solve", "[lu][
     lu.btran(y);
     auto Bty = denseMultiplyTranspose(A, basis, y);
     for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+}
+
+TEST_CASE("SparseLU: BTF block-wise elimination is off by default", "[lu][btf]") {
+    // Same block-structured basis as the confinement test, but with the default
+    // configuration. Block-wise elimination is opt-in pending the #179
+    // benchmark (see SparseLU::setBtfBlockElimination), so the factorization
+    // must take the single global Markowitz pass and still round-trip.
+    auto spec = makeBlockTriangularBasis(10, 12);
+    SparseMatrix A(spec.dim, spec.dim, spec.triplets);
+    std::vector<Index> basis(static_cast<std::size_t>(spec.dim));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    CHECK_FALSE(lu.btfBlockElimination());
+    lu.factorize(A, basis);
+
+    // Not confined: one global pass, even though the pattern has 10 blocks.
+    CHECK(lu.numBtfBlocks() == 1);
+
+    auto b = makeRhs(spec.dim, 0.44);
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < spec.dim; ++i) {
+        CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < spec.dim; ++i) {
         CHECK_THAT(Bty[static_cast<std::size_t>(i)],
                    WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
     }

@@ -308,7 +308,14 @@ TEST_CASE("Netlib: LP solve objectives match .solu on curated set", "[benchmark]
     }
 
     const auto solu_entries = readSolu(solu_file);
-    const std::array<std::string, 3> instances = {"afiro", "blend", "sc50a"};
+    // sc105, sc205 and share1b are here because afiro/blend/sc50a all have
+    // fewer than 100 rows, so every basis they factorize stays below
+    // SparseLU::kBtfMinDim and the BTF paths in the LU are never reached. The
+    // larger three do produce bases at dim >= kBtfMinDim with real block
+    // structure, which is what makes this objective check cover the
+    // factorization code it is meant to guard.
+    const std::array<std::string, 6> instances = {"afiro", "blend", "sc50a",
+                                                  "sc105", "sc205", "share1b"};
 
     bool ran_any = false;
     for (const auto& name : instances) {

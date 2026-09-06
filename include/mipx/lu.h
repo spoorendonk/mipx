@@ -67,17 +67,41 @@ public:
     [[nodiscard]] bool mixedPrecision() const { return mixed_precision_active_; }
     [[nodiscard]] bool mixedPrecisionEnabled() const { return mixed_precision_enabled_; }
 
-    /// Number of BTF diagonal blocks the last factorization eliminated over.
-    /// 1 means no usable block structure was found (or the basis was below
-    /// kBtfMinDim) and a single global Markowitz pass was used.
+    /// Enable/disable BTF block-wise elimination: when on, the Markowitz pivot
+    /// search is confined to one BTF diagonal block at a time, so each block is
+    /// factorized independently.
+    ///
+    /// OFF BY DEFAULT, pending the benchmark in issue #179. Confinement makes
+    /// the factorization itself cheaper (the search only ever ranges over one
+    /// block) but gives up the global Markowitz freedom that keeps the
+    /// off-diagonal region sparse. Measured on the Netlib bases that reach
+    /// kBtfMinDim, it costs 0.7-14% more L+U nonzeros -- and L+U nonzeros are
+    /// the per-iteration FTRAN/BTRAN cost, paid thousands of times per LP,
+    /// against a one-off factorization gain. Turning it into a win needs the
+    /// off-diagonal blocks left unfactorized and handled by block forward/back
+    /// substitution in the solves, which is a change to the solve engine rather
+    /// than to pivot selection.
+    ///
+    /// With this off, factorize() behaves exactly as it did before block-wise
+    /// elimination existed: BTF is still detected and still used to relabel
+    /// rows/columns, only the pivot confinement is skipped.
+    void setBtfBlockElimination(bool enable) { btf_block_elimination_ = enable; }
+    [[nodiscard]] bool btfBlockElimination() const { return btf_block_elimination_; }
+
+    /// Number of BTF diagonal blocks the last factorization was *confined to*.
+    /// 1 means no confinement happened -- block-wise elimination is disabled,
+    /// the basis was below kBtfMinDim, or no usable block structure was found --
+    /// and a single global Markowitz pass was used.
     [[nodiscard]] Index numBtfBlocks() const { return num_btf_blocks_; }
 
     /// Number of dense L panels (supernodes of width >= kSupernodeMinWidth)
     /// built by the last factorization.
     [[nodiscard]] Index numSupernodes() const { return static_cast<Index>(supernodes_.size()); }
 
-    /// Enable/disable supernodal dense-panel L/L^T solves. Disabling forces the
-    /// scalar eta path; used to cross-check the accelerated path.
+    /// Test-only: force the scalar eta L/L^T solve by suppressing supernode
+    /// detection. This is not a tuning knob -- it exists so tests can check the
+    /// dense-panel path against the scalar path on the same basis. Production
+    /// callers should leave it enabled.
     void setSupernodalEnabled(bool enable) { supernodal_enabled_ = enable; }
     [[nodiscard]] bool supernodalEnabled() const { return supernodal_enabled_; }
 
@@ -187,6 +211,8 @@ private:
     };
     std::vector<Supernode> supernodes_;
     bool supernodal_enabled_ = true;
+    // BTF block-wise elimination: off by default, see setBtfBlockElimination().
+    bool btf_block_elimination_ = false;
     // Dense panel values: column-major, panel_rows x width.
     std::vector<Real> snode_panel_values_;
     // Row indices for each supernode (in original row space).
