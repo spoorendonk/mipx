@@ -1,10 +1,9 @@
+#include "mipx/lp_problem.h"
 #include "mipx/separators.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
-
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -28,17 +27,14 @@ struct CmirResult {
     bool valid = false;
 };
 
-CmirResult applyCmir(const std::vector<Index>& row_indices,
-                     const std::vector<Real>& row_values,
-                     Real row_rhs,
-                     const LpProblem& problem,
-                     std::span<const Real> primals,
+CmirResult applyCmir(const std::vector<Index>& row_indices, const std::vector<Real>& row_values,
+                     Real row_rhs, const LpProblem& problem, std::span<const Real> primals,
                      const std::vector<bool>& complement) {
     CmirResult result;
 
     // Build the modified row after complementation.
-    // For complemented integer var j: x_j' = u_j - x_j, so a_j x_j = a_j(u_j - x_j') = -a_j x_j' + a_j u_j
-    // New coefficient: -a_j, rhs adjusted by -a_j * u_j
+    // For complemented integer var j: x_j' = u_j - x_j, so a_j x_j = a_j(u_j - x_j') = -a_j x_j' +
+    // a_j u_j New coefficient: -a_j, rhs adjusted by -a_j * u_j
     Real mod_rhs = row_rhs;
     std::vector<Index> mod_indices;
     std::vector<Real> mod_values;
@@ -96,8 +92,10 @@ CmirResult applyCmir(const std::vector<Index>& row_indices,
         } else {
             // Integer: apply MIR formula
             Real fj = a - std::floor(a);
-            if (fj < 0.0) fj += 1.0;
-            if (fj > 1.0 - kCoeffTol) fj = 0.0;
+            if (fj < 0.0)
+                fj += 1.0;
+            if (fj > 1.0 - kCoeffTol)
+                fj = 0.0;
 
             if (fj <= f0 + kCoeffTol) {
                 cut_values[k] = std::floor(a);
@@ -146,21 +144,22 @@ CmirResult applyCmir(const std::vector<Index>& row_indices,
 
 }  // namespace
 
-Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
-                                   const LpProblem& problem,
-                                   std::span<const Real> primals,
-                                   CutPool& pool,
+Int SeparatorManager::separateCmir(DualSimplexSolver& lp, const LpProblem& problem,
+                                   std::span<const Real> primals, CutPool& pool,
                                    CutFamilyStats& stats) {
     (void)lp;  // LP solver not needed for row-based CMIR.
     Int accepted = 0;
 
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf) continue;
+        if (problem.row_upper[i] >= kInf)
+            continue;
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs)) continue;
+        if (!std::isfinite(rhs))
+            continue;
 
         auto row = problem.matrix.row(i);
-        if (row.size() < 2) continue;
+        if (row.size() < 2)
+            continue;
 
         // Check row has at least one integer variable.
         bool has_integer = false;
@@ -172,12 +171,15 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
         for (Index p = 0; p < row.size(); ++p) {
             const Index j = row.indices[p];
             const Real a = row.values[p];
-            if (std::abs(a) < kCoeffTol) continue;
-            if (problem.col_type[j] != VarType::Continuous) has_integer = true;
+            if (std::abs(a) < kCoeffTol)
+                continue;
+            if (problem.col_type[j] != VarType::Continuous)
+                has_integer = true;
             row_indices.push_back(j);
             row_values.push_back(a);
         }
-        if (!has_integer) continue;
+        if (!has_integer)
+            continue;
         ++stats.attempted;
 
         // Try different complementation patterns.
@@ -202,10 +204,12 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
         std::vector<bool> opt_comp(row_indices.size(), false);
         for (std::size_t k = 0; k < row_indices.size(); ++k) {
             const Index j = row_indices[k];
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (problem.col_type[j] == VarType::Continuous)
+                continue;
             const Real lb = problem.col_lower[j];
             const Real ub = problem.col_upper[j];
-            if (!std::isfinite(ub)) continue;
+            if (!std::isfinite(ub))
+                continue;
             const Real mid = 0.5 * (lb + ub);
             if (j < static_cast<Index>(primals.size()) && primals[j] > mid) {
                 opt_comp[k] = true;
@@ -217,8 +221,10 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
         std::vector<bool> greedy_comp = opt_comp;
         for (std::size_t k = 0; k < row_indices.size() && accepted < max_cuts_per_family_; ++k) {
             const Index j = row_indices[k];
-            if (problem.col_type[j] == VarType::Continuous) continue;
-            if (!std::isfinite(problem.col_upper[j])) continue;
+            if (problem.col_type[j] == VarType::Continuous)
+                continue;
+            if (!std::isfinite(problem.col_upper[j]))
+                continue;
             greedy_comp[k] = !greedy_comp[k];
             auto res = applyCmir(row_indices, row_values, rhs, problem, primals, greedy_comp);
             if (res.valid && res.violation > best_violation) {
@@ -229,7 +235,8 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
             }
         }
 
-        if (!best_result.valid) continue;
+        if (!best_result.valid)
+            continue;
 
         // Sort indices for the cut.
         std::vector<std::pair<Index, Real>> sorted_cut;
@@ -251,10 +258,13 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
 
         ++stats.generated;
         Real norm_sq = 0.0;
-        for (Real v : cut.values) norm_sq += v * v;
-        if (norm_sq < kCoeffTol) continue;
+        for (Real v : cut.values)
+            norm_sq += v * v;
+        if (norm_sq < kCoeffTol)
+            continue;
         cut.efficacy = best_violation / std::sqrt(norm_sq);
-        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0) continue;
+        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
+            continue;
 
         if (pool.addCut(std::move(cut))) {
             ++stats.accepted;
@@ -266,10 +276,8 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp,
     return accepted;
 }
 
-Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
-                                       const LpProblem& problem,
-                                       std::span<const Real> primals,
-                                       CutPool& pool,
+Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& problem,
+                                       std::span<const Real> primals, CutPool& pool,
                                        CutFamilyStats& stats) {
     (void)lp;  // LP solver not needed for row-based Strong CG.
     // Strong Chvatal-Gomory cuts.
@@ -282,24 +290,29 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
     const std::vector<Real> multipliers = {0.5, 1.0, 2.0, 3.0, 0.25, 0.75, 1.5};
 
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf) continue;
+        if (problem.row_upper[i] >= kInf)
+            continue;
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs)) continue;
+        if (!std::isfinite(rhs))
+            continue;
 
         auto row = problem.matrix.row(i);
-        if (row.size() < 1) continue;
+        if (row.size() < 1)
+            continue;
 
         bool has_integer = false;
         bool valid = true;
         for (Index p = 0; p < row.size(); ++p) {
             const Index j = row.indices[p];
-            if (problem.col_type[j] != VarType::Continuous) has_integer = true;
+            if (problem.col_type[j] != VarType::Continuous)
+                has_integer = true;
             if (problem.col_lower[j] < -1e-12) {
                 valid = false;
                 break;
             }
         }
-        if (!has_integer || !valid) continue;
+        if (!has_integer || !valid)
+            continue;
         ++stats.attempted;
 
         Real best_violation = min_violation_;
@@ -309,7 +322,8 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
         for (Real t : multipliers) {
             const Real scaled_rhs = t * rhs;
             const Real floored_rhs = std::floor(scaled_rhs + 1e-9);
-            if (floored_rhs + 1e-9 >= scaled_rhs) continue;  // No rounding.
+            if (floored_rhs + 1e-9 >= scaled_rhs)
+                continue;  // No rounding.
 
             Cut cut;
             cut.family = CutFamily::StrongCg;
@@ -334,14 +348,17 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
                     }
                 } else {
                     const Real rounded = std::floor(scaled_a + 1e-9);
-                    if (rounded <= 0.0) continue;
-                    if (rounded + 1e-9 < scaled_a) changed = true;
+                    if (rounded <= 0.0)
+                        continue;
+                    if (rounded + 1e-9 < scaled_a)
+                        changed = true;
                     cut.indices.push_back(j);
                     cut.values.push_back(rounded);
                 }
             }
 
-            if (!changed || cut.indices.empty()) continue;
+            if (!changed || cut.indices.empty())
+                continue;
 
             // Compute violation.
             Real lhs = 0.0;
@@ -354,8 +371,10 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
             const Real violation = lhs - cut.upper;
             if (violation > best_violation) {
                 Real norm_sq = 0.0;
-                for (Real v : cut.values) norm_sq += v * v;
-                if (norm_sq < kCoeffTol) continue;
+                for (Real v : cut.values)
+                    norm_sq += v * v;
+                if (norm_sq < kCoeffTol)
+                    continue;
                 cut.efficacy = violation / std::sqrt(norm_sq);
                 if (std::isfinite(cut.efficacy) && cut.efficacy > 0.0) {
                     best_violation = violation;
@@ -365,7 +384,8 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp,
             }
         }
 
-        if (!found) continue;
+        if (!found)
+            continue;
         ++stats.generated;
         if (pool.addCut(std::move(best_cut))) {
             ++stats.accepted;
