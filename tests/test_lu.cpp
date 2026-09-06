@@ -2,6 +2,7 @@
 #include "mipx/sparse_matrix.h"
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
@@ -11,6 +12,7 @@
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 // Helper: build a dense column from a SparseMatrix column.
 static std::vector<Real> denseColumn(const SparseMatrix& A, Index j) {
@@ -1511,5 +1513,547 @@ TEST_CASE("SparseLU: BTF with permuted block structure", "[lu][btf]") {
     auto Bty = denseMultiplyTranspose(A, basis, y);
     for (Index i = 0; i < 6; ++i) {
         CHECK_THAT(Bty[i], WithinAbs(b[i], 1e-9));
+    }
+}
+
+// --------------------------------------------------------------------------
+//  BTF block-wise elimination and supernodal panels above the real thresholds
+//
+//  The guards inside SparseLU::factorize only fire on genuinely large bases
+//  (SparseLU::kBtfMinDim for BTF, SparseLU::kSupernodeDetectMinDim for
+//  supernodes), so the cases below are sized above those thresholds. They also
+//  assert which path was taken, so a silent fallback cannot pass unnoticed.
+// --------------------------------------------------------------------------
+
+namespace {
+
+// A basis whose pattern decomposes into `num_blocks` strongly connected
+// components of `block_size` each, chained block-to-block so the matrix is
+// block triangular but not block diagonal. Rows and columns are scattered by
+// fixed coprime-stride permutations, so the block structure is only recoverable
+// by an actual BTF decomposition and not from the input ordering.
+//
+// The fixture is deliberately adversarial for pivot confinement. Earlier blocks
+// are dense and later blocks sparse, and the coupling entries are large enough
+// to clear the |a_ij| >= kPivotTol * max|a_*j| threshold. A later block's rows
+// are therefore both admissible and much cheaper by Markowitz count than the
+// current block's own rows, so any search path that forgets to exclude inactive
+// rows will happily pivot across blocks. A uniform-density fixture does not
+// discriminate: the coupling either loses on Markowitz count or gets filtered
+// out by the threshold, and cross-block pivots never appear.
+struct BlockTriangularBasis {
+    Index num_blocks = 0;
+    Index block_size = 0;
+    Index dim = 0;
+    std::vector<Index> row_logical;  // matrix row -> logical index
+    std::vector<Index> col_logical;  // matrix column -> logical index
+    std::vector<Triplet> triplets;
+
+    [[nodiscard]] Index blockOfRow(Index matrix_row) const {
+        return row_logical[static_cast<std::size_t>(matrix_row)] / block_size;
+    }
+    [[nodiscard]] Index blockOfColumn(Index matrix_col) const {
+        return col_logical[static_cast<std::size_t>(matrix_col)] / block_size;
+    }
+};
+
+BlockTriangularBasis makeBlockTriangularBasis(Index num_blocks, Index block_size) {
+    BlockTriangularBasis b;
+    b.num_blocks = num_blocks;
+    b.block_size = block_size;
+    b.dim = num_blocks * block_size;
+
+    // Fixed permutations; the strides are coprime with dim so both are bijections.
+    std::vector<Index> row_pos(static_cast<std::size_t>(b.dim));
+    std::vector<Index> col_pos(static_cast<std::size_t>(b.dim));
+    b.row_logical.assign(static_cast<std::size_t>(b.dim), -1);
+    b.col_logical.assign(static_cast<std::size_t>(b.dim), -1);
+    for (Index l = 0; l < b.dim; ++l) {
+        const Index rp = (7 * l + 13) % b.dim;
+        const Index cp = (11 * l + 5) % b.dim;
+        row_pos[static_cast<std::size_t>(l)] = rp;
+        col_pos[static_cast<std::size_t>(l)] = cp;
+        b.row_logical[static_cast<std::size_t>(rp)] = l;
+        b.col_logical[static_cast<std::size_t>(cp)] = l;
+    }
+
+    auto emit = [&](Index logical_row, Index logical_col, Real v) {
+        b.triplets.push_back({row_pos[static_cast<std::size_t>(logical_row)],
+                              col_pos[static_cast<std::size_t>(logical_col)], v});
+    };
+
+    for (Index blk = 0; blk < num_blocks; ++blk) {
+        const Index base = blk * block_size;
+        // Diagonal block: a diagonally dominant directed cycle, plus a band
+        // whose width shrinks with the block index. Block 0 is the densest and
+        // the last block is a bare cycle, which is exactly the shape that
+        // tempts Markowitz to reach forward into a later, sparser block.
+        const Index band =
+            1 + (block_size - 3) * (num_blocks - 1 - blk) / std::max<Index>(1, num_blocks - 1);
+        for (Index i = 0; i < block_size; ++i) {
+            emit(base + i, base + i, 11.0 + 0.01 * static_cast<Real>(i));
+            for (Index d = 1; d <= band; ++d) {
+                emit(base + ((i + d) % block_size), base + i, 0.9);
+            }
+        }
+        // Coupling into the previous block: entries at (row in block blk,
+        // column in block blk-1). This is the strictly block-lower part; it
+        // carries no cycle back, so the blocks stay separate SCCs. The value is
+        // above kPivotTol * 11.0, so these entries are admissible pivots on
+        // stability grounds and only the block confinement rules them out.
+        if (blk > 0) {
+            for (Index i = 0; i < block_size; ++i) {
+                emit(base + i, base - block_size + i, 2.0);
+            }
+        }
+    }
+    return b;
+}
+
+// Append a column formed as 3*B_p + B_q (p, q basis positions) to `trips`.
+// Replacing basis position p with it keeps the basis nonsingular (the
+// transformed column has the value 3 in position p).
+void appendCombinationColumn(const SparseMatrix& A, std::span<const Index> basis, Index p, Index q,
+                             std::vector<Triplet>& trips, Index new_col) {
+    std::vector<Real> dense(static_cast<std::size_t>(A.numRows()), 0.0);
+    auto cp = A.col(basis[static_cast<std::size_t>(p)]);
+    for (Index k = 0; k < cp.size(); ++k) {
+        dense[static_cast<std::size_t>(cp.indices[k])] += 3.0 * cp.values[k];
+    }
+    auto cq = A.col(basis[static_cast<std::size_t>(q)]);
+    for (Index k = 0; k < cq.size(); ++k) {
+        dense[static_cast<std::size_t>(cq.indices[k])] += cq.values[k];
+    }
+    for (Index i = 0; i < A.numRows(); ++i) {
+        if (dense[static_cast<std::size_t>(i)] != 0.0) {
+            trips.push_back({i, new_col, dense[static_cast<std::size_t>(i)]});
+        }
+    }
+}
+
+// Deterministic pseudo-random right-hand side.
+std::vector<Real> makeRhs(Index n, Real seed) {
+    std::vector<Real> b(static_cast<std::size_t>(n));
+    for (Index i = 0; i < n; ++i) {
+        b[static_cast<std::size_t>(i)] = std::sin(seed + 0.37 * static_cast<Real>(i)) * 2.0 + 0.5;
+    }
+    return b;
+}
+
+// A basis at dim >= kSupernodeDetectMinDim whose L etas nest: the first
+// `panel` elimination steps are singleton rows whose pivot columns hit a
+// growing suffix of the trailing rows, so each eta target set contains the
+// previous one and the steps collapse into one dense panel.
+std::vector<Triplet> makeNestedEtaBasis(Index n, Index panel) {
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 4.0});
+    }
+    // Column j (j < panel) has entries in rows [n - panel + j, n).
+    for (Index j = 0; j < panel; ++j) {
+        for (Index i = n - panel + j; i < n; ++i) {
+            trips.push_back({i, j, 0.5});
+        }
+    }
+    // Cycle over the trailing rows/columns [panel, n) so none of them is a
+    // singleton column; otherwise Markowitz would pivot them out first and the
+    // nested etas would never form.
+    for (Index j = panel; j < n; ++j) {
+        const Index row = (j + 1 < n) ? j + 1 : panel;
+        trips.push_back({row, j, 1.0});
+    }
+    return trips;
+}
+
+}  // namespace
+
+TEST_CASE("SparseLU: BTF confines Markowitz pivoting to diagonal blocks", "[lu][btf]") {
+    // dim 120 >= SparseLU::kBtfMinDim, 10 strongly connected blocks of 12.
+    const Index num_blocks = 10;
+    const Index block_size = 12;
+    auto spec = makeBlockTriangularBasis(num_blocks, block_size);
+    REQUIRE(spec.dim >= SparseLU::kBtfMinDim);
+
+    SparseMatrix A(spec.dim, spec.dim, spec.triplets);
+    std::vector<Index> basis(static_cast<std::size_t>(spec.dim));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.setBtfBlockElimination(true);
+    lu.factorize(A, basis);
+
+    SECTION("block structure was detected and used") {
+        REQUIRE(lu.numBtfBlocks() == num_blocks);
+
+        auto row_perm = lu.rowPermutation();
+        auto col_perm = lu.colPermutation();
+        REQUIRE(static_cast<Index>(row_perm.size()) == spec.dim);
+        REQUIRE(static_cast<Index>(col_perm.size()) == spec.dim);
+
+        // No cross-block pivot: at every elimination step the pivot row and the
+        // pivot column belong to the same diagonal block.
+        std::vector<Index> step_block(static_cast<std::size_t>(spec.dim));
+        for (Index k = 0; k < spec.dim; ++k) {
+            const Index rb = spec.blockOfRow(row_perm[static_cast<std::size_t>(k)]);
+            const Index cb = spec.blockOfColumn(
+                basis[static_cast<std::size_t>(col_perm[static_cast<std::size_t>(k)])]);
+            CHECK(rb == cb);
+            step_block[static_cast<std::size_t>(k)] = rb;
+        }
+
+        // Each block owns one contiguous run of exactly block_size steps, i.e.
+        // a block is fully eliminated before the next one starts.
+        std::vector<Index> first_step(static_cast<std::size_t>(num_blocks), -1);
+        std::vector<Index> count(static_cast<std::size_t>(num_blocks), 0);
+        for (Index k = 0; k < spec.dim; ++k) {
+            const auto b = static_cast<std::size_t>(step_block[static_cast<std::size_t>(k)]);
+            if (first_step[b] < 0) {
+                first_step[b] = k;
+            }
+            ++count[b];
+        }
+        for (Index b = 0; b < num_blocks; ++b) {
+            const auto bs = static_cast<std::size_t>(b);
+            CHECK(count[bs] == block_size);
+            for (Index k = first_step[bs]; k < first_step[bs] + block_size; ++k) {
+                CHECK(step_block[static_cast<std::size_t>(k)] == b);
+            }
+        }
+    }
+
+    SECTION("FTRAN round-trip") {
+        auto b = makeRhs(spec.dim, 0.3);
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < spec.dim; ++i) {
+            CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+        }
+    }
+
+    SECTION("BTRAN round-trip") {
+        auto c = makeRhs(spec.dim, 1.7);
+        std::vector<Real> y = c;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < spec.dim; ++i) {
+            CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                       WithinAbs(c[static_cast<std::size_t>(i)], 1e-9));
+        }
+    }
+}
+
+TEST_CASE("SparseLU: Forrest-Tomlin updates stay correct after a BTF factorization", "[lu][btf]") {
+    const Index num_blocks = 10;
+    const Index block_size = 12;
+    auto spec = makeBlockTriangularBasis(num_blocks, block_size);
+
+    // Three spare columns to swap in, built from the basis itself so every
+    // intermediate basis stays nonsingular.
+    const std::array<Index, 3> swap_pos = {5, 40, 100};
+    std::vector<Triplet> trips = spec.triplets;
+    {
+        SparseMatrix base(spec.dim, spec.dim, spec.triplets);
+        std::vector<Index> basis0(static_cast<std::size_t>(spec.dim));
+        std::iota(basis0.begin(), basis0.end(), 0);
+        for (std::size_t u = 0; u < swap_pos.size(); ++u) {
+            appendCombinationColumn(base, basis0, swap_pos[u], (swap_pos[u] + 1) % spec.dim, trips,
+                                    spec.dim + static_cast<Index>(u));
+        }
+    }
+
+    SparseMatrix A(spec.dim, spec.dim + static_cast<Index>(swap_pos.size()), trips);
+    std::vector<Index> basis(static_cast<std::size_t>(spec.dim));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.setBtfBlockElimination(true);
+    lu.factorize(A, basis);
+    REQUIRE(lu.numBtfBlocks() == num_blocks);
+
+    // AC4 must fail if the factorization it updates was not block-confined, so
+    // assert the confinement here too rather than only round-tripping.
+    {
+        auto row_perm = lu.rowPermutation();
+        auto col_perm = lu.colPermutation();
+        for (Index k = 0; k < spec.dim; ++k) {
+            const Index rb = spec.blockOfRow(row_perm[static_cast<std::size_t>(k)]);
+            const Index cb = spec.blockOfColumn(
+                basis[static_cast<std::size_t>(col_perm[static_cast<std::size_t>(k)])]);
+            CHECK(rb == cb);
+        }
+    }
+
+    auto verify = [&](Real seed) {
+        auto b = makeRhs(spec.dim, seed);
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < spec.dim; ++i) {
+            CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-8));
+        }
+        std::vector<Real> y = b;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < spec.dim; ++i) {
+            CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-8));
+        }
+    };
+
+    verify(0.11);
+    for (std::size_t u = 0; u < swap_pos.size(); ++u) {
+        const Index entering = spec.dim + static_cast<Index>(u);
+        auto c = A.col(entering);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(swap_pos[u], idx, val);
+        basis[static_cast<std::size_t>(swap_pos[u])] = entering;
+        CHECK(lu.numUpdates() == static_cast<Index>(u) + 1);
+        verify(0.11 + 0.9 * static_cast<Real>(u + 1));
+    }
+}
+
+TEST_CASE("SparseLU: irreducible basis above the BTF threshold falls back to Markowitz",
+          "[lu][btf]") {
+    // One 120-cycle: a single strongly connected component, so BTF finds no
+    // usable decomposition and the standard global Markowitz path is used.
+    const Index n = 120;
+    REQUIRE(n >= SparseLU::kBtfMinDim);
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 5.0});
+        trips.push_back({(i + 1) % n, i, 1.0});
+    }
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(static_cast<std::size_t>(n));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.setBtfBlockElimination(true);
+    lu.factorize(A, basis);
+
+    CHECK(lu.numBtfBlocks() == 1);
+
+    auto b = makeRhs(n, 2.5);
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+}
+
+TEST_CASE("SparseLU: nested eta patterns form dense supernodal panels", "[lu][supernodal]") {
+    // dim 80 >= SparseLU::kSupernodeDetectMinDim (and below kBtfMinDim, so BTF
+    // stays out of the way).
+    const Index n = 80;
+    const Index panel = 30;
+    REQUIRE(n >= SparseLU::kSupernodeDetectMinDim);
+    auto trips = makeNestedEtaBasis(n, panel);
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(static_cast<std::size_t>(n));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    // The accelerated path must actually have been taken: supernodes are only
+    // recorded when they reach SparseLU::kSupernodeMinWidth columns.
+    REQUIRE(lu.numSupernodes() >= 1);
+    CHECK(lu.numBtfBlocks() == 1);
+
+    // Reference factorization forced onto the scalar eta path.
+    SparseLU scalar_lu;
+    scalar_lu.setSupernodalEnabled(false);
+    scalar_lu.factorize(A, basis);
+    REQUIRE(scalar_lu.numSupernodes() == 0);
+
+    auto b = makeRhs(n, 0.9);
+
+    SECTION("FTRAN round-trips and matches the scalar eta path") {
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        std::vector<Real> x_scalar = b;
+        scalar_lu.ftran(x_scalar);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-10));
+            CHECK_THAT(x[static_cast<std::size_t>(i)],
+                       WithinRel(x_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(x_scalar[static_cast<std::size_t>(i)], 1e-300));
+        }
+    }
+
+    SECTION("BTRAN round-trips and matches the scalar eta path") {
+        std::vector<Real> y = b;
+        lu.btran(y);
+        std::vector<Real> y_scalar = b;
+        scalar_lu.btran(y_scalar);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-10));
+            CHECK_THAT(y[static_cast<std::size_t>(i)],
+                       WithinRel(y_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-300));
+        }
+    }
+
+    SECTION("BTRAN with nonzero tracking matches the scalar eta path") {
+        std::vector<Real> y = b;
+        std::vector<Index> nz;
+        lu.btran(y, nz);
+        std::vector<Real> y_scalar = b;
+        std::vector<Index> nz_scalar;
+        scalar_lu.btran(y_scalar, nz_scalar);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(y[static_cast<std::size_t>(i)],
+                       WithinRel(y_scalar[static_cast<std::size_t>(i)], 1e-13) ||
+                           WithinAbs(y_scalar[static_cast<std::size_t>(i)], 1e-300));
+        }
+    }
+}
+
+TEST_CASE("SparseLU: Forrest-Tomlin updates stay correct after a supernodal factorization",
+          "[lu][supernodal]") {
+    const Index n = 80;
+    const Index panel = 30;
+    auto trips = makeNestedEtaBasis(n, panel);
+
+    const std::array<Index, 3> swap_pos = {2, 35, 70};
+    {
+        SparseMatrix base(n, n, trips);
+        std::vector<Index> basis0(static_cast<std::size_t>(n));
+        std::iota(basis0.begin(), basis0.end(), 0);
+        for (std::size_t u = 0; u < swap_pos.size(); ++u) {
+            appendCombinationColumn(base, basis0, swap_pos[u], (swap_pos[u] + 1) % n, trips,
+                                    n + static_cast<Index>(u));
+        }
+    }
+
+    SparseMatrix A(n, n + static_cast<Index>(swap_pos.size()), trips);
+    std::vector<Index> basis(static_cast<std::size_t>(n));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+    REQUIRE(lu.numSupernodes() >= 1);
+
+    auto verify = [&](Real seed) {
+        auto b = makeRhs(n, seed);
+        std::vector<Real> x = b;
+        lu.ftran(x);
+        auto Bx = denseMultiply(A, basis, x);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+        }
+        std::vector<Real> y = b;
+        lu.btran(y);
+        auto Bty = denseMultiplyTranspose(A, basis, y);
+        for (Index i = 0; i < n; ++i) {
+            CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+        }
+    };
+
+    verify(0.2);
+    for (std::size_t u = 0; u < swap_pos.size(); ++u) {
+        const Index entering = n + static_cast<Index>(u);
+        auto c = A.col(entering);
+        std::vector<Index> idx(c.indices.begin(), c.indices.end());
+        std::vector<Real> val(c.values.begin(), c.values.end());
+        lu.update(swap_pos[u], idx, val);
+        basis[static_cast<std::size_t>(swap_pos[u])] = entering;
+        verify(0.2 + 0.8 * static_cast<Real>(u + 1));
+    }
+}
+
+TEST_CASE("SparseLU: basis without nested etas takes the scalar L-solve", "[lu][supernodal]") {
+    // Tridiagonal at dim 80: above kSupernodeDetectMinDim, but consecutive eta
+    // patterns are single, disjoint targets, so no supernode reaches
+    // kSupernodeMinWidth and the scalar eta path is used.
+    const Index n = 80;
+    REQUIRE(n >= SparseLU::kSupernodeDetectMinDim);
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 4.0});
+        if (i + 1 < n) {
+            trips.push_back({i + 1, i, 1.0});
+            trips.push_back({i, i + 1, 1.0});
+        }
+    }
+    SparseMatrix A(n, n, trips);
+    std::vector<Index> basis(static_cast<std::size_t>(n));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    lu.factorize(A, basis);
+
+    CHECK(lu.numSupernodes() == 0);
+
+    auto b = makeRhs(n, 3.1);
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < n; ++i) {
+        CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+}
+
+TEST_CASE("SparseLU: BTF block-wise elimination is off by default", "[lu][btf]") {
+    // Same block-structured basis as the confinement test, but with the default
+    // configuration. Block-wise elimination is opt-in pending the #179
+    // benchmark (see SparseLU::setBtfBlockElimination), so the factorization
+    // must take the single global Markowitz pass and still round-trip.
+    auto spec = makeBlockTriangularBasis(10, 12);
+    SparseMatrix A(spec.dim, spec.dim, spec.triplets);
+    std::vector<Index> basis(static_cast<std::size_t>(spec.dim));
+    std::iota(basis.begin(), basis.end(), 0);
+
+    SparseLU lu;
+    CHECK_FALSE(lu.btfBlockElimination());
+    lu.factorize(A, basis);
+
+    // Not confined: one global pass, even though the pattern has 10 blocks.
+    CHECK(lu.numBtfBlocks() == 1);
+
+    auto b = makeRhs(spec.dim, 0.44);
+    std::vector<Real> x = b;
+    lu.ftran(x);
+    auto Bx = denseMultiply(A, basis, x);
+    for (Index i = 0; i < spec.dim; ++i) {
+        CHECK_THAT(Bx[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+    }
+
+    std::vector<Real> y = b;
+    lu.btran(y);
+    auto Bty = denseMultiplyTranspose(A, basis, y);
+    for (Index i = 0; i < spec.dim; ++i) {
+        CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                   WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
     }
 }
