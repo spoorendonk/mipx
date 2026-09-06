@@ -293,6 +293,24 @@ public:
             case CutFamily::Mixing:
                 cut_family_config_.mixing = enabled;
                 break;
+            case CutFamily::Cmir:
+                cut_family_config_.cmir = enabled;
+                break;
+            case CutFamily::StrongCg:
+                cut_family_config_.strong_cg = enabled;
+                break;
+            case CutFamily::LiftedCover:
+                cut_family_config_.lifted_cover = enabled;
+                break;
+            case CutFamily::ModK:
+                cut_family_config_.mod_k = enabled;
+                break;
+            case CutFamily::IntersectionCut:
+                cut_family_config_.intersection_cut = enabled;
+                break;
+            case CutFamily::MultiRow:
+                cut_family_config_.multi_row = enabled;
+                break;
             case CutFamily::Unknown:
             case CutFamily::Count:
             default:
@@ -392,6 +410,11 @@ public:
     }
     const MipLpStats& getLpStats() const { return lp_stats_; }
     const MipCutStats& getCutStats() const { return cut_stats_; }
+    /// Per-family separation statistics accumulated by the last root cut loop.
+    /// Empty until `solve()` has run a root cutting-plane pass.
+    [[nodiscard]] const CutSeparationStats& getRootCutFamilyStats() const {
+        return root_cut_family_stats_;
+    }
     const MipConflictStats& getConflictStats() const { return conflict_stats_; }
     const MipPreRootStats& getPreRootStats() const { return pre_root_stats_; }
     [[nodiscard]] bool hasLpLightCapability() const;
@@ -609,6 +632,7 @@ private:
     bool tree_cuts_enabled_ = false;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
+    CutSeparationStats root_cut_family_stats_{};
     MipConflictStats conflict_stats_{};
     MipPreRootStats pre_root_stats_{};
     MipSearchStats search_stats_{};

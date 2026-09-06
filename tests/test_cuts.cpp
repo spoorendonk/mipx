@@ -585,6 +585,12 @@ TEST_CASE("MipSolver: cut family toggles preserve correctness", "[cuts][integrat
     no_families.clique = false;
     no_families.zero_half = false;
     no_families.mixing = false;
+    no_families.cmir = false;
+    no_families.strong_cg = false;
+    no_families.lifted_cover = false;
+    no_families.mod_k = false;
+    no_families.intersection_cut = false;
+    no_families.multi_row = false;
     solver_no_families.setCutFamilyConfig(no_families);
     solver_no_families.load(lp);
     auto result_no = solver_no_families.solve();
@@ -600,6 +606,12 @@ TEST_CASE("MipSolver: cut family toggles preserve correctness", "[cuts][integrat
     mir_only.clique = false;
     mir_only.zero_half = false;
     mir_only.mixing = false;
+    mir_only.cmir = false;
+    mir_only.strong_cg = false;
+    mir_only.lifted_cover = false;
+    mir_only.mod_k = false;
+    mir_only.intersection_cut = false;
+    mir_only.multi_row = false;
     solver_mir_only.setCutFamilyConfig(mir_only);
     solver_mir_only.load(lp);
     auto result_mir = solver_mir_only.solve();
@@ -1050,4 +1062,152 @@ TEST_CASE("MipSolver: knapsack solves to -9.5 with presolve off and cuts on", "[
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-9.5, 1e-6));
+}
+
+// ---------------------------------------------------------------------------
+// Cut family configuration gating (issue #189)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every CutFamily value that names a real separator, i.e. the enum range with
+// the Unknown sentinel and the Count terminator stripped off. Iterating the
+// enum rather than a hand-written list keeps these tests honest when a new
+// family is added.
+std::vector<CutFamily> allSeparableFamilies() {
+    std::vector<CutFamily> families;
+    for (Int fi = static_cast<Int>(CutFamily::Unknown) + 1; fi < static_cast<Int>(CutFamily::Count);
+         ++fi) {
+        families.push_back(static_cast<CutFamily>(fi));
+    }
+    return families;
+}
+
+// Config with every flag set to `enabled`. Built through setCutFamilyEnabled so
+// the switch in MipSolver has to handle every family for this to work.
+CutFamilyConfig allCutFamilies(bool enabled) {
+    MipSolver probe;
+    for (CutFamily family : allSeparableFamilies()) {
+        probe.setCutFamilyEnabled(family, enabled);
+    }
+    return probe.getCutFamilyConfig();
+}
+
+}  // namespace
+
+TEST_CASE("MipSolver: setCutFamilyEnabled reaches every cut family", "[cuts][families]") {
+    // A family setCutFamilyEnabled forgets keeps the CutFamilyConfig default of
+    // true, which is exactly the bug: it then separates unconditionally.
+    const CutFamilyConfig none = allCutFamilies(false);
+    CHECK_FALSE(none.gomory);
+    CHECK_FALSE(none.mir);
+    CHECK_FALSE(none.cover);
+    CHECK_FALSE(none.implied_bound);
+    CHECK_FALSE(none.clique);
+    CHECK_FALSE(none.zero_half);
+    CHECK_FALSE(none.mixing);
+    CHECK_FALSE(none.cmir);
+    CHECK_FALSE(none.strong_cg);
+    CHECK_FALSE(none.lifted_cover);
+    CHECK_FALSE(none.mod_k);
+    CHECK_FALSE(none.intersection_cut);
+    CHECK_FALSE(none.multi_row);
+
+    const CutFamilyConfig all = allCutFamilies(true);
+    CHECK(all.gomory);
+    CHECK(all.mir);
+    CHECK(all.cover);
+    CHECK(all.implied_bound);
+    CHECK(all.clique);
+    CHECK(all.zero_half);
+    CHECK(all.mixing);
+    CHECK(all.cmir);
+    CHECK(all.strong_cg);
+    CHECK(all.lifted_cover);
+    CHECK(all.mod_k);
+    CHECK(all.intersection_cut);
+    CHECK(all.multi_row);
+}
+
+TEST_CASE("MipSolver: every cut family off adds no root cuts", "[cuts][families][integration]") {
+    const auto lp = buildStrongCgKnapsackMip();
+
+    // Baseline with every family on. Cuts must actually be separated here,
+    // otherwise the all-off run below would pass for the wrong reason.
+    MipSolver baseline;
+    baseline.setVerbose(false);
+    baseline.setPresolve(false);
+    baseline.setCutsEnabled(true);
+    baseline.setMaxCutRounds(10);
+    baseline.setCutFamilyConfig(allCutFamilies(true));
+    baseline.load(lp);
+    const auto base_result = baseline.solve();
+    REQUIRE(base_result.status == Status::Optimal);
+    REQUIRE(baseline.getCutStats().root_cuts_added > 0);
+
+    // Same model, same cut settings, only the family flags differ: cuts stay
+    // enabled and the effort mode is untouched, so a zero count can only come
+    // from the per-family gating.
+    MipSolver all_off;
+    all_off.setVerbose(false);
+    all_off.setPresolve(false);
+    all_off.setCutsEnabled(true);
+    all_off.setMaxCutRounds(10);
+    all_off.setCutFamilyConfig(allCutFamilies(false));
+    all_off.load(lp);
+    const auto off_result = all_off.solve();
+
+    REQUIRE(off_result.status == Status::Optimal);
+    CHECK(all_off.getCutEffortMode() == baseline.getCutEffortMode());
+    CHECK(all_off.getCutStats().root_cuts_added == 0);
+    CHECK_THAT(off_result.objective, WithinAbs(base_result.objective, 1e-6));
+
+    // No family was even attempted, while the baseline attempted at least one.
+    Int baseline_attempted = 0;
+    for (CutFamily family : allSeparableFamilies()) {
+        INFO("family " << cutFamilyName(family));
+        CHECK(all_off.getRootCutFamilyStats().at(family).attempted == 0);
+        CHECK(all_off.getRootCutFamilyStats().at(family).accepted == 0);
+        baseline_attempted += baseline.getRootCutFamilyStats().at(family).attempted;
+    }
+    CHECK(baseline_attempted > 0);
+}
+
+TEST_CASE("MipSolver: one cut family at a time silences all the others",
+          "[cuts][families][integration]") {
+    const auto lp = buildStrongCgKnapsackMip();
+
+    Int solo_accepted_total = 0;
+    for (CutFamily solo : allSeparableFamilies()) {
+        INFO("solo family " << cutFamilyName(solo));
+
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(true);
+        solver.setMaxCutRounds(10);
+        solver.setCutFamilyConfig(allCutFamilies(false));
+        solver.setCutFamilyEnabled(solo, true);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-9.5, 1e-6));
+
+        const auto& stats = solver.getRootCutFamilyStats();
+        for (CutFamily other : allSeparableFamilies()) {
+            if (other == solo) {
+                continue;
+            }
+            INFO("silenced family " << cutFamilyName(other));
+            CHECK(stats.at(other).attempted == 0);
+            CHECK(stats.at(other).generated == 0);
+            CHECK(stats.at(other).accepted == 0);
+        }
+        solo_accepted_total += stats.at(solo).accepted;
+    }
+
+    // At least one solo run has to separate something; otherwise every check
+    // above would hold vacuously.
+    CHECK(solo_accepted_total > 0);
 }
