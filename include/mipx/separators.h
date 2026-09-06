@@ -104,7 +104,8 @@ private:
     /// Common acceptance path for every separator. Screens the cut for
     /// numerical safety, applies the minimum-violation threshold, computes the
     /// efficacy and updates @p stats when the pool takes the cut. Every family
-    /// must route through this so no separator can bypass the safety screen.
+    /// SeparatorManager owns routes through this. GomorySeparator is a separate
+    /// class with its own accept path and is not screened here; see issue #196.
     bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
                         CutFamilyStats& stats) const;
 

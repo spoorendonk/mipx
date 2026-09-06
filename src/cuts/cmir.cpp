@@ -311,6 +311,9 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
 
         for (Real t : multipliers) {
             const Real scaled_rhs = t * rhs;
+            // The snapping tolerance is kept here, unlike on the coefficient
+            // floor below: rounding the right-hand side *up* only weakens the
+            // cut, and the guard on the next line discards exactly those cases.
             const Real floored_rhs = std::floor(scaled_rhs + 1e-9);
             if (floored_rhs + 1e-9 >= scaled_rhs)
                 continue;  // No rounding.
