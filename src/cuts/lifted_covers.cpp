@@ -1,11 +1,10 @@
+#include "mipx/lp_problem.h"
 #include "mipx/separators.h"
 
 #include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <vector>
-
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -23,9 +22,9 @@ constexpr Real kCoeffTol = 1e-10;
 /// which equals |C| - 1 minus the optimal value of a small binary knapsack.
 ///
 /// For efficiency, we solve the knapsack greedily (good enough for most instances).
-Int solveSmallKnapsack(const std::vector<Real>& weights,
-                       Real capacity) {
-    if (capacity < 0.0) return 0;
+Int solveSmallKnapsack(const std::vector<Real>& weights, Real capacity) {
+    if (capacity < 0.0)
+        return 0;
     // Greedy: take items in order of increasing weight.
     std::vector<std::size_t> order(weights.size());
     std::iota(order.begin(), order.end(), std::size_t{0});
@@ -45,10 +44,8 @@ Int solveSmallKnapsack(const std::vector<Real>& weights,
 
 }  // namespace
 
-Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
-                                          std::span<const Real> primals,
-                                          CutPool& pool,
-                                          CutFamilyStats& stats) {
+Int SeparatorManager::separateLiftedCover(const LpProblem& problem, std::span<const Real> primals,
+                                          CutPool& pool, CutFamilyStats& stats) {
     struct Item {
         Index var;
         Real coeff;
@@ -58,9 +55,11 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
     Int accepted = 0;
 
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf) continue;
+        if (problem.row_upper[i] >= kInf)
+            continue;
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs) || rhs <= 0.0) continue;
+        if (!std::isfinite(rhs) || rhs <= 0.0)
+            continue;
 
         auto row = problem.matrix.row(i);
 
@@ -78,19 +77,20 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
                 break;
             }
             if (problem.col_type[j] == VarType::Binary && a > 1e-9) {
-                const Real x = (j < static_cast<Index>(primals.size()))
-                    ? primals[j] : 0.0;
+                const Real x = (j < static_cast<Index>(primals.size())) ? primals[j] : 0.0;
                 items.push_back({j, a, x});
             }
         }
-        if (!valid || items.size() < 2) continue;
+        if (!valid || items.size() < 2)
+            continue;
         ++stats.attempted;
 
         // Sort by decreasing LP value * coefficient (greedy cover selection).
         std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
             const Real wa = a.primal * a.coeff;
             const Real wb = b.primal * b.coeff;
-            if (std::abs(wa - wb) > 1e-12) return wa > wb;
+            if (std::abs(wa - wb) > 1e-12)
+                return wa > wb;
             return a.coeff > b.coeff;
         });
 
@@ -103,13 +103,16 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
             cover.push_back(items[k]);
             in_cover[k] = true;
             cover_sum += items[k].coeff;
-            if (cover_sum > rhs + 1e-9) break;
+            if (cover_sum > rhs + 1e-9)
+                break;
         }
-        if (cover_sum <= rhs + 1e-9) continue;
+        if (cover_sum <= rhs + 1e-9)
+            continue;
 
         // Minimize cover: remove items that are not needed.
-        for (auto it = cover.begin(); it != cover.end(); ) {
-            if (cover.size() <= 2) break;
+        for (auto it = cover.begin(); it != cover.end();) {
+            if (cover.size() <= 2)
+                break;
             if (cover_sum - it->coeff > rhs + 1e-9) {
                 cover_sum -= it->coeff;
                 it = cover.erase(it);
@@ -117,7 +120,8 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
                 ++it;
             }
         }
-        if (cover_sum <= rhs + 1e-9) continue;
+        if (cover_sum <= rhs + 1e-9)
+            continue;
 
         // Collect non-cover items for lifting.
         non_cover_items.clear();
@@ -165,7 +169,8 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
             }
         }
 
-        if (cut_entries.size() <= 1) continue;
+        if (cut_entries.size() <= 1)
+            continue;
 
         // Sort by variable index.
         std::sort(cut_entries.begin(), cut_entries.end(),
@@ -189,13 +194,17 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem,
             }
         }
         const Real violation = lhs - cut.upper;
-        if (violation < min_violation_) continue;
+        if (violation < min_violation_)
+            continue;
 
         Real norm_sq = 0.0;
-        for (Real v : cut.values) norm_sq += v * v;
-        if (norm_sq < kCoeffTol) continue;
+        for (Real v : cut.values)
+            norm_sq += v * v;
+        if (norm_sq < kCoeffTol)
+            continue;
         cut.efficacy = violation / std::sqrt(norm_sq);
-        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0) continue;
+        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
+            continue;
 
         ++stats.generated;
         if (pool.addCut(std::move(cut))) {
