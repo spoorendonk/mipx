@@ -870,6 +870,32 @@ LpProblem buildStrongCgMixedMip() {
     return lp;
 }
 
+// max x + 0.001z, i.e. min -x - 0.001z, with a coefficient just below one:
+//   R1: (1 - 1e-9) x <= 1000.9999999,  x integer in [0, 2000]
+//   R2:           2z <=         1,     z integer in [0, 1]
+// x = 1001 is feasible (1001 * (1 - 1e-9) = 1000.999998999 <= 1000.9999999) and
+// optimal at -1001. Flooring t*a_j with a snapping tolerance rounded the scaled
+// coefficient 0.999999999 up to 1, which strengthens the term rather than
+// relaxing it and yields the invalid cut x <= 1000.
+LpProblem buildStrongCgNearIntegerMip() {
+    LpProblem lp;
+    lp.name = "strongcg_near_integer";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {-1.0, -0.001};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {2000.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Integer};
+    lp.col_names = {"x", "z"};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1000.9999999, 1.0};
+    lp.row_names = {"R1", "R2"};
+    std::vector<Triplet> trips = {{0, 0, 1.0 - 1e-9}, {1, 1, 2.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
 CutFamilyConfig onlyStrongCgConfig() {
     CutFamilyConfig config;
     config.gomory = false;
@@ -990,6 +1016,27 @@ TEST_CASE("MipSolver: Strong CG cuts do not cut off the optimum", "[cuts][strong
         REQUIRE(result.status == Status::Optimal);
         CHECK_THAT(result.objective, WithinAbs(-2.5, 1e-6));
     }
+}
+
+TEST_CASE("SeparatorManager: Strong CG does not round a coefficient up", "[cuts][strongcg]") {
+    const auto problem = buildStrongCgNearIntegerMip();
+    // x = 1001, z = 0 is integer-feasible; the pre-fix cut x <= 1000 removes it.
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig());
+}
+
+TEST_CASE("MipSolver: Strong CG keeps an optimum under a near-integer coefficient",
+          "[cuts][strongcg]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutFamilyConfig(onlyStrongCgConfig());
+    solver.load(buildStrongCgNearIntegerMip());
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
 }
 
 TEST_CASE("MipSolver: knapsack solves to -9.5 with presolve off and cuts on", "[cuts][strongcg]") {

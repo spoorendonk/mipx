@@ -359,7 +359,15 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
                     continue;
                 }
 
-                const Real rounded = std::floor(scaled_a + 1e-9);
+                // Plain floor, with no snapping tolerance. Chvatal-Gomory
+                // rounding is a relaxation only while floor(t*a_j) <= t*a_j: the
+                // rounded term must not exceed the original, or the left-hand
+                // side is strengthened and flooring the right-hand side is no
+                // longer justified. Adding a tolerance before the floor rounds a
+                // coefficient just below an integer *up*, which strengthens that
+                // term by up to the tolerance times the column's upper bound and
+                // can cut off integer-feasible points.
+                const Real rounded = std::floor(scaled_a);
                 if (rounded <= 0.0)
                     continue;
                 if (rounded + 1e-9 < scaled_a)
