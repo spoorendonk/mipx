@@ -5201,6 +5201,13 @@ MipResult MipSolver::solve() {
 
     // Check if root solution is integer feasible.
     root_basis = lp.getBasis();
+    // Snapshot the root LP duals here, alongside the basis and while root_bound
+    // and root_primals still describe this same LP solution. Reduced-cost
+    // fixing is only sound for a (reduced cost, primal point, objective) triple
+    // that comes from one optimal basis; the root heuristics below run on this
+    // very LP object and leave its dual state behind them, and restoring the
+    // basis afterwards does not recompute the reduced costs.
+    const std::vector<Real> root_reduced_costs = lp.getReducedCosts();
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
     HeuristicRuntime root_runtime(runtime_config);
@@ -5276,22 +5283,19 @@ MipResult MipSolver::solve() {
             root_heur_outcome.feaspump_improvements, root_heur_outcome.rens_calls,
             root_heur_outcome.rens_improvements, root_heur_outcome.rins_calls,
             root_heur_outcome.rins_improvements, root_heur_outcome.localbranching_calls,
-            root_heur_outcome.localbranching_improvements,
-            root_heur_outcome.zirounding_calls, root_heur_outcome.zirounding_improvements,
-            root_heur_outcome.shifting_calls, root_heur_outcome.shifting_improvements,
-            root_heur_outcome.randrounding_calls, root_heur_outcome.randrounding_improvements,
-            root_heur_outcome.cliquerounding_calls,
-            root_heur_outcome.cliquerounding_improvements,
-            root_heur_outcome.propcompletion_calls,
-            root_heur_outcome.propcompletion_improvements,
-            root_heur_outcome.feasjump_calls, root_heur_outcome.feasjump_improvements,
-            root_heur_outcome.undercover_calls, root_heur_outcome.undercover_improvements,
-            root_heur_outcome.reducedcost_calls, root_heur_outcome.reducedcost_improvements,
-            root_heur_outcome.crossover_calls, root_heur_outcome.crossover_improvements,
-            root_heur_outcome.proximity_calls, root_heur_outcome.proximity_improvements,
-            root_heur_outcome.oneopt_calls, root_heur_outcome.oneopt_improvements,
-            root_heur_outcome.twoopt_calls, root_heur_outcome.twoopt_improvements,
-            root_heur_outcome.work_units);
+            root_heur_outcome.localbranching_improvements, root_heur_outcome.zirounding_calls,
+            root_heur_outcome.zirounding_improvements, root_heur_outcome.shifting_calls,
+            root_heur_outcome.shifting_improvements, root_heur_outcome.randrounding_calls,
+            root_heur_outcome.randrounding_improvements, root_heur_outcome.cliquerounding_calls,
+            root_heur_outcome.cliquerounding_improvements, root_heur_outcome.propcompletion_calls,
+            root_heur_outcome.propcompletion_improvements, root_heur_outcome.feasjump_calls,
+            root_heur_outcome.feasjump_improvements, root_heur_outcome.undercover_calls,
+            root_heur_outcome.undercover_improvements, root_heur_outcome.reducedcost_calls,
+            root_heur_outcome.reducedcost_improvements, root_heur_outcome.crossover_calls,
+            root_heur_outcome.crossover_improvements, root_heur_outcome.proximity_calls,
+            root_heur_outcome.proximity_improvements, root_heur_outcome.oneopt_calls,
+            root_heur_outcome.oneopt_improvements, root_heur_outcome.twoopt_calls,
+            root_heur_outcome.twoopt_improvements, root_heur_outcome.work_units);
     }
 
     const bool root_basis_dirty = root_heur_outcome.basis_dirty;
@@ -5305,12 +5309,11 @@ MipResult MipSolver::solve() {
     // Reduced-cost fixing: load engine and apply global fixings at root.
     rc_fixer_.load(problem_);
     if (incumbent < kInf) {
-        auto root_rc = lp.getReducedCosts();
         rc_root_saved_lower = problem_.col_lower;
         rc_root_saved_upper = problem_.col_upper;
         std::vector<Index> rc_tightened;
         bool rc_feasible =
-            rc_fixer_.applyGlobalFixing(root_rc, root_primals, root_bound, incumbent,
+            rc_fixer_.applyGlobalFixing(root_reduced_costs, root_primals, root_bound, incumbent,
                                         problem_.col_lower, problem_.col_upper, rc_tightened);
         if (!rc_feasible) {
             if (verbose_) {

@@ -1828,10 +1828,9 @@ static LpProblem buildPlungeRoundingImprovementMip() {
     lp.obj = {5.0, -8.0, 5.0, 1.0, -7.0, 8.0, 8.0, -3.0, -8.0, 2.0};
     lp.col_lower.assign(10, 0.0);
     lp.col_upper = {3.0, 3.0, 1.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0};
-    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Binary,
-                   VarType::Binary,  VarType::Integer, VarType::Binary,
-                   VarType::Integer, VarType::Binary,  VarType::Integer,
-                   VarType::Binary};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Binary,  VarType::Binary,
+                   VarType::Integer, VarType::Binary,  VarType::Integer, VarType::Binary,
+                   VarType::Integer, VarType::Binary};
 
     lp.num_rows = 2;
     lp.row_lower = {-kInf, -kInf};
@@ -2117,4 +2116,173 @@ TEST_CASE("MipSolver: a second solve is not narrowed by the first solve's RC fix
     auto third = solver.solve();
     REQUIRE(third.status == first.status);
     CHECK_THAT(third.objective, WithinAbs(first.objective, 1e-9));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #186: branch-and-bound reported Status::Optimal with a suboptimal
+// objective on small all-integer models.
+//
+// The cause was root reduced-cost fixing being handed reduced costs that no
+// longer belonged to the root LP solution they were priced against: the root
+// heuristics run on the same LP object and leave their own dual state behind,
+// and restoring the saved basis afterwards does not recompute reduced costs.
+// Fixing against stale duals removes bound values that hold the true optimum,
+// and the search then proves optimality of a worse point.
+//
+// Only the second model below exercises that path: the ranged-row model the
+// issue reports had already stopped reproducing by the time the cause was
+// found, so it stands here as end-to-end coverage of the reported case rather
+// than as the guard on root reduced-cost fixing. The second model, from the
+// same randomized differential sweep, is the one that regresses to -22 the
+// moment the reduced-cost snapshot is removed.
+//
+// Both models are all-integer, so every acceptance check can be made exactly:
+// rows, bounds, integrality and objective.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Assert that `solution` is integral, inside the column bounds, satisfies
+/// every row of `lp`, and evaluates to `expected_obj`.
+void checkIntegerSolution(const LpProblem& lp, const std::vector<Real>& solution,
+                          Real expected_obj) {
+    REQUIRE(static_cast<Index>(solution.size()) == lp.num_cols);
+
+    Real obj = 0.0;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const Real x = solution[j];
+        CHECK_THAT(x, WithinAbs(std::round(x), 1e-6));
+        CHECK(x >= lp.col_lower[j] - 1e-6);
+        CHECK(x <= lp.col_upper[j] + 1e-6);
+        obj += lp.obj[j] * std::round(x);
+    }
+    CHECK_THAT(obj, WithinAbs(expected_obj, 1e-6));
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        Real activity = 0.0;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            activity += lp.matrix.coeff(i, j) * std::round(solution[j]);
+        }
+        CHECK(activity >= lp.row_lower[i] - 1e-6);
+        CHECK(activity <= lp.row_upper[i] + 1e-6);
+    }
+}
+
+/// The exact model from issue #186. Optimum is -10 at x = (1, 3, 2, 0).
+LpProblem buildIssue186RangedRowMip() {
+    LpProblem lp;
+    lp.name = "issue186_ranged_rows";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.num_rows = 4;
+    lp.obj = {-3.0, -3.0, 1.0, 2.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 4.0, 4.0, 1.0};
+    lp.col_type.assign(4, VarType::Integer);
+    lp.col_names = {"x0", "x1", "x2", "x3"};
+    lp.row_lower = {-4.0, -7.0, -5.0, -kInf};
+    lp.row_upper = {kInf, 11.0, kInf, 6.0};
+    lp.row_names = {"R0", "R1", "R2", "R3"};
+    std::vector<Triplet> trips = {
+        {0, 0, 5.0}, {1, 1, -5.0}, {1, 2, 5.0},  {1, 3, -5.0}, {2, 0, -5.0},
+        {2, 2, 2.0}, {2, 3, -1.0}, {3, 0, -3.0}, {3, 1, 3.0},  {3, 3, -5.0},
+    };
+    lp.matrix = SparseMatrix(4, 4, std::move(trips));
+    return lp;
+}
+
+/// A second model from the same randomized differential sweep as issue #186.
+/// The optimum is -23 at x = (2, 3, 0, 2, 1, 0, 1, 3); the root LP relaxation
+/// already attains -23, so the whole answer hangs on the root fixings being
+/// derived from that LP's own reduced costs. Against stale duals the solver
+/// used to fix x3 to at most 1 and then proved -22 optimal.
+LpProblem buildIssue186RootFixingMip() {
+    LpProblem lp;
+    lp.name = "issue186_root_rc_fixing";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 8;
+    lp.num_rows = 1;
+    lp.obj = {-3.0, -3.0, 2.0, 1.0, 2.0, -3.0, -3.0, -3.0};
+    lp.col_lower.assign(8, 0.0);
+    lp.col_upper = {2.0, 4.0, 1.0, 2.0, 1.0, 4.0, 1.0, 3.0};
+    lp.col_type.assign(8, VarType::Integer);
+    lp.col_names = {"x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"};
+    lp.row_lower = {-kInf};
+    lp.row_upper = {-7.0};
+    lp.row_names = {"R0"};
+    std::vector<Triplet> trips = {
+        {0, 0, -3.0}, {0, 1, 3.0}, {0, 2, -1.0}, {0, 3, -1.0},
+        {0, 4, -5.0}, {0, 5, 4.0}, {0, 7, -1.0},
+    };
+    lp.matrix = SparseMatrix(1, 8, std::move(trips));
+    return lp;
+}
+
+/// Turn off every optional component the issue's isolation table covers, so a
+/// failure can only be in the core branch-and-bound / node-LP path.
+void disableOptionalComponents(MipSolver& solver) {
+    solver.setSymmetryEnabled(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setTreeCutsEnabled(false);
+    solver.setConflictsEnabled(false);
+    solver.setRestartsEnabled(false);
+}
+
+}  // namespace
+
+TEST_CASE("MipSolver: issue 186 ranged-row model is solved to its true optimum",
+          "[mip][issue186]") {
+    const auto lp = buildIssue186RangedRowMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-10.0, 1e-6));
+    checkIntegerSolution(lp, result.solution, -10.0);
+}
+
+TEST_CASE("MipSolver: issue 186 ranged-row model needs no optional component", "[mip][issue186]") {
+    const auto lp = buildIssue186RangedRowMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    disableOptionalComponents(solver);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-10.0, 1e-6));
+    checkIntegerSolution(lp, result.solution, -10.0);
+}
+
+TEST_CASE("MipSolver: issue 186 root RC fixing keeps the optimum reachable", "[mip][issue186]") {
+    const auto lp = buildIssue186RootFixingMip();
+
+    SECTION("default settings") {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-23.0, 1e-6));
+        checkIntegerSolution(lp, result.solution, -23.0);
+    }
+
+    SECTION("optional components disabled") {
+        MipSolver solver;
+        solver.setVerbose(false);
+        disableOptionalComponents(solver);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-23.0, 1e-6));
+        checkIntegerSolution(lp, result.solution, -23.0);
+    }
 }
