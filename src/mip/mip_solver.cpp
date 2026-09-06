@@ -3656,6 +3656,7 @@ MipResult MipSolver::solve() {
     }
     lp_stats_ = {};
     cut_stats_ = {};
+    root_cut_family_stats_ = {};
     conflict_stats_ = {};
     pre_root_stats_ = {};
     search_stats_ = {};
@@ -5588,6 +5589,12 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     cut_manager.setFamilyEnabled(CutFamily::Clique, cut_family_config_.clique);
     cut_manager.setFamilyEnabled(CutFamily::ZeroHalf, cut_family_config_.zero_half);
     cut_manager.setFamilyEnabled(CutFamily::Mixing, cut_family_config_.mixing);
+    cut_manager.setFamilyEnabled(CutFamily::Cmir, cut_family_config_.cmir);
+    cut_manager.setFamilyEnabled(CutFamily::StrongCg, cut_family_config_.strong_cg);
+    cut_manager.setFamilyEnabled(CutFamily::LiftedCover, cut_family_config_.lifted_cover);
+    cut_manager.setFamilyEnabled(CutFamily::ModK, cut_family_config_.mod_k);
+    cut_manager.setFamilyEnabled(CutFamily::IntersectionCut, cut_family_config_.intersection_cut);
+    cut_manager.setFamilyEnabled(CutFamily::MultiRow, cut_family_config_.multi_row);
 
     auto userFamilyEnabled = [&](CutFamily family) -> bool {
         switch (family) {
@@ -5605,6 +5612,18 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 return cut_family_config_.zero_half;
             case CutFamily::Mixing:
                 return cut_family_config_.mixing;
+            case CutFamily::Cmir:
+                return cut_family_config_.cmir;
+            case CutFamily::StrongCg:
+                return cut_family_config_.strong_cg;
+            case CutFamily::LiftedCover:
+                return cut_family_config_.lifted_cover;
+            case CutFamily::ModK:
+                return cut_family_config_.mod_k;
+            case CutFamily::IntersectionCut:
+                return cut_family_config_.intersection_cut;
+            case CutFamily::MultiRow:
+                return cut_family_config_.multi_row;
             case CutFamily::Unknown:
             case CutFamily::Count:
             default:
@@ -5624,23 +5643,28 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             break;
         }
 
+        // A family runs this round only when both the adaptive policy and the
+        // user configuration allow it. Every CutFamily value must appear here:
+        // CutFamilyConfig defaults to all-true, so a family left out would run
+        // unconditionally.
+        auto familyEnabledThisRound = [&](CutFamily family) {
+            return policy.family_enabled[static_cast<std::size_t>(family)] &&
+                   userFamilyEnabled(family);
+        };
         CutFamilyConfig round_config{};
-        round_config.gomory = policy.family_enabled[static_cast<std::size_t>(CutFamily::Gomory)] &&
-                              userFamilyEnabled(CutFamily::Gomory);
-        round_config.mir = policy.family_enabled[static_cast<std::size_t>(CutFamily::Mir)] &&
-                           userFamilyEnabled(CutFamily::Mir);
-        round_config.cover = policy.family_enabled[static_cast<std::size_t>(CutFamily::Cover)] &&
-                             userFamilyEnabled(CutFamily::Cover);
-        round_config.implied_bound =
-            policy.family_enabled[static_cast<std::size_t>(CutFamily::ImpliedBound)] &&
-            userFamilyEnabled(CutFamily::ImpliedBound);
-        round_config.clique = policy.family_enabled[static_cast<std::size_t>(CutFamily::Clique)] &&
-                              userFamilyEnabled(CutFamily::Clique);
-        round_config.zero_half =
-            policy.family_enabled[static_cast<std::size_t>(CutFamily::ZeroHalf)] &&
-            userFamilyEnabled(CutFamily::ZeroHalf);
-        round_config.mixing = policy.family_enabled[static_cast<std::size_t>(CutFamily::Mixing)] &&
-                              userFamilyEnabled(CutFamily::Mixing);
+        round_config.gomory = familyEnabledThisRound(CutFamily::Gomory);
+        round_config.mir = familyEnabledThisRound(CutFamily::Mir);
+        round_config.cover = familyEnabledThisRound(CutFamily::Cover);
+        round_config.implied_bound = familyEnabledThisRound(CutFamily::ImpliedBound);
+        round_config.clique = familyEnabledThisRound(CutFamily::Clique);
+        round_config.zero_half = familyEnabledThisRound(CutFamily::ZeroHalf);
+        round_config.mixing = familyEnabledThisRound(CutFamily::Mixing);
+        round_config.cmir = familyEnabledThisRound(CutFamily::Cmir);
+        round_config.strong_cg = familyEnabledThisRound(CutFamily::StrongCg);
+        round_config.lifted_cover = familyEnabledThisRound(CutFamily::LiftedCover);
+        round_config.mod_k = familyEnabledThisRound(CutFamily::ModK);
+        round_config.intersection_cut = familyEnabledThisRound(CutFamily::IntersectionCut);
+        round_config.multi_row = familyEnabledThisRound(CutFamily::MultiRow);
         separators.setConfig(round_config);
         separators.setMaxCutsPerFamily(std::max<Int>(1, policy.max_cuts_per_round));
 
@@ -5847,6 +5871,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
     cut_stats_.root_rounds += rounds_done;
     cut_stats_.root_cuts_added += total_cuts;
+    root_cut_family_stats_ = total_family_stats;
 
     return total_cuts;
 }

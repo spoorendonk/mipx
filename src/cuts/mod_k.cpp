@@ -7,12 +7,6 @@
 
 namespace mipx {
 
-namespace {
-
-constexpr Real kCoeffTol = 1e-10;
-
-}  // namespace
-
 /// Mod-k separation: generalize zero-half cuts to arbitrary k.
 /// For a row sum a_j x_j <= b with integer variables:
 ///   Scale by 1/k, round down coefficients: floor(a_j/k) x_j <= floor(b/k).
@@ -79,31 +73,7 @@ Int SeparatorManager::separateModK(const LpProblem& problem, std::span<const Rea
             if (!changed || cut.indices.empty())
                 continue;
 
-            // Compute violation.
-            Real lhs = 0.0;
-            for (Index idx = 0; idx < static_cast<Index>(cut.indices.size()); ++idx) {
-                const Index j = cut.indices[idx];
-                if (j >= 0 && j < static_cast<Index>(primals.size())) {
-                    lhs += cut.values[idx] * primals[j];
-                }
-            }
-            const Real violation = lhs - cut.upper;
-            if (violation < min_violation_)
-                continue;
-
-            Real norm_sq = 0.0;
-            for (Real v : cut.values)
-                norm_sq += v * v;
-            if (norm_sq < kCoeffTol)
-                continue;
-            cut.efficacy = violation / std::sqrt(norm_sq);
-            if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
-                continue;
-
-            ++stats.generated;
-            if (pool.addCut(std::move(cut))) {
-                ++stats.accepted;
-                stats.efficacy_sum += violation / std::sqrt(norm_sq);
+            if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                 ++accepted;
             }
         }

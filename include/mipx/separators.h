@@ -101,6 +101,13 @@ private:
 
     [[nodiscard]] bool isEnabled(CutFamily family) const;
 
+    /// Common acceptance path for every separator. Screens the cut for
+    /// numerical safety, applies the minimum-violation threshold, computes the
+    /// efficacy and updates @p stats when the pool takes the cut. Every family
+    /// must route through this so no separator can bypass the safety screen.
+    bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
+                        CutFamilyStats& stats) const;
+
     CutFamilyConfig config_{};
     GomorySeparator gomory_{};
     Int max_cuts_per_family_ = 50;

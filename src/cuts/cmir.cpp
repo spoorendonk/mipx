@@ -256,19 +256,7 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp, const LpProblem& probl
             cut.values.push_back(val);
         }
 
-        ++stats.generated;
-        Real norm_sq = 0.0;
-        for (Real v : cut.values)
-            norm_sq += v * v;
-        if (norm_sq < kCoeffTol)
-            continue;
-        cut.efficacy = best_violation / std::sqrt(norm_sq);
-        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
-            continue;
-
-        if (pool.addCut(std::move(cut))) {
-            ++stats.accepted;
-            stats.efficacy_sum += best_violation / std::sqrt(norm_sq);
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -405,10 +393,7 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
 
         if (!found)
             continue;
-        ++stats.generated;
-        if (pool.addCut(std::move(best_cut))) {
-            ++stats.accepted;
-            stats.efficacy_sum += best_violation;
+        if (addViolatedCut(std::move(best_cut), primals, pool, stats)) {
             ++accepted;
         }
     }

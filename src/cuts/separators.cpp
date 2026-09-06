@@ -96,15 +96,17 @@ bool isNumericallySafeCut(const Cut& cut) {
     return true;
 }
 
-bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats,
-                    Real min_violation) {
+}  // namespace
+
+bool SeparatorManager::addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
+                                      CutFamilyStats& stats) const {
     ++stats.generated;
     if (!isNumericallySafeCut(cut)) {
         return false;
     }
 
     const Real violation = computeViolation(cut, primals);
-    if (violation < min_violation) {
+    if (violation < min_violation_) {
         return false;
     }
 
@@ -125,8 +127,6 @@ bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool, CutFa
     stats.efficacy_sum += efficacy;
     return true;
 }
-
-}  // namespace
 
 bool SeparatorManager::isEnabled(CutFamily family) const {
     switch (family) {
@@ -264,7 +264,7 @@ Int SeparatorManager::separateMir(const LpProblem& problem, std::span<const Real
         if (!valid || !changed || cut.indices.empty()) {
             continue;
         }
-        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -361,7 +361,7 @@ Int SeparatorManager::separateCover(const LpProblem& problem, std::span<const Re
             }
         }
         cut.values = std::move(sorted_vals);
-        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -430,7 +430,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
                     cut.indices = {y, x};
                     cut.values = {ub0 - ub1, 1.0};
                 }
-                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                     ++accepted;
                 }
             }
@@ -468,7 +468,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
                     cut.indices = {vub.binary_var, j};
                     cut.values = {-vub.coeff, 1.0};
                 }
-                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                     ++accepted;
                 }
             }
@@ -497,7 +497,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
                     cut.indices = {vlb.binary_var, j};
                     cut.values = {-vlb.coeff, 1.0};
                 }
-                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                     ++accepted;
                 }
             }
@@ -568,7 +568,7 @@ Int SeparatorManager::separateClique(const LpProblem& problem, std::span<const R
                 cut.upper = 1.0;
                 cut.indices = {lo, hi};
                 cut.values = {1.0, 1.0};
-                if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+                if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                     ++accepted;
                 }
             }
@@ -603,7 +603,7 @@ Int SeparatorManager::separateCliqueTableCover(const LpProblem& problem,
     Int accepted = 0;
     for (Index k = 0; k < scratch.size() && accepted < budget; ++k) {
         Cut cut = scratch[k];
-        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -653,7 +653,7 @@ Int SeparatorManager::separateZeroHalf(const LpProblem& problem, std::span<const
         if (!valid || !changed || cut.indices.empty()) {
             continue;
         }
-        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -704,7 +704,7 @@ Int SeparatorManager::separateMixing(const LpProblem& problem, std::span<const R
         if (!valid || !changed || cut.indices.empty()) {
             continue;
         }
-        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }

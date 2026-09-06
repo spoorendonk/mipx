@@ -185,31 +185,7 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem, std::span<co
             cut.values.push_back(val);
         }
 
-        // Compute violation and efficacy.
-        Real lhs = 0.0;
-        for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-            const Index j = cut.indices[k];
-            if (j >= 0 && j < static_cast<Index>(primals.size())) {
-                lhs += cut.values[k] * primals[j];
-            }
-        }
-        const Real violation = lhs - cut.upper;
-        if (violation < min_violation_)
-            continue;
-
-        Real norm_sq = 0.0;
-        for (Real v : cut.values)
-            norm_sq += v * v;
-        if (norm_sq < kCoeffTol)
-            continue;
-        cut.efficacy = violation / std::sqrt(norm_sq);
-        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
-            continue;
-
-        ++stats.generated;
-        if (pool.addCut(std::move(cut))) {
-            ++stats.accepted;
-            stats.efficacy_sum += violation / std::sqrt(norm_sq);
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }

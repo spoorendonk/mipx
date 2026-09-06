@@ -188,23 +188,7 @@ Int SeparatorManager::separateIntersectionCut(DualSimplexSolver& lp, const LpPro
         cut.lower = cut_rhs;
         cut.upper = kInf;
 
-        // Compute violation.
-        Real lhs = 0.0;
-        for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-            lhs += cut.values[k] * primals[cut.indices[k]];
-        }
-        const Real violation = cut_rhs - lhs;
-        if (violation < min_violation_)
-            continue;
-
-        cut.efficacy = violation / std::sqrt(norm_sq);
-        if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
-            continue;
-
-        ++stats.generated;
-        if (pool.addCut(std::move(cut))) {
-            ++stats.accepted;
-            stats.efficacy_sum += violation / std::sqrt(norm_sq);
+        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
             ++accepted;
         }
     }
@@ -404,23 +388,7 @@ Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp, const LpProblem& p
             cut.lower = cut_rhs;
             cut.upper = kInf;
 
-            // Compute violation.
-            Real lhs = 0.0;
-            for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-                lhs += cut.values[k] * primals[cut.indices[k]];
-            }
-            const Real violation = cut_rhs - lhs;
-            if (violation < min_violation_)
-                continue;
-
-            cut.efficacy = violation / std::sqrt(norm_sq);
-            if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0)
-                continue;
-
-            ++stats.generated;
-            if (pool.addCut(std::move(cut))) {
-                ++stats.accepted;
-                stats.efficacy_sum += violation / std::sqrt(norm_sq);
+            if (addViolatedCut(std::move(cut), primals, pool, stats)) {
                 ++accepted;
             }
         }
