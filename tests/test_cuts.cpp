@@ -814,3 +814,240 @@ TEST_CASE("SeparatorManager: CMIR skips rows with negative lower bounds", "[cuts
     manager.separate(solver, lp, solver.getPrimalValues(), pool, stats);
     CHECK(pool.size() == 0);
 }
+
+// ---------------------------------------------------------------------------
+// Strong CG validity.
+//
+// The Strong CG cut rounds the scaled right-hand side down, which is only
+// valid when the scaled left-hand side is integral. Continuous columns never
+// are, so they have to be relaxed away (dropped) before the rounding step --
+// keeping them makes the cut stronger than the row implies and removes
+// integer-feasible points, which branch-and-bound then reports as an optimum
+// worse than the true one.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// min -6a -5b -4c -s  s.t.  4a + 3b + 3c + s <= 6.5, a,b,c binary, s in [0,10].
+// Optimum -9.5 at b = c = 1, s = 0.5 (weight 6 <= 6.5).
+LpProblem buildStrongCgKnapsackMip() {
+    LpProblem lp;
+    lp.name = "strongcg_knap";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.num_rows = 1;
+    lp.obj = {-6.0, -5.0, -4.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 10.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Continuous};
+    lp.col_names = {"a", "b", "c", "s"};
+    lp.row_lower = {-kInf};
+    lp.row_upper = {6.5};
+    lp.row_names = {"R1"};
+    std::vector<Triplet> trips = {{0, 0, 4.0}, {0, 1, 3.0}, {0, 2, 3.0}, {0, 3, 1.0}};
+    lp.matrix = SparseMatrix(1, 4, std::move(trips));
+    return lp;
+}
+
+// min -x - y  s.t.  x + y <= 2.5, x integer in [0,10], y continuous in [0,10].
+// Optimum -2.5, attained anywhere on x + y = 2.5 with x integral.
+LpProblem buildStrongCgMixedMip() {
+    LpProblem lp;
+    lp.name = "strongcg_mixed";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 1;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {10.0, 10.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.row_lower = {-kInf};
+    lp.row_upper = {2.5};
+    lp.row_names = {"R1"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
+// max x + 0.001z, i.e. min -x - 0.001z, with a coefficient just below one:
+//   R1: (1 - 1e-9) x <= 1000.9999999,  x integer in [0, 2000]
+//   R2:           2z <=         1,     z integer in [0, 1]
+// x = 1001 is feasible (1001 * (1 - 1e-9) = 1000.999998999 <= 1000.9999999) and
+// optimal at -1001. Flooring t*a_j with a snapping tolerance rounded the scaled
+// coefficient 0.999999999 up to 1, which strengthens the term rather than
+// relaxing it and yields the invalid cut x <= 1000.
+LpProblem buildStrongCgNearIntegerMip() {
+    LpProblem lp;
+    lp.name = "strongcg_near_integer";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {-1.0, -0.001};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {2000.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Integer};
+    lp.col_names = {"x", "z"};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1000.9999999, 1.0};
+    lp.row_names = {"R1", "R2"};
+    std::vector<Triplet> trips = {{0, 0, 1.0 - 1e-9}, {1, 1, 2.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+CutFamilyConfig onlyStrongCgConfig() {
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = false;
+    config.cover = false;
+    config.implied_bound = false;
+    config.clique = false;
+    config.zero_half = false;
+    config.mixing = false;
+    config.cmir = false;
+    config.strong_cg = true;
+    config.lifted_cover = false;
+    config.mod_k = false;
+    config.intersection_cut = false;
+    config.multi_row = false;
+    return config;
+}
+
+// Separate the LP relaxation of `problem` with `config` and check that every
+// cut in the pool is satisfied by the integer-feasible point `x`. Returns the
+// number of cuts that were checked.
+Index separateAndCheckCutsKeep(const LpProblem& problem, const std::vector<Real>& x,
+                               const CutFamilyConfig& config) {
+    // The reference point really is feasible and integral for the model.
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        const Real v = x[static_cast<std::size_t>(j)];
+        INFO("column " << j);
+        CHECK(v >= problem.col_lower[j] - 1e-9);
+        CHECK(v <= problem.col_upper[j] + 1e-9);
+        if (problem.col_type[j] != VarType::Continuous) {
+            CHECK(std::abs(v - std::round(v)) <= 1e-9);
+        }
+    }
+    for (Index i = 0; i < problem.num_rows; ++i) {
+        auto row = problem.matrix.row(i);
+        Real activity = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            activity += row.values[k] * x[static_cast<std::size_t>(row.indices[k])];
+        }
+        INFO("row " << i);
+        CHECK(activity <= problem.row_upper[i] + 1e-9);
+        CHECK(activity >= problem.row_lower[i] - 1e-9);
+    }
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    CutPool pool;
+    SeparatorManager manager;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+
+    CutSeparationStats stats;
+    manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+
+    for (Index c = 0; c < pool.size(); ++c) {
+        const Cut& cut = pool[c];
+        Real activity = 0.0;
+        for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+            activity += cut.values[k] * x[static_cast<std::size_t>(cut.indices[k])];
+        }
+        INFO("cut " << c << " activity " << activity << " in [" << cut.lower << ", " << cut.upper
+                    << "]");
+        CHECK(activity <= cut.upper + 1e-7);
+        CHECK(activity >= cut.lower - 1e-7);
+    }
+    return pool.size();
+}
+
+}  // namespace
+
+TEST_CASE("SeparatorManager: Strong CG cuts keep the knapsack optimum", "[cuts][strongcg]") {
+    const auto problem = buildStrongCgKnapsackMip();
+    const std::vector<Real> optimum = {0.0, 1.0, 1.0, 0.5};  // objective -9.5
+
+    // The fractional right-hand side makes the row separable, so the check is
+    // not passing vacuously on an empty pool.
+    CHECK(separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig()) > 0);
+}
+
+TEST_CASE("SeparatorManager: Strong CG cuts keep the mixed-row optimum", "[cuts][strongcg]") {
+    const auto problem = buildStrongCgMixedMip();
+    // x = 0, y = 2.5 is integer-feasible and optimal (objective -2.5). Keeping
+    // the continuous column produced 0.75y <= 1 from the multiplier t = 0.75,
+    // which this point violates by 0.875. Once the column is relaxed away the
+    // only integer term left is x, and no multiplier rounds it into a violated
+    // cut -- so the pool must be empty rather than hold a valid-but-different
+    // cut. If a future change does emit one here, the per-cut checks in the
+    // helper must still pass.
+    const std::vector<Real> optimum = {0.0, 2.5};
+
+    CHECK(separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig()) == 0);
+}
+
+TEST_CASE("MipSolver: Strong CG cuts do not cut off the optimum", "[cuts][strongcg]") {
+    SECTION("knapsack with a continuous column") {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutFamilyConfig(onlyStrongCgConfig());
+        solver.load(buildStrongCgKnapsackMip());
+        auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-9.5, 1e-6));
+    }
+
+    SECTION("mixed integer/continuous row") {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutFamilyConfig(onlyStrongCgConfig());
+        solver.load(buildStrongCgMixedMip());
+        auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-2.5, 1e-6));
+    }
+}
+
+TEST_CASE("SeparatorManager: Strong CG does not round a coefficient up", "[cuts][strongcg]") {
+    const auto problem = buildStrongCgNearIntegerMip();
+    // x = 1001, z = 0 is integer-feasible; the pre-fix cut x <= 1000 removes it.
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    separateAndCheckCutsKeep(problem, optimum, onlyStrongCgConfig());
+}
+
+TEST_CASE("MipSolver: Strong CG keeps an optimum under a near-integer coefficient",
+          "[cuts][strongcg]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutFamilyConfig(onlyStrongCgConfig());
+    solver.load(buildStrongCgNearIntegerMip());
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+}
+
+TEST_CASE("MipSolver: knapsack solves to -9.5 with presolve off and cuts on", "[cuts][strongcg]") {
+    // The reproduction from the bug report: presolve off, every cut family on.
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(true);
+    solver.load(buildStrongCgKnapsackMip());
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-9.5, 1e-6));
+}
