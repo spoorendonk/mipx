@@ -5201,12 +5201,19 @@ MipResult MipSolver::solve() {
 
     // Check if root solution is integer feasible.
     root_basis = lp.getBasis();
-    // Snapshot the root LP duals here, alongside the basis and while root_bound
-    // and root_primals still describe this same LP solution. Reduced-cost
-    // fixing is only sound for a (reduced cost, primal point, objective) triple
-    // that comes from one optimal basis; the root heuristics below run on this
-    // very LP object and leave its dual state behind them, and restoring the
-    // basis afterwards does not recompute the reduced costs.
+    // Snapshot the root relaxation's reduced costs *here*, next to the basis and
+    // while root_bound and root_primals still describe this same LP solution.
+    // Reduced-cost fixing is only sound for a (reduced cost, primal point,
+    // objective) triple that comes from one optimal basis. The root heuristics
+    // below re-solve `lp` with substituted objectives (aux-objective,
+    // zero-objective, feasibility pump, proximity) and with fixed column bounds
+    // (RENS, RINS, local branching, undercover, ...). They restore the objective
+    // vector, the bounds and the basis, but the solver's cached duals are
+    // whatever its last simplex solve produced, and setBasis() does not
+    // recompute them. Reading lp.getReducedCosts() after the portfolio therefore
+    // yields the duals of a heuristic subproblem, which are not dual-feasible
+    // for the root relaxation. Pairing those with root_primals/root_bound made
+    // global reduced-cost fixing unsound and silently cut off optimal solutions.
     const std::vector<Real> root_reduced_costs = lp.getReducedCosts();
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
@@ -5309,6 +5316,9 @@ MipResult MipSolver::solve() {
     // Reduced-cost fixing: load engine and apply global fixings at root.
     rc_fixer_.load(problem_);
     if (incumbent < kInf) {
+        // root_reduced_costs is the snapshot taken with root_basis, not a fresh
+        // lp.getReducedCosts(): the heuristic portfolio above may have left the
+        // solver's cached duals belonging to one of its subproblems.
         rc_root_saved_lower = problem_.col_lower;
         rc_root_saved_upper = problem_.col_upper;
         std::vector<Index> rc_tightened;
