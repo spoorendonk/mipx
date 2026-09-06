@@ -83,12 +83,10 @@ inline Real denseDot(const Real* a, std::span<const Real> x) {
 Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
                           std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
                           std::vector<Index>& btf_block_start) {
-    // Minimum dimension to attempt BTF detection. BTF builds a matching +
-    // Tarjan SCC over the basis pattern; for small bases the fixed cost
-    // (allocations + scans) outweighs any savings, since a single-block LU
-    // factorization is already cheap on small matrices.
-    static constexpr Index kBtfMinDim = 100;
-
+    // kBtfMinDim is the minimum dimension at which BTF detection is attempted.
+    // BTF builds a matching + Tarjan SCC over the basis pattern; for small
+    // bases the fixed cost (allocations + scans) outweighs any savings, since
+    // a single-block LU factorization is already cheap on small matrices.
     if (dim < kBtfMinDim) {
         return 0;
     }
@@ -401,6 +399,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     std::vector<Index> btf_block_start;
     Index num_blocks =
         detectBTF(dim_, matrix, basis_cols, btf_row_perm, btf_col_perm, btf_block_start);
+    // detectBTF returns 0 when BTF is not applicable (too small, no perfect
+    // matching, or a single SCC); in that case the whole basis is one block.
+    num_btf_blocks_ = num_blocks > 1 ? num_blocks : 1;
 
     // Build the effective row and column mapping.
     // If BTF detected blocks, we use the BTF permutation to reorder the
@@ -629,12 +630,46 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         }
     }
 
-    for (Index i = 0; i < dim_; ++i) {
-        bucketAdd(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[i], i);
+    // --- Block-wise elimination setup ---
+    // Under the BTF permutation the basis is block *lower* triangular: an entry
+    // at (row position p, column position q) exists only when block(p) >=
+    // block(q), because every directed edge of the matched graph runs forward in
+    // the topological order the blocks were numbered in. Consequently the pivot
+    // row of a step in block b has active entries only in block b's columns, so
+    // eliminating block b creates no fill in any other diagonal block and the
+    // blocks can be factorized independently (U comes out block diagonal, L
+    // block lower triangular -- exactly the block back-substitution structure).
+    //
+    // We enforce that by only ever exposing the current block's rows and columns
+    // to the Markowitz search: rows/columns of later blocks are held inactive,
+    // which keeps them out of the count buckets while addEntry/removeEntry still
+    // maintain their counts, and they are admitted when their block starts.
+    //
+    // The strictly-lower off-diagonal blocks are still eliminated into L (they
+    // become A_{b'b} * U_b^{-1}); that is inherent to holding a single monolithic
+    // L*U rather than deferring the off-diagonal blocks to a block
+    // back-substitution, and it is what the existing FTRAN/BTRAN/Forrest-Tomlin
+    // paths already expect.
+    const bool use_btf = num_blocks > 1;
+    Index btf_block = 0;
+    Index block_end = use_btf ? btf_block_start[1] : dim_;
+
+    auto activateBlockRange = [&](Index from, Index to) {
+        for (Index p = from; p < to; ++p) {
+            row_active[static_cast<std::size_t>(p)] = uint8_t{1};
+            col_active[static_cast<std::size_t>(p)] = uint8_t{1};
+            bucketAdd(row_bucket_head, row_bucket_prev, row_bucket_next, row_count[p], p);
+            bucketAdd(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[p], p);
+        }
+    };
+
+    if (use_btf) {
+        for (Index p = block_end; p < dim_; ++p) {
+            row_active[static_cast<std::size_t>(p)] = uint8_t{0};
+            col_active[static_cast<std::size_t>(p)] = uint8_t{0};
+        }
     }
-    for (Index j = 0; j < dim_; ++j) {
-        bucketAdd(col_bucket_head, col_bucket_prev, col_bucket_next, col_count[j], j);
-    }
+    activateBlockRange(0, block_end);
 
     // Permutation arrays.
     row_perm_.resize(dim_);
@@ -772,6 +807,17 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     rows_to_update.reserve(static_cast<std::size_t>(dim_));
 
     for (Index step = 0; step < dim_; ++step) {
+        // Advance to the next BTF diagonal block once the current one is fully
+        // eliminated. Block b spans exactly the elimination steps
+        // [btf_block_start[b], btf_block_start[b+1]) because every step consumes
+        // one row and one column of the active block.
+        if (use_btf && step == block_end) {
+            ++btf_block;
+            const Index next_end = btf_block_start[static_cast<std::size_t>(btf_block + 1)];
+            activateBlockRange(block_end, next_end);
+            block_end = next_end;
+        }
+
         // ---- Markowitz pivot selection ----
         // Find pivot minimizing (row_nnz - 1) * (col_nnz - 1)
         // among entries with |a_ij| >= kPivotTol * max|a_*j|.
@@ -1181,13 +1227,12 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     snode_panel_values_.clear();
     snode_panel_row_indices_.clear();
 
-    // Lower guard: supernode detection performs a linear scan with sorted
-    // target-set comparisons and panel allocations. For small bases the
-    // cost of detection itself dominates the savings, since the L-solve
-    // is already cheap. Only run on bases where dense-panel L-solve can
-    // amortize the detection cost.
-    static constexpr Index kSupernodeDetectMinDim = 64;
-    if (dim_ >= kSupernodeDetectMinDim) {
+    // Lower guard (kSupernodeDetectMinDim): supernode detection performs a
+    // linear scan with sorted target-set comparisons and panel allocations.
+    // For small bases the cost of detection itself dominates the savings,
+    // since the L-solve is already cheap. Only run on bases where a
+    // dense-panel L-solve can amortize the detection cost.
+    if (supernodal_enabled_ && dim_ >= kSupernodeDetectMinDim) {
         // Detect fundamental supernodes: consecutive steps where each step's
         // eta target set is a subset of the next step's. Use a rolling
         // comparison of sorted target sets to keep cost linear.

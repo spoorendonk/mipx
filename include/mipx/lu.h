@@ -23,6 +23,18 @@ class SparseLU {
 public:
     SparseLU() = default;
 
+    /// Minimum basis dimension at which BTF detection is attempted. Below this,
+    /// the matching + Tarjan SCC scan costs more than a single-block Markowitz
+    /// factorization saves.
+    static constexpr Index kBtfMinDim = 100;
+
+    /// Minimum basis dimension at which supernode detection is attempted.
+    static constexpr Index kSupernodeDetectMinDim = 64;
+
+    /// Minimum number of consecutive elimination steps needed before a group of
+    /// nested eta patterns is stored as a dense panel.
+    static constexpr Index kSupernodeMinWidth = 4;
+
     /// Factorize a square basis matrix (given as columns from constraint matrix).
     /// basis_cols[i] = column index in the original matrix for basis position i.
     void factorize(const SparseMatrix& matrix, std::span<const Index> basis_cols);
@@ -54,6 +66,25 @@ public:
     void setMixedPrecision(bool enable) { mixed_precision_enabled_ = enable; }
     [[nodiscard]] bool mixedPrecision() const { return mixed_precision_active_; }
     [[nodiscard]] bool mixedPrecisionEnabled() const { return mixed_precision_enabled_; }
+
+    /// Number of BTF diagonal blocks the last factorization eliminated over.
+    /// 1 means no usable block structure was found (or the basis was below
+    /// kBtfMinDim) and a single global Markowitz pass was used.
+    [[nodiscard]] Index numBtfBlocks() const { return num_btf_blocks_; }
+
+    /// Number of dense L panels (supernodes of width >= kSupernodeMinWidth)
+    /// built by the last factorization.
+    [[nodiscard]] Index numSupernodes() const { return static_cast<Index>(supernodes_.size()); }
+
+    /// Enable/disable supernodal dense-panel L/L^T solves. Disabling forces the
+    /// scalar eta path; used to cross-check the accelerated path.
+    void setSupernodalEnabled(bool enable) { supernodal_enabled_ = enable; }
+    [[nodiscard]] bool supernodalEnabled() const { return supernodal_enabled_; }
+
+    /// rowPermutation()[k] = original matrix row eliminated at step k.
+    [[nodiscard]] std::span<const Index> rowPermutation() const { return row_perm_; }
+    /// colPermutation()[k] = basis position (index into basis_cols) pivoted at step k.
+    [[nodiscard]] std::span<const Index> colPermutation() const { return col_perm_; }
 
     /// Access work unit counter.
     [[nodiscard]] const WorkUnits& workUnits() const { return work_; }
@@ -117,6 +148,9 @@ private:
     bool buildFp32Factors();
 
     Index dim_ = 0;
+    // Number of BTF diagonal blocks the last factorization was confined to
+    // (1 = no usable block structure, i.e. one global Markowitz pass).
+    Index num_btf_blocks_ = 1;
 
     // Permutations: row_perm_[k] = original row for elimination step k.
     std::vector<Index> row_perm_;
@@ -143,7 +177,6 @@ private:
     // A supernode is a group of consecutive elimination steps where the eta
     // patterns are nested. For supernodes >= kSupernodeMinWidth, we store a
     // dense panel for efficient application.
-    static constexpr Index kSupernodeMinWidth = 4;
     struct Supernode {
         Index start;         // first elimination step
         Index width;         // number of steps in the supernode
@@ -153,6 +186,7 @@ private:
         Index row_offset;
     };
     std::vector<Supernode> supernodes_;
+    bool supernodal_enabled_ = true;
     // Dense panel values: column-major, panel_rows x width.
     std::vector<Real> snode_panel_values_;
     // Row indices for each supernode (in original row space).
