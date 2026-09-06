@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -54,11 +55,16 @@ class NodeQueue {
 public:
     explicit NodeQueue(NodePolicy policy = NodePolicy::BestFirst);
 
-    /// Add a node to the queue. Assigns a unique id.
-    void push(BnbNode node);
+    /// Add a node to the queue. Assigns a unique id and returns it.
+    Int push(BnbNode node);
 
     /// Remove and return the next node to process.
     BnbNode pop();
+
+    /// Remove and return the node with the given id, or nullopt when it is no
+    /// longer queued (for example after prune() dropped it). Used by the serial
+    /// plunge phase to dive into a specific child without bypassing the queue.
+    std::optional<BnbNode> popById(Int id);
 
     /// Best (lowest) LP bound in the queue.
     Real bestBound() const;

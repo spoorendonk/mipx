@@ -184,6 +184,8 @@ struct RootHeuristicOutcome {
     Int reducedcost_improvements = 0;
     Int propcompletion_calls = 0;
     Int propcompletion_improvements = 0;
+    Int cliquerounding_calls = 0;
+    Int cliquerounding_improvements = 0;
     Int oneopt_calls = 0;
     Int oneopt_improvements = 0;
     Int twoopt_calls = 0;

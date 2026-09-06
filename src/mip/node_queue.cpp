@@ -109,9 +109,11 @@ void NodeQueue::eraseById(Int id) {
     nodes_.erase(it);
 }
 
-void NodeQueue::push(BnbNode node) {
-    node.id = next_id_++;
+Int NodeQueue::push(BnbNode node) {
+    const Int id = next_id_++;
+    node.id = id;
     insertNode(std::move(node));
+    return id;
 }
 
 BnbNode NodeQueue::pop() {
@@ -135,6 +137,16 @@ BnbNode NodeQueue::pop() {
     }
     BnbNode result = std::move(it->second);
     eraseById(key->id);
+    return result;
+}
+
+std::optional<BnbNode> NodeQueue::popById(Int id) {
+    auto it = nodes_.find(id);
+    if (it == nodes_.end()) {
+        return std::nullopt;
+    }
+    BnbNode result = std::move(it->second);
+    eraseById(id);
     return result;
 }
 

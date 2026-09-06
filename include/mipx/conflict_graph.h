@@ -79,8 +79,16 @@ private:
     /// Number of binary variables.
     Index num_binaries_ = 0;
 
-    /// Total number of literals = 2 * num_binaries_.
-    [[nodiscard]] Index numLiterals() const { return 2 * num_binaries_; }
+    /// Number of columns in the problem the graph was built from.
+    Index num_cols_ = 0;
+
+    /// Total number of literals. Literal ids are formed from the ORIGINAL
+    /// column index (Literal::id() == 2*var + complemented), not from the
+    /// compacted binary index, so the adjacency array must span every column.
+    /// Sizing this by num_binaries_ instead overflows adj_ on any model whose
+    /// binary columns are not the leading columns. CliqueTable uses the same
+    /// 2 * num_cols space for lit_to_cliques_.
+    [[nodiscard]] Index numLiterals() const { return 2 * num_cols_; }
 
     /// Adjacency lists indexed by literal id.
     std::vector<std::vector<Literal>> adj_;

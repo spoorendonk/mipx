@@ -3,6 +3,8 @@
 #include "mipx/barrier.h"
 #include "mipx/bnb_node.h"
 #include "mipx/branching.h"
+#include "mipx/clique_table.h"
+#include "mipx/conflict_graph.h"
 #include "mipx/core.h"
 #include "mipx/cut_manager.h"
 #include "mipx/cut_pool.h"
@@ -145,6 +147,20 @@ struct MipSearchStats {
     Int sibling_cache_hits = 0;
     Int sibling_cache_misses = 0;
     Int strong_budget_updates = 0;
+    /// Nodes entered by diving into a child instead of popping the queue.
+    Int plunge_nodes = 0;
+    /// Backtracks because the plunged child produced no children (infeasible,
+    /// integral, or pruned by the incumbent before it could be processed).
+    Int plunge_backtracks_infeasible = 0;
+    /// Backtracks because the plunge depth limit was reached.
+    Int plunge_backtracks_depth = 0;
+    /// Dives declined because the child LP bound degrades the queue best bound
+    /// by more than the configured quotient.
+    Int plunge_backtracks_bound = 0;
+    /// Rounding heuristic calls made at a plunge leaf before backtracking.
+    Int plunge_rounding_calls = 0;
+    /// Plunge-leaf rounding calls that improved the incumbent.
+    Int plunge_rounding_improvements = 0;
 };
 
 struct MipTreePresolveStats {
@@ -204,6 +220,18 @@ struct MipProbingStats {
     Int equivalences_found = 0;
     Int rounds = 0;
     double time_seconds = 0.0;
+};
+
+/// Statistics for the root conflict graph / clique table.
+struct MipCliqueStats {
+    bool enabled = false;
+    Int num_binaries = 0;
+    Int num_conflict_edges = 0;
+    Int num_cliques = 0;        // after merging and subsumption
+    Int cliques_from_cuts = 0;  // cliques extracted from root cuts
+    double build_time_seconds = 0.0;
+    bool skipped_too_large = false;  // binary count exceeded the build cap
+    Int node_attachments = 0;        // node propagators given the table
 };
 
 struct MipResult {
@@ -338,6 +366,17 @@ public:
         restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
     }
+    /// Configure the serial plunge (dive) phase.
+    /// @param max_depth      Maximum number of consecutive dives after a branch.
+    ///                       0 disables plunging entirely (the default).
+    /// @param bound_quotient Relative bound-degradation quotient: a dive is
+    ///                       declined when the child LP bound exceeds the
+    ///                       queue's best bound by more than
+    ///                       bound_quotient * max(1, |best bound|).
+    void setPlungeControls(Int max_depth, Real bound_quotient) {
+        plunge_max_depth_ = std::max<Int>(0, max_depth);
+        plunge_bound_quotient_ = std::max<Real>(0.0, bound_quotient);
+    }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
     void setTreePresolveAutoTuning(bool enabled) {
         tree_presolve_auto_tuning_enabled_ = enabled;
@@ -374,6 +413,23 @@ public:
     void setProbingMaxRounds(Int rounds) { probing_max_rounds_ = std::max<Int>(1, rounds); }
     void setProbingTimeLimit(double seconds) { probing_time_limit_ = std::max(0.1, seconds); }
     const MipProbingStats& getProbingStats() const { return probing_stats_; }
+    /// Enable the root conflict graph / clique table. When on, cliques drive
+    /// node domain propagation and maximal-clique separation at the root.
+    void setCliqueTableEnabled(bool enabled) { clique_table_enabled_ = enabled; }
+    /// Skip building the conflict graph / clique table above this many
+    /// binary columns. Both builds are superlinear in the binary count, so
+    /// this bounds the root cost the way the probing and cut budgets do.
+    void setCliqueMaxBinaries(Int value) { clique_max_binaries_ = std::max<Int>(0, value); }
+    [[nodiscard]] Int getCliqueMaxBinaries() const { return clique_max_binaries_; }
+    [[nodiscard]] bool isCliqueTableEnabled() const { return clique_table_enabled_; }
+    /// Clique stats, with the node-attachment counter folded in from the
+    /// atomic the tree threads increment.
+    [[nodiscard]] MipCliqueStats getCliqueStats() const {
+        MipCliqueStats out = clique_stats_;
+        out.node_attachments = clique_node_attachments_.load(std::memory_order_relaxed);
+        return out;
+    }
+    const CliqueTable& getCliqueTable() const { return clique_table_; }
     const ImplicationGraph& getImplicationGraph() const { return implication_graph_; }
     const VariableBoundStore& getVariableBoundStore() const { return vb_store_; }
 
@@ -436,6 +492,10 @@ private:
     Real computeGap(Real incumbent, Real best_bound) const;
 
     // Log a progress line.
+    /// True when diving into a child whose LP bound is child_bound would degrade
+    /// the queue's best bound by more than the configured plunge quotient.
+    [[nodiscard]] bool plungeBoundDegraded(Real child_bound, const NodeQueue& queue) const;
+
     void logProgress(Int nodes, Int open, Int lp_iters, Real incumbent, Real best_bound,
                      double elapsed, bool new_incumbent = false, Int int_inf = -1) const;
 
@@ -455,6 +515,16 @@ private:
                                             std::span<const Real> current_lower,
                                             std::span<const Real> current_upper, Index default_var);
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
+
+    /// Build the root conflict graph and clique table from problem_.
+    /// No-op when the feature is off or the problem has fewer than two
+    /// binaries; populates clique_stats_ either way.
+    void buildCliqueTable();
+
+    /// True when node propagation should consult the clique table.
+    [[nodiscard]] bool cliquePropagationActive() const {
+        return clique_table_enabled_ && clique_table_.numCliques() > 0;
+    }
 
     /// Run root probing and populate implication graph / variable bounds.
     /// Returns true if probing proved the problem infeasible.
@@ -520,6 +590,9 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
+    // Plunging is off by default: enabling it changes the serial node order.
+    Int plunge_max_depth_ = 0;
+    Real plunge_bound_quotient_ = 0.05;
     // Serial in-tree presolve is enabled by default because it materially
     // improves hard MIP search on benchmark instances.
     bool tree_presolve_enabled_ = true;
@@ -572,6 +645,17 @@ private:
     ImplicationGraph implication_graph_;
     VariableBoundStore vb_store_;
     MipProbingStats probing_stats_{};
+
+    // Conflict graph / clique table, rebuilt at the root of every solve().
+    bool clique_table_enabled_ = false;
+    Int clique_max_binaries_ = 2000;
+    // Counts node DomainPropagators handed the clique table. Node processing
+    // is multi-threaded, so this is atomic and folded into clique_stats_ when
+    // the solve reports.
+    std::atomic<Int> clique_node_attachments_{0};
+    ConflictGraph conflict_graph_;
+    CliqueTable clique_table_;
+    MipCliqueStats clique_stats_{};
 
     mutable Logger log_;
 

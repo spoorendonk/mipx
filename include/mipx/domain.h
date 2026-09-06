@@ -24,6 +24,10 @@ public:
     /// The clique table must outlive the propagator.
     void setCliqueTable(const CliqueTable* table);
 
+    /// True once a clique table has been attached. Lets a caller assert that
+    /// the attachment actually happened rather than assuming it.
+    [[nodiscard]] bool hasCliqueTable() const { return clique_table_ != nullptr; }
+
     /// Set variable bounds.
     void setBound(Index col, Real lower, Real upper);
 

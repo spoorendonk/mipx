@@ -1,5 +1,8 @@
 #include "mipx/separators.h"
 
+#include "mipx/clique_table.h"
+#include "mipx/variable_bounds.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -7,8 +10,6 @@
 #include <limits>
 #include <unordered_set>
 #include <vector>
-
-#include "mipx/variable_bounds.h"
 
 namespace mipx {
 
@@ -18,7 +19,9 @@ Real computeLhs(const Cut& cut, std::span<const Real> primals) {
     Real lhs = 0.0;
     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
         const Index j = cut.indices[k];
-        if (j < 0 || j >= static_cast<Index>(primals.size())) continue;
+        if (j < 0 || j >= static_cast<Index>(primals.size())) {
+            continue;
+        }
         lhs += cut.values[k] * primals[j];
     }
     return lhs;
@@ -27,21 +30,35 @@ Real computeLhs(const Cut& cut, std::span<const Real> primals) {
 Real computeViolation(const Cut& cut, std::span<const Real> primals) {
     const Real lhs = computeLhs(cut, primals);
     Real violation = 0.0;
-    if (cut.lower > -kInf) violation = std::max(violation, cut.lower - lhs);
-    if (cut.upper < kInf) violation = std::max(violation, lhs - cut.upper);
+    if (cut.lower > -kInf) {
+        violation = std::max(violation, cut.lower - lhs);
+    }
+    if (cut.upper < kInf) {
+        violation = std::max(violation, lhs - cut.upper);
+    }
     return violation;
 }
 
 bool hasFiniteBounds(const Cut& cut) {
-    if (!std::isfinite(cut.lower) && cut.lower > -kInf) return false;
-    if (!std::isfinite(cut.upper) && cut.upper < kInf) return false;
+    if (!std::isfinite(cut.lower) && cut.lower > -kInf) {
+        return false;
+    }
+    if (!std::isfinite(cut.upper) && cut.upper < kInf) {
+        return false;
+    }
     return true;
 }
 
 bool isNumericallySafeCut(const Cut& cut) {
-    if (cut.indices.empty()) return false;
-    if (cut.indices.size() != cut.values.size()) return false;
-    if (!hasFiniteBounds(cut)) return false;
+    if (cut.indices.empty()) {
+        return false;
+    }
+    if (cut.indices.size() != cut.values.size()) {
+        return false;
+    }
+    if (!hasFiniteBounds(cut)) {
+        return false;
+    }
 
     Real norm_sq = 0.0;
     Real max_abs = 0.0;
@@ -51,43 +68,59 @@ bool isNumericallySafeCut(const Cut& cut) {
     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
         const Index idx = cut.indices[k];
         const Real val = cut.values[k];
-        if (idx < 0 || idx <= prev) return false;
-        if (!std::isfinite(val)) return false;
+        if (idx < 0 || idx <= prev) {
+            return false;
+        }
+        if (!std::isfinite(val)) {
+            return false;
+        }
         const Real abs_v = std::abs(val);
-        if (abs_v <= 1e-12) return false;
+        if (abs_v <= 1e-12) {
+            return false;
+        }
         norm_sq += val * val;
         max_abs = std::max(max_abs, abs_v);
         min_abs = std::min(min_abs, abs_v);
         prev = idx;
     }
 
-    if (norm_sq < 1e-12 || norm_sq > 1e16) return false;
-    if (max_abs > 1e6) return false;
-    if (min_abs < std::numeric_limits<Real>::infinity() &&
-        max_abs / min_abs > 1e8) {
+    if (norm_sq < 1e-12 || norm_sq > 1e16) {
+        return false;
+    }
+    if (max_abs > 1e6) {
+        return false;
+    }
+    if (min_abs < std::numeric_limits<Real>::infinity() && max_abs / min_abs > 1e8) {
         return false;
     }
     return true;
 }
 
-bool addViolatedCut(Cut cut,
-                    std::span<const Real> primals,
-                    CutPool& pool,
-                    CutFamilyStats& stats,
+bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats,
                     Real min_violation) {
     ++stats.generated;
-    if (!isNumericallySafeCut(cut)) return false;
+    if (!isNumericallySafeCut(cut)) {
+        return false;
+    }
 
     const Real violation = computeViolation(cut, primals);
-    if (violation < min_violation) return false;
+    if (violation < min_violation) {
+        return false;
+    }
 
     Real norm_sq = 0.0;
-    for (Real v : cut.values) norm_sq += v * v;
+    for (Real v : cut.values) {
+        norm_sq += v * v;
+    }
     cut.efficacy = violation / std::sqrt(norm_sq);
-    if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0) return false;
+    if (!std::isfinite(cut.efficacy) || cut.efficacy <= 0.0) {
+        return false;
+    }
 
     const Real efficacy = cut.efficacy;
-    if (!pool.addCut(std::move(cut))) return false;
+    if (!pool.addCut(std::move(cut))) {
+        return false;
+    }
     ++stats.accepted;
     stats.efficacy_sum += efficacy;
     return true;
@@ -97,87 +130,87 @@ bool addViolatedCut(Cut cut,
 
 bool SeparatorManager::isEnabled(CutFamily family) const {
     switch (family) {
-        case CutFamily::Gomory: return config_.gomory;
-        case CutFamily::Mir: return config_.mir;
-        case CutFamily::Cover: return config_.cover;
-        case CutFamily::ImpliedBound: return config_.implied_bound;
-        case CutFamily::Clique: return config_.clique;
-        case CutFamily::ZeroHalf: return config_.zero_half;
-        case CutFamily::Mixing: return config_.mixing;
-        case CutFamily::Cmir: return config_.cmir;
-        case CutFamily::StrongCg: return config_.strong_cg;
-        case CutFamily::LiftedCover: return config_.lifted_cover;
-        case CutFamily::ModK: return config_.mod_k;
-        case CutFamily::IntersectionCut: return config_.intersection_cut;
-        case CutFamily::MultiRow: return config_.multi_row;
+        case CutFamily::Gomory:
+            return config_.gomory;
+        case CutFamily::Mir:
+            return config_.mir;
+        case CutFamily::Cover:
+            return config_.cover;
+        case CutFamily::ImpliedBound:
+            return config_.implied_bound;
+        case CutFamily::Clique:
+            return config_.clique;
+        case CutFamily::ZeroHalf:
+            return config_.zero_half;
+        case CutFamily::Mixing:
+            return config_.mixing;
+        case CutFamily::Cmir:
+            return config_.cmir;
+        case CutFamily::StrongCg:
+            return config_.strong_cg;
+        case CutFamily::LiftedCover:
+            return config_.lifted_cover;
+        case CutFamily::ModK:
+            return config_.mod_k;
+        case CutFamily::IntersectionCut:
+            return config_.intersection_cut;
+        case CutFamily::MultiRow:
+            return config_.multi_row;
         case CutFamily::Unknown:
         case CutFamily::Count:
-        default: return false;
+        default:
+            return false;
     }
 }
 
-Int SeparatorManager::separate(DualSimplexSolver& lp,
-                               const LpProblem& problem,
-                               std::span<const Real> primals,
-                               CutPool& pool,
+Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
+                               std::span<const Real> primals, CutPool& pool,
                                CutSeparationStats& stats) {
     Int total_added = 0;
 
     auto runFamily = [&](CutFamily family, auto&& fn) {
-        if (!isEnabled(family)) return;
+        if (!isEnabled(family)) {
+            return;
+        }
         auto t0 = std::chrono::steady_clock::now();
         total_added += fn(stats.at(family));
-        stats.at(family).time_seconds += std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
+        stats.at(family).time_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
 
-    runFamily(CutFamily::Gomory, [&](CutFamilyStats& s) {
-        return separateGomory(lp, problem, primals, pool, s);
-    });
-    runFamily(CutFamily::Mir, [&](CutFamilyStats& s) {
-        return separateMir(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::Cover, [&](CutFamilyStats& s) {
-        return separateCover(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::ImpliedBound, [&](CutFamilyStats& s) {
-        return separateImpliedBound(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::Clique, [&](CutFamilyStats& s) {
-        return separateClique(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::ZeroHalf, [&](CutFamilyStats& s) {
-        return separateZeroHalf(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::Mixing, [&](CutFamilyStats& s) {
-        return separateMixing(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::Cmir, [&](CutFamilyStats& s) {
-        return separateCmir(lp, problem, primals, pool, s);
-    });
-    runFamily(CutFamily::StrongCg, [&](CutFamilyStats& s) {
-        return separateStrongCg(lp, problem, primals, pool, s);
-    });
-    runFamily(CutFamily::LiftedCover, [&](CutFamilyStats& s) {
-        return separateLiftedCover(problem, primals, pool, s);
-    });
-    runFamily(CutFamily::ModK, [&](CutFamilyStats& s) {
-        return separateModK(problem, primals, pool, s);
-    });
+    runFamily(CutFamily::Gomory,
+              [&](CutFamilyStats& s) { return separateGomory(lp, problem, primals, pool, s); });
+    runFamily(CutFamily::Mir,
+              [&](CutFamilyStats& s) { return separateMir(problem, primals, pool, s); });
+    runFamily(CutFamily::Cover,
+              [&](CutFamilyStats& s) { return separateCover(problem, primals, pool, s); });
+    runFamily(CutFamily::ImpliedBound,
+              [&](CutFamilyStats& s) { return separateImpliedBound(problem, primals, pool, s); });
+    runFamily(CutFamily::Clique,
+              [&](CutFamilyStats& s) { return separateClique(problem, primals, pool, s); });
+    runFamily(CutFamily::ZeroHalf,
+              [&](CutFamilyStats& s) { return separateZeroHalf(problem, primals, pool, s); });
+    runFamily(CutFamily::Mixing,
+              [&](CutFamilyStats& s) { return separateMixing(problem, primals, pool, s); });
+    runFamily(CutFamily::Cmir,
+              [&](CutFamilyStats& s) { return separateCmir(lp, problem, primals, pool, s); });
+    runFamily(CutFamily::StrongCg,
+              [&](CutFamilyStats& s) { return separateStrongCg(lp, problem, primals, pool, s); });
+    runFamily(CutFamily::LiftedCover,
+              [&](CutFamilyStats& s) { return separateLiftedCover(problem, primals, pool, s); });
+    runFamily(CutFamily::ModK,
+              [&](CutFamilyStats& s) { return separateModK(problem, primals, pool, s); });
     runFamily(CutFamily::IntersectionCut, [&](CutFamilyStats& s) {
         return separateIntersectionCut(lp, problem, primals, pool, s);
     });
-    runFamily(CutFamily::MultiRow, [&](CutFamilyStats& s) {
-        return separateMultiRow(lp, problem, primals, pool, s);
-    });
+    runFamily(CutFamily::MultiRow,
+              [&](CutFamilyStats& s) { return separateMultiRow(lp, problem, primals, pool, s); });
 
     return total_added;
 }
 
-Int SeparatorManager::separateGomory(DualSimplexSolver& lp,
-                                     const LpProblem& problem,
-                                     std::span<const Real> primals,
-                                     CutPool& pool,
+Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& problem,
+                                     std::span<const Real> primals, CutPool& pool,
                                      CutFamilyStats& stats) {
     gomory_.setMaxCuts(max_cuts_per_family_);
     gomory_.setMinViolation(min_violation_);
@@ -188,15 +221,17 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp,
     return accepted;
 }
 
-Int SeparatorManager::separateMir(const LpProblem& problem,
-                                  std::span<const Real> primals,
-                                  CutPool& pool,
-                                  CutFamilyStats& stats) {
+Int SeparatorManager::separateMir(const LpProblem& problem, std::span<const Real> primals,
+                                  CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs)) continue;
+        if (!std::isfinite(rhs)) {
+            continue;
+        }
         ++stats.attempted;
 
         auto row = problem.matrix.row(i);
@@ -213,14 +248,22 @@ Int SeparatorManager::separateMir(const LpProblem& problem,
                 valid = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (problem.col_type[j] == VarType::Continuous) {
+                continue;
+            }
             const Real rounded = std::floor(a + 1e-9);
-            if (rounded <= 0.0) continue;
-            if (rounded + 1e-9 < a) changed = true;
+            if (rounded <= 0.0) {
+                continue;
+            }
+            if (rounded + 1e-9 < a) {
+                changed = true;
+            }
             cut.indices.push_back(j);
             cut.values.push_back(rounded);
         }
-        if (!valid || !changed || cut.indices.empty()) continue;
+        if (!valid || !changed || cut.indices.empty()) {
+            continue;
+        }
         if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
             ++accepted;
         }
@@ -228,10 +271,8 @@ Int SeparatorManager::separateMir(const LpProblem& problem,
     return accepted;
 }
 
-Int SeparatorManager::separateCover(const LpProblem& problem,
-                                    std::span<const Real> primals,
-                                    CutPool& pool,
-                                    CutFamilyStats& stats) {
+Int SeparatorManager::separateCover(const LpProblem& problem, std::span<const Real> primals,
+                                    CutPool& pool, CutFamilyStats& stats) {
     struct Item {
         Index var;
         Real coeff;
@@ -239,9 +280,13 @@ Int SeparatorManager::separateCover(const LpProblem& problem,
 
     Int accepted = 0;
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs)) continue;
+        if (!std::isfinite(rhs)) {
+            continue;
+        }
         ++stats.attempted;
 
         auto row = problem.matrix.row(i);
@@ -259,10 +304,14 @@ Int SeparatorManager::separateCover(const LpProblem& problem,
                 items.push_back({j, a});
             }
         }
-        if (!valid || items.size() < 2) continue;
+        if (!valid || items.size() < 2) {
+            continue;
+        }
 
         std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-            if (a.coeff != b.coeff) return a.coeff > b.coeff;
+            if (a.coeff != b.coeff) {
+                return a.coeff > b.coeff;
+            }
             return a.var < b.var;
         });
 
@@ -272,14 +321,18 @@ Int SeparatorManager::separateCover(const LpProblem& problem,
         for (const auto& item : items) {
             cover.push_back(item);
             sum += item.coeff;
-            if (sum > rhs + 1e-9) break;
+            if (sum > rhs + 1e-9) {
+                break;
+            }
         }
-        if (sum <= rhs + 1e-9) continue;
+        if (sum <= rhs + 1e-9) {
+            continue;
+        }
 
         while (cover.size() > 1) {
-            auto min_it = std::min_element(
-                cover.begin(), cover.end(),
-                [](const Item& a, const Item& b) { return a.coeff < b.coeff; });
+            auto min_it =
+                std::min_element(cover.begin(), cover.end(),
+                                 [](const Item& a, const Item& b) { return a.coeff < b.coeff; });
             if (sum - min_it->coeff > rhs + 1e-9) {
                 sum -= min_it->coeff;
                 cover.erase(min_it);
@@ -315,15 +368,17 @@ Int SeparatorManager::separateCover(const LpProblem& problem,
     return accepted;
 }
 
-Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
-                                           std::span<const Real> primals,
-                                           CutPool& pool,
-                                           CutFamilyStats& stats) {
+Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<const Real> primals,
+                                           CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs) || rhs <= 0.0) continue;
+        if (!std::isfinite(rhs) || rhs <= 0.0) {
+            continue;
+        }
 
         auto row = problem.matrix.row(i);
         bool nonnegative = true;
@@ -333,24 +388,36 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
                 break;
             }
         }
-        if (!nonnegative) continue;
+        if (!nonnegative) {
+            continue;
+        }
 
         for (Index px = 0; px < row.size() && accepted < max_cuts_per_family_; ++px) {
             const Index x = row.indices[px];
             const Real ax = row.values[px];
-            if (ax <= 1e-9 || problem.col_type[x] == VarType::Binary) continue;
+            if (ax <= 1e-9 || problem.col_type[x] == VarType::Binary) {
+                continue;
+            }
 
             for (Index py = 0; py < row.size() && accepted < max_cuts_per_family_; ++py) {
-                if (px == py) continue;
+                if (px == py) {
+                    continue;
+                }
                 const Index y = row.indices[py];
                 const Real ay = row.values[py];
-                if (problem.col_type[y] != VarType::Binary || ay <= 1e-9) continue;
+                if (problem.col_type[y] != VarType::Binary || ay <= 1e-9) {
+                    continue;
+                }
                 ++stats.attempted;
 
                 const Real ub0 = rhs / ax;
                 const Real ub1 = (rhs - ay) / ax;
-                if (!std::isfinite(ub0) || !std::isfinite(ub1)) continue;
-                if (ub1 >= ub0 - 1e-9) continue;
+                if (!std::isfinite(ub0) || !std::isfinite(ub1)) {
+                    continue;
+                }
+                if (ub1 >= ub0 - 1e-9) {
+                    continue;
+                }
 
                 Cut cut;
                 cut.family = CutFamily::ImpliedBound;
@@ -373,14 +440,21 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
     // Generate implied-bound cuts from probing-derived VUBs/VLBs.
     if (vb_store_ != nullptr) {
         for (Index j = 0; j < problem.num_cols && accepted < max_cuts_per_family_; ++j) {
-            if (problem.col_type[j] == VarType::Binary) continue;
+            if (problem.col_type[j] == VarType::Binary) {
+                continue;
+            }
 
             // VUB cuts: x_j <= a*y + b translates to x_j - a*y <= b.
             for (const auto& vub : vb_store_->vubs(j)) {
-                if (accepted >= max_cuts_per_family_) break;
-                if (vub.binary_var < 0 ||
-                    vub.binary_var >= static_cast<Index>(primals.size())) continue;
-                if (std::abs(vub.coeff) < 1e-10) continue;
+                if (accepted >= max_cuts_per_family_) {
+                    break;
+                }
+                if (vub.binary_var < 0 || vub.binary_var >= static_cast<Index>(primals.size())) {
+                    continue;
+                }
+                if (std::abs(vub.coeff) < 1e-10) {
+                    continue;
+                }
                 ++stats.attempted;
 
                 Cut cut;
@@ -401,10 +475,15 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
 
             // VLB cuts: x_j >= a*y + b translates to -x_j + a*y <= -b.
             for (const auto& vlb : vb_store_->vlbs(j)) {
-                if (accepted >= max_cuts_per_family_) break;
-                if (vlb.binary_var < 0 ||
-                    vlb.binary_var >= static_cast<Index>(primals.size())) continue;
-                if (std::abs(vlb.coeff) < 1e-10) continue;
+                if (accepted >= max_cuts_per_family_) {
+                    break;
+                }
+                if (vlb.binary_var < 0 || vlb.binary_var >= static_cast<Index>(primals.size())) {
+                    continue;
+                }
+                if (std::abs(vlb.coeff) < 1e-10) {
+                    continue;
+                }
                 ++stats.attempted;
 
                 Cut cut;
@@ -428,17 +507,19 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem,
     return accepted;
 }
 
-Int SeparatorManager::separateClique(const LpProblem& problem,
-                                     std::span<const Real> primals,
-                                     CutPool& pool,
-                                     CutFamilyStats& stats) {
+Int SeparatorManager::separateClique(const LpProblem& problem, std::span<const Real> primals,
+                                     CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     std::unordered_set<std::uint64_t> seen_pairs;
 
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs) || rhs <= 0.0) continue;
+        if (!std::isfinite(rhs) || rhs <= 0.0) {
+            continue;
+        }
 
         auto row = problem.matrix.row(i);
         std::vector<std::pair<Index, Real>> binaries;
@@ -455,25 +536,31 @@ Int SeparatorManager::separateClique(const LpProblem& problem,
                 binaries.push_back({j, a});
             }
         }
-        if (!nonnegative || binaries.size() < 2) continue;
+        if (!nonnegative || binaries.size() < 2) {
+            continue;
+        }
 
-        for (Index p = 0; p < static_cast<Index>(binaries.size()) &&
-                         accepted < max_cuts_per_family_; ++p) {
-            for (Index q = p + 1; q < static_cast<Index>(binaries.size()) &&
-                                accepted < max_cuts_per_family_; ++q) {
+        for (Index p = 0;
+             p < static_cast<Index>(binaries.size()) && accepted < max_cuts_per_family_; ++p) {
+            for (Index q = p + 1;
+                 q < static_cast<Index>(binaries.size()) && accepted < max_cuts_per_family_; ++q) {
                 ++stats.attempted;
                 const Index a = binaries[p].first;
                 const Index b = binaries[q].first;
                 const Real ca = binaries[p].second;
                 const Real cb = binaries[q].second;
-                if (ca + cb <= rhs + 1e-9) continue;
+                if (ca + cb <= rhs + 1e-9) {
+                    continue;
+                }
 
                 const Index lo = std::min(a, b);
                 const Index hi = std::max(a, b);
                 const std::uint64_t key =
                     (static_cast<std::uint64_t>(static_cast<std::uint32_t>(lo)) << 32U) |
                     static_cast<std::uint32_t>(hi);
-                if (!seen_pairs.insert(key).second) continue;
+                if (!seen_pairs.insert(key).second) {
+                    continue;
+                }
 
                 Cut cut;
                 cut.family = CutFamily::Clique;
@@ -487,18 +574,53 @@ Int SeparatorManager::separateClique(const LpProblem& problem,
             }
         }
     }
+
+    accepted += separateCliqueTableCover(problem, primals, pool, stats, accepted);
     return accepted;
 }
 
-Int SeparatorManager::separateZeroHalf(const LpProblem& problem,
-                                       std::span<const Real> primals,
-                                       CutPool& pool,
-                                       CutFamilyStats& stats) {
+Int SeparatorManager::separateCliqueTableCover(const LpProblem& problem,
+                                               std::span<const Real> primals, CutPool& pool,
+                                               CutFamilyStats& stats, Int already_accepted) {
+    if (clique_table_ == nullptr) {
+        return 0;
+    }
+    const Int budget = max_cuts_per_family_ - already_accepted;
+    if (budget <= 0) {
+        return 0;
+    }
+
+    // The table generates maximal-clique inequalities into a scratch pool so
+    // that acceptance, efficacy and family statistics still flow through the
+    // manager's common addViolatedCut path.
+    CutPool scratch;
+    clique_table_->separateCliqueCover(problem, primals, scratch, min_violation_, budget);
+    // Charge only the candidates actually produced, not every clique in the
+    // table. Counting the whole table would push the family past CutManager's
+    // demotion threshold after a single round on any table of a few cliques.
+    stats.attempted += static_cast<Int>(scratch.size());
+
+    Int accepted = 0;
+    for (Index k = 0; k < scratch.size() && accepted < budget; ++k) {
+        Cut cut = scratch[k];
+        if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
+            ++accepted;
+        }
+    }
+    return accepted;
+}
+
+Int SeparatorManager::separateZeroHalf(const LpProblem& problem, std::span<const Real> primals,
+                                       CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs) || rhs <= 0.0) continue;
+        if (!std::isfinite(rhs) || rhs <= 0.0) {
+            continue;
+        }
         ++stats.attempted;
 
         auto row = problem.matrix.row(i);
@@ -515,14 +637,22 @@ Int SeparatorManager::separateZeroHalf(const LpProblem& problem,
                 valid = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (problem.col_type[j] == VarType::Continuous) {
+                continue;
+            }
             const Real rounded = std::floor(0.5 * a + 1e-9);
-            if (rounded <= 0.0) continue;
-            if (rounded + 1e-9 < a) changed = true;
+            if (rounded <= 0.0) {
+                continue;
+            }
+            if (rounded + 1e-9 < a) {
+                changed = true;
+            }
             cut.indices.push_back(j);
             cut.values.push_back(rounded);
         }
-        if (!valid || !changed || cut.indices.empty()) continue;
+        if (!valid || !changed || cut.indices.empty()) {
+            continue;
+        }
         if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
             ++accepted;
         }
@@ -530,16 +660,18 @@ Int SeparatorManager::separateZeroHalf(const LpProblem& problem,
     return accepted;
 }
 
-Int SeparatorManager::separateMixing(const LpProblem& problem,
-                                     std::span<const Real> primals,
-                                     CutPool& pool,
-                                     CutFamilyStats& stats) {
+Int SeparatorManager::separateMixing(const LpProblem& problem, std::span<const Real> primals,
+                                     CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     constexpr Real kScale = 1.0 / 3.0;
     for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
-        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) continue;
+        if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
+            continue;
+        }
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs) || rhs <= 0.0) continue;
+        if (!std::isfinite(rhs) || rhs <= 0.0) {
+            continue;
+        }
         ++stats.attempted;
 
         auto row = problem.matrix.row(i);
@@ -556,14 +688,22 @@ Int SeparatorManager::separateMixing(const LpProblem& problem,
                 valid = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Continuous) continue;
+            if (problem.col_type[j] == VarType::Continuous) {
+                continue;
+            }
             const Real rounded = std::floor(kScale * a + 1e-9);
-            if (rounded <= 0.0) continue;
-            if (rounded + 1e-9 < a) changed = true;
+            if (rounded <= 0.0) {
+                continue;
+            }
+            if (rounded + 1e-9 < a) {
+                changed = true;
+            }
             cut.indices.push_back(j);
             cut.values.push_back(rounded);
         }
-        if (!valid || !changed || cut.indices.empty()) continue;
+        if (!valid || !changed || cut.indices.empty()) {
+            continue;
+        }
         if (addViolatedCut(std::move(cut), primals, pool, stats, min_violation_)) {
             ++accepted;
         }

@@ -168,6 +168,70 @@ static LpProblem buildFractionalSingleIntMip() {
     return lp;
 }
 
+// ---------------------------------------------------------------------------
+// Helper: set-packing MIP whose first row is a clique x1 + x2 + x3 <= 1.
+// min -3x1 - 3x2 - x3 - x4  s.t. x1 + x2 + x3 <= 1, x4 <= 1, all binary.
+// Rounding the LP point (0.5, 0.5, 0, *) to nearest would set two members of
+// the clique to 1 and violate the packing row.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildCliquePackingMip() {
+    LpProblem lp;
+    lp.name = "clique_packing";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-3.0, -3.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary,
+                   VarType::Binary};
+    lp.col_names = {"x1", "x2", "x3", "x4"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1.0, 1.0};
+    lp.row_names = {"pack", "cap_x4"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+        {1, 3, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: MIP with two overlapping cliques sharing x1.
+// min -3x1 - 3x2 - x3 - x4
+// s.t. x1 + x2 + x3 <= 1, x1 + x4 <= 1, all binary.
+// Picking x1 for the first clique must force x4 to 0 in the second.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildOverlappingCliqueMip() {
+    LpProblem lp;
+    lp.name = "overlapping_cliques";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-3.0, -3.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary,
+                   VarType::Binary};
+    lp.col_names = {"x1", "x2", "x3", "x4"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {1.0, 1.0};
+    lp.row_names = {"pack1", "pack2"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+        {1, 0, 1.0}, {1, 3, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+    return lp;
+}
+
 // ===========================================================================
 // Rounding tests
 // ===========================================================================
@@ -1103,6 +1167,148 @@ TEST_CASE("ZiRoundingHeuristic: solution is feasible when returned", "[heuristic
 }
 
 // ===========================================================================
+// Clique rounding tests
+// ===========================================================================
+
+TEST_CASE("CliqueRoundingHeuristic: finds feasible on easy MIP", "[heuristics]") {
+    auto problem = buildCliquePackingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    CliqueRoundingHeuristic clique_rounding;
+    auto result = clique_rounding.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(clique_rounding.lastCliqueCount() >= 1);
+    CHECK(isFeasible(problem, result->values));
+}
+
+// Building the conflict graph and clique table is superlinear in the binary
+// count, so the heuristic refuses models above its cap instead of stalling the
+// root portfolio. Uses a set-packing row, the shape that makes the graph dense.
+TEST_CASE("CliqueRoundingHeuristic: skips models above the binary cap", "[heuristics]") {
+    constexpr Index n = 400;
+    LpProblem problem;
+    problem.name = "wide_set_packing";
+    problem.sense = Sense::Minimize;
+    problem.num_cols = n;
+    problem.obj.assign(n, -1.0);
+    problem.col_lower.assign(n, 0.0);
+    problem.col_upper.assign(n, 1.0);
+    problem.col_type.assign(n, VarType::Binary);
+    problem.num_rows = 1;
+    problem.row_lower = {-kInf};
+    problem.row_upper = {1.0};
+    std::vector<Triplet> trips;
+    trips.reserve(n);
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({0, j, 1.0});
+    }
+    problem.matrix = SparseMatrix(1, n, std::move(trips));
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    CliqueRoundingHeuristic clique_rounding;
+    clique_rounding.setMaxBinaries(n - 1);
+    CHECK_FALSE(clique_rounding.run(problem, lp, primals, kInf).has_value());
+    CHECK(clique_rounding.lastRunSkippedTooLarge());
+    CHECK(clique_rounding.lastCliqueCount() == 0);
+
+    // Under the cap the same model is processed normally.
+    clique_rounding.setMaxBinaries(n);
+    clique_rounding.run(problem, lp, primals, kInf);
+    CHECK_FALSE(clique_rounding.lastRunSkippedTooLarge());
+    CHECK(clique_rounding.lastCliqueCount() >= 1);
+}
+
+TEST_CASE("CliqueRoundingHeuristic: solution is feasible when returned",
+          "[heuristics]") {
+    SECTION("knapsack row carries no clique structure") {
+        auto problem = buildKnapsack();
+
+        DualSimplexSolver lp;
+        lp.load(problem);
+        lp.solve();
+        auto primals = lp.getPrimalValues();
+
+        CliqueRoundingHeuristic clique_rounding;
+        auto result = clique_rounding.run(problem, lp, primals, kInf);
+
+        // No pair of knapsack coefficients exceeds the capacity, so there is
+        // no clique to exploit and the heuristic declines.
+        CHECK(clique_rounding.lastCliqueCount() == 0);
+        CHECK(!result.has_value());
+    }
+
+    SECTION("overlapping cliques stay consistent") {
+        auto problem = buildOverlappingCliqueMip();
+
+        DualSimplexSolver lp;
+        lp.load(problem);
+        lp.solve();
+
+        // x1 wins the first clique, which must then drive x4 out of the
+        // second one even though its LP value is high.
+        std::vector<Real> primals = {0.6, 0.4, 0.0, 0.7};
+
+        CliqueRoundingHeuristic clique_rounding;
+        auto result = clique_rounding.run(problem, lp, primals, kInf);
+
+        REQUIRE(result.has_value());
+        CHECK(clique_rounding.lastCliqueCount() >= 2);
+        CHECK(isFeasible(problem, result->values));
+        CHECK(result->values[0] + result->values[3] <= 1.0 + 1e-6);
+    }
+}
+
+TEST_CASE("CliqueRoundingHeuristic: respects incumbent cutoff", "[heuristics]") {
+    auto problem = buildCliquePackingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+    auto primals = lp.getPrimalValues();
+
+    CliqueRoundingHeuristic clique_rounding;
+    auto result = clique_rounding.run(problem, lp, primals, -100.0);
+    CHECK(!result.has_value());
+}
+
+TEST_CASE("CliqueRoundingHeuristic: never rounds two clique members to 1",
+          "[heuristics]") {
+    auto problem = buildCliquePackingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    lp.solve();
+
+    // Hand-built fractional point: rounding x1 and x2 to nearest would put two
+    // members of the packing clique at 1.
+    std::vector<Real> primals = {0.5, 0.5, 0.0, 0.9};
+
+    CliqueRoundingHeuristic clique_rounding;
+    auto result = clique_rounding.run(problem, lp, primals, kInf);
+
+    REQUIRE(result.has_value());
+    CHECK(clique_rounding.lastCliqueCount() >= 1);
+    CHECK(isFeasible(problem, result->values));
+
+    Int ones = 0;
+    for (Index j = 0; j < 3; ++j) {
+        if (result->values[j] > 0.5) ++ones;
+    }
+    CHECK(ones <= 1);
+}
+
+// ===========================================================================
 // Shifting tests
 // ===========================================================================
 
@@ -1335,4 +1541,87 @@ TEST_CASE("TwoOptHeuristic: requires incumbent", "[heuristics]") {
     TwoOptHeuristic twoopt;
     auto result = twoopt.run(problem, lp, primals, kInf);
     CHECK(!result.has_value());
+}
+
+// ===========================================================================
+// Root portfolio wiring
+// ===========================================================================
+
+// Pins the wiring of runRootPortfolio: every heuristic in the root portfolio
+// must actually be invoked. Without this the per-heuristic call counters are
+// asserted nowhere and a heuristic could silently drop out of the portfolio.
+TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic",
+          "[heuristics]") {
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    Int root_int_inf = 0;
+    Int root_int_vars = 0;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        if (problem.col_type[j] == VarType::Continuous) continue;
+        ++root_int_vars;
+        if (!isIntegral(primals[j], 1e-6)) ++root_int_inf;
+    }
+    REQUIRE(root_int_inf > 0);
+
+    HeuristicRuntimeConfig config;
+    HeuristicRuntime runtime(config);
+
+    // A large reported total work budget keeps the deterministic budget
+    // manager from gating the later portfolio entries; the point of this test
+    // is the wiring, not the budget policy (which budget tests cover).
+    RootHeuristicContext ctx{
+        .problem = problem,
+        .lp = lp,
+        .primals = primals,
+        .root_int_inf = root_int_inf,
+        .root_int_vars = root_int_vars,
+        .node_count = 0,
+        .thread_id = 0,
+        .total_work_units = 1.0e6,
+        .solution_pool = nullptr,
+    };
+
+    SECTION("heuristics that need no incumbent all run") {
+        Real incumbent = kInf;
+        std::vector<Real> best_solution;
+        const auto out = runtime.runRootPortfolio(ctx, incumbent, best_solution);
+
+        CHECK(out.zirounding_calls >= 1);
+        CHECK(out.shifting_calls >= 1);
+        CHECK(out.randrounding_calls >= 1);
+        CHECK(out.propcompletion_calls >= 1);
+        CHECK(out.cliquerounding_calls >= 1);
+        CHECK(out.feasjump_calls >= 1);
+        CHECK(out.undercover_calls >= 1);
+        CHECK(out.reducedcost_calls >= 1);
+
+        if (incumbent < kInf) {
+            REQUIRE(!best_solution.empty());
+            CHECK(isFeasible(problem, best_solution));
+        }
+    }
+
+    SECTION("incumbent-driven heuristics run once a solution is seeded") {
+        // Suboptimal but feasible knapsack point: 3*1 <= 5, obj = -6.
+        std::vector<Real> best_solution = {1.0, 0.0, 0.0};
+        REQUIRE(isFeasible(problem, best_solution));
+        Real incumbent = -6.0;
+
+        const auto out = runtime.runRootPortfolio(ctx, incumbent, best_solution);
+
+        CHECK(out.crossover_calls >= 1);
+        CHECK(out.proximity_calls >= 1);
+        CHECK(out.oneopt_calls >= 1);
+        CHECK(out.twoopt_calls >= 1);
+
+        REQUIRE(incumbent < kInf);
+        REQUIRE(!best_solution.empty());
+        CHECK(isFeasible(problem, best_solution));
+    }
 }

@@ -1,3 +1,5 @@
+#include "mipx/clique_table.h"
+#include "mipx/conflict_graph.h"
 #include "mipx/cut_pool.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
@@ -195,6 +197,33 @@ static LpProblem buildFractionalMip() {
     return lp;
 }
 
+// min -x -y -z  s.t. x + y <= 1, y + z <= 1, x + z <= 1, all binary.
+// Every pair conflicts, so x + y + z <= 1 is valid, but no single row implies
+// it. The LP relaxation optimum is the unique fractional point (.5, .5, .5),
+// where each pairwise inequality is tight and therefore not separable.
+static LpProblem buildTriangleCliqueMip() {
+    LpProblem lp;
+    lp.name = "triangle_clique";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {1.0, 1.0, 1.0};
+    lp.row_names = {"xy", "yz", "xz"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}, {2, 0, 1.0}, {2, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(3, 3, std::move(trips));
+    return lp;
+}
+
 // min -x1 -x2 -x3  s.t. x1 + x2 + x3 <= 1.5, x binary
 // LP optimum is fractional (sum 1.5), good for cover/clique separation tests.
 static LpProblem buildBinaryConflictMip() {
@@ -374,6 +403,90 @@ TEST_CASE("SeparatorManager: clique family generates conflict cuts", "[cuts][fam
     for (Index i = 0; i < pool.size(); ++i) {
         CHECK(pool[i].family == CutFamily::Clique);
     }
+}
+
+static CutFamilyConfig cliqueOnlyConfig() {
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.mir = false;
+    config.cover = false;
+    config.implied_bound = false;
+    config.clique = true;
+    config.zero_half = false;
+    config.mixing = false;
+    config.cmir = false;
+    config.strong_cg = false;
+    config.lifted_cover = false;
+    config.mod_k = false;
+    config.intersection_cut = false;
+    config.multi_row = false;
+    return config;
+}
+
+TEST_CASE("SeparatorManager: clique table separates maximal clique cuts", "[cuts][clique]") {
+    auto problem = buildTriangleCliqueMip();
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+    REQUIRE(primals.size() == 3);
+    for (Index j = 0; j < 3; ++j) {
+        CHECK_THAT(primals[j], WithinAbs(0.5, 1e-9));
+    }
+
+    const CutFamilyConfig config = cliqueOnlyConfig();
+
+    // Without a clique table the pairwise row scan only reproduces the rows,
+    // which are tight at the LP optimum, so nothing is violated.
+    {
+        CutPool pool;
+        SeparatorManager manager;
+        manager.setConfig(config);
+        manager.setMaxCutsPerFamily(10);
+        CutSeparationStats stats;
+        CHECK(manager.separate(lp, problem, primals, pool, stats) == 0);
+        CHECK(pool.size() == 0);
+    }
+
+    ConflictGraph graph;
+    graph.build(problem);
+    REQUIRE(graph.numEdges() == 3);
+
+    CliqueTable table;
+    table.build(problem, graph);
+    REQUIRE(table.numCliques() >= 1);
+
+    CutPool pool;
+    SeparatorManager manager;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+    manager.setCliqueTable(&table);
+
+    CutSeparationStats stats;
+    const Int cuts = manager.separate(lp, problem, primals, pool, stats);
+    REQUIRE(cuts >= 1);
+    CHECK(stats.at(CutFamily::Clique).accepted == cuts);
+    CHECK(stats.at(CutFamily::Clique).generated >= 1);
+    CHECK(stats.at(CutFamily::Clique).efficacy_sum > 0.0);
+
+    bool found_triangle_cut = false;
+    for (Index i = 0; i < pool.size(); ++i) {
+        const auto& cut = pool[i];
+        CHECK(cut.family == CutFamily::Clique);
+        if (cut.indices.size() != 3) {
+            continue;
+        }
+        found_triangle_cut = true;
+        CHECK(cut.indices == std::vector<Index>{0, 1, 2});
+        for (Real v : cut.values) {
+            CHECK_THAT(v, WithinAbs(1.0, 1e-12));
+        }
+        CHECK_THAT(cut.upper, WithinAbs(1.0, 1e-12));
+    }
+    CHECK(found_triangle_cut);
 }
 
 TEST_CASE("SeparatorManager: MIR family generates rounding cuts", "[cuts][families]") {
@@ -569,9 +682,8 @@ LpProblem buildCmirValidityMip() {
     lp.obj_offset = -2.0;
     lp.col_lower = {0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 3.0};
     lp.col_upper = {1.0, 1.0, 1.0, 1.0, 10.0, 6.0, 8.8};
-    lp.col_type = {VarType::Binary,     VarType::Binary,     VarType::Binary,
-                   VarType::Binary,     VarType::Continuous, VarType::Continuous,
-                   VarType::Continuous};
+    lp.col_type = {VarType::Binary,     VarType::Binary,     VarType::Binary,    VarType::Binary,
+                   VarType::Continuous, VarType::Continuous, VarType::Continuous};
     lp.col_names = {"c0", "c1", "c2", "c3", "c4", "c5", "c6"};
 
     lp.row_lower = {-18.0, -kInf, 4.0, -kInf, 15.0};

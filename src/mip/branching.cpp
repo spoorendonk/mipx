@@ -6,6 +6,14 @@
 
 namespace mipx {
 
+namespace {
+
+/// Integrality tolerance used when deciding which variables contribute to the
+/// pseudocost node estimate. Matches the branching/LP integrality tolerance.
+constexpr Real kPseudocostEstimateIntTol = 1e-6;
+
+}  // namespace
+
 Index MostFractionalBranching::select(
     std::span<const Real> primal_values,
     std::span<const VarType> var_types,
@@ -306,6 +314,38 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
         ++telemetry.pseudocost_uses;
     }
     return selection;
+}
+
+Real pseudocostNodeEstimate(const ReliabilityBranching& rule, const LpProblem& problem,
+                            std::span<const Real> primal_values, Real lp_bound) {
+    if (!std::isfinite(lp_bound)) {
+        return lp_bound;
+    }
+    // Bound by col_type too: this is a public free function, so callers are
+    // not guaranteed to hold MipSolver's num_cols == col_type.size() invariant.
+    const Index n = std::min<Index>({problem.num_cols, static_cast<Index>(primal_values.size()),
+                                     static_cast<Index>(problem.col_type.size())});
+    Real penalty = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        if (problem.col_type[j] == VarType::Continuous) {
+            continue;
+        }
+        const Real value = primal_values[j];
+        if (!std::isfinite(value)) {
+            continue;
+        }
+        const Real frac = value - std::floor(value);
+        if (frac <= kPseudocostEstimateIntTol || frac >= 1.0 - kPseudocostEstimateIntTol) {
+            continue;
+        }
+        const Real down_gain = frac * rule.downPseudoCost(j);
+        const Real up_gain = (1.0 - frac) * rule.upPseudoCost(j);
+        const Real gain = std::min(down_gain, up_gain);
+        if (std::isfinite(gain) && gain > 0.0) {
+            penalty += gain;
+        }
+    }
+    return lp_bound + penalty;
 }
 
 std::pair<BnbNode, BnbNode> createChildren(BnbNode parent,

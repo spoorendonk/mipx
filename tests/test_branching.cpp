@@ -308,3 +308,44 @@ TEST_CASE("Symmetry detection enforces canonical branching", "[branching][symmet
                                       telemetry);
     CHECK(selection.variable == 0);
 }
+
+TEST_CASE("pseudocostNodeEstimate matches the hand-computed sum", "[branching][search]") {
+    LpProblem problem;
+    problem.num_cols = 3;
+    problem.col_type = {VarType::Integer, VarType::Binary, VarType::Continuous};
+    problem.col_lower = {0.0, 0.0, 0.0};
+    problem.col_upper = {10.0, 1.0, 10.0};
+
+    ReliabilityBranching rule;
+    rule.reset(problem.num_cols);
+    rule.setPseudocostFallback(3.0);
+    rule.updatePseudoCost(0, /*up_direction=*/false, 2.0);  // down cost of x0 = 2
+    rule.updatePseudoCost(1, /*up_direction=*/true, 4.0);   // up cost of x1 = 4
+
+    // x0 = 1.25: min(0.25 * 2.0, 0.75 * 3.0) = 0.5   (up unobserved -> fallback)
+    // x1 = 0.50: min(0.50 * 3.0, 0.50 * 4.0) = 1.5   (down unobserved -> fallback)
+    // x2 continuous -> skipped.
+    const std::vector<Real> primals = {1.25, 0.5, 0.75};
+    const Real estimate = pseudocostNodeEstimate(rule, problem, primals, 10.0);
+    CHECK_THAT(estimate, Catch::Matchers::WithinAbs(12.0, 1e-12));
+}
+
+TEST_CASE("pseudocostNodeEstimate is the LP bound without fractional variables",
+          "[branching][search]") {
+    LpProblem problem;
+    problem.num_cols = 2;
+    problem.col_type = {VarType::Integer, VarType::Continuous};
+    problem.col_lower = {0.0, 0.0};
+    problem.col_upper = {10.0, 10.0};
+
+    ReliabilityBranching rule;
+    rule.reset(problem.num_cols);
+
+    const std::vector<Real> primals = {3.0, 1.5};
+    CHECK_THAT(pseudocostNodeEstimate(rule, problem, primals, -7.5),
+               Catch::Matchers::WithinAbs(-7.5, 1e-12));
+
+    // A non-finite LP bound is passed through untouched (no NaN arithmetic).
+    const std::vector<Real> fractional = {3.5, 1.5};
+    CHECK(pseudocostNodeEstimate(rule, problem, fractional, -kInf) == -kInf);
+}

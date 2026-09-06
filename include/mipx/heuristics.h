@@ -534,6 +534,39 @@ public:
     [[nodiscard]] const char* name() const override { return "zirounding"; }
 };
 
+/// Clique-based rounding: round binary variables using the clique table so
+/// that at most one member of any clique is set to 1, then round the
+/// remaining integer variables to nearest.
+class CliqueRoundingHeuristic : public Heuristic {
+public:
+    std::optional<HeuristicSolution> run(
+        const LpProblem& problem,
+        DualSimplexSolver& lp,
+        std::span<const Real> primals,
+        Real incumbent) override;
+
+    /// Number of cliques in the table built by the last run() call.
+    [[nodiscard]] Int lastCliqueCount() const { return last_clique_count_; }
+
+    /// Skip the run above this many binary columns. Building the conflict
+    /// graph and clique table is superlinear in the binary count (measured
+    /// ~16s and 133MB at 4000 binaries), so this bounds the cost the same way
+    /// MipSolver::setCliqueMaxBinaries bounds the root build.
+    void setMaxBinaries(Int value) { max_binaries_ = std::max<Int>(0, value); }
+    [[nodiscard]] Int getMaxBinaries() const { return max_binaries_; }
+
+    /// True when the last run() was skipped because the model had more binary
+    /// columns than the cap.
+    [[nodiscard]] bool lastRunSkippedTooLarge() const { return skipped_too_large_; }
+
+    [[nodiscard]] const char* name() const override { return "cliquerounding"; }
+
+private:
+    Int last_clique_count_ = 0;
+    Int max_binaries_ = 2000;
+    bool skipped_too_large_ = false;
+};
+
 /// Shifting heuristic: fix violated constraints by shifting variable values
 /// along feasible directions.
 class ShiftingHeuristic : public Heuristic {

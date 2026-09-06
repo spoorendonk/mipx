@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include "mipx/clique_table.h"
+#include "mipx/conflict_graph.h"
 #include "mipx/domain.h"
 
 using namespace mipx;
@@ -207,4 +209,58 @@ TEST_CASE("Domain: binary variable fixing", "[domain]") {
     REQUIRE(dp.propagate());
     CHECK_THAT(dp.getLower(0), WithinAbs(1.0, 1e-7));
     CHECK_THAT(dp.getLower(1), WithinAbs(1.0, 1e-7));
+}
+
+// A clique that no single row implies: the row x + y + z <= 2 creates no
+// pairwise conflict, so row propagation alone learns nothing when x is fixed
+// to 1. The conflict graph is given the three edges explicitly, which makes
+// {x, y, z} a maximal clique, and clique propagation must then force y = z = 0.
+// Without this, DomainPropagator + CliqueTable had no end-to-end coverage.
+TEST_CASE("DomainPropagator: clique table infers fixings rows cannot", "[domain][clique]") {
+    LpProblem problem;
+    problem.name = "loose_row_triangle";
+    problem.sense = Sense::Minimize;
+    problem.num_cols = 3;
+    problem.obj = {-1.0, -1.0, -1.0};
+    problem.col_lower = {0.0, 0.0, 0.0};
+    problem.col_upper = {1.0, 1.0, 1.0};
+    problem.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    problem.col_names = {"x", "y", "z"};
+    problem.num_rows = 1;
+    problem.row_lower = {-kInf};
+    problem.row_upper = {2.0};
+    problem.row_names = {"loose"};
+    problem.matrix = SparseMatrix(1, 3, {{0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}});
+
+    SECTION("row propagation alone cannot fix y or z") {
+        DomainPropagator dp;
+        dp.load(problem);
+        dp.setBound(0, 1.0, 1.0);  // x branched to 1
+        REQUIRE(dp.propagate());
+        CHECK_THAT(dp.getUpper(1), WithinAbs(1.0, 1e-7));
+        CHECK_THAT(dp.getUpper(2), WithinAbs(1.0, 1e-7));
+    }
+
+    SECTION("clique propagation fixes both") {
+        ConflictGraph graph;
+        graph.build(problem);
+        REQUIRE(graph.numEdges() == 0);  // the loose row implies nothing
+        graph.addConflict({0, false}, {1, false});
+        graph.addConflict({1, false}, {2, false});
+        graph.addConflict({0, false}, {2, false});
+        REQUIRE(graph.numEdges() == 3);
+
+        CliqueTable table;
+        table.build(problem, graph);
+        REQUIRE(table.numCliques() >= 1);
+
+        DomainPropagator dp;
+        dp.load(problem);
+        dp.setCliqueTable(&table);
+        dp.setBound(0, 1.0, 1.0);  // x branched to 1
+        REQUIRE(dp.propagate());
+        CHECK_THAT(dp.getUpper(1), WithinAbs(0.0, 1e-7));
+        CHECK_THAT(dp.getUpper(2), WithinAbs(0.0, 1e-7));
+        CHECK(dp.numTightened() >= 2);
+    }
 }

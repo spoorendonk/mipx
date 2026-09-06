@@ -1,16 +1,17 @@
 #pragma once
 
-#include <array>
-#include <span>
-
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
 #include "mipx/lp_problem.h"
 
+#include <array>
+#include <span>
+
 namespace mipx {
 
+class CliqueTable;
 class VariableBoundStore;
 
 struct CutFamilyStats {
@@ -56,71 +57,47 @@ public:
     void setMaxCutsPerFamily(Int value) { max_cuts_per_family_ = std::max<Int>(1, value); }
     void setMinViolation(Real value) { min_violation_ = std::max<Real>(1e-8, value); }
     void setVariableBoundStore(const VariableBoundStore* store) { vb_store_ = store; }
+    /// Attach a persistent clique table. When set, the clique family also
+    /// separates maximal-clique inequalities from the table in addition to the
+    /// pairwise row scan. The table must outlive the manager.
+    void setCliqueTable(const CliqueTable* table) { clique_table_ = table; }
 
-    Int separate(DualSimplexSolver& lp,
-                 const LpProblem& problem,
-                 std::span<const Real> primals,
-                 CutPool& pool,
-                 CutSeparationStats& stats);
+    Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
+                 CutPool& pool, CutSeparationStats& stats);
 
 private:
-    Int separateGomory(DualSimplexSolver& lp,
-                       const LpProblem& problem,
-                       std::span<const Real> primals,
-                       CutPool& pool,
-                       CutFamilyStats& stats);
-    Int separateMir(const LpProblem& problem,
-                    std::span<const Real> primals,
-                    CutPool& pool,
+    Int separateGomory(DualSimplexSolver& lp, const LpProblem& problem,
+                       std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats);
+    Int separateMir(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                     CutFamilyStats& stats);
-    Int separateCover(const LpProblem& problem,
-                      std::span<const Real> primals,
-                      CutPool& pool,
+    Int separateCover(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                       CutFamilyStats& stats);
-    Int separateImpliedBound(const LpProblem& problem,
-                             std::span<const Real> primals,
-                             CutPool& pool,
+    Int separateImpliedBound(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                              CutFamilyStats& stats);
-    Int separateClique(const LpProblem& problem,
-                       std::span<const Real> primals,
-                       CutPool& pool,
+    Int separateClique(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                        CutFamilyStats& stats);
-    Int separateZeroHalf(const LpProblem& problem,
-                         std::span<const Real> primals,
-                         CutPool& pool,
+    /// Separate maximal-clique inequalities held in the attached clique table.
+    /// @param already_accepted  cuts the pairwise scan already took from the
+    ///                          per-family budget.
+    Int separateCliqueTableCover(const LpProblem& problem, std::span<const Real> primals,
+                                 CutPool& pool, CutFamilyStats& stats, Int already_accepted);
+    Int separateZeroHalf(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                          CutFamilyStats& stats);
-    Int separateMixing(const LpProblem& problem,
-                       std::span<const Real> primals,
-                       CutPool& pool,
+    Int separateMixing(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                        CutFamilyStats& stats);
-    Int separateCmir(DualSimplexSolver& lp,
-                     const LpProblem& problem,
-                     std::span<const Real> primals,
-                     CutPool& pool,
-                     CutFamilyStats& stats);
-    Int separateStrongCg(DualSimplexSolver& lp,
-                         const LpProblem& problem,
-                         std::span<const Real> primals,
-                         CutPool& pool,
-                         CutFamilyStats& stats);
-    Int separateLiftedCover(const LpProblem& problem,
-                            std::span<const Real> primals,
-                            CutPool& pool,
+    Int separateCmir(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
+                     CutPool& pool, CutFamilyStats& stats);
+    Int separateStrongCg(DualSimplexSolver& lp, const LpProblem& problem,
+                         std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats);
+    Int separateLiftedCover(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                             CutFamilyStats& stats);
-    Int separateModK(const LpProblem& problem,
-                     std::span<const Real> primals,
-                     CutPool& pool,
+    Int separateModK(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
                      CutFamilyStats& stats);
-    Int separateIntersectionCut(DualSimplexSolver& lp,
-                                const LpProblem& problem,
-                                std::span<const Real> primals,
-                                CutPool& pool,
+    Int separateIntersectionCut(DualSimplexSolver& lp, const LpProblem& problem,
+                                std::span<const Real> primals, CutPool& pool,
                                 CutFamilyStats& stats);
-    Int separateMultiRow(DualSimplexSolver& lp,
-                         const LpProblem& problem,
-                         std::span<const Real> primals,
-                         CutPool& pool,
-                         CutFamilyStats& stats);
+    Int separateMultiRow(DualSimplexSolver& lp, const LpProblem& problem,
+                         std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats);
 
     [[nodiscard]] bool isEnabled(CutFamily family) const;
 
@@ -129,6 +106,7 @@ private:
     Int max_cuts_per_family_ = 50;
     Real min_violation_ = 1e-5;
     const VariableBoundStore* vb_store_ = nullptr;
+    const CliqueTable* clique_table_ = nullptr;
 };
 
 }  // namespace mipx

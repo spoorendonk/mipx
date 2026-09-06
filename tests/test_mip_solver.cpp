@@ -435,8 +435,9 @@ static Real rcKnapsackOptimum() {
         for (int c = 0; c <= cap; ++c) {
             for (int k = 1; k <= mult; ++k) {
                 const int used = k * w;
-                if (used > c)
+                if (used > c) {
                     break;
+                }
                 next[static_cast<std::size_t>(c)] =
                     std::max(next[static_cast<std::size_t>(c)],
                              dp[static_cast<std::size_t>(c - used)] + static_cast<Real>(k) * value);
@@ -1389,6 +1390,220 @@ TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conf
     CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
 }
 
+// ---------------------------------------------------------------------------
+// Helper: set packing on an odd cycle (5-hole)
+// min -x0 -x1 -x2 -x3 -x4  s.t. x_i + x_{i+1 mod 5} <= 1, all binary
+// LP relaxation optimum is the fractional point (.5, ..., .5) with value -2.5;
+// the MIP optimum is -2 and only branching closes the gap.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildOddCycleSetPackingMip() {
+    LpProblem lp;
+    lp.name = "odd_cycle_set_packing";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 5;
+    lp.obj.assign(5, -1.0);
+    lp.col_lower.assign(5, 0.0);
+    lp.col_upper.assign(5, 1.0);
+    lp.col_type.assign(5, VarType::Binary);
+    lp.col_names = {"x0", "x1", "x2", "x3", "x4"};
+
+    lp.num_rows = 5;
+    lp.row_lower.assign(5, -kInf);
+    lp.row_upper.assign(5, 1.0);
+    lp.row_names = {"c0", "c1", "c2", "c3", "c4"};
+
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < 5; ++i) {
+        trips.push_back({i, i, 1.0});
+        trips.push_back({i, (i + 1) % 5, 1.0});
+    }
+    lp.matrix = SparseMatrix(5, 5, std::move(trips));
+    return lp;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: single conflict row whose root LP stays fractional
+// min -3x1 -2x2 -0.1x3  s.t. x1 + x2 + x3 <= 1.5, all binary
+// Any two variables together exceed the capacity, so the MIP optimum is -3,
+// while the root LP relaxation sits at x1 = 1, x2 = 0.5.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildBinaryConflictRowMip() {
+    LpProblem lp;
+    lp.name = "binary_conflict_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-3.0, -2.0, -0.1};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x1", "x2", "x3"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.5};
+    lp.row_names = {"cap"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {0, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("MipSolver: clique table is built at root and preserves optimum", "[mip][clique]") {
+    const auto lp = buildOddCycleSetPackingMip();
+
+    MipSolver with_cliques;
+    with_cliques.setVerbose(false);
+    with_cliques.setCliqueTableEnabled(true);
+    with_cliques.load(lp);
+    const auto with_result = with_cliques.solve();
+
+    MipSolver without_cliques;
+    without_cliques.setVerbose(false);
+    without_cliques.setCliqueTableEnabled(false);
+    without_cliques.load(lp);
+    const auto without_result = without_cliques.solve();
+
+    REQUIRE(with_result.status == Status::Optimal);
+    REQUIRE(without_result.status == Status::Optimal);
+    CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
+    CHECK_THAT(with_result.objective, WithinAbs(-2.0, 1e-9));
+
+    const MipCliqueStats stats = with_cliques.getCliqueStats();
+    CHECK(stats.enabled);
+    CHECK(stats.num_binaries >= 2);
+    CHECK(stats.num_conflict_edges >= 1);
+    CHECK(stats.num_cliques > 0);
+    CHECK(stats.build_time_seconds >= 0.0);
+
+    const MipCliqueStats off_stats = without_cliques.getCliqueStats();
+    CHECK_FALSE(off_stats.enabled);
+    CHECK(off_stats.node_attachments == 0);
+    CHECK_FALSE(off_stats.skipped_too_large);
+    CHECK(off_stats.num_binaries == 0);
+    CHECK(off_stats.num_cliques == 0);
+    CHECK(off_stats.cliques_from_cuts == 0);
+
+    // A second solve() on the same object rebuilds the table from scratch
+    // instead of accumulating on top of the first solve's state.
+    const auto repeat_result = with_cliques.solve();
+    REQUIRE(repeat_result.status == Status::Optimal);
+    CHECK_THAT(repeat_result.objective, WithinAbs(with_result.objective, 1e-9));
+    const MipCliqueStats repeat_stats = with_cliques.getCliqueStats();
+    CHECK(repeat_stats.num_cliques == stats.num_cliques);
+    CHECK(repeat_stats.num_conflict_edges == stats.num_conflict_edges);
+    CHECK(repeat_stats.cliques_from_cuts == stats.cliques_from_cuts);
+}
+
+TEST_CASE("MipSolver: root cuts feed the clique table", "[mip][clique]") {
+    const auto lp = buildBinaryConflictRowMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    // Keep the root LP fractional so the cut loop actually runs.
+    solver.setPresolve(false);
+    solver.setCutsEnabled(true);
+    solver.setCliqueTableEnabled(true);
+    solver.setCutFamilyEnabled(CutFamily::Gomory, false);
+    solver.setCutFamilyEnabled(CutFamily::Mir, false);
+    solver.setCutFamilyEnabled(CutFamily::Cover, false);
+    solver.setCutFamilyEnabled(CutFamily::ImpliedBound, false);
+    solver.setCutFamilyEnabled(CutFamily::ZeroHalf, false);
+    solver.setCutFamilyEnabled(CutFamily::Mixing, false);
+    solver.setCutFamilyEnabled(CutFamily::Clique, true);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-3.0, 1e-9));
+
+    const MipCliqueStats stats = solver.getCliqueStats();
+    CHECK(stats.enabled);
+    CHECK(stats.num_binaries == 3);
+    // The single capacity row makes every pair conflict, so the root table
+    // already holds the maximal clique, and the root cut loop hands at least
+    // one unit-coefficient rhs-1 cut back to it.
+    CHECK(stats.num_cliques >= 1);
+    CHECK(stats.cliques_from_cuts >= 1);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: a 12-cycle of set-packing rows (which give the conflict graph real
+// edges, hence real cliques) plus an equality row forcing sum(x) = 4.5. The
+// equality is integer-infeasible, so the search cannot close at the root and
+// must descend far enough for in-tree propagation to run. This is what makes
+// the clique table observable at node level.
+// ---------------------------------------------------------------------------
+
+static LpProblem buildCliquePropagationMip() {
+    constexpr Index n = 12;
+    LpProblem lp;
+    lp.name = "clique_propagation_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj.assign(n, -1.0);
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Binary);
+
+    lp.num_rows = n + 1;
+    lp.row_lower.assign(n, -kInf);
+    lp.row_upper.assign(n, 1.0);
+    lp.row_lower.push_back(4.5);
+    lp.row_upper.push_back(4.5);
+
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < n; ++i) {
+        trips.push_back({i, i, 1.0});
+        trips.push_back({i, (i + 1) % n, 1.0});
+    }
+    for (Index j = 0; j < n; ++j) {
+        trips.push_back({n, j, 1.0});
+    }
+    lp.matrix = SparseMatrix(n + 1, n, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("MipSolver: clique table reaches the node propagators", "[mip][clique]") {
+    const auto lp = buildCliquePropagationMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(true);
+    solver.setCliqueTableEnabled(true);
+    solver.setNodeLimit(300);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    const MipCliqueStats stats = solver.getCliqueStats();
+    REQUIRE(stats.enabled);
+    REQUIRE(stats.num_cliques > 0);
+    // Criterion 3: without the two setCliqueTable calls in processNode this is
+    // zero and every other assertion in the clique tests still passes.
+    CHECK(stats.node_attachments > 0);
+    CHECK((result.status == Status::Infeasible || result.status == Status::NodeLimit ||
+           result.status == Status::Optimal));
+
+    MipSolver off;
+    off.setVerbose(false);
+    off.setCutsEnabled(false);
+    off.setPresolve(false);
+    off.setTreePresolveEnabled(true);
+    off.setCliqueTableEnabled(false);
+    off.setNodeLimit(300);
+    off.load(lp);
+    const auto off_result = off.solve();
+    CHECK(off.getCliqueStats().node_attachments == 0);
+    CHECK(off_result.status == result.status);
+}
+
 TEST_CASE("MipSolver: stable search profile is reproducible", "[mip][search]") {
     auto lp = buildSearchStagnationMip();
 
@@ -1440,6 +1655,219 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(sstats.restarts >= 1);
     CHECK(sstats.restart_nodes_dropped == 0);
     CHECK(sstats.strong_budget_updates >= 1);
+}
+
+namespace {
+
+// Configure a solver the plunge tests share: no cuts, no presolve, so that the
+// serial tree search is the only thing closing the gap.
+void configurePlungeSolver(MipSolver& solver) {
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setHeuristicMode(HeuristicRuntimeMode::Deterministic);
+    solver.setHeuristicSeed(42);
+    solver.setNodeLimit(300);
+}
+
+Int totalPlungeBacktracks(const MipSearchStats& stats) {
+    return stats.plunge_backtracks_infeasible + stats.plunge_backtracks_depth +
+           stats.plunge_backtracks_bound;
+}
+
+}  // namespace
+
+TEST_CASE("MipSolver: plunging is disabled by default", "[mip][search]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver solver;
+    configurePlungeSolver(solver);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK((result.status == Status::Infeasible || result.status == Status::NodeLimit ||
+           result.status == Status::TimeLimit));
+    const auto& stats = solver.getSearchStats();
+    CHECK(stats.plunge_nodes == 0);
+    CHECK(stats.plunge_backtracks_infeasible == 0);
+    CHECK(stats.plunge_backtracks_depth == 0);
+    CHECK(stats.plunge_backtracks_bound == 0);
+    CHECK(stats.plunge_rounding_calls == 0);
+    CHECK(stats.plunge_rounding_improvements == 0);
+}
+
+TEST_CASE("MipSolver: plunging dives, backtracks and stays deterministic", "[mip][search]") {
+    auto lp = buildSearchStagnationMip();
+
+    MipSolver baseline;
+    configurePlungeSolver(baseline);
+    baseline.load(lp);
+    const auto baseline_result = baseline.solve();
+
+    MipSolver plunged_a;
+    configurePlungeSolver(plunged_a);
+    plunged_a.setPlungeControls(4, 0.05);
+    plunged_a.load(lp);
+    const auto a = plunged_a.solve();
+
+    MipSolver plunged_b;
+    configurePlungeSolver(plunged_b);
+    plunged_b.setPlungeControls(4, 0.05);
+    plunged_b.load(lp);
+    const auto b = plunged_b.solve();
+
+    CHECK(a.status == baseline_result.status);
+    REQUIRE(a.status == b.status);
+    CHECK(a.nodes == b.nodes);
+
+    const auto& stats = plunged_a.getSearchStats();
+    CHECK(stats.plunge_nodes > 0);
+    CHECK(totalPlungeBacktracks(stats) > 0);
+    CHECK(stats.plunge_nodes <= a.nodes);
+    // No node is lost to plunging: the restart path still drops nothing.
+    CHECK(stats.restart_nodes_dropped == 0);
+}
+
+TEST_CASE("MipSolver: plunging preserves the optimal objective", "[mip][search]") {
+    auto lp = buildRcFixingKnapsackMip();
+
+    MipSolver baseline;
+    configurePlungeSolver(baseline);
+    baseline.load(lp);
+    const auto baseline_result = baseline.solve();
+
+    MipSolver plunged;
+    configurePlungeSolver(plunged);
+    plunged.setPlungeControls(6, 0.05);
+    plunged.load(lp);
+    const auto plunged_result = plunged.solve();
+
+    MipSolver plunged_again;
+    configurePlungeSolver(plunged_again);
+    plunged_again.setPlungeControls(6, 0.05);
+    plunged_again.load(lp);
+    const auto repeat_result = plunged_again.solve();
+
+    REQUIRE(baseline_result.status == Status::Optimal);
+    REQUIRE(plunged_result.status == Status::Optimal);
+    CHECK_THAT(plunged_result.objective, WithinAbs(baseline_result.objective, 1e-9));
+    CHECK(plunged_result.nodes == repeat_result.nodes);
+
+    const auto& stats = plunged.getSearchStats();
+    CHECK(stats.plunge_nodes > 0);
+    CHECK(totalPlungeBacktracks(stats) > 0);
+    CHECK(baseline.getSearchStats().plunge_nodes == 0);
+}
+
+TEST_CASE("MipSolver: plunge depth limit ends the dive", "[mip][search]") {
+    auto lp = buildCliquePropagationMip();
+
+    MipSolver solver;
+    configurePlungeSolver(solver);
+    // A huge bound quotient disables the degradation trigger, so the depth
+    // limit is the only thing that can end a dive that keeps branching.
+    solver.setPlungeControls(2, 1e9);
+    solver.load(lp);
+    static_cast<void>(solver.solve());
+
+    const auto& stats = solver.getSearchStats();
+    CHECK(stats.plunge_nodes > 0);
+    CHECK(stats.plunge_backtracks_depth > 0);
+    CHECK(stats.plunge_backtracks_bound == 0);
+}
+
+TEST_CASE("MipSolver: plunge bound-degradation trigger is configurable", "[mip][search]") {
+    auto lp = buildRcFixingKnapsackMip();
+
+    MipSolver strict;
+    configurePlungeSolver(strict);
+    // Quotient 0 declines every dive whose child bound is worse than the best
+    // bound left in the queue.
+    strict.setPlungeControls(8, 0.0);
+    strict.load(lp);
+    const auto strict_result = strict.solve();
+
+    MipSolver lenient;
+    configurePlungeSolver(lenient);
+    lenient.setPlungeControls(8, 1e9);
+    lenient.load(lp);
+    const auto lenient_result = lenient.solve();
+
+    REQUIRE(strict_result.status == Status::Optimal);
+    REQUIRE(lenient_result.status == Status::Optimal);
+    CHECK_THAT(strict_result.objective, WithinAbs(lenient_result.objective, 1e-9));
+    CHECK(strict.getSearchStats().plunge_backtracks_bound > 0);
+    CHECK(lenient.getSearchStats().plunge_backtracks_bound == 0);
+}
+
+TEST_CASE("MipSolver: plunge leaves run the rounding heuristic", "[mip][search]") {
+    auto lp = buildRcFixingKnapsackMip();
+
+    MipSolver solver;
+    configurePlungeSolver(solver);
+    solver.setPlungeControls(8, 0.0);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& stats = solver.getSearchStats();
+    CHECK(stats.plunge_rounding_calls > 0);
+    CHECK(stats.plunge_rounding_improvements <= stats.plunge_rounding_calls);
+}
+
+// A plunge leaf whose rounded LP solution is actually an improvement, so the
+// incumbent-acceptance path (submit + prune + nodes_since_incumbent reset) is
+// exercised rather than just the call counter. Found by randomized search:
+// asserting only `plunge_rounding_calls > 0` leaves that path untested, and a
+// mutation discarding the rounded solution passes the whole suite.
+static LpProblem buildPlungeRoundingImprovementMip() {
+    LpProblem lp;
+    lp.name = "plunge_rounding_improvement";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 10;
+    lp.obj = {5.0, -8.0, 5.0, 1.0, -7.0, 8.0, 8.0, -3.0, -8.0, 2.0};
+    lp.col_lower.assign(10, 0.0);
+    lp.col_upper = {3.0, 3.0, 1.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Binary,
+                   VarType::Binary,  VarType::Integer, VarType::Binary,
+                   VarType::Integer, VarType::Binary,  VarType::Integer,
+                   VarType::Binary};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {6.0, 18.4};
+    std::vector<Triplet> trips = {
+        {0, 0, 6.0},  {0, 1, -3.0}, {0, 5, -2.0}, {0, 6, -3.0}, {0, 9, 1.0},
+        {1, 0, -8.0}, {1, 1, 9.0},  {1, 2, -1.0}, {1, 3, -8.0}, {1, 4, 1.0},
+        {1, 7, 4.0},  {1, 8, 8.0},  {1, 9, 7.0},
+    };
+    lp.matrix = SparseMatrix(2, 10, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("MipSolver: plunge rounding accepts an improving incumbent", "[mip][search]") {
+    const auto lp = buildPlungeRoundingImprovementMip();
+
+    MipSolver solver;
+    configurePlungeSolver(solver);
+    solver.setPlungeControls(8, 0.0);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    const auto& stats = solver.getSearchStats();
+    CHECK(stats.plunge_rounding_calls > 0);
+    CHECK(stats.plunge_rounding_improvements > 0);
+
+    // The accepted incumbent must not corrupt the answer.
+    MipSolver baseline;
+    baseline.setVerbose(false);
+    baseline.setCutsEnabled(false);
+    baseline.setPresolve(false);
+    baseline.load(lp);
+    const auto base_result = baseline.solve();
+    REQUIRE(base_result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(base_result.objective, 1e-9));
 }
 
 TEST_CASE("MipSolver: in-tree presolve telemetry is populated", "[mip][presolve][tree]") {
@@ -1664,7 +2092,7 @@ TEST_CASE("MipSolver: a second solve is not narrowed by the first solve's RC fix
     lp.row_upper = {1.0, 9.0};
     lp.row_names = {"R0", "R1"};
     std::vector<Triplet> trips = {
-        {0, 0, -5.0}, {0, 1, 1.0}, {0, 2, -5.0}, {0, 4, -3.0},
+        {0, 0, -5.0}, {0, 1, 1.0},  {0, 2, -5.0}, {0, 4, -3.0},
         {1, 0, 4.0},  {1, 1, -3.0}, {1, 4, 5.0},
     };
     lp.matrix = SparseMatrix(2, 5, std::move(trips));

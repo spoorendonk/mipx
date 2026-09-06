@@ -147,6 +147,19 @@ private:
     static constexpr Real kStrongInfeasibleGain = 1e4;
 };
 
+/// Pseudocost-based node estimate for a solved node.
+///
+///   estimate = lp_bound + sum_{j fractional} min(f_j * down_j, (1 - f_j) * up_j)
+///
+/// where f_j is the fractional part of x_j, and down_j / up_j are the rule's
+/// per-unit pseudocosts. Directions with no observations fall back to the
+/// rule's pseudocost fallback (see ReliabilityBranching::setPseudocostFallback),
+/// so the estimate is always finite when lp_bound is finite. A non-finite
+/// lp_bound is returned unchanged.
+[[nodiscard]] Real pseudocostNodeEstimate(const ReliabilityBranching& rule,
+                                          const LpProblem& problem,
+                                          std::span<const Real> primal_values, Real lp_bound);
+
 /// Create two child nodes by branching on variable branch_var with value branch_val.
 /// Left child: x_j <= floor(branch_val), right child: x_j >= ceil(branch_val).
 std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val);

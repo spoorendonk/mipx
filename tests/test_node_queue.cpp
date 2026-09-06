@@ -220,3 +220,45 @@ TEST_CASE("takeAll and replaceAll preserve queue contents", "[node_queue]") {
     REQUIRE(q.size() == 2);
     REQUIRE(q.bestBound() == 1.0);
 }
+
+TEST_CASE("popById returns the requested node and only that node", "[node_queue]") {
+    NodeQueue q;
+    BnbNode a;
+    a.lp_bound = 1.0;
+    a.depth = 1;
+    BnbNode b;
+    b.lp_bound = 5.0;
+    b.depth = 2;
+    const Int id_a = q.push(a);
+    const Int id_b = q.push(b);
+    REQUIRE(id_a != id_b);
+    REQUIRE(q.size() == 2);
+
+    // The worse-bound node can be taken directly, bypassing the policy order.
+    auto plunged = q.popById(id_b);
+    REQUIRE(plunged.has_value());
+    CHECK(plunged->id == id_b);
+    CHECK(plunged->depth == 2);
+    CHECK(q.size() == 1);
+
+    // A node that is no longer queued yields nullopt rather than throwing.
+    CHECK_FALSE(q.popById(id_b).has_value());
+    CHECK(q.size() == 1);
+    CHECK(q.pop().id == id_a);
+}
+
+TEST_CASE("popById reports nodes removed by prune", "[node_queue]") {
+    NodeQueue q;
+    BnbNode good;
+    good.lp_bound = 1.0;
+    BnbNode bad;
+    bad.lp_bound = 9.0;
+    const Int id_good = q.push(good);
+    const Int id_bad = q.push(bad);
+
+    q.prune(5.0);
+    CHECK_FALSE(q.popById(id_bad).has_value());
+    auto kept = q.popById(id_good);
+    REQUIRE(kept.has_value());
+    CHECK(kept->id == id_good);
+}

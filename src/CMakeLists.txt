@@ -41,6 +41,7 @@ add_library(mipx STATIC
     heuristics/proximity_search.cpp
     heuristics/undercover.cpp
     heuristics/zi_rounding.cpp
+    heuristics/clique_rounding.cpp
     heuristics/shifting.cpp
     heuristics/randomized_rounding.cpp
     heuristics/reduced_cost.cpp

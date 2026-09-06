@@ -20,6 +20,7 @@ void ConflictGraph::build(const LpProblem& problem) {
         }
     }
     num_binaries_ = static_cast<Index>(bin_to_col_.size());
+    num_cols_ = problem.num_cols;
     adj_.assign(numLiterals(), {});
     fixed_.assign(num_binaries_, false);
     fixed_value_.assign(num_binaries_, 0.0);
@@ -95,6 +96,8 @@ void ConflictGraph::addConflict(Literal a, Literal b) {
     // Check if edge already exists (linear scan for small adj lists).
     Index a_id = a_int.id();
     Index b_id = b_int.id();
+    const Index num_lits = static_cast<Index>(adj_.size());
+    if (a_id < 0 || a_id >= num_lits || b_id < 0 || b_id >= num_lits) return;
     for (const auto& lit : adj_[a_id]) {
         if (lit.var == b_int.var && lit.complemented == b_int.complemented) {
             return;  // Already exists.

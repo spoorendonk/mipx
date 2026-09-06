@@ -167,6 +167,29 @@ Int computeStrongBranchBudget(SearchProfile profile, Int node_depth, Int stagnat
     return std::clamp<Int>(strong_budget, 4, 24);
 }
 
+/// Pick the child to dive into during a plunge: the one whose branch direction
+/// matches the nearest rounding of the parent's LP value for the branch
+/// variable. children[0] is the floor (down) child, children[1] the ceil (up)
+/// child, as produced by createChildren().
+Int selectPlungeChild(const std::vector<BnbNode>& children, std::span<const Real> primals) {
+    if (children.empty()) {
+        return -1;
+    }
+    if (children.size() < 2) {
+        return 0;
+    }
+    const Index var = children.front().branch.variable;
+    if (var < 0 || var >= static_cast<Index>(primals.size())) {
+        return 0;
+    }
+    const Real value = primals[var];
+    if (!std::isfinite(value)) {
+        return 0;
+    }
+    const Real frac = value - std::floor(value);
+    return (frac > 0.5) ? 1 : 0;
+}
+
 const char* exactRefinementModeName(ExactRefinementMode mode) {
     switch (mode) {
         case ExactRefinementMode::Off:
@@ -1308,6 +1331,54 @@ void MipSolver::load(const LpProblem& problem) {
     loaded_ = true;
 }
 
+void MipSolver::buildCliqueTable() {
+    clique_stats_ = {};
+    clique_stats_.enabled = clique_table_enabled_;
+    conflict_graph_ = ConflictGraph{};
+    clique_table_ = CliqueTable{};
+    if (!clique_table_enabled_) {
+        return;
+    }
+
+    Index num_binaries = 0;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (problem_.col_type[j] == VarType::Binary) {
+            ++num_binaries;
+        }
+    }
+    clique_stats_.num_binaries = num_binaries;
+    if (num_binaries < 2) {
+        return;
+    }
+    // Both builds are superlinear in the binary count: the conflict graph
+    // materializes every pairwise edge, and mergeAndSubsume is quadratic in
+    // the clique count. Left ungated this costs tens of seconds and hundreds
+    // of megabytes on a large set-packing model before the root LP even
+    // starts, so cap it the way probing and cut separation are capped.
+    if (num_binaries > clique_max_binaries_) {
+        clique_stats_.skipped_too_large = true;
+        if (verbose_) {
+            log_.log("Clique table: skipped, %d binaries exceeds cap %d\n\n", num_binaries,
+                     clique_max_binaries_);
+        }
+        return;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    conflict_graph_.build(problem_);
+    clique_table_.build(problem_, conflict_graph_);
+    clique_stats_.build_time_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    clique_stats_.num_conflict_edges = conflict_graph_.numEdges();
+    clique_stats_.num_cliques = clique_table_.numCliques();
+
+    if (verbose_ && clique_stats_.num_cliques > 0) {
+        log_.log("Clique table: %d binaries, %d conflict edges, %d cliques (%.3fs)\n\n",
+                 clique_stats_.num_binaries, clique_stats_.num_conflict_edges,
+                 clique_stats_.num_cliques, clique_stats_.build_time_seconds);
+    }
+}
+
 bool MipSolver::runRootProbing() {
     probing_stats_ = {};
     probing_stats_.enabled = true;
@@ -2124,6 +2195,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (implication_graph_.numImplications() > 0) {
                 dp.setImplicationGraph(&implication_graph_);
             }
+            if (cliquePropagationActive()) {
+                dp.setCliqueTable(&clique_table_);
+                if (dp.hasCliqueTable()) {
+                    clique_node_attachments_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
@@ -2344,6 +2421,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             rc_dp.load(problem_);
             if (implication_graph_.numImplications() > 0) {
                 rc_dp.setImplicationGraph(&implication_graph_);
+            }
+            if (cliquePropagationActive()) {
+                rc_dp.setCliqueTable(&clique_table_);
+                if (rc_dp.hasCliqueTable()) {
+                    clique_node_attachments_.fetch_add(1, std::memory_order_relaxed);
+                }
             }
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
@@ -2604,7 +2687,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
     BnbNode solved_node = std::move(node);
     solved_node.lp_bound = node_obj_out;
-    solved_node.estimate = node_obj_out + 0.05 * static_cast<Real>(std::max<Int>(0, frac_count));
+    {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        solved_node.estimate =
+            pseudocostNodeEstimate(branching_rule_, problem_, node_primals_out, node_obj_out);
+    }
     solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
     if (temp_local_rows.empty()) {
         solved_node.basis = lp.getBasis();
@@ -2623,6 +2710,18 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     children_out.push_back(std::move(left));
     children_out.push_back(std::move(right));
     return true;
+}
+
+bool MipSolver::plungeBoundDegraded(Real child_bound, const NodeQueue& queue) const {
+    if (queue.empty()) {
+        return false;
+    }
+    const Real best_bound = queue.bestBound();
+    if (!std::isfinite(best_bound) || !std::isfinite(child_bound)) {
+        return false;
+    }
+    const Real tolerance = plunge_bound_quotient_ * std::max<Real>(1.0, std::abs(best_bound));
+    return child_bound > best_bound + tolerance;
 }
 
 void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,
@@ -2658,6 +2757,13 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     Int rins_skip_few_fix = 0;
     Int rins_fixed_sum = 0;
     Int nodes_since_incumbent = 0;
+
+    // Plunge (dive) state. Plunging mirrors the sibling-cache gate: it only
+    // applies to the serial tree search. plunge_target_id is the queued child
+    // to dive into next; plunge_depth counts consecutive dives.
+    const bool plunge_enabled = (plunge_max_depth_ > 0 && num_threads_ <= 1);
+    Int plunge_target_id = -1;
+    Int plunge_depth = 0;
 
     while (!queue.empty()) {
         if (nodes_explored >= node_limit_) {
@@ -2705,12 +2811,35 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             queue.setPolicy(NodePolicy::BestFirst);
             ++search_stats_.restarts;
             nodes_since_incumbent = 0;
+            // A restart resets node selection, so abandon any pending dive. The
+            // target child stays in the queue and is selected by policy again.
+            plunge_target_id = -1;
+            plunge_depth = 0;
             if (queue.empty()) {
                 break;
             }
         }
 
-        BnbNode node = queue.pop();
+        BnbNode node;
+        bool plunged_into_node = false;
+        if (plunge_target_id >= 0) {
+            auto plunge_node = queue.popById(plunge_target_id);
+            plunge_target_id = -1;
+            if (plunge_node.has_value()) {
+                node = std::move(*plunge_node);
+                plunged_into_node = true;
+                ++plunge_depth;
+                ++search_stats_.plunge_nodes;
+            } else {
+                // The child was pruned by an improved incumbent before we could
+                // dive into it: backtrack to the queue.
+                ++search_stats_.plunge_backtracks_infeasible;
+                plunge_depth = 0;
+            }
+        }
+        if (!plunged_into_node) {
+            node = queue.pop();
+        }
         const Int strong_budget = computeStrongBranchBudget(
             search_profile_, node.depth, nodes_since_incumbent, restart_stagnation_nodes_);
         ++search_stats_.strong_budget_updates;
@@ -2825,8 +2954,63 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 sibling_branch_cache_.clear();
             }
         }
-        for (auto& child : children) {
-            queue.push(std::move(child));
+        // Decide whether to dive into one child next, or backtrack to the queue.
+        Int plunge_child_slot = -1;
+        bool plunge_leaf = false;
+        if (plunge_enabled) {
+            if (branched && !children.empty()) {
+                const Int candidate = selectPlungeChild(children, node_primals);
+                const Real candidate_bound =
+                    children[static_cast<std::size_t>(std::max<Int>(0, candidate))].lp_bound;
+                if (plunge_depth >= plunge_max_depth_) {
+                    ++search_stats_.plunge_backtracks_depth;
+                    plunge_leaf = true;
+                } else if (plungeBoundDegraded(candidate_bound, queue)) {
+                    ++search_stats_.plunge_backtracks_bound;
+                    plunge_leaf = true;
+                } else {
+                    plunge_child_slot = candidate;
+                }
+            } else if (plunged_into_node) {
+                // Infeasible, pruned by the incumbent, or integral: no child to
+                // dive into.
+                ++search_stats_.plunge_backtracks_infeasible;
+                plunge_leaf = true;
+            }
+            if (plunge_leaf) {
+                plunge_depth = 0;
+            }
+        }
+
+        for (std::size_t ci = 0; ci < children.size(); ++ci) {
+            const Int child_id = queue.push(std::move(children[ci]));
+            if (static_cast<Int>(ci) == plunge_child_slot) {
+                plunge_target_id = child_id;
+            }
+        }
+
+        // Plunge leaf: try the cheap rounding heuristic on this node's LP
+        // solution before backtracking.
+        if (plunge_leaf && node_int_inf > 0 && !node_primals.empty()) {
+            ++search_stats_.plunge_rounding_calls;
+            RoundingHeuristic rounding;
+            auto rounded = rounding.run(problem_, lp, node_primals, incumbent);
+            if (rounded.has_value() && rounded->objective < incumbent) {
+                ++search_stats_.plunge_rounding_improvements;
+                incumbent = rounded->objective;
+                best_solution = std::move(rounded->values);
+                solution_pool.submit({best_solution, incumbent}, "plunge_rounding", 0);
+                const double log_elapsed =
+                    (parallel_mode_ == ParallelMode::Deterministic)
+                        ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
+                        : elapsed();
+                logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+                            queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
+                            node_int_inf);
+                queue.prune(incumbent - 1e-6);
+                nodes_since_incumbent = 0;
+                improved_this_node = true;
+            }
         }
 
         if (!improved_this_node) {
@@ -3479,6 +3663,10 @@ MipResult MipSolver::solve() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
+    clique_stats_ = {};
+    conflict_graph_ = ConflictGraph{};
+    clique_table_ = CliqueTable{};
+    clique_node_attachments_.store(0, std::memory_order_relaxed);
     rc_fixing_stats_ = {};
     rc_fixer_.reset();
     for (auto& clause : conflict_pool_) {
@@ -3824,6 +4012,11 @@ MipResult MipSolver::solve() {
             discrete_vars.push_back(j);
         }
     }
+
+    // Root conflict graph and clique table over the presolved problem. Built
+    // before probing so both root separation and node propagation see it.
+    buildCliqueTable();
+    total_work += clique_stats_.build_time_seconds;  // Approximate work measure.
 
     // Root probing: discover implications, variable bounds, and fixings.
     if (probing_enabled_ && !discrete_vars.empty()) {
@@ -5069,7 +5262,11 @@ MipResult MipSolver::solve() {
         log_.log(
             "Root heuristics: int_inf=%d/%d int_vars=%d/%d calls=%d wins=%d "
             "round=%d/%d aux=%d/%d zero=%d/%d "
-            "fp=%d/%d rens=%d/%d rins=%d/%d lb=%d/%d work=%.3f\n",
+            "fp=%d/%d rens=%d/%d rins=%d/%d lb=%d/%d "
+            "zir=%d/%d shift=%d/%d randround=%d/%d clique=%d/%d "
+            "propcomp=%d/%d feasjump=%d/%d undercover=%d/%d rc=%d/%d "
+            "crossover=%d/%d proximity=%d/%d oneopt=%d/%d twoopt=%d/%d "
+            "work=%.3f\n",
             root_int_inf, runtime_config.root_max_int_inf, root_int_vars,
             runtime_config.root_max_int_vars, root_heur_outcome.calls,
             root_heur_outcome.improvements, root_heur_outcome.rounding_calls,
@@ -5079,7 +5276,22 @@ MipResult MipSolver::solve() {
             root_heur_outcome.feaspump_improvements, root_heur_outcome.rens_calls,
             root_heur_outcome.rens_improvements, root_heur_outcome.rins_calls,
             root_heur_outcome.rins_improvements, root_heur_outcome.localbranching_calls,
-            root_heur_outcome.localbranching_improvements, root_heur_outcome.work_units);
+            root_heur_outcome.localbranching_improvements,
+            root_heur_outcome.zirounding_calls, root_heur_outcome.zirounding_improvements,
+            root_heur_outcome.shifting_calls, root_heur_outcome.shifting_improvements,
+            root_heur_outcome.randrounding_calls, root_heur_outcome.randrounding_improvements,
+            root_heur_outcome.cliquerounding_calls,
+            root_heur_outcome.cliquerounding_improvements,
+            root_heur_outcome.propcompletion_calls,
+            root_heur_outcome.propcompletion_improvements,
+            root_heur_outcome.feasjump_calls, root_heur_outcome.feasjump_improvements,
+            root_heur_outcome.undercover_calls, root_heur_outcome.undercover_improvements,
+            root_heur_outcome.reducedcost_calls, root_heur_outcome.reducedcost_improvements,
+            root_heur_outcome.crossover_calls, root_heur_outcome.crossover_improvements,
+            root_heur_outcome.proximity_calls, root_heur_outcome.proximity_improvements,
+            root_heur_outcome.oneopt_calls, root_heur_outcome.oneopt_improvements,
+            root_heur_outcome.twoopt_calls, root_heur_outcome.twoopt_improvements,
+            root_heur_outcome.work_units);
     }
 
     const bool root_basis_dirty = root_heur_outcome.basis_dirty;
@@ -5160,7 +5372,11 @@ MipResult MipSolver::solve() {
             createChildren(std::move(root_node), branch_var, root_primals[branch_var]);
         left.lp_bound = root_bound;
         right.lp_bound = root_bound;
-        left.estimate = root_bound + 0.05 * static_cast<Real>(std::max<Int>(0, root_int_inf));
+        {
+            std::lock_guard<std::mutex> lock(branching_mutex_);
+            left.estimate =
+                pseudocostNodeEstimate(branching_rule_, problem_, root_primals, root_bound);
+        }
         right.estimate = left.estimate;
         queue.push(std::move(left));
         queue.push(std::move(right));
@@ -5281,6 +5497,14 @@ MipResult MipSolver::solve() {
                 conflict_stats_.lp_infeasible_conflicts, conflict_stats_.bound_infeasible_conflicts,
                 conflict_stats_.branch_score_overrides);
         }
+        if (search_stats_.plunge_nodes > 0 || search_stats_.plunge_backtracks_bound > 0) {
+            log_.log(
+                "Plunge: nodes=%d bt_infeasible=%d bt_depth=%d bt_bound=%d "
+                "rounding_calls=%d rounding_improvements=%d\n",
+                search_stats_.plunge_nodes, search_stats_.plunge_backtracks_infeasible,
+                search_stats_.plunge_backtracks_depth, search_stats_.plunge_backtracks_bound,
+                search_stats_.plunge_rounding_calls, search_stats_.plunge_rounding_improvements);
+        }
         if (search_stats_.policy_switches > 0 || search_stats_.restarts > 0 ||
             search_stats_.sibling_cache_hits > 0) {
             log_.log(
@@ -5347,6 +5571,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     SeparatorManager separators;
     if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
         separators.setVariableBoundStore(&vb_store_);
+    }
+    if (clique_table_enabled_) {
+        // Attach even when the table is still empty: cuts extracted during the
+        // rounds below can populate it for later rounds.
+        separators.setCliqueTable(&clique_table_);
     }
     CutSeparationStats total_family_stats;
     CutManager cut_manager;
@@ -5473,6 +5702,21 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
         if (lower.empty()) {
             break;
+        }
+
+        // Feed every cut entering the root LP back into the clique table:
+        // unit-coefficient binary cuts with rhs 1 are cliques themselves and
+        // may extend further through the conflict graph.
+        if (clique_table_enabled_) {
+            Int new_cliques = 0;
+            for (const Cut* cut : selected_cuts) {
+                new_cliques += clique_table_.extractFromCut(*cut, problem_, conflict_graph_);
+            }
+            if (new_cliques > 0) {
+                clique_stats_.cliques_from_cuts += new_cliques;
+                clique_table_.mergeAndSubsume();
+                clique_stats_.num_cliques = clique_table_.numCliques();
+            }
         }
 
         Index cuts_this_round = static_cast<Index>(lower.size());

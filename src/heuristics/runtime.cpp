@@ -415,6 +415,19 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(
             }
         }
 
+        // Clique-based rounding (no LP needed).
+        {
+            ++out.calls;
+            ++out.cliquerounding_calls;
+            ++stats_.calls;
+            CliqueRoundingHeuristic cliquerounding;
+            auto hsol = cliquerounding.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            if (accept("cliquerounding", hsol)) {
+                ++stats_.improvements;
+                ++out.cliquerounding_improvements;
+            }
+        }
+
         // Feasibility jump (no LP needed, but more expensive).
         if (allowRootCall(ctx.total_work_units + out.work_units)) {
             ++out.calls;
