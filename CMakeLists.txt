@@ -1,4 +1,17 @@
 cmake_minimum_required(VERSION 3.25)
+
+# Default to Release for single-config generators. Several benchmark tests
+# carry wall-clock limits (MIPLIB gen allows 20s against ~1.2s optimized), so
+# an unoptimized build fails them on timing alone -- a confusing signal that
+# looks like a solver regression. Multi-config generators pick per-build and
+# are left alone. Set -DCMAKE_BUILD_TYPE=Debug explicitly for ASan/UBSan.
+get_property(_mipx_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _mipx_multi_config AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+  message(STATUS "CMAKE_BUILD_TYPE not set; defaulting to Release")
+endif()
+
 project(mipx LANGUAGES CXX)
 
 find_package(CUDAToolkit QUIET)
