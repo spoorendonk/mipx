@@ -558,7 +558,7 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
 
         // Fixing a column with crossed bounds at one of them would bury the
         // contradiction in the postsolve stack, so report it instead -- the
-        // same guard dualFixing and removeEmptyColumns already apply.
+        // same guard removeEmptyColumns already applies.
         if (lp.col_lower[j] > lp.col_upper[j] + kTol) {
             infeasible_ = true;
             return changes;
@@ -1478,6 +1478,13 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
             continue;
         }
         ++stats_.cols_examined;
+
+        // Same guard as removeSingletonCols: a lock-based fix would bury a
+        // crossed bound in the postsolve stack instead of reporting it.
+        if (lp.col_lower[j] > lp.col_upper[j] + kTol) {
+            infeasible_ = true;
+            return changes;
+        }
 
         Index up_locks = 0;
         Index down_locks = 0;
