@@ -244,6 +244,14 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 | `MIPX_BUILD_CLI` | ON | Build `mipx-solve` CLI |
 | `MIPX_SIMD_ISA` | native | SIMD codegen: `off`, `avx2`, `native` |
 | `MIPX_STRICT_WARNINGS` | ON | `-Werror` |
+| `MIPX_USE_CCACHE` | ON | Use `ccache`/`sccache` as compiler launcher when installed |
+
+`MIPX_USE_CCACHE` is opportunistic — a no-op if neither tool is on PATH, and it
+never overrides a `CMAKE_CXX_COMPILER_LAUNCHER` you set yourself. It matters
+because the pre-push gate does `rm -rf build` and a full rebuild on every push:
+measured on a 12-core box, that goes from ~52s to ~5s with a warm cache. The
+cache keys on the compile command, so a build directory at a *different path*
+misses (include flags differ) — the gate always uses `build/`, so it hits.
 
 ### Test data
 
