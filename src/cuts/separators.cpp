@@ -7,7 +7,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -37,63 +36,6 @@ Real computeViolation(const Cut& cut, std::span<const Real> primals) {
         violation = std::max(violation, lhs - cut.upper);
     }
     return violation;
-}
-
-bool hasFiniteBounds(const Cut& cut) {
-    if (!std::isfinite(cut.lower) && cut.lower > -kInf) {
-        return false;
-    }
-    if (!std::isfinite(cut.upper) && cut.upper < kInf) {
-        return false;
-    }
-    return true;
-}
-
-bool isNumericallySafeCut(const Cut& cut) {
-    if (cut.indices.empty()) {
-        return false;
-    }
-    if (cut.indices.size() != cut.values.size()) {
-        return false;
-    }
-    if (!hasFiniteBounds(cut)) {
-        return false;
-    }
-
-    Real norm_sq = 0.0;
-    Real max_abs = 0.0;
-    Real min_abs = std::numeric_limits<Real>::infinity();
-    Index prev = -1;
-
-    for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-        const Index idx = cut.indices[k];
-        const Real val = cut.values[k];
-        if (idx < 0 || idx <= prev) {
-            return false;
-        }
-        if (!std::isfinite(val)) {
-            return false;
-        }
-        const Real abs_v = std::abs(val);
-        if (abs_v <= 1e-12) {
-            return false;
-        }
-        norm_sq += val * val;
-        max_abs = std::max(max_abs, abs_v);
-        min_abs = std::min(min_abs, abs_v);
-        prev = idx;
-    }
-
-    if (norm_sq < 1e-12 || norm_sq > 1e16) {
-        return false;
-    }
-    if (max_abs > 1e6) {
-        return false;
-    }
-    if (min_abs < std::numeric_limits<Real>::infinity() && max_abs / min_abs > 1e8) {
-        return false;
-    }
-    return true;
 }
 
 }  // namespace

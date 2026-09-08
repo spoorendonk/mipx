@@ -1,11 +1,11 @@
 #pragma once
 
+#include "mipx/core.h"
+
 #include <cmath>
 #include <limits>
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -37,10 +37,22 @@ struct Cut {
     Real upper = std::numeric_limits<Real>::infinity();
     CutFamily family = CutFamily::Unknown;
     bool local = false;
-    Real efficacy = 0.0;   // violation / ||a||
-    Int age = 0;           // rounds since last active (binding)
-    Int activity = 0;      // number of rounds where cut was active
+    Real efficacy = 0.0;  // violation / ||a||
+    Int age = 0;          // rounds since last active (binding)
+    Int activity = 0;     // number of rounds where cut was active
 };
+
+/// Screen a cut for numerical safety before it is offered to a CutPool.
+///
+/// Shared by every separator: SeparatorManager applies it in addViolatedCut,
+/// GomorySeparator applies it on its own accept path. A cut is rejected when
+/// it is empty, its index and value arrays disagree in length, its finite
+/// bounds are not finite numbers, its indices are negative or not strictly
+/// increasing, any coefficient is non-finite or no larger than 1e-12 in
+/// magnitude, its squared norm falls outside [1e-12, 1e16], the largest
+/// coefficient magnitude exceeds 1e6, or the largest/smallest coefficient
+/// ratio exceeds 1e8.
+[[nodiscard]] bool isNumericallySafeCut(const Cut& cut);
 
 /// Pool of cutting planes with efficacy ranking and parallelism filtering.
 class CutPool {
@@ -76,9 +88,10 @@ public:
 
 private:
     /// Compute the cosine similarity between two sparse vectors.
-    [[nodiscard]] static Real cosineSimilarity(
-        std::span<const Index> ind_a, std::span<const Real> val_a,
-        std::span<const Index> ind_b, std::span<const Real> val_b);
+    [[nodiscard]] static Real cosineSimilarity(std::span<const Index> ind_a,
+                                               std::span<const Real> val_a,
+                                               std::span<const Index> ind_b,
+                                               std::span<const Real> val_b);
 
     std::vector<Cut> cuts_;
     Real parallelism_threshold_ = 0.9;

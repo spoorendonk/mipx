@@ -276,6 +276,40 @@ static LpProblem buildMirTestMip() {
     return lp;
 }
 
+// min -x  s.t. x - 20 y <= 2.000002, x integer in [0, 1000], y continuous in
+// [0, 10].
+//
+// The LP optimum is y = 10 (at its upper bound), x = 202.000002 basic, and the
+// row tight. The fractional part of the basic integer variable is f0 = 2e-6,
+// barely above GomorySeparator's kIntTol of 1e-6, while the tableau coefficient
+// on the continuous nonbasic y is 20. A GMI cut off that row therefore carries
+// the coefficient t/f0 = 1e7 on y — an order of magnitude past the safety
+// screen's 1e6 limit on the largest coefficient, and a numerically worthless
+// restatement of y <= 10.
+static LpProblem buildGomoryBlowupMip() {
+    LpProblem lp;
+    lp.name = "gomory_blowup";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1000.0, 10.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {2.000002};
+    lp.row_names = {"link"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0},
+        {0, 1, -20.0},
+    };
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
 // ---------------------------------------------------------------------------
 // Gomory separator tests
 // ---------------------------------------------------------------------------
@@ -325,6 +359,81 @@ TEST_CASE("Gomory: generate cuts on small MIP", "[cuts][gomory]") {
         if (cut.lower > -kInf) {
             CHECK(lhs < cut.lower + 1e-3);  // violated or nearly so
         }
+    }
+}
+
+TEST_CASE("Gomory: safety screen rejects a GMI coefficient blow-up", "[cuts][gomory]") {
+    // The cut buildGomoryBlowupMip's tableau row produces: y is nonbasic at its
+    // upper bound with t = 20, f0 = 2e-6, so gmi_coeff = t / f0 = 1e7, giving
+    // -1e7 y >= 1 - 1e7 * 10 — a numerically worthless restatement of y <= 10.
+    Cut blown_up;
+    blown_up.indices = {1};
+    blown_up.values = {-1e7};
+    blown_up.lower = 1.0 - 1e7 * 10.0;
+    blown_up.family = CutFamily::Gomory;
+
+    // Only the largest-coefficient check trips: the squared norm is 1e14 (limit
+    // 1e16) and a single coefficient cannot trip the max/min ratio, so this
+    // pins max |coef| > 1e6 specifically rather than passing for some unrelated
+    // reason.
+    CHECK_FALSE(isNumericallySafeCut(blown_up));
+
+    // The same cut with the coefficient back under the limit is accepted, so
+    // the rejection above is the magnitude and not the cut's structure.
+    Cut scaled_down = blown_up;
+    scaled_down.values = {-9e5};
+    scaled_down.lower = 1.0 - 9e5 * 10.0;
+    CHECK(isNumericallySafeCut(scaled_down));
+
+    // A second nonbasic at a sane magnitude does not rescue it either, and the
+    // max/min ratio here is 1.7e7, still inside the 1e8 limit.
+    Cut mixed = blown_up;
+    mixed.indices = {0, 1};
+    mixed.values = {0.6, -1e7};
+    CHECK_FALSE(isNumericallySafeCut(mixed));
+}
+
+TEST_CASE("Gomory: blow-up row is never pooled", "[cuts][gomory]") {
+    auto problem = buildGomoryBlowupMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+
+    // x is basic with a fractional part just above kIntTol, which is what makes
+    // the GMI coefficient on y explode.
+    const Real f0 = primals[0] - std::floor(primals[0]);
+    CHECK(f0 > 1e-6);
+    CHECK(f0 < 1e-4);
+
+    CutPool pool;
+    GomorySeparator gomory;
+    const Int cuts = gomory.separate(lp, problem, primals, pool);
+
+    // Nothing is pooled. NOTE: today that is *not* because the safety screen
+    // rejected the blown-up cut — the cut is never built at all. Every tableau
+    // row of a basic structural variable has a nonzero entry on some nonbasic
+    // logical (row p of B^-1 vanishes exactly on the basic logicals and cannot
+    // be the zero row), and gomory.cpp's supported_row filter rejects any row
+    // with a nonbasic slack, so GomorySeparator currently emits no cuts on any
+    // instance. That defect is issue #211; the vacuous CHECK(cuts >= 0) in
+    // "Gomory: generate cuts on small MIP" above is why it went unnoticed.
+    //
+    // When #211 is fixed this row will build a cut with a 1e7 coefficient and
+    // the safety screen becomes what keeps the pool empty — so revisit this
+    // assertion then: it must stay green for the new reason, and the screen
+    // itself is pinned by "Gomory: safety screen rejects a GMI coefficient
+    // blow-up" above.
+    CHECK(cuts == 0);
+    CHECK(pool.size() == 0);
+
+    // Invariant that holds either way and is the point of issue #196: whatever
+    // Gomory does pool has passed the shared numerical safety screen.
+    for (Index i = 0; i < pool.size(); ++i) {
+        CHECK(isNumericallySafeCut(pool[i]));
     }
 }
 

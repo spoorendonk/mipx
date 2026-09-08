@@ -1,11 +1,11 @@
 #include "mipx/gomory.h"
 
+#include "mipx/branching.h"
+#include "mipx/lp_problem.h"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
-
-#include "mipx/branching.h"
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -33,10 +33,8 @@ bool isIntegralValue(Real v, Real tol) {
 /// The cut is:
 ///   sum over nonbasic j:  gmi_coeff(t_j) * delta_j >= 1
 
-Int GomorySeparator::separate(DualSimplexSolver& lp,
-                               const LpProblem& problem,
-                               std::span<const Real> primals,
-                               CutPool& pool) {
+Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
+                              std::span<const Real> primals, CutPool& pool) {
     Int num_cuts = 0;
     Index num_cols = problem.num_cols;
     Index num_rows = lp.numRows();
@@ -53,9 +51,13 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
     std::vector<Candidate> candidates;
 
     for (Index j = 0; j < num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
+        if (problem.col_type[j] == VarType::Continuous) {
+            continue;
+        }
         Index bp = lp.basisPosition(j);
-        if (bp < 0) continue;
+        if (bp < 0) {
+            continue;
+        }
 
         Real val = primals[j];
         Real frac = fractionality(val);
@@ -65,13 +67,12 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
     }
 
     // Sort by fractionality closest to 0.5.
-    std::sort(candidates.begin(), candidates.end(),
-        [](const Candidate& a, const Candidate& b) {
-            return std::abs(a.frac - 0.5) < std::abs(b.frac - 0.5);
-        });
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return std::abs(a.frac - 0.5) < std::abs(b.frac - 0.5);
+    });
 
-    Index max_try = std::min(static_cast<Index>(candidates.size()),
-                             static_cast<Index>(max_cuts_ * 2));
+    Index max_try =
+        std::min(static_cast<Index>(candidates.size()), static_cast<Index>(max_cuts_ * 2));
 
     std::vector<Real> tab_row(static_cast<std::size_t>(total_vars));
 
@@ -83,7 +84,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
 
         Real b = primals[cand.col];
         Real f0 = b - std::floor(b);
-        if (f0 < kIntTol || f0 > 1.0 - kIntTol) continue;
+        if (f0 < kIntTol || f0 > 1.0 - kIntTol) {
+            continue;
+        }
 
         // Safety filter:
         // Generate Gomory cuts only from rows whose nonbasic terms are all
@@ -92,9 +95,13 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
         // already contains dynamically added rows/cuts.
         bool supported_row = true;
         for (Index k = 0; k < total_vars; ++k) {
-            if (basis[k] == BasisStatus::Basic) continue;
+            if (basis[k] == BasisStatus::Basic) {
+                continue;
+            }
             const Real alpha = tab_row[k];
-            if (std::abs(alpha) < kCoeffTol) continue;
+            if (std::abs(alpha) < kCoeffTol) {
+                continue;
+            }
 
             const BasisStatus st = basis[k];
             if (k >= num_cols) {
@@ -109,8 +116,7 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                     supported_row = false;
                     break;
                 }
-                if (problem.col_type[k] != VarType::Continuous &&
-                    !isIntegralValue(lb, kIntTol)) {
+                if (problem.col_type[k] != VarType::Continuous && !isIntegralValue(lb, kIntTol)) {
                     supported_row = false;
                     break;
                 }
@@ -119,8 +125,7 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                     supported_row = false;
                     break;
                 }
-                if (problem.col_type[k] != VarType::Continuous &&
-                    !isIntegralValue(ub, kIntTol)) {
+                if (problem.col_type[k] != VarType::Continuous && !isIntegralValue(ub, kIntTol)) {
                     supported_row = false;
                     break;
                 }
@@ -129,7 +134,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                 break;
             }
         }
-        if (!supported_row) continue;
+        if (!supported_row) {
+            continue;
+        }
 
         // Build the cut in external space: sum_j cut_coeff[j] * x_j >= cut_rhs
         std::vector<Real> cut_coeff(static_cast<std::size_t>(num_cols), 0.0);
@@ -137,10 +144,14 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
         bool valid = true;
 
         for (Index k = 0; k < total_vars; ++k) {
-            if (basis[k] == BasisStatus::Basic) continue;
+            if (basis[k] == BasisStatus::Basic) {
+                continue;
+            }
 
             Real alpha = tab_row[k];
-            if (std::abs(alpha) < kCoeffTol) continue;
+            if (std::abs(alpha) < kCoeffTol) {
+                continue;
+            }
 
             BasisStatus st = basis[k];
 
@@ -153,15 +164,18 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                 t = -alpha;
             }
 
-            bool is_integer = (k < num_cols &&
-                               problem.col_type[k] != VarType::Continuous);
+            bool is_integer = (k < num_cols && problem.col_type[k] != VarType::Continuous);
 
             // GMI coefficient for the deviation.
             Real gmi_coeff = 0.0;
             if (is_integer) {
                 Real fj = t - std::floor(t);
-                if (fj < 0) fj += 1.0;
-                if (fj > 1.0 - kCoeffTol) fj = 0.0;
+                if (fj < 0) {
+                    fj += 1.0;
+                }
+                if (fj > 1.0 - kCoeffTol) {
+                    fj = 0.0;
+                }
 
                 if (fj <= f0 + kCoeffTol) {
                     gmi_coeff = fj / f0;
@@ -176,7 +190,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                 }
             }
 
-            if (std::abs(gmi_coeff) < kCoeffTol) continue;
+            if (std::abs(gmi_coeff) < kCoeffTol) {
+                continue;
+            }
 
             if (k < num_cols) {
                 // Structural variable with external bounds.
@@ -186,11 +202,15 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
                 if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
                     // delta = x - lb
                     cut_coeff[k] += gmi_coeff;
-                    if (lb > -kInf) cut_rhs += gmi_coeff * lb;
+                    if (lb > -kInf) {
+                        cut_rhs += gmi_coeff * lb;
+                    }
                 } else if (st == BasisStatus::AtUpper) {
                     // delta = ub - x
                     cut_coeff[k] -= gmi_coeff;
-                    if (ub < kInf) cut_rhs -= gmi_coeff * ub;
+                    if (ub < kInf) {
+                        cut_rhs -= gmi_coeff * ub;
+                    }
                 } else {
                     valid = false;
                     break;
@@ -202,7 +222,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
             }
         }
 
-        if (!valid || !std::isfinite(cut_rhs)) continue;
+        if (!valid || !std::isfinite(cut_rhs)) {
+            continue;
+        }
 
         // Build sparse cut.
         Cut cut;
@@ -215,11 +237,38 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
             }
         }
 
-        if (cut.indices.empty() || norm_sq < kCoeffTol) continue;
+        if (cut.indices.empty() || norm_sq < kCoeffTol) {
+            continue;
+        }
 
         cut.lower = cut_rhs;
         cut.upper = kInf;
         cut.family = CutFamily::Gomory;
+
+        // Same numerical safety screen every other family gets through
+        // SeparatorManager::addViolatedCut. No check is skipped: the ones the
+        // construction above already guarantees (sorted indices, |coef| above
+        // kCoeffTol, finite rhs, non-empty support, norm_sq above kCoeffTol)
+        // are cheap to re-test, and the ones it does not guarantee — a maximum
+        // coefficient above 1e6, a max/min coefficient ratio above 1e8, and a
+        // squared norm above 1e16 — are exactly why the screen is here. A GMI
+        // coefficient is t/f0 (or fj/f0) on a nonbasic column, so a basic
+        // variable whose fractional part f0 sits just above kIntTol blows the
+        // coefficient up without any of the local checks noticing.
+        //
+        // Note the screen is stricter than the sparsification just above: it
+        // drops the whole cut when max|coef| / min|coef| exceeds 1e8, while the
+        // loop keeps every coefficient above kCoeffTol = 1e-10. A cut carrying
+        // an O(1) coefficient next to a 5e-10 cancellation residual is
+        // therefore rejected outright. That is deliberate — Gomory gets the
+        // same screen as everyone else, and a Gomory-only exemption would put
+        // the ill-conditioned cut it is meant to catch straight into the LP.
+        // If it proves too blunt once GomorySeparator actually emits cuts
+        // (issue #211), the fix is a relative drop tolerance applied to every
+        // family before screening, not a carve-out here.
+        if (!isNumericallySafeCut(cut)) {
+            continue;
+        }
 
         // Compute violation: lhs = sum cut_coeff[j] * x_j, violation = rhs - lhs.
         Real lhs = 0.0;
@@ -228,7 +277,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp,
         }
         Real violation = cut_rhs - lhs;
 
-        if (violation < min_violation_) continue;
+        if (violation < min_violation_) {
+            continue;
+        }
 
         cut.efficacy = violation / std::sqrt(norm_sq);
 
