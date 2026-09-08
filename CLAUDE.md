@@ -188,12 +188,21 @@ rm -rf build
 ```
 
 ```build
-cmake -B build && cmake --build build -j$(nproc)
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```
 
 ```test
 ctest --test-dir build --output-on-failure -j$(nproc) && { pytest --tb=short -q || test $? -eq 5; }
 ```
+
+`CMAKE_BUILD_TYPE` must stay in the build command. `CMakeLists.txt` sets no
+default, so omitting it produces an unoptimized build — and several benchmark
+tests carry wall-clock limits (`MIPLIB: gen ...` allows 20s, where an optimized
+build takes ~1.2s). The pre-push hook runs these exact blocks after `rm -rf
+build`, so a missing build type turns the gate red on timing alone. Note also
+that `pip install -e .` reconfigures this same `build/` directory; if C++ tests
+suddenly slow down, check `CMAKE_BUILD_TYPE` in `build/CMakeCache.txt` before
+suspecting the code.
 
 ### Running a single C++ test
 
