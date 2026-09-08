@@ -991,32 +991,6 @@ LpProblem buildStrongCgMixedMip() {
     return lp;
 }
 
-// max x + 0.001z, i.e. min -x - 0.001z, with a coefficient just below one:
-//   R1: (1 - 1e-9) x <= 1000.9999999,  x integer in [0, 2000]
-//   R2:           2z <=         1,     z integer in [0, 1]
-// x = 1001 is feasible (1001 * (1 - 1e-9) = 1000.999998999 <= 1000.9999999) and
-// optimal at -1001. Flooring t*a_j with a snapping tolerance rounded the scaled
-// coefficient 0.999999999 up to 1, which strengthens the term rather than
-// relaxing it and yields the invalid cut x <= 1000.
-LpProblem buildStrongCgNearIntegerMip() {
-    LpProblem lp;
-    lp.name = "strongcg_near_integer";
-    lp.sense = Sense::Minimize;
-    lp.num_cols = 2;
-    lp.num_rows = 2;
-    lp.obj = {-1.0, -0.001};
-    lp.col_lower = {0.0, 0.0};
-    lp.col_upper = {2000.0, 1.0};
-    lp.col_type = {VarType::Integer, VarType::Integer};
-    lp.col_names = {"x", "z"};
-    lp.row_lower = {-kInf, -kInf};
-    lp.row_upper = {1000.9999999, 1.0};
-    lp.row_names = {"R1", "R2"};
-    std::vector<Triplet> trips = {{0, 0, 1.0 - 1e-9}, {1, 1, 2.0}};
-    lp.matrix = SparseMatrix(2, 2, std::move(trips));
-    return lp;
-}
-
 // The integer optimum of every `buildNearIntegerMip` model. See below for why
 // this particular magnitude.
 constexpr Real kNearIntegerOptimum = 100001.0;
@@ -1057,6 +1031,20 @@ LpProblem buildNearIntegerMip(const char* name, Real divisor, Real c2, Real b2) 
     std::vector<Triplet> trips = {{0, 0, divisor * (1.0 - 1e-9)}, {1, 1, c2}};
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
+}
+
+// Strong CG's #188 model, in the same shape as the four #195 families: divisor
+// 1.0, with R2 `2z <= 1` yielding the valid cut z <= 0 at t = 0.5.
+//
+// It used to carry optimum 1001, and that magnitude made the solve test weaker
+// than it looked: the LP relaxation sits at 1001.0000009, a fractionality below
+// MipSolver's integrality tolerance, so the solver accepted the root LP point
+// and never branched. An objective-only assertion could not then tell a correct
+// 1001 from a regressed 1000.9999995 -- both land within 1e-6 of -1001. Sharing
+// the 100001 scale puts the fractionality at 5e-5 and lets the solve pin the
+// solution vector, matching what the four #195 families assert.
+LpProblem buildStrongCgNearIntegerMip() {
+    return buildNearIntegerMip("strongcg_near_integer", 1.0, 2.0, 1.0);
 }
 
 // Three binaries under a single row `coeff * (x1 + x2 + x3) <= rhs`, minimizing
@@ -1262,8 +1250,9 @@ TEST_CASE("MipSolver: Strong CG cuts do not cut off the optimum", "[cuts][strong
 
 TEST_CASE("SeparatorManager: Strong CG does not round a coefficient up", "[cuts][strongcg]") {
     const auto problem = buildStrongCgNearIntegerMip();
-    // x = 1001, z = 0 is integer-feasible; the pre-fix cut x <= 1000 removes it.
-    const std::vector<Real> optimum = {1001.0, 0.0};
+    // x = 100001, z = 0 is integer-feasible; the pre-fix cut x <= 100000
+    // removes it.
+    const std::vector<Real> optimum = {kNearIntegerOptimum, 0.0};
 
     // Require a non-empty pool so the per-cut validity loop is genuinely
     // exercised: R2 (2z <= 1) still yields the valid cut z <= 0 at t = 0.5.
@@ -1274,15 +1263,7 @@ TEST_CASE("SeparatorManager: Strong CG does not round a coefficient up", "[cuts]
 
 TEST_CASE("MipSolver: Strong CG keeps an optimum under a near-integer coefficient",
           "[cuts][strongcg]") {
-    MipSolver solver;
-    solver.setVerbose(false);
-    solver.setPresolve(false);
-    solver.setCutFamilyConfig(onlyStrongCgConfig());
-    solver.load(buildStrongCgNearIntegerMip());
-    auto result = solver.solve();
-
-    REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    checkNearIntegerOptimum(buildStrongCgNearIntegerMip(), onlyStrongCgConfig());
 }
 
 // ---------------------------------------------------------------------------
