@@ -2357,6 +2357,56 @@ void disableOptionalComponents(MipSolver& solver) {
     solver.setRestartsEnabled(false);
 }
 
+/// The exact model from issue #194. R0 forces x2 = 0 while R3 forces x2 = 1,
+/// so the model is infeasible; presolve used to tighten both singleton rows
+/// into the same column without noticing the crossed bounds, drop them, and
+/// report a bogus optimum at x = (1, 4, 0).
+LpProblem buildIssue194ConflictingSingletonsMip() {
+    LpProblem lp;
+    lp.name = "issue194_conflicting_singletons";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.num_rows = 4;
+    lp.obj = {5.0, -15.0, -18.0};
+    lp.obj_offset = 3.0;
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 4.0, 1.0};
+    lp.col_type.assign(3, VarType::Integer);
+    lp.col_names = {"x0", "x1", "x2"};
+    lp.row_lower = {-kInf, -kInf, -kInf, 2.0};
+    lp.row_upper = {0.0, -2.0, -1.0, 2.0};
+    lp.row_names = {"R0", "R1", "R2", "R3"};
+    std::vector<Triplet> trips = {
+        {0, 2, 4.0}, {1, 0, -4.0}, {2, 0, -3.0}, {2, 2, -3.0}, {3, 2, 2.0},
+    };
+    lp.matrix = SparseMatrix(4, 3, std::move(trips));
+    return lp;
+}
+
+/// Check a reported point against every row bound and against the integrality
+/// of every integer column, without pinning an objective value. Unlike
+/// checkIntegerSolution, usable where the optimum is not known up front.
+void checkPointFeasible(const LpProblem& lp, const std::vector<Real>& solution) {
+    REQUIRE(static_cast<Index>(solution.size()) == lp.num_cols);
+
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const Real x = solution[j];
+        if (lp.col_type[j] != VarType::Continuous) {
+            CHECK_THAT(x, WithinAbs(std::round(x), 1e-6));
+        }
+        CHECK(x >= lp.col_lower[j] - 1e-6);
+        CHECK(x <= lp.col_upper[j] + 1e-6);
+    }
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        Real activity = 0.0;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            activity += lp.matrix.coeff(i, j) * solution[j];
+        }
+        CHECK(activity >= lp.row_lower[i] - 1e-6);
+        CHECK(activity <= lp.row_upper[i] + 1e-6);
+    }
+}
 }  // namespace
 
 TEST_CASE("MipSolver: issue 186 ranged-row model is solved to its true optimum",
@@ -2412,4 +2462,29 @@ TEST_CASE("MipSolver: issue 186 root RC fixing keeps the optimum reachable", "[m
         CHECK_THAT(result.objective, WithinAbs(-23.0, 1e-6));
         checkIntegerSolution(lp, result.solution, -23.0);
     }
+}
+
+TEST_CASE("MipSolver: issue 194 conflicting singleton rows stay infeasible",
+          "[mip][presolve][issue194]") {
+    const auto lp = buildIssue194ConflictingSingletonsMip();
+
+    const auto solveWith = [&](bool presolve) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(presolve);
+        solver.load(lp);
+        const auto result = solver.solve();
+        // A reported optimum has to be a genuine point of the model.
+        if (result.status == Status::Optimal) {
+            checkPointFeasible(lp, result.solution);
+        }
+        return result.status;
+    };
+
+    const Status with_presolve = solveWith(true);
+    const Status without_presolve = solveWith(false);
+
+    CHECK(with_presolve == Status::Infeasible);
+    CHECK(without_presolve == Status::Infeasible);
+    CHECK(with_presolve == without_presolve);
 }
