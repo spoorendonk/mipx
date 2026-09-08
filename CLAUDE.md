@@ -41,7 +41,9 @@ After a successful push:
 
 ## Hooks
 
-Git hooks live in `.githooks/` (`core.hooksPath`); Claude Code hooks are the entries in `.claude/settings.json`. Both are vendored in this repo — there is no upstream to escalate to, so a wrong or too-strict hook is fixed here.
+Git hooks live in `.githooks/` (`core.hooksPath`) and are the only hooks in this repo. They are vendored here — there is no upstream to escalate to, so a wrong or too-strict hook is fixed here.
+
+`.claude/` is untracked and carries no hooks. Don't add Claude Code hooks to it: agent-side hooks duplicated the git hooks' job while being invisible to anyone not running Claude Code, and the branch-creation one could not be satisfied from a git worktree at all. Enforcement belongs in `.githooks/`, where every contributor and CI runs it.
 
 - **Don't work around a failing hook by weakening it.** Fix the cause, or change the hook deliberately and say why in the commit.
 - **Never use `git push --no-verify` or `git commit --no-verify`** unless explicitly asked. A failing hook is a signal.
