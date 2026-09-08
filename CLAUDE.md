@@ -186,7 +186,7 @@ A from-scratch branch-and-cut MIP solver in C++23 with Python bindings via nanob
 ## Build & Test
 
 ```clean
-rm -rf build
+if [ -d build ]; then find build -mindepth 1 -maxdepth 1 ! -name _deps -exec rm -rf {} +; fi
 ```
 
 ```build
@@ -248,10 +248,16 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 
 `MIPX_USE_CCACHE` is opportunistic — a no-op if neither tool is on PATH, and it
 never overrides a `CMAKE_CXX_COMPILER_LAUNCHER` you set yourself. It matters
-because the pre-push gate does `rm -rf build` and a full rebuild on every push:
-measured on a 12-core box, that goes from ~52s to ~5s with a warm cache. The
-cache keys on the compile command, so a build directory at a *different path*
-misses (include flags differ) — the gate always uses `build/`, so it hits.
+because the pre-push gate wipes the build tree and rebuilds on every push:
+measured on a 12-core box, that compile goes from ~52s to ~5s with a warm
+cache. The cache keys on the compile command, so a build directory at a
+*different path* misses (include flags differ) — the gate always uses `build/`,
+so it hits.
+
+The `clean` block deliberately keeps `build/_deps`. Everything of ours is
+rebuilt from scratch, but Catch2 and nanobind are not re-cloned — that was
+~12s of network per push and validates nothing about this codebase. Use
+`rm -rf build` for a genuine full reset, e.g. when a dependency pin changes.
 
 ### Test data
 
