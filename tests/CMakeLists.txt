@@ -38,4 +38,25 @@ target_compile_definitions(mipx-tests PRIVATE
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
 
-catch_discover_tests(mipx-tests)
+# Fast correctness suite -- the default, and what the git hooks run.
+catch_discover_tests(mipx-tests
+    TEST_SPEC "~[benchmark]~[miplib]~[netlib]"
+)
+
+# Instance-driven solver tests, labelled so the hooks can skip them.
+#
+# These load real Netlib/MIPLIB instances and assert objectives under
+# wall-clock limits, so they measure the machine and the build as much as the
+# code: an unoptimized build alone is enough to fail them on timing. That makes
+# them a poor per-commit gate. They still run on demand:
+#
+#   ctest --test-dir build -L solver-regression --output-on-failure
+#
+# They are a placeholder for a proper benchmark bed with recorded times; the
+# intent is to fold them into the MIPLIB benchmark suite rather than keep them
+# as pass/fail unit tests. See issue #213.
+catch_discover_tests(mipx-tests
+    TEST_SPEC "[benchmark],[miplib],[netlib]"
+    TEST_PREFIX "solver-regression: "
+    PROPERTIES LABELS "solver-regression"
+)

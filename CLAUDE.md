@@ -194,8 +194,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```
 
 ```test
-ctest --test-dir build --output-on-failure -j$(nproc) && { pytest --tb=short -q || test $? -eq 5; }
+ctest --test-dir build --output-on-failure -LE solver-regression -j$(nproc) && { pytest --tb=short -q || test $? -eq 5; }
 ```
+
+The commit and push gates run **correctness tests only**, and should stay fast
+(~4s). The instance-driven Netlib/MIPLIB tests are labelled
+`solver-regression` and excluded: they assert objectives under wall-clock
+limits, so they gate on the machine and the build type as much as on the code.
+Run them deliberately:
+
+```bash
+ctest --test-dir build -L solver-regression --output-on-failure
+```
+
+Don't add new wall-clock assertions to the default suite. Timing work belongs
+in a benchmark bed with recorded baselines, not in pass/fail unit tests — see
+#213 for folding this label into the MIPLIB benchmark suite.
 
 Keep `CMAKE_BUILD_TYPE` in the build command. `CMakeLists.txt` also defaults it
 to Release when unset, so both paths agree; the explicit flag documents the

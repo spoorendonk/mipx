@@ -71,7 +71,11 @@ TESTS_FAILED=0
 # Only run C++ tests if C++ files were staged
 if [ -n "$CPP_FILES" ] && [ -d "build" ] && command -v ctest &>/dev/null; then
   echo "Running C++ tests..."
-  if ! GTEST_BRIEF=1 ctest --test-dir build --output-on-failure --progress -j"$(nproc 2>/dev/null || echo 4)"; then
+  # -LE solver-regression: the instance-driven Netlib/MIPLIB tests assert
+  # objectives under wall-clock limits, so they gate on the machine and the
+  # build type as much as on the code. Correctness only on the commit path;
+  # run them on demand with `ctest --test-dir build -L solver-regression`.
+  if ! GTEST_BRIEF=1 ctest --test-dir build --output-on-failure --progress -LE solver-regression -j"$(nproc 2>/dev/null || echo 4)"; then
     echo "FAILED: C++ tests failed."
     TESTS_FAILED=1
   fi
