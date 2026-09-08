@@ -908,7 +908,48 @@ LpProblem buildStrongCgNearIntegerMip() {
     return lp;
 }
 
-CutFamilyConfig onlyStrongCgConfig() {
+// The reproduction from #195, scaled for a family whose separator multiplies
+// the row by 1/`divisor`:
+//   R1: divisor * (1 - 1e-9) x <= divisor * 1000.9999999, x integer in [0, 2000]
+//   R2:                 c2 * z <= b2,                     z integer in [0, 1]
+// The scaled R1 coefficient is exactly 0.999999999 for every divisor used here,
+// so a snapping tolerance floors it to 1 while the scaled right-hand side still
+// floors to 1000 -- the invalid cut x <= 1000. x = 1001 is integer-feasible and
+// optimal (objective -1001); x = 1002 is not. R2 carries no near-integer
+// trickery: it exists so that each family still emits a *valid* violated cut
+// after the fix, which keeps the per-cut validity check non-vacuous.
+LpProblem buildNearIntegerMip(const char* name, Real divisor, Real c2, Real b2) {
+    LpProblem lp;
+    lp.name = name;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {-1.0, -0.001};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {2000.0, 1.0};
+    lp.col_type = {VarType::Integer, VarType::Integer};
+    lp.col_names = {"x", "z"};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {divisor * 1000.9999999, b2};
+    lp.row_names = {"R1", "R2"};
+    std::vector<Triplet> trips = {{0, 0, divisor * (1.0 - 1e-9)}, {1, 1, c2}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+// Branch-and-cut `problem` with presolve off and only `config`'s family armed,
+// so a cut that removes the optimum shows up as a wrong objective rather than
+// being masked by another family or by presolve.
+MipResult solveWithCutFamilies(const LpProblem& problem, const CutFamilyConfig& config) {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutFamilyConfig(config);
+    solver.load(problem);
+    return solver.solve();
+}
+
+CutFamilyConfig noCutFamiliesConfig() {
     CutFamilyConfig config;
     config.gomory = false;
     config.mir = false;
@@ -918,11 +959,41 @@ CutFamilyConfig onlyStrongCgConfig() {
     config.zero_half = false;
     config.mixing = false;
     config.cmir = false;
-    config.strong_cg = true;
+    config.strong_cg = false;
     config.lifted_cover = false;
     config.mod_k = false;
     config.intersection_cut = false;
     config.multi_row = false;
+    return config;
+}
+
+CutFamilyConfig onlyStrongCgConfig() {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    config.strong_cg = true;
+    return config;
+}
+
+CutFamilyConfig onlyMirConfig() {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    config.mir = true;
+    return config;
+}
+
+CutFamilyConfig onlyZeroHalfConfig() {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    config.zero_half = true;
+    return config;
+}
+
+CutFamilyConfig onlyMixingConfig() {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    config.mixing = true;
+    return config;
+}
+
+CutFamilyConfig onlyModKConfig() {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    config.mod_k = true;
     return config;
 }
 
@@ -1053,6 +1124,83 @@ TEST_CASE("MipSolver: Strong CG keeps an optimum under a near-integer coefficien
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+}
+
+// ---------------------------------------------------------------------------
+// #195: the other four families that floored a scaled coefficient through a
+// snapping tolerance. Each test isolates one family, checks every separated cut
+// against the known integer optimum, pins the pool non-empty so that check is
+// not vacuous, and re-solves the model end to end.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SeparatorManager: MIR does not round a coefficient up", "[cuts][mir]") {
+    // MIR scales the row by 1, so R1 carries the bare 1 - 1e-9 coefficient.
+    // R2 (z <= 0.5) floors to z <= 0, which the LP point z = 0.5 violates, so
+    // the pool stays non-empty once R1 no longer yields anything.
+    const auto problem = buildNearIntegerMip("mir_near_integer", 1.0, 1.0, 0.5);
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    SECTION("separated cuts keep the integer optimum") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyMirConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyMirConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    }
+}
+
+TEST_CASE("SeparatorManager: zero-half does not round a coefficient up", "[cuts][zerohalf]") {
+    // Zero-half scales the row by 1/2, so R1 needs 2 * (1 - 1e-9). R2 stays
+    // separable after the fix: 3z <= 1 floors to z <= 0, violated at z = 1/3.
+    const auto problem = buildNearIntegerMip("zerohalf_near_integer", 2.0, 3.0, 1.0);
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    SECTION("separated cuts keep the integer optimum") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyZeroHalfConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyZeroHalfConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    }
+}
+
+TEST_CASE("SeparatorManager: mixing does not round a coefficient up", "[cuts][mixing]") {
+    // Mixing scales the row by 1/3, so R1 needs 3 * (1 - 1e-9). R2 stays
+    // separable after the fix: 4z <= 1 floors to z <= 0, violated at z = 1/4.
+    const auto problem = buildNearIntegerMip("mixing_near_integer", 3.0, 4.0, 1.0);
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    SECTION("separated cuts keep the integer optimum") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyMixingConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyMixingConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    }
+}
+
+TEST_CASE("SeparatorManager: mod-k does not round a coefficient up", "[cuts][modk]") {
+    // Mod-k tries k in {2, 3, 4, 5}; k = 2 is the one that trips on
+    // 2 * (1 - 1e-9). R2 stays separable after the fix: 3z <= 1 floors to
+    // z <= 0 at k = 2 and k = 3, violated at z = 1/3.
+    const auto problem = buildNearIntegerMip("modk_near_integer", 2.0, 3.0, 1.0);
+    const std::vector<Real> optimum = {1001.0, 0.0};
+
+    SECTION("separated cuts keep the integer optimum") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyModKConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyModKConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    }
 }
 
 TEST_CASE("MipSolver: knapsack solves to -9.5 with presolve off and cuts on", "[cuts][strongcg]") {

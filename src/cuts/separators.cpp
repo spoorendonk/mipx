@@ -251,7 +251,15 @@ Int SeparatorManager::separateMir(const LpProblem& problem, std::span<const Real
             if (problem.col_type[j] == VarType::Continuous) {
                 continue;
             }
-            const Real rounded = std::floor(a + 1e-9);
+            // Plain floor, with no snapping tolerance. Chvatal-Gomory
+            // rounding is a relaxation only while floor(t*a_j) <= t*a_j: the
+            // rounded term must not exceed the original, or the left-hand side
+            // is strengthened and flooring the right-hand side is no longer
+            // justified. Adding a tolerance before the floor rounds a
+            // coefficient just below an integer *up*, which strengthens that
+            // term by up to the tolerance times the column's upper bound and
+            // can cut off integer-feasible points.
+            const Real rounded = std::floor(a);
             if (rounded <= 0.0) {
                 continue;
             }
@@ -640,11 +648,23 @@ Int SeparatorManager::separateZeroHalf(const LpProblem& problem, std::span<const
             if (problem.col_type[j] == VarType::Continuous) {
                 continue;
             }
-            const Real rounded = std::floor(0.5 * a + 1e-9);
+            // Plain floor, with no snapping tolerance. Chvatal-Gomory
+            // rounding is a relaxation only while floor(t*a_j) <= t*a_j: the
+            // rounded term must not exceed the original, or the left-hand side
+            // is strengthened and flooring the right-hand side is no longer
+            // justified. Adding a tolerance before the floor rounds a
+            // coefficient just below an integer *up*, which strengthens that
+            // term by up to the tolerance times the column's upper bound and
+            // can cut off integer-feasible points.
+            const Real rounded = std::floor(0.5 * a);
             if (rounded <= 0.0) {
                 continue;
             }
-            if (rounded + 1e-9 < a) {
+            // Compare against the *scaled* coefficient. `rounded` is
+            // floor(0.5*a), so testing it against the unscaled `a` reports
+            // "rounding changed something" for essentially every coefficient
+            // above 1 and makes the flag useless as a strengthening test.
+            if (rounded + 1e-9 < 0.5 * a) {
                 changed = true;
             }
             cut.indices.push_back(j);
@@ -691,11 +711,23 @@ Int SeparatorManager::separateMixing(const LpProblem& problem, std::span<const R
             if (problem.col_type[j] == VarType::Continuous) {
                 continue;
             }
-            const Real rounded = std::floor(kScale * a + 1e-9);
+            // Plain floor, with no snapping tolerance. Chvatal-Gomory
+            // rounding is a relaxation only while floor(t*a_j) <= t*a_j: the
+            // rounded term must not exceed the original, or the left-hand side
+            // is strengthened and flooring the right-hand side is no longer
+            // justified. Adding a tolerance before the floor rounds a
+            // coefficient just below an integer *up*, which strengthens that
+            // term by up to the tolerance times the column's upper bound and
+            // can cut off integer-feasible points.
+            const Real rounded = std::floor(kScale * a);
             if (rounded <= 0.0) {
                 continue;
             }
-            if (rounded + 1e-9 < a) {
+            // Compare against the *scaled* coefficient. `rounded` is
+            // floor(kScale*a), so testing it against the unscaled `a` reports
+            // "rounding changed something" for essentially every coefficient
+            // and makes the flag useless as a strengthening test.
+            if (rounded + 1e-9 < kScale * a) {
                 changed = true;
             }
             cut.indices.push_back(j);
