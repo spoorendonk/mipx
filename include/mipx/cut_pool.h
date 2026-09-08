@@ -44,14 +44,24 @@ struct Cut {
 
 /// Screen a cut for numerical safety before it is offered to a CutPool.
 ///
-/// Shared by every separator: SeparatorManager applies it in addViolatedCut,
-/// GomorySeparator applies it on its own accept path. A cut is rejected when
-/// it is empty, its index and value arrays disagree in length, its finite
-/// bounds are not finite numbers, its indices are negative or not strictly
-/// increasing, any coefficient is non-finite or no larger than 1e-12 in
-/// magnitude, its squared norm falls outside [1e-12, 1e16], the largest
-/// coefficient magnitude exceeds 1e6, or the largest/smallest coefficient
-/// ratio exceeds 1e8.
+/// Shared by the two classes that offer cuts to a pool directly:
+/// SeparatorManager applies it in addViolatedCut, GomorySeparator applies it
+/// on its own accept path. (CliqueTable::separateCliqueCover also calls
+/// CutPool::addCut, but only on a scratch pool whose cuts are re-offered
+/// through addViolatedCut.) A cut is rejected when it is empty, its index and
+/// value arrays disagree in length, a bound is infinite in the direction that
+/// bounds it (a lower of +inf or an upper of -inf), its indices are negative
+/// or not strictly increasing, any coefficient is non-finite or no larger
+/// than 1e-12 in magnitude, its squared norm falls outside [1e-12, 1e16], the
+/// largest coefficient magnitude exceeds 1e6, or the largest/smallest
+/// coefficient ratio exceeds 1e8.
+///
+/// Note the bound test does not reject a NaN bound: a one-sided cut carries
+/// +/-kInf on its open side, and the predicate distinguishes those from a
+/// bound infinite the wrong way by comparing against kInf, which NaN fails on
+/// both sides. No current separator can produce one -- Gomory rejects a
+/// non-finite rhs before the screen, and the manager families build bounds by
+/// flooring finite values -- so this is a gap in the screen, not a live hole.
 [[nodiscard]] bool isNumericallySafeCut(const Cut& cut);
 
 /// Pool of cutting planes with efficacy ranking and parallelism filtering.
