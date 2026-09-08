@@ -26,6 +26,12 @@ SH_FILES=$(echo "$CHANGED_FILES" | grep -E '\.sh$' || true)
 # Python venv — required for all Python tooling
 if [ -n "$PY_FILES" ] || [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
   source "$(dirname "$0")/resolve-venv.sh"
+  # Put the venv on PATH as well as exposing $VENV_BIN. The build/test blocks
+  # below come from CLAUDE.md, are written to be run by hand from the repo
+  # root, and call tools by bare name (`pytest`, `ruff`); they cannot be
+  # expected to know about $VENV_BIN. Without this the test block dies with
+  # "pytest: command not found" whenever the venv is not already activated.
+  [ -n "$VENV_BIN" ] && PATH="$PWD/$VENV_BIN:$PATH" && export PATH
 fi
 
 # Check if only non-code files changed (skip build+test for docs-only pushes)
