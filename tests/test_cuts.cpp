@@ -937,6 +937,30 @@ LpProblem buildNearIntegerMip(const char* name, Real divisor, Real c2, Real b2) 
     return lp;
 }
 
+// Three binaries under a single row `coeff * (x1 + x2 + x3) <= rhs`, minimizing
+// -(x1 + x2 + x3). With `coeff` an exact multiple of the family's divisor no
+// coefficient rounds at all, so the whole strength of the cut comes from
+// flooring the scaled right-hand side -- the canonical Chvatal-Gomory case. The
+// integer optimum is any single 1 (objective -1) whenever rhs < 2 * coeff.
+LpProblem buildDivisibleRowMip(const char* name, Real coeff, Real rhs) {
+    LpProblem lp;
+    lp.name = name;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.num_rows = 1;
+    lp.obj = {-1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary};
+    lp.col_names = {"x1", "x2", "x3"};
+    lp.row_lower = {-kInf};
+    lp.row_upper = {rhs};
+    lp.row_names = {"R1"};
+    std::vector<Triplet> trips = {{0, 0, coeff}, {0, 1, coeff}, {0, 2, coeff}};
+    lp.matrix = SparseMatrix(1, 3, std::move(trips));
+    return lp;
+}
+
 // Branch-and-cut `problem` with presolve off and only `config`'s family armed,
 // so a cut that removes the optimum shows up as a wrong objective rather than
 // being masked by another family or by presolve.
@@ -1200,6 +1224,47 @@ TEST_CASE("SeparatorManager: mod-k does not round a coefficient up", "[cuts][mod
         const auto result = solveWithCutFamilies(problem, onlyModKConfig());
         REQUIRE(result.status == Status::Optimal);
         CHECK_THAT(result.objective, WithinAbs(-1001.0, 1e-6));
+    }
+}
+
+// Rescaling the "did rounding change anything" test in #195 made zero-half and
+// mixing stricter, and neither seeds the flag from the right-hand side the way
+// MIR and mod-k do. These two pin the case that exposes: a row where no
+// coefficient rounds and the whole cut comes from flooring the scaled rhs.
+
+TEST_CASE("SeparatorManager: zero-half still cuts a row only the rhs rounds", "[cuts][zerohalf]") {
+    // 2x1 + 2x2 + 2x3 <= 3 over binaries. No coefficient rounds (0.5 * 2 = 1),
+    // but the rhs floors from 1.5 to 1, giving x1 + x2 + x3 <= 1 -- the
+    // canonical {0,1/2} cut, violated by the LP optimum whose sum is 1.5.
+    const auto problem = buildDivisibleRowMip("zerohalf_even_row", 2.0, 3.0);
+    const std::vector<Real> optimum = {1.0, 0.0, 0.0};
+
+    SECTION("the cut is still generated and is valid") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyZeroHalfConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyZeroHalfConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.0, 1e-6));
+    }
+}
+
+TEST_CASE("SeparatorManager: mixing still cuts a row only the rhs rounds", "[cuts][mixing]") {
+    // 3x1 + 3x2 + 3x3 <= 4 over binaries. No coefficient rounds (3/3 = 1), but
+    // the rhs floors from 4/3 to 1, giving x1 + x2 + x3 <= 1, violated by the
+    // LP optimum whose sum is 4/3.
+    const auto problem = buildDivisibleRowMip("mixing_multiple_of_three_row", 3.0, 4.0);
+    const std::vector<Real> optimum = {1.0, 0.0, 0.0};
+
+    SECTION("the cut is still generated and is valid") {
+        CHECK(separateAndCheckCutsKeep(problem, optimum, onlyMixingConfig()) > 0);
+    }
+
+    SECTION("solver reports the true optimum") {
+        const auto result = solveWithCutFamilies(problem, onlyMixingConfig());
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.0, 1e-6));
     }
 }
 

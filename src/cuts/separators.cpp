@@ -637,7 +637,12 @@ Int SeparatorManager::separateZeroHalf(const LpProblem& problem, std::span<const
         cut.lower = -kInf;
         cut.upper = std::floor(0.5 * rhs + 1e-9);
         bool valid = true;
-        bool changed = false;
+        // Seed from the right-hand side, as MIR, mod-k and Strong CG do. A row
+        // whose integer coefficients are all even -- the canonical {0,1/2} cut
+        // -- rounds no coefficient at all, and all of the cut's strength comes
+        // from flooring the scaled right-hand side. Starting at false would
+        // discard exactly that cut.
+        bool changed = (cut.upper + 1e-9 < 0.5 * rhs);
         for (Index p = 0; p < row.size(); ++p) {
             const Index j = row.indices[p];
             const Real a = row.values[p];
@@ -700,7 +705,11 @@ Int SeparatorManager::separateMixing(const LpProblem& problem, std::span<const R
         cut.lower = -kInf;
         cut.upper = std::floor(kScale * rhs + 1e-9);
         bool valid = true;
-        bool changed = false;
+        // Seed from the right-hand side, as MIR, mod-k and Strong CG do: a row
+        // whose coefficients are all multiples of 3 rounds no coefficient, and
+        // all of the cut's strength comes from flooring the scaled right-hand
+        // side. Starting at false would discard exactly that cut.
+        bool changed = (cut.upper + 1e-9 < kScale * rhs);
         for (Index p = 0; p < row.size(); ++p) {
             const Index j = row.indices[p];
             const Real a = row.values[p];
