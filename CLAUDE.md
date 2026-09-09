@@ -259,6 +259,17 @@ rebuilt from scratch, but Catch2 and nanobind are not re-cloned — that was
 ~12s of network per push and validates nothing about this codebase. Use
 `rm -rf build` for a genuine full reset, e.g. when a dependency pin changes.
 
+**Ninja is optional.** The build blocks don't name a generator, so
+`export CMAKE_GENERATOR=Ninja` is enough to use it if `ninja` is installed.
+Measured here it is worth about 10%: clean cycle 4.8s → 4.3s, incremental
+0.6s → 0.4s. Real, but not enough to make ninja a build requirement, so Make
+stays the default.
+
+**Switching generators requires `rm -rf build`**, not the `clean` block. The
+preserved `_deps/*-subbuild` directories record the generator that created
+them, and the mismatch surfaces as a `CMake step for nanobind failed` error
+from inside FetchContent rather than as anything mentioning generators.
+
 ### Test data
 
 Netlib/MIPLIB instances are not in git. Download before running benchmarks:
