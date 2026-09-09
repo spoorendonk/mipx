@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
-
 #include <zlib.h>
 
 #ifdef MIPX_HAS_BZIP2
@@ -37,10 +36,8 @@ constexpr size_t kBulkDecompressThreshold = 128 * 1024 * 1024;  // 128 MB
 class LineReader {
 public:
     explicit LineReader(const std::string& filename) {
-        bool is_gz = filename.size() >= 3 &&
-                     filename.compare(filename.size() - 3, 3, ".gz") == 0;
-        bool is_bz2 = filename.size() >= 4 &&
-                      filename.compare(filename.size() - 4, 4, ".bz2") == 0;
+        bool is_gz = filename.size() >= 3 && filename.compare(filename.size() - 3, 3, ".gz") == 0;
+        bool is_bz2 = filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".bz2") == 0;
 
         compressed_size_ = queryFileSize(filename);
 
@@ -48,9 +45,8 @@ public:
 #ifdef MIPX_HAS_BZIP2
             initBz2(filename);
 #else
-            throw std::runtime_error(
-                "bzip2 support not compiled in (need -DMIPX_USE_BZIP2=ON): " +
-                filename);
+            throw std::runtime_error("bzip2 support not compiled in (need -DMIPX_USE_BZIP2=ON): " +
+                                     filename);
 #endif
         } else if (is_gz) {
             if (compressed_size_ <= kBulkDecompressThreshold) {
@@ -70,13 +66,16 @@ public:
             ::close(fd_);
         }
 #endif
-        if (gz_file_) gzclose(gz_file_);
+        if (gz_file_) {
+            gzclose(gz_file_);
+        }
 #ifdef MIPX_HAS_BZIP2
         if (bz_handle_) {
             int bzerr;
             BZ2_bzReadClose(&bzerr, bz_handle_);
         }
-        if (bz_fp_) fclose(bz_fp_);
+        if (bz_fp_)
+            fclose(bz_fp_);
 #endif
     }
 
@@ -85,9 +84,12 @@ public:
 
     /// Returns next line (valid until next call).  Returns false at EOF.
     bool getline(std::string_view& out) {
-        if (data_) return getlineMemory(out);
+        if (data_) {
+            return getlineMemory(out);
+        }
 #ifdef MIPX_HAS_BZIP2
-        if (bz_handle_) return getlineBz2(out);
+        if (bz_handle_)
+            return getlineBz2(out);
 #endif
         return getlineBuffered(out);
     }
@@ -99,19 +101,23 @@ private:
     static size_t queryFileSize(const std::string& filename) {
 #ifdef __unix__
         struct stat st;
-        if (::stat(filename.c_str(), &st) == 0)
+        if (::stat(filename.c_str(), &st) == 0) {
             return static_cast<size_t>(st.st_size);
+        }
 #endif
         std::ifstream f(filename, std::ios::binary | std::ios::ate);
-        if (f) return static_cast<size_t>(f.tellg());
+        if (f) {
+            return static_cast<size_t>(f.tellg());
+        }
         return 0;
     }
 
     void initPlain(const std::string& filename) {
 #ifdef __unix__
         fd_ = ::open(filename.c_str(), O_RDONLY);
-        if (fd_ < 0)
+        if (fd_ < 0) {
             throw std::runtime_error("Cannot open file: " + filename);
+        }
 
         struct stat st;
         if (fstat(fd_, &st) < 0) {
@@ -155,7 +161,9 @@ private:
     void initGzBulk(const std::string& filename) {
         is_compressed_ = true;
         gzFile f = gzopen(filename.c_str(), "rb");
-        if (!f) throw std::runtime_error("Cannot open file: " + filename);
+        if (!f) {
+            throw std::runtime_error("Cannot open file: " + filename);
+        }
 
         // Pre-allocate with heuristic estimate (MPS compresses ~12x).
         size_t est = std::max<size_t>(compressed_size_ * 14, 4096);
@@ -168,10 +176,11 @@ private:
                 owned_buf_.resize(owned_buf_.size() * 2);
                 avail = owned_buf_.size() - total;
             }
-            auto to_read =
-                static_cast<unsigned>(std::min<size_t>(avail, 1u << 30));
+            auto to_read = static_cast<unsigned>(std::min<size_t>(avail, 1u << 30));
             int n = gzread(f, owned_buf_.data() + total, to_read);
-            if (n <= 0) break;
+            if (n <= 0) {
+                break;
+            }
             total += static_cast<size_t>(n);
         }
         gzclose(f);
@@ -184,8 +193,9 @@ private:
     void initGzStreaming(const std::string& filename) {
         is_compressed_ = true;
         gz_file_ = gzopen(filename.c_str(), "rb");
-        if (!gz_file_)
+        if (!gz_file_) {
             throw std::runtime_error("Cannot open file: " + filename);
+        }
         gzbuffer(gz_file_, 1 << 17);  // 128 KB zlib internal buffer
     }
 
@@ -210,10 +220,8 @@ private:
         for (;;) {
             if (buf_pos_ < buf_len_) {
                 const char* start = buf_ + buf_pos_;
-                auto remaining =
-                    static_cast<size_t>(buf_len_ - buf_pos_);
-                const char* nl = static_cast<const char*>(
-                    std::memchr(start, '\n', remaining));
+                auto remaining = static_cast<size_t>(buf_len_ - buf_pos_);
+                const char* nl = static_cast<const char*>(std::memchr(start, '\n', remaining));
 
                 if (nl) {
                     auto len = static_cast<size_t>(nl - start);
@@ -257,12 +265,14 @@ private:
 #endif
 
     bool getlineMemory(std::string_view& out) {
-        if (data_pos_ >= data_len_) return false;
+        if (data_pos_ >= data_len_) {
+            return false;
+        }
 
         const char* start = data_ + data_pos_;
         const char* end = data_ + data_len_;
-        const char* nl = static_cast<const char*>(
-            std::memchr(start, '\n', static_cast<size_t>(end - start)));
+        const char* nl =
+            static_cast<const char*>(std::memchr(start, '\n', static_cast<size_t>(end - start)));
 
         if (nl) {
             out = std::string_view(start, static_cast<size_t>(nl - start));
@@ -271,7 +281,9 @@ private:
             out = std::string_view(start, static_cast<size_t>(end - start));
             data_pos_ = data_len_;
         }
-        if (!out.empty() && out.back() == '\r') out.remove_suffix(1);
+        if (!out.empty() && out.back() == '\r') {
+            out.remove_suffix(1);
+        }
         return true;
     }
 
@@ -281,10 +293,8 @@ private:
         for (;;) {
             if (buf_pos_ < buf_len_) {
                 const char* start = buf_ + buf_pos_;
-                auto remaining =
-                    static_cast<size_t>(buf_len_ - buf_pos_);
-                const char* nl = static_cast<const char*>(
-                    std::memchr(start, '\n', remaining));
+                auto remaining = static_cast<size_t>(buf_len_ - buf_pos_);
+                const char* nl = static_cast<const char*>(std::memchr(start, '\n', remaining));
 
                 if (nl) {
                     auto len = static_cast<size_t>(nl - start);
@@ -296,8 +306,9 @@ private:
                         overflow_.append(start, len);
                         out = overflow_;
                     }
-                    if (!out.empty() && out.back() == '\r')
+                    if (!out.empty() && out.back() == '\r') {
                         out.remove_suffix(1);
+                    }
                     return true;
                 }
 
@@ -310,8 +321,9 @@ private:
             if (n <= 0) {
                 if (!overflow_.empty()) {
                     out = overflow_;
-                    if (!out.empty() && out.back() == '\r')
+                    if (!out.empty() && out.back() == '\r') {
                         out.remove_suffix(1);
+                    }
                     return true;
                 }
                 return false;
@@ -366,10 +378,16 @@ Tokens tokenize(std::string_view line) {
     size_t i = 0;
     const size_t len = line.size();
     while (i < len && t.n < 6) {
-        while (i < len && (line[i] == ' ' || line[i] == '\t')) ++i;
-        if (i >= len) break;
+        while (i < len && (line[i] == ' ' || line[i] == '\t')) {
+            ++i;
+        }
+        if (i >= len) {
+            break;
+        }
         size_t start = i;
-        while (i < len && line[i] != ' ' && line[i] != '\t') ++i;
+        while (i < len && line[i] != ' ' && line[i] != '\t') {
+            ++i;
+        }
         t.data[t.n++] = line.substr(start, i - start);
     }
     return t;
@@ -379,7 +397,9 @@ Real parseReal(std::string_view s) {
     const char* begin = s.data();
     const char* end = s.data() + s.size();
     // std::from_chars may not accept a leading '+' on some implementations.
-    if (begin < end && *begin == '+') ++begin;
+    if (begin < end && *begin == '+') {
+        ++begin;
+    }
     Real val = 0.0;
     auto [ptr, ec] = std::from_chars(begin, end, val);
     if (ec != std::errc{} || ptr != end) {
@@ -389,7 +409,9 @@ Real parseReal(std::string_view s) {
 }
 
 bool isSection(std::string_view line) {
-    if (line.empty()) return false;
+    if (line.empty()) {
+        return false;
+    }
     return !std::isspace(static_cast<unsigned char>(line[0]));
 }
 
@@ -397,16 +419,34 @@ enum class Section { None, Name, Rows, Columns, Rhs, Ranges, Bounds, Endata };
 
 Section parseSection(std::string_view line) {
     auto tokens = tokenize(line);
-    if (tokens.n == 0) return Section::None;
+    if (tokens.n == 0) {
+        return Section::None;
+    }
     auto s = tokens[0];
-    if (s == "NAME") return Section::Name;
-    if (s == "ROWS") return Section::Rows;
-    if (s == "LAZYCONS" || s == "USERCUTS") return Section::Rows;
-    if (s == "COLUMNS") return Section::Columns;
-    if (s == "RHS") return Section::Rhs;
-    if (s == "RANGES") return Section::Ranges;
-    if (s == "BOUNDS") return Section::Bounds;
-    if (s == "ENDATA") return Section::Endata;
+    if (s == "NAME") {
+        return Section::Name;
+    }
+    if (s == "ROWS") {
+        return Section::Rows;
+    }
+    if (s == "LAZYCONS" || s == "USERCUTS") {
+        return Section::Rows;
+    }
+    if (s == "COLUMNS") {
+        return Section::Columns;
+    }
+    if (s == "RHS") {
+        return Section::Rhs;
+    }
+    if (s == "RANGES") {
+        return Section::Ranges;
+    }
+    if (s == "BOUNDS") {
+        return Section::Bounds;
+    }
+    if (s == "ENDATA") {
+        return Section::Endata;
+    }
     return Section::None;
 }
 
@@ -420,13 +460,10 @@ struct StringHash {
 
 struct StringEqual {
     using is_transparent = void;
-    bool operator()(std::string_view a, std::string_view b) const noexcept {
-        return a == b;
-    }
+    bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
 };
 
-using StringMap =
-    std::unordered_map<std::string, Index, StringHash, StringEqual>;
+using StringMap = std::unordered_map<std::string, Index, StringHash, StringEqual>;
 
 }  // namespace
 
@@ -455,8 +492,7 @@ LpProblem readMps(const std::string& filename) {
     {
         size_t fsz = reader.compressedSize();
         if (fsz > 1024) {
-            size_t text_est =
-                reader.isCompressed() ? fsz * 12 : fsz;
+            size_t text_est = reader.isCompressed() ? fsz * 12 : fsz;
             size_t est_nnz = text_est / 40;
             size_t est_cols = text_est / 100;
             size_t est_rows = text_est / 500;
@@ -486,8 +522,9 @@ LpProblem readMps(const std::string& filename) {
     Index cached_col_idx = -1;
 
     auto getOrCreateCol = [&](std::string_view name) -> Index {
-        if (name == cached_col_name && cached_col_idx >= 0)
+        if (name == cached_col_name && cached_col_idx >= 0) {
             return cached_col_idx;
+        }
         auto it = col_map.find(name);
         if (it != col_map.end()) {
             cached_col_name = it->first;
@@ -510,13 +547,16 @@ LpProblem readMps(const std::string& filename) {
     std::string_view line;
     while (reader.getline(line)) {
         // Skip empty lines and full-line comments.
-        if (line.empty()) continue;
-        if (line[0] == '*' || line[0] == '$') continue;
+        if (line.empty()) {
+            continue;
+        }
+        if (line[0] == '*' || line[0] == '$') {
+            continue;
+        }
 
         // Strip inline '$' comments: '$' preceded by whitespace.
         for (size_t pos = 1; pos < line.size(); ++pos) {
-            if (line[pos] == '$' &&
-                (line[pos - 1] == ' ' || line[pos - 1] == '\t')) {
+            if (line[pos] == '$' && (line[pos - 1] == ' ' || line[pos - 1] == '\t')) {
                 line = line.substr(0, pos);
                 break;
             }
@@ -530,16 +570,22 @@ LpProblem readMps(const std::string& filename) {
                     prob.name = std::string(tokens[1]);
                 }
             }
-            if (section == Section::Endata) break;
+            if (section == Section::Endata) {
+                break;
+            }
             continue;
         }
 
         auto tokens = tokenize(line);
-        if (tokens.n == 0) continue;
+        if (tokens.n == 0) {
+            continue;
+        }
 
         switch (section) {
             case Section::Rows: {
-                if (tokens.n < 2) break;
+                if (tokens.n < 2) {
+                    break;
+                }
                 char sense = tokens[0][0];
                 auto name = tokens[1];
                 if (sense == 'N') {
@@ -565,7 +611,9 @@ LpProblem readMps(const std::string& filename) {
                     break;
                 }
 
-                if (tokens.n < 3) break;
+                if (tokens.n < 3) {
+                    break;
+                }
                 auto col_name = tokens[0];
                 Index col_idx = getOrCreateCol(col_name);
 
@@ -580,9 +628,8 @@ LpProblem readMps(const std::string& filename) {
 
                     auto it = row_map.find(row_name);
                     if (it == row_map.end()) {
-                        throw std::runtime_error(
-                            "MPS: unknown row '" + std::string(row_name) +
-                            "'");
+                        throw std::runtime_error("MPS: unknown row '" + std::string(row_name) +
+                                                 "'");
                     }
                     if (it->second == -1) {
                         // Objective row.
@@ -598,12 +645,16 @@ LpProblem readMps(const std::string& filename) {
 
             case Section::Rhs: {
                 // First token is RHS name (ignored), then pairs.
-                if (tokens.n < 3) break;
+                if (tokens.n < 3) {
+                    break;
+                }
                 for (int i = 1; i + 1 < tokens.n; i += 2) {
                     auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
                     auto it = row_map.find(row_name);
-                    if (it == row_map.end()) continue;
+                    if (it == row_map.end()) {
+                        continue;
+                    }
                     if (it->second == -1) {
                         // Objective offset (RHS of N row).
                         prob.obj_offset = -val;
@@ -619,12 +670,16 @@ LpProblem readMps(const std::string& filename) {
             }
 
             case Section::Ranges: {
-                if (tokens.n < 3) break;
+                if (tokens.n < 3) {
+                    break;
+                }
                 for (int i = 1; i + 1 < tokens.n; i += 2) {
                     auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
                     auto it = row_map.find(row_name);
-                    if (it == row_map.end() || it->second == -1) continue;
+                    if (it == row_map.end() || it->second == -1) {
+                        continue;
+                    }
                     Index idx = it->second;
                     if (idx >= static_cast<Index>(range_values.size())) {
                         range_values.resize(idx + 1, 0.0);
@@ -635,7 +690,9 @@ LpProblem readMps(const std::string& filename) {
             }
 
             case Section::Bounds: {
-                if (tokens.n < 3) break;
+                if (tokens.n < 3) {
+                    break;
+                }
                 auto bound_type = tokens[0];
                 // tokens[1] is bound name (ignored).
                 auto col_name = tokens[2];
@@ -668,19 +725,15 @@ LpProblem readMps(const std::string& filename) {
                     prob.col_upper[col_idx] = parseReal(tokens[3]);
                     prob.col_type[col_idx] = VarType::Integer;
                 } else if (bound_type == "SC") {
-                    const Real semi_lb =
-                        has_value ? parseReal(tokens[3]) : 1.0;
+                    const Real semi_lb = has_value ? parseReal(tokens[3]) : 1.0;
                     prob.col_type[col_idx] = VarType::SemiContinuous;
                     prob.col_lower[col_idx] = 0.0;
-                    prob.col_semi_lower[col_idx] =
-                        std::max<Real>(0.0, semi_lb);
+                    prob.col_semi_lower[col_idx] = std::max<Real>(0.0, semi_lb);
                 } else if (bound_type == "SI") {
-                    const Real semi_lb =
-                        has_value ? parseReal(tokens[3]) : 1.0;
+                    const Real semi_lb = has_value ? parseReal(tokens[3]) : 1.0;
                     prob.col_type[col_idx] = VarType::SemiInteger;
                     prob.col_lower[col_idx] = 0.0;
-                    prob.col_semi_lower[col_idx] =
-                        std::max<Real>(0.0, semi_lb);
+                    prob.col_semi_lower[col_idx] = std::max<Real>(0.0, semi_lb);
                 }
                 break;
             }
@@ -718,9 +771,15 @@ LpProblem readMps(const std::string& filename) {
         }
 
         // Free entry arrays early.
-        { std::vector<Index>{}.swap(entry_rows); }
-        { std::vector<Index>{}.swap(entry_cols); }
-        { std::vector<Real>{}.swap(entry_vals); }
+        {
+            std::vector<Index>{}.swap(entry_rows);
+        }
+        {
+            std::vector<Index>{}.swap(entry_cols);
+        }
+        {
+            std::vector<Real>{}.swap(entry_vals);
+        }
 
         // Sort within each row by column index and sum duplicates.
         Index write = 0;
@@ -763,9 +822,8 @@ LpProblem readMps(const std::string& filename) {
         col_indices.resize(write);
         values.resize(write);
 
-        prob.matrix = SparseMatrix(prob.num_rows, prob.num_cols,
-                                   std::move(values), std::move(col_indices),
-                                   std::move(row_starts));
+        prob.matrix = SparseMatrix(prob.num_rows, prob.num_cols, std::move(values),
+                                   std::move(col_indices), std::move(row_starts));
     }
 
     // Convert row_sense + rhs + ranges to row_lower/row_upper.
@@ -782,13 +840,11 @@ LpProblem readMps(const std::string& filename) {
         switch (sense) {
             case 'L':
                 prob.row_upper[i] = rhs;
-                prob.row_lower[i] =
-                    (range != 0.0) ? rhs - std::abs(range) : -kInf;
+                prob.row_lower[i] = (range != 0.0) ? rhs - std::abs(range) : -kInf;
                 break;
             case 'G':
                 prob.row_lower[i] = rhs;
-                prob.row_upper[i] =
-                    (range != 0.0) ? rhs + std::abs(range) : kInf;
+                prob.row_upper[i] = (range != 0.0) ? rhs + std::abs(range) : kInf;
                 break;
             case 'E':
                 if (range > 0.0) {

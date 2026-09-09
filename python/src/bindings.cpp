@@ -1,13 +1,12 @@
-#include <cstdint>
-#include <string>
-
-#include <nanobind/nanobind.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/vector.h>
-
 #include "mipx/heuristic_runtime.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
+
+#include <cstdint>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+#include <string>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -83,12 +82,9 @@ NB_MODULE(_core, m) {
         .def_rw("obj_offset", &LpProblem::obj_offset)
         .def("has_integers", &LpProblem::hasIntegers);
 
-    m.def("read_mps", &mipx::readMps, "filename"_a,
-          "Read an MPS model from disk.");
-    m.def("read_lp", &mipx::readLp, "filename"_a,
-          "Read a CPLEX LP model from disk.");
-    m.def("write_mps", &mipx::writeMps, "filename"_a, "problem"_a,
-          "Write a model to MPS format.");
+    m.def("read_mps", &mipx::readMps, "filename"_a, "Read an MPS model from disk.");
+    m.def("read_lp", &mipx::readLp, "filename"_a, "Read a CPLEX LP model from disk.");
+    m.def("write_mps", &mipx::writeMps, "filename"_a, "problem"_a, "Write a model to MPS format.");
 
     nb::class_<MipPreRootStats>(m, "MipPreRootStats")
         .def_ro("enabled", &MipPreRootStats::enabled)
@@ -154,30 +150,19 @@ NB_MODULE(_core, m) {
         .def("set_parallel_mode", &MipSolver::setParallelMode, "mode"_a)
         .def("set_heuristic_mode", &MipSolver::setHeuristicMode, "mode"_a)
         .def("set_heuristic_seed", &MipSolver::setHeuristicSeed, "seed"_a)
-        .def("set_pre_root_lpfree_enabled", &MipSolver::setPreRootLpFreeEnabled,
-             "enabled"_a)
-        .def("set_pre_root_lplight_enabled", &MipSolver::setPreRootLpLightEnabled,
-             "enabled"_a)
-        .def("set_pre_root_portfolio_enabled", &MipSolver::setPreRootPortfolioEnabled,
-             "enabled"_a)
+        .def("set_pre_root_lpfree_enabled", &MipSolver::setPreRootLpFreeEnabled, "enabled"_a)
+        .def("set_pre_root_lplight_enabled", &MipSolver::setPreRootLpLightEnabled, "enabled"_a)
+        .def("set_pre_root_portfolio_enabled", &MipSolver::setPreRootPortfolioEnabled, "enabled"_a)
         .def("set_search_profile", &MipSolver::setSearchProfile, "profile"_a)
         .def("has_lplight_capability", &MipSolver::hasLpLightCapability)
-        .def("get_pre_root_stats", [](const MipSolver& solver) {
-            return solver.getPreRootStats();
-        });
+        .def("get_pre_root_stats",
+             [](const MipSolver& solver) { return solver.getPreRootStats(); });
 
     m.def(
         "solve_mps",
-        [](const std::string& filename,
-           mipx::Int node_limit,
-           double time_limit,
-           double gap_tolerance,
-           bool verbose,
-           bool presolve,
-           bool cuts,
-           mipx::Int threads,
-           HeuristicRuntimeMode heuristic_mode,
-           std::uint64_t heuristic_seed) {
+        [](const std::string& filename, mipx::Int node_limit, double time_limit,
+           double gap_tolerance, bool verbose, bool presolve, bool cuts, mipx::Int threads,
+           HeuristicRuntimeMode heuristic_mode, std::uint64_t heuristic_seed) {
             auto model = mipx::readMps(filename);
             MipSolver solver;
             solver.setNodeLimit(node_limit);
@@ -192,15 +177,8 @@ NB_MODULE(_core, m) {
             solver.load(model);
             return solver.solve();
         },
-        "filename"_a,
-        "node_limit"_a = 1000000,
-        "time_limit"_a = 3600.0,
-        "gap_tolerance"_a = 1e-4,
-        "verbose"_a = false,
-        "presolve"_a = true,
-        "cuts"_a = true,
-        "threads"_a = 1,
-        "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic,
-        "heuristic_seed"_a = 1,
+        "filename"_a, "node_limit"_a = 1000000, "time_limit"_a = 3600.0, "gap_tolerance"_a = 1e-4,
+        "verbose"_a = false, "presolve"_a = true, "cuts"_a = true, "threads"_a = 1,
+        "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic, "heuristic_seed"_a = 1,
         "Load an MPS model and solve it with default MIP settings.");
 }
