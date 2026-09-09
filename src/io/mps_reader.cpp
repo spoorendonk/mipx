@@ -1,3 +1,4 @@
+#include "file_suffix.h"
 #include "mipx/io.h"
 
 #include <algorithm>
@@ -35,9 +36,12 @@ constexpr size_t kBulkDecompressThreshold = 128 * 1024 * 1024;  // 128 MB
 /// valid until the next call.
 class LineReader {
 public:
-    explicit LineReader(const std::string& filename) {
-        bool is_gz = filename.size() >= 3 && filename.compare(filename.size() - 3, 3, ".gz") == 0;
-        bool is_bz2 = filename.size() >= 4 && filename.compare(filename.size() - 4, 4, ".bz2") == 0;
+    explicit LineReader(const std::string& filename) : filename_(filename) {
+        // Case-insensitive, and shared with the format dispatcher, so that
+        // `Model.MPS.GZ` is decompressed by the same rule that resolved it to
+        // MPS in the first place.
+        const bool is_gz = io_detail::endsWithIgnoreCase(filename, ".gz");
+        const bool is_bz2 = io_detail::endsWithIgnoreCase(filename, ".bz2");
 
         compressed_size_ = queryFileSize(filename);
 
@@ -179,6 +183,16 @@ private:
             auto to_read = static_cast<unsigned>(std::min<size_t>(avail, 1u << 30));
             int n = gzread(f, owned_buf_.data() + total, to_read);
             if (n <= 0) {
+                // gzread reports both EOF and failure as a non-positive return,
+                // so a truncated or corrupt stream is indistinguishable from a
+                // complete one unless zlib is asked. Left unasked, a damaged
+                // archive yields a partial model that solves and is reported as
+                // optimal -- the same silent wrong answer as issue #198.
+                const std::string error = gzErrorText(f, filename);
+                if (!error.empty()) {
+                    gzclose(f);
+                    throw std::runtime_error("Cannot read '" + filename + "': " + error);
+                }
                 break;
             }
             total += static_cast<size_t>(n);
@@ -188,6 +202,28 @@ private:
         owned_buf_.resize(total);
         data_ = owned_buf_.data();
         data_len_ = total;
+    }
+
+    /// Describe a zlib failure on `file`, or "" when the stream is merely at
+    /// its end. Z_STREAM_END is a clean finish, not an error.
+    ///
+    /// zlib prefixes its message with the path it opened, which the caller is
+    /// about to name as well, so that prefix is trimmed.
+    static std::string gzErrorText(gzFile file, const std::string& filename) {
+        int code = Z_OK;
+        const char* message = gzerror(file, &code);
+        if (code == Z_OK || code == Z_STREAM_END) {
+            return {};
+        }
+        if (message == nullptr || *message == '\0') {
+            return "corrupt or truncated gzip stream";
+        }
+        std::string text = message;
+        const std::string prefix = filename + ": ";
+        if (text.starts_with(prefix)) {
+            text.erase(0, prefix.size());
+        }
+        return text;
     }
 
     void initGzStreaming(const std::string& filename) {
@@ -319,6 +355,10 @@ private:
 
             int n = gzread(gz_file_, buf_, sizeof(buf_));
             if (n <= 0) {
+                const std::string error = gzErrorText(gz_file_, filename_);
+                if (!error.empty()) {
+                    throw std::runtime_error("Cannot read '" + filename_ + "': " + error);
+                }
                 if (!overflow_.empty()) {
                     out = overflow_;
                     if (!out.empty() && out.back() == '\r') {
@@ -356,6 +396,7 @@ private:
 
     size_t compressed_size_ = 0;
     bool is_compressed_ = false;
+    std::string filename_;
 
 #ifdef MIPX_HAS_BZIP2
     FILE* bz_fp_ = nullptr;
@@ -467,7 +508,11 @@ using StringMap = std::unordered_map<std::string, Index, StringHash, StringEqual
 
 }  // namespace
 
-LpProblem readMps(const std::string& filename) {
+LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
+    if (diag != nullptr) {
+        *diag = ReadDiagnostics{};
+    }
+
     LineReader reader(filename);
 
     LpProblem prob;
@@ -550,6 +595,11 @@ LpProblem readMps(const std::string& filename) {
         if (line.empty()) {
             continue;
         }
+        // Recorded before comments are skipped: this answers "was there
+        // anything in the file", not "was there anything we understood".
+        if (diag != nullptr) {
+            diag->saw_content = true;
+        }
         if (line[0] == '*' || line[0] == '$') {
             continue;
         }
@@ -564,6 +614,15 @@ LpProblem readMps(const std::string& filename) {
 
         if (isSection(line)) {
             section = parseSection(line);
+            // Only headers that are exclusive to MPS count as evidence that
+            // this really is an MPS file. NAME carries no model data, and
+            // BOUNDS is a section keyword in CPLEX LP too -- counting either
+            // would let a wrong-format file pass as MPS.
+            if (diag != nullptr && (section == Section::Rows || section == Section::Columns ||
+                                    section == Section::Rhs || section == Section::Ranges ||
+                                    section == Section::Endata)) {
+                diag->saw_format_section = true;
+            }
             if (section == Section::Name) {
                 auto tokens = tokenize(line);
                 if (tokens.n >= 2) {

@@ -20,6 +20,12 @@ tests/data/**/*.mps.gz
 tests/data/**/*.mps.bz2
 tests/data/*_roundtrip.mps
 
+# ...but the small hand-written fixtures are part of the repo. The ignores
+# above are for downloaded instance sets and test scratch files.
+!tests/data/tiny.mps
+!tests/data/empty_model.mps
+!tests/data/malformed.mps
+
 # Scratch planning docs
 plan-barrier.md
 

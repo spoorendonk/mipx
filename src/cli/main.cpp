@@ -20,7 +20,8 @@
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::fprintf(stdout,
-                     "Usage: mipx-solve <mps-file> [--threads N] [--time-limit S] "
+                     "Usage: mipx-solve <model-file> [--format auto|mps|lp] "
+                     "[--threads N] [--time-limit S] "
                      "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
                      "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
                      "[--conflicts|--no-conflicts] "
@@ -54,11 +55,16 @@ int main(int argc, char* argv[]) {
                      "[--barrier-ordering auto|amd|nd|cudss] "
                      "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                      "[--relax-integrality] "
-                     "[--verbose|--quiet] [--print-backend]\n");
+                     "[--verbose|--quiet] [--print-backend]\n"
+                     "\n"
+                     "The model file is read as MPS unless it ends in .lp, "
+                     "ignoring any .gz/.bz2\n"
+                     "compression suffix. --format overrides that choice.\n");
         return 1;
     }
 
     std::string filename = argv[1];
+    mipx::ModelFormat model_format = mipx::ModelFormat::Auto;
     int num_threads = 1;
     double time_limit = -1.0;  // negative = use solver default
     mipx::Int node_limit = 1000000;
@@ -305,6 +311,21 @@ int main(int argc, char* argv[]) {
                 std::fprintf(stderr, "Unknown barrier ordering: %s\n", mode.c_str());
                 return 1;
             }
+        } else if (arg == "--format" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "auto") {
+                model_format = mipx::ModelFormat::Auto;
+            } else if (mode == "mps") {
+                model_format = mipx::ModelFormat::Mps;
+            } else if (mode == "lp") {
+                model_format = mipx::ModelFormat::Lp;
+            } else {
+                std::fprintf(stderr,
+                             "Invalid --format value: %s "
+                             "(expected auto, mps or lp)\n",
+                             mode.c_str());
+                return 1;
+            }
         } else if (arg == "--relax-integrality") {
             relax_integrality = true;
         } else {
@@ -317,8 +338,30 @@ int main(int argc, char* argv[]) {
         search_profile = mipx::SearchProfile::Aggressive;
     }
 
+    mipx::LpProblem lp;
     try {
-        auto lp = mipx::readMps(filename);
+        lp = mipx::readModel(filename, model_format);
+    } catch (const mipx::ModelFormatError& e) {
+        std::fprintf(stderr, "Error: %s\n", e.what());
+        if (model_format == mipx::ModelFormat::Auto) {
+            // Only worth saying when the reader was guessed from the
+            // extension. Spelled out in full because the model file has to be
+            // the first argument -- "--format lp model.lp" is rejected with
+            // "Unknown argument: lp", so a bare flag name would send the user
+            // straight into that.
+            std::fprintf(stderr,
+                         "Hint: force a reader with "
+                         "'mipx-solve %s --format mps|lp' "
+                         "(the model file must come first).\n",
+                         filename.c_str());
+        }
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "Error: %s\n", e.what());
+        return 1;
+    }
+
+    try {
         if (relax_integrality && lp.hasIntegers()) {
             for (auto& t : lp.col_type) {
                 t = mipx::VarType::Continuous;

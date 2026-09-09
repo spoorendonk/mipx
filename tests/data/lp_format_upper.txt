@@ -1,0 +1,13 @@
+\ An LP-format model written with uppercase headers and saved under an
+\ extension that does not identify it. Read as MPS, its BOUNDS section is a
+\ valid MPS header and its bound records manufacture columns, so nothing
+\ about the parsed model looks wrong -- only the absence of an MPS-exclusive
+\ header gives it away.
+MAXIMIZE
+ obj: x + y
+SUBJECT TO
+ c1: x + y <= 3
+BOUNDS
+ 0 <= x <= 2
+ 0 <= y <= 2
+END

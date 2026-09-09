@@ -13,6 +13,7 @@ add_library(mipx STATIC
     io/mps_reader.cpp
     io/mps_writer.cpp
     io/lp_reader.cpp
+    io/model_reader.cpp
     io/solu_reader.cpp
     mip/domain.cpp
     mip/implication_graph.cpp

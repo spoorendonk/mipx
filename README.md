@@ -48,13 +48,21 @@ cmake -B build -DMIPX_USE_CUDA=ON && cmake --build build -j$(nproc)
 
 ```bash
 ./build/mipx-solve instance.mps
+./build/mipx-solve instance.lp
 ./build/mipx-solve instance.mps --time-limit 300 --threads 4
 ```
+
+The reader is chosen from the extension, case-insensitively: `.lp` is read as
+CPLEX LP, anything else as MPS, ignoring a `.gz`/`.bz2` suffix
+(`instance.mps.gz` is MPS). `--format` overrides that. A file that is not in
+the format it is read as fails with an error instead of quietly solving as an
+empty or nonsense model.
 
 Key options:
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `--format auto\|mps\|lp` | auto | Force the model file reader |
 | `--time-limit <s>` | 3600 | Wall-clock time limit |
 | `--threads <n>` | 1 | Parallel tree-search threads |
 | `--gap-tol <g>` | 1e-4 | Relative optimality gap tolerance |

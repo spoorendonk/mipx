@@ -25,6 +25,7 @@ add_executable(mipx-tests
     test_conflict_graph.cpp
     test_clique_table.cpp
     test_reduced_cost_fixer.cpp
+    test_cli.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
@@ -37,6 +38,15 @@ mipx_set_compiler_flags(mipx-tests)
 target_compile_definitions(mipx-tests PRIVATE
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
+
+# The CLI tests in test_cli.cpp spawn the real binary; they compile to nothing
+# when there is no binary to spawn (MIPX_BUILD_CLI=OFF).
+if(TARGET mipx-solve)
+    target_compile_definitions(mipx-tests PRIVATE
+        MIPX_SOLVE_BINARY="$<TARGET_FILE:mipx-solve>"
+    )
+    add_dependencies(mipx-tests mipx-solve)
+endif()
 
 # Fast correctness suite -- the default, and what the git hooks run.
 catch_discover_tests(mipx-tests

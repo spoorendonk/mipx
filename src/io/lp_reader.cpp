@@ -106,7 +106,11 @@ std::vector<std::pair<std::string, Real>> parseExpression(const std::vector<std:
 
 }  // namespace
 
-LpProblem readLp(const std::string& filename) {
+LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
+    if (diag != nullptr) {
+        *diag = ReadDiagnostics{};
+    }
+
     std::ifstream in(filename);
     if (!in.is_open()) {
         throw std::runtime_error("Cannot open file: " + filename);
@@ -134,6 +138,12 @@ LpProblem readLp(const std::string& filename) {
     std::vector<std::string> lines;
     std::string line;
     while (std::getline(in, line)) {
+        // Recorded on the raw line, before comments are stripped: this answers
+        // "was there anything in the file", not "was there anything we
+        // understood".
+        if (diag != nullptr && !line.empty()) {
+            diag->saw_content = true;
+        }
         // Remove comments.
         auto bslash = line.find('\\');
         if (bslash != std::string::npos) {
@@ -159,6 +169,11 @@ LpProblem readLp(const std::string& filename) {
         // Check for section header.
         LpSection new_section = parseLpSection(l);
         if (new_section != LpSection::None) {
+            // Bounds is excluded: MPS spells a section BOUNDS as well, so an
+            // MPS file fed to this reader would otherwise look like LP.
+            if (diag != nullptr && new_section != LpSection::Bounds) {
+                diag->saw_format_section = true;
+            }
             if (new_section == LpSection::Objective) {
                 std::string lower = toLower(l);
                 if (lower.starts_with("max")) {

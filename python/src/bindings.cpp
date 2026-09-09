@@ -82,8 +82,14 @@ NB_MODULE(_core, m) {
         .def_rw("obj_offset", &LpProblem::obj_offset)
         .def("has_integers", &LpProblem::hasIntegers);
 
-    m.def("read_mps", &mipx::readMps, "filename"_a, "Read an MPS model from disk.");
-    m.def("read_lp", &mipx::readLp, "filename"_a, "Read a CPLEX LP model from disk.");
+    // Lambdas rather than function pointers: the readers take an optional
+    // diagnostics out-parameter that the Python API does not expose.
+    m.def(
+        "read_mps", [](const std::string& filename) { return mipx::readMps(filename); },
+        "filename"_a, "Read an MPS model from disk.");
+    m.def(
+        "read_lp", [](const std::string& filename) { return mipx::readLp(filename); }, "filename"_a,
+        "Read a CPLEX LP model from disk.");
     m.def("write_mps", &mipx::writeMps, "filename"_a, "problem"_a, "Write a model to MPS format.");
 
     nb::class_<MipPreRootStats>(m, "MipPreRootStats")
