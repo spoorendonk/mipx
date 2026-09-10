@@ -1,10 +1,10 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <algorithm>
-#include <cmath>
-
 #include "mipx/mip_solver.h"
 #include "mipx/presolve.h"
+
+#include <algorithm>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cmath>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -55,7 +55,8 @@ static LpProblem buildSingletonRowProblem() {
     lp.row_names = {"c1", "c2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
         {1, 0, 2.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
@@ -85,8 +86,10 @@ static LpProblem buildSingletonColProblem() {
     lp.row_names = {"c1", "c2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 1, 1.0}, {1, 2, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 1, 1.0},
+        {1, 2, 1.0},
     };
     lp.matrix = SparseMatrix(2, 3, std::move(trips));
     return lp;
@@ -139,7 +142,8 @@ static LpProblem buildForcingRowProblem() {
     lp.row_names = {"forcing"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -184,7 +188,8 @@ static LpProblem buildSmallMip() {
     lp.row_names = {"sum", "ub_x", "ub_y"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
         {1, 0, 1.0},
         {2, 1, 1.0},
     };
@@ -211,9 +216,7 @@ static LpProblem buildImpliedEquationProblem() {
     lp.row_names = {"c1", "c2", "c3"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -240,9 +243,7 @@ static LpProblem buildActivityBoundTighteningProblem() {
     lp.row_names = {"c1", "c2", "c3"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -268,9 +269,7 @@ static LpProblem buildDualFixingProblem() {
     lp.row_names = {"c1", "c2", "c3"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -323,8 +322,10 @@ static LpProblem buildDuplicateRowProblem() {
     lp.row_names = {"tight", "weak"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 1.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
@@ -352,8 +353,10 @@ static LpProblem buildParallelRowProblem() {
     lp.row_names = {"tight", "weak_antiparallel"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, -2.0}, {1, 1, -2.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, -2.0},
+        {1, 1, -2.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
@@ -381,10 +384,7 @@ static LpProblem buildCoeffTighteningDuplicateProblem() {
     lp.row_names = {"r1", "r2", "r3", "r4"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 7.0}, {0, 1, 1.0},
-        {1, 0, 6.0}, {1, 1, 1.0},
-        {2, 2, 1.0},
-        {3, 0, 1.0}, {3, 1, -1.0},
+        {0, 0, 7.0}, {0, 1, 1.0}, {1, 0, 6.0}, {1, 1, 1.0}, {2, 2, 1.0}, {3, 0, 1.0}, {3, 1, -1.0},
     };
     lp.matrix = SparseMatrix(4, 3, std::move(trips));
     return lp;
@@ -411,8 +411,10 @@ static LpProblem buildCoeffTighteningLowerSideProblem() {
     lp.row_names = {"r1", "r2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, -7.0}, {0, 1, 1.0},
-        {1, 0, -6.0}, {1, 1, 1.0},
+        {0, 0, -7.0},
+        {0, 1, 1.0},
+        {1, 0, -6.0},
+        {1, 1, 1.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
@@ -443,9 +445,7 @@ static LpProblem buildDoubletonAggregationProblem() {
     lp.row_names = {"eq", "c1", "c2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 2.0}, {1, 1, 1.0}, {1, 2, 1.0},
-        {2, 0, -1.0}, {2, 1, 2.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 1.0}, {1, 2, 1.0}, {2, 0, -1.0}, {2, 1, 2.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -471,9 +471,7 @@ static LpProblem buildDoubletonNoFillProblem() {
     lp.row_names = {"eq", "r1", "r2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -761,8 +759,10 @@ TEST_CASE("Presolve: no reductions on dense problem", "[presolve]") {
     lp.row_names = {"c1", "c2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 1, 0.5},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 0.5},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
 
@@ -910,8 +910,10 @@ TEST_CASE("Presolve: positive-scale parallel row removal", "[presolve]") {
     lp.row_names = {"tight", "weak_parallel"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 2.0}, {1, 1, 2.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, 2.0},
+        {1, 1, 2.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
 
@@ -942,7 +944,8 @@ TEST_CASE("Presolve: negative coefficient is not tightened", "[presolve]") {
     lp.row_names = {"r1"};
 
     std::vector<Triplet> trips = {
-        {0, 0, -3.0}, {0, 1, 1.0},
+        {0, 0, -3.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
 
@@ -984,8 +987,12 @@ TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[preso
         Real ax = 0.0;
         Real ay = 0.0;
         for (Index k = 0; k < rv.size(); ++k) {
-            if (rv.indices[k] == 0) ax = rv.values[k];
-            if (rv.indices[k] == 1) ay = rv.values[k];
+            if (rv.indices[k] == 0) {
+                ax = rv.values[k];
+            }
+            if (rv.indices[k] == 1) {
+                ay = rv.values[k];
+            }
         }
         if (ay > 0.0) {
             CHECK_THAT(ax, WithinAbs(6.0, 1e-8));
@@ -1032,8 +1039,12 @@ TEST_CASE("Presolve: doubleton equality aggregation preserves LP objective", "[p
     Index y_reduced_col = -1;
     const auto& mapping = presolver.colMapping();
     for (Index jj = 0; jj < static_cast<Index>(mapping.size()); ++jj) {
-        if (mapping[jj] == 0) x_removed = false;
-        if (mapping[jj] == 1) y_reduced_col = jj;
+        if (mapping[jj] == 0) {
+            x_removed = false;
+        }
+        if (mapping[jj] == 1) {
+            y_reduced_col = jj;
+        }
     }
     CHECK(x_removed);
     if (y_reduced_col >= 0) {
@@ -1059,12 +1070,15 @@ TEST_CASE("Presolve: doubleton equality aggregation preserves LP objective", "[p
     REQUIRE(full.size() == static_cast<size_t>(lp.num_cols));
 
     Real full_obj = lp.obj_offset;
-    for (Index j = 0; j < lp.num_cols; ++j) full_obj += lp.obj[j] * full[j];
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        full_obj += lp.obj[j] * full[j];
+    }
     CHECK_THAT(full_obj, WithinAbs(direct.objective, 1e-6));
     CHECK_THAT(full[0] + full[1], WithinAbs(5.0, 1e-6));
 }
 
-TEST_CASE("Presolve: doubleton aggregation detects infeasibility from bound projection", "[presolve]") {
+TEST_CASE("Presolve: doubleton aggregation detects infeasibility from bound projection",
+          "[presolve]") {
     // x + y = 10, x in [0,3], y in [0,3]
     // Projected: y = 10 - x, y in [7,10] but y <= 3 -> infeasible.
     LpProblem lp;
@@ -1167,10 +1181,12 @@ TEST_CASE("Presolve: redundant upper row is not treated as forcing", "[presolve]
     lp.row_lower = {-kInf, -kInf};
     lp.row_upper = {25.0, 2.0};
     lp.row_names = {"redundant", "y_cap"};
-    lp.matrix = SparseMatrix(2, 2, std::vector<Triplet>{
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 1, 1.0},
-    });
+    lp.matrix = SparseMatrix(2, 2,
+                             std::vector<Triplet>{
+                                 {0, 0, 1.0},
+                                 {0, 1, 1.0},
+                                 {1, 1, 1.0},
+                             });
 
     Presolver presolver;
     auto reduced = presolver.presolve(lp);
@@ -1222,7 +1238,10 @@ TEST_CASE("Presolve: last column in a row respects the row bound", "[presolve]")
     lp.row_upper = {4.0, 4.0};
     lp.row_names = {"R0", "R1"};
     std::vector<Triplet> trips = {
-        {0, 0, 4.0}, {0, 3, 4.0}, {1, 1, -3.0}, {1, 2, 4.0},
+        {0, 0, 4.0},
+        {0, 3, 4.0},
+        {1, 1, -3.0},
+        {1, 2, 4.0},
     };
     lp.matrix = SparseMatrix(2, 4, std::move(trips));
 
@@ -1282,9 +1301,7 @@ static LpProblem buildProbingFixingMip() {
     lp.row_names = {"c1", "c2", "c3"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 2, 1.0},
     };
     lp.matrix = SparseMatrix(3, 3, std::move(trips));
     return lp;
@@ -1301,11 +1318,8 @@ static LpProblem buildProbingInfeasibleMip() {
     lp.row_names = {"c1", "c2", "c3", "c4", "c5"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 2, 1.0},
-        {2, 1, 1.0}, {2, 2, 1.0},
-        {3, 1, 1.0}, {3, 0, -1.0},
-        {4, 2, 1.0}, {4, 0, -1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0},  {1, 2, 1.0}, {2, 1, 1.0},
+        {2, 2, 1.0}, {3, 1, 1.0}, {3, 0, -1.0}, {4, 2, 1.0}, {4, 0, -1.0},
     };
     lp.matrix = SparseMatrix(5, 3, std::move(trips));
     return lp;
@@ -1324,8 +1338,7 @@ static LpProblem buildProbingStrengtheningMip() {
     lp.obj = {-1.0, -1.0, -1.0, -1.0};
     lp.col_lower = {0.0, 0.0, 0.0, 0.0};
     lp.col_upper = {1.0, 1.0, 10.0, 2.0};
-    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous,
-                   VarType::Continuous};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous, VarType::Continuous};
     lp.col_names = {"y0", "y1", "x", "z"};
 
     lp.num_rows = 4;
@@ -1334,10 +1347,8 @@ static LpProblem buildProbingStrengtheningMip() {
     lp.row_names = {"r0", "r1", "r2", "r3"};
 
     std::vector<Triplet> trips = {
-        {0, 2, 1.0},  {0, 0, -5.0},
-        {1, 0, 3.0},  {1, 2, 1.0},  {1, 3, 1.0},
-        {2, 0, 1.0},  {2, 1, 1.0},
-        {3, 3, 1.0},  {3, 1, -2.0},
+        {0, 2, 1.0}, {0, 0, -5.0}, {1, 0, 3.0}, {1, 2, 1.0},  {1, 3, 1.0},
+        {2, 0, 1.0}, {2, 1, 1.0},  {3, 3, 1.0}, {3, 1, -2.0},
     };
     lp.matrix = SparseMatrix(4, 4, std::move(trips));
     return lp;
