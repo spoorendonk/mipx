@@ -18,6 +18,11 @@ namespace {
 /// formula, and a wrong answer there produces an invalid cut.
 constexpr Real kDataIntTol = 1e-9;
 
+/// Largest coefficient a fractional-part snap may discard. Mirrors
+/// GomorySeparator::kCoeffTol, the threshold finalizeCut drops terms at, so the
+/// snap never removes mass the cut would otherwise have kept.
+constexpr Real kSnapCoeffTol = 1e-10;
+
 bool isIntegralValue(Real v, Real tol) {
     return std::abs(v - std::round(v)) <= tol;
 }
@@ -49,10 +54,23 @@ Real gmiCoefficient(Real t, bool integral, Real f0) {
     if (integral) {
         Real f = t - std::floor(t);  // in [0, 1) for negative t as well
         // An integral t up to round-off contributes nothing: the term is an
-        // integer multiple of an integer deviation. Snapping both sides keeps
-        // a 1e-10 tableau residual from entering the cut as a coefficient the
-        // max/min ratio screen would then reject the whole cut over.
-        if (f > 1.0 - kDataIntTol || f < kDataIntTol) {
+        // integer multiple of an integer deviation. Snapping keeps a tableau
+        // residual from entering the cut as a coefficient the max/min ratio
+        // screen would then reject the whole cut over.
+        //
+        // The threshold is on the *coefficient the snap discards*, not on f
+        // itself. The cut is sum_k c_k delta_k >= 1 with delta_k >= 0, so
+        // dropping a term strengthens it, and an over-eager snap cuts off
+        // integer-feasible points. Testing f against a bare kDataIntTol did
+        // that: the discarded coefficient is f/f0 on the low side and
+        // (1-f)/(1-f0) on the high side, and separate() only guarantees f0 is
+        // kIntTol (1e-6) away from either end -- so a 1e-9 residual becomes a
+        // coefficient of 1e-3, which on a column of range 1e5 moves the cut by
+        // 1e2. Bounding the coefficient change by kCoeffTol instead is exactly
+        // the mass finalizeCut would drop anyway. A larger residual now
+        // survives into the cut, where the ratio screen may reject it -- losing
+        // a cut, never validity.
+        if (f <= kSnapCoeffTol * f0 || 1.0 - f <= kSnapCoeffTol * (1.0 - f0)) {
             f = 0.0;
         }
         return (f <= f0) ? f / f0 : (1.0 - f) / (1.0 - f0);
