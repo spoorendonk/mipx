@@ -1126,6 +1126,14 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
         // rejects rows the plain kTol test accepted, never the reverse. It is
         // computed here rather than with the activities because it needs a
         // column scan, and only rows that already look forcing reach this point.
+        //
+        // The bound covers the columns the fixing loop below actually pins,
+        // i.e. those with |a_ij| > kTol. A column whose coefficient in this row
+        // is at or below kTol is skipped by both loops, so no wrong fixing
+        // comes of it -- but the row is still removed while that column stays
+        // free, which loses the constraint it placed on it. That is a separate
+        // pre-existing defect, not one this guard can close; see issue #215 for
+        // the wider survey of reductions that substitute a bound for a value.
         Real forcing_tol = kTol;
         for (Index k = 0; k < rv.size(); ++k) {
             const Index j = rv.indices[k];
