@@ -24,7 +24,7 @@ This is a preference, not a prohibition. Shelling out to `grep`/`rg` is fine whe
 plan (non-trivial) → implement → test → /review → push to main
 ```
 
-Hooks auto-format and type-check on save — don't fix formatting manually. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate.
+Hooks auto-format and type-check on save — don't fix formatting manually. `.githooks/pre-commit` also runs `clang-format -i` and `clang-tidy --fix` over every *staged* C++ file and re-stages the result, so touching a file that has drifted from `.clang-format` pulls the whole file's reflow into your diff. That is the hook working, not scope creep, and `--no-verify` is not the answer. Stage the file, let the hook reflow it, and commit that as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate.
 
 ## Git Workflow
 
@@ -77,7 +77,9 @@ When the user brings multiple gh issues to work on at once:
 2. **Orchestrator role.** Spawn one subagent per issue (Agent tool with `isolation: "worktree"`). Subagents branch from main, not from the orchestrator's working branch, and work in their own git worktree. Pass each subagent its gh issue number and any plan file path.
 3. **Subagents self-review** per the Agent Self-Review rule above. Subagents commit locally in their worktree and **do not push** — worktrees share `.git`, so the orchestrator sees their commits via `git log <branch>` with no network round-trip.
 4. **No merging without user OK.** Subagents never merge into main; the orchestrator never merges a subagent's branch without explicit user approval.
-5. **Final combined review, then push.** The orchestrator merges all approved branches into local main, runs `/review` over the merged result, and only then runs `git push origin main`. No pushes — of main or feature branches — happen before that final review.
+5. **Final combined review, then push.** The orchestrator integrates all approved branches into local main, runs `/review` over the merged result, and only then runs `git push origin main`. No pushes — of main or feature branches — happen before that final review.
+
+**Integrate without merge commits.** "Merge" above means the result, not the command: main keeps linear history, so `git merge --no-ff` is wrong here and the commit-msg hook rejects it anyway — `merge` is not a Conventional Commit type. Fast-forward the first branch (`git merge --ff-only <branch>`), then `git cherry-pick` each remaining branch's commits in order. Cherry-picked branches are no longer ancestors of main, so `git branch -d` will refuse them: verify with `git cherry main <branch>` (every line prefixed `-` means already applied) and then `git branch -D`.
 
 ## Commit Messages
 
