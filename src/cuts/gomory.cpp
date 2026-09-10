@@ -18,11 +18,18 @@ namespace {
 /// formula, and a wrong answer there produces an invalid cut.
 constexpr Real kDataIntTol = 1e-9;
 
-/// Relative slack when comparing an LP bound against the global bound.
-constexpr Real kBoundMatchTol = 1e-9;
-
 bool isIntegralValue(Real v, Real tol) {
     return std::abs(v - std::round(v)) <= tol;
+}
+
+/// True when a column is constrained to integer values. Continuous is the
+/// obvious exclusion; SemiContinuous is the trap, because it is not
+/// VarType::Continuous yet ranges over {0} U [l, u]. Treating it as integral
+/// would let a basic semi-continuous value at 2.7 open a Gomory row and give a
+/// nonbasic one the integer coefficient formula, both invalid. MipSolver
+/// linearizes these away before separation, but the separator is public API.
+bool isIntegerValued(VarType t) {
+    return t == VarType::Integer || t == VarType::Binary || t == VarType::SemiInteger;
 }
 
 /// GMI coefficient of a deviation variable.
@@ -58,12 +65,23 @@ Real gmiCoefficient(Real t, bool integral, Real f0) {
 
 /// True when an LP bound is strictly tighter than the corresponding global
 /// bound, i.e. the deviation measured from it is only valid in this subtree.
+///
+/// The comparison is exact, deliberately. A tolerance here would have to be
+/// scaled against something, and the only safe scale is not the bound: getting
+/// this wrong marks a locally-derived cut global, and the resulting rhs error
+/// is the bound difference times the emitted coefficient, which the safety
+/// screen caps at 1e6 rather than at anything proportional to the bound. A
+/// bound-magnitude tolerance therefore admits an unsound promotion on exactly
+/// the columns where it costs most: a continuous column with a global upper of
+/// 1e6 tightened by node propagation to 1e6 - 1e-4 reads as "not local" under
+/// a relative 1e-9, and a cut coefficient of that order puts the rhs out by
+/// ~1e2. Comparing exactly can only err the other way, marking an untightened
+/// bound local, which loses a cut and never validity.
 bool boundIsLocal(Real bound, Real global_bound, Real sign) {
     if (!std::isfinite(global_bound)) {
         return true;
     }
-    const Real tol = kBoundMatchTol * (1.0 + std::abs(global_bound));
-    return (sign > 0.0) ? (bound > global_bound + tol) : (bound < global_bound - tol);
+    return (sign > 0.0) ? (bound > global_bound) : (bound < global_bound);
 }
 
 /// Scratch buffers for the row of a substituted logical, reused across rows.
@@ -80,7 +98,7 @@ bool rowActivityIsIntegral(const LpProblem& problem, const RowScratch& row) {
         if (j < 0 || j >= problem.num_cols) {
             return false;
         }
-        if (problem.col_type[j] == VarType::Continuous) {
+        if (!isIntegerValued(problem.col_type[j])) {
             return false;
         }
         if (!isIntegralValue(row.values[p], kDataIntTol)) {
@@ -140,7 +158,7 @@ bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, In
 
     const Real t = sign * alpha;
     const bool integral =
-        problem.col_type[k] != VarType::Continuous && isIntegralValue(bound, kDataIntTol);
+        isIntegerValued(problem.col_type[k]) && isIntegralValue(bound, kDataIntTol);
     const Real coeff = gmiCoefficient(t, integral, f0);
     if (std::abs(coeff) < coeff_tol) {
         return true;
@@ -223,7 +241,7 @@ std::vector<Candidate> collectCandidates(const DualSimplexSolver& lp, const LpPr
                                          std::span<const Real> primals, Real int_tol) {
     std::vector<Candidate> candidates;
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) {
+        if (!isIntegerValued(problem.col_type[j])) {
             continue;
         }
         const Index bpos = lp.basisPosition(j);
