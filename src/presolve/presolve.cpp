@@ -1084,17 +1084,78 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             return changes;
         }
 
-        // <= row is forcing when even the minimum activity is at the upper limit.
-        bool force_to_min = !has_inf_min && !std::isinf(lp.row_upper[i]) &&
-                            std::abs(act_min - lp.row_upper[i]) <= kTol &&
-                            (std::isinf(lp.row_lower[i]) || act_min >= lp.row_lower[i] - kTol);
+        // A row is forcing when one of its extreme activities meets the opposite
+        // row bound: every variable is then pinned at the bound that attains
+        // that activity. near_* is that test at the plain primal tolerance --
+        // the shape the code had before issue #210.
+        const bool near_force_to_min =
+            !has_inf_min && !std::isinf(lp.row_upper[i]) &&
+            std::abs(act_min - lp.row_upper[i]) <= kTol &&
+            (std::isinf(lp.row_lower[i]) || act_min >= lp.row_lower[i] - kTol);
+        const bool near_force_to_max =
+            !has_inf_max && !std::isinf(lp.row_lower[i]) &&
+            std::abs(act_max - lp.row_lower[i]) <= kTol &&
+            (std::isinf(lp.row_upper[i]) || act_max <= lp.row_upper[i] + kTol);
 
-        // >= row is forcing when even the maximum activity is at the lower limit.
-        bool force_to_max = !has_inf_max && !std::isinf(lp.row_lower[i]) &&
-                            std::abs(act_max - lp.row_lower[i]) <= kTol &&
-                            (std::isinf(lp.row_upper[i]) || act_max <= lp.row_upper[i] + kTol);
+        if (!near_force_to_min && !near_force_to_max) {
+            continue;
+        }
 
-        if (force_to_min && force_to_max) {
+        // That test compares in *activity* units, but what it licenses is a
+        // fixing in *variable* units, and the two are related by 1/|a_ij|. With
+        // a gap g between the extreme activity and the row bound, variable j can
+        // still move d_j = g/|a_ij| off the bound that attains that activity and
+        // keep the row satisfied. Pinning it there perturbs the model twice
+        // over: by d_j in j's own value, and by |a_kj| * d_j in the right-hand
+        // side of every other row k that contains j, since the fixing loop below
+        // shifts those bounds by a_kj * fix_value. Both perturbations have to
+        // stay inside the primal tolerance, which bounds the gap at
+        //
+        //     g <= kTol * |a_ij| / max(1, max_k |a_kj|)   for every j.
+        //
+        // Testing g against a bare kTol was the defect behind Netlib bore3d
+        // (issue #210): activity bound tightening had shrunk a column's upper
+        // bound to 1.7e-8 without reaching its true value of 0, leaving an
+        // equality row with rhs 0 at min activity -9.8e-11 -- inside kTol, so
+        // "forcing". Fixing that column at 1.7e-8 instead of 0 shifted a second
+        // equality row's rhs to -1.7e-8, over kTol, and presolve reported the
+        // instance infeasible. The gap was within tolerance; the displacement it
+        // authorized, amplified by a coefficient of 5.7e-3, was not.
+        //
+        // The ratio is clamped at 1 so forcing_tol <= kTol: this only ever
+        // rejects rows the plain kTol test accepted, never the reverse. It is
+        // computed here rather than with the activities because it needs a
+        // column scan, and only rows that already look forcing reach this point.
+        Real forcing_tol = kTol;
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            if (col_removed[j]) {
+                continue;
+            }
+            const Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
+            if (std::abs(a) <= kTol) {
+                continue;
+            }
+            // Largest coefficient this column carries in any other live row --
+            // the factor by which its displacement reaches that row's bounds.
+            Real amplification = 1.0;
+            auto cv = lp.matrix.col(j);
+            for (Index kk = 0; kk < cv.size(); ++kk) {
+                const Index other_row = cv.indices[kk];
+                if (other_row == i || row_removed[other_row]) {
+                    continue;
+                }
+                amplification = std::max(
+                    amplification,
+                    std::abs(effectiveCoeff(coeff_overrides_, other_row, j, cv.values[kk])));
+            }
+            forcing_tol = std::min(forcing_tol, kTol * std::abs(a) / amplification);
+        }
+
+        bool force_to_min = near_force_to_min && std::abs(act_min - lp.row_upper[i]) <= forcing_tol;
+        bool force_to_max = near_force_to_max && std::abs(act_max - lp.row_lower[i]) <= forcing_tol;
+
+        if (near_force_to_min && near_force_to_max) {
             bool consistent = true;
             for (Index k = 0; k < rv.size(); ++k) {
                 const Index j = rv.indices[k];
@@ -1114,6 +1175,17 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
                 }
             }
             if (!consistent) {
+                continue;
+            }
+            // The row looks forcing from both sides, so the two directions
+            // disagree about which bound each variable is pinned at. `consistent`
+            // only bounds that disagreement by kTol, which is exactly the
+            // displacement the tolerance above exists to rule out -- so resolve
+            // it the way this code always has, to the min side, and take the
+            // reduction only when the min side passes on its own. Silently
+            // falling through to the max side would fix every variable at the
+            // opposite bound, up to kTol away from what was chosen before.
+            if (!force_to_min) {
                 continue;
             }
             force_to_max = false;

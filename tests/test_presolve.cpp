@@ -1,3 +1,5 @@
+#include "mipx/dual_simplex.h"
+#include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "mipx/presolve.h"
 
@@ -5,6 +7,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <filesystem>
+#include <string>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -1523,4 +1527,145 @@ TEST_CASE("Presolve: probing off leaves output untouched", "[presolve]") {
     CHECK(defaults.stats().probing_coeff_strengthenings == 0);
     CHECK(explicit_off.stats().probing_coeff_strengthenings == 0);
     CHECK(reduced_default.row_upper == reduced_off.row_upper);
+}
+
+// =============================================================================
+// Forcing rows: the gap must be judged in variable units (issue #210)
+// =============================================================================
+
+/// Equality row whose minimum activity misses its right-hand side only by a
+/// tolerance-sized gap, and only because one variable with a small coefficient
+/// has a tiny-but-nonempty domain.
+///
+///   eq    : -0.005*x0 + x1 + x2 = 0     x0 in [0, x0_ub], x1, x2 in [0, 10]
+///   loose :       x0 + x1 + x2 <= 100
+///
+/// With x0_ub = 2e-8 the minimum activity is -1e-10, inside the 1e-8 primal
+/// tolerance of the rhs, so the row looks forcing -- but pinning x0 at its
+/// upper bound moves it 2e-8, which is 200x the gap and lands in "loose" as a
+/// right-hand side shift of the same size. That amplification is the #210
+/// defect. With x0_ub = 0 the row is forcing exactly and must still reduce.
+///
+/// "loose" is redundant but keeps every column out of the singleton-column
+/// path, so the forcing-row pass is what acts on "eq" in the first round.
+static LpProblem buildNearForcingRowProblem(Real x0_ub) {
+    LpProblem lp;
+    lp.name = "near_forcing_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 1.0, 1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {x0_ub, 10.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1", "x2"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {0.0, -kInf};
+    lp.row_upper = {0.0, 100.0};
+    lp.row_names = {"eq", "loose"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, -0.005}, {0, 1, 1.0}, {0, 2, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}, {1, 2, 1.0},
+    };
+    lp.matrix = SparseMatrix(2, 3, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("Presolve: a row forcing only within tolerance is not reduced", "[presolve]") {
+    // Data-free guard for issue #210, so the commit gate covers this reduction
+    // even when the Netlib corpus is not downloaded. Before the fix this
+    // recorded one forcing-row reduction and pinned x0 at 2e-8.
+    Presolver presolver;
+    const auto reduced = presolver.presolve(buildNearForcingRowProblem(2e-8));
+
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().forcing_row_changes == 0);
+
+    // The guard must discriminate, not just disable the pass: the same row with
+    // the tiny domain collapsed to a point is forcing exactly and still reduces.
+    Presolver exact;
+    exact.presolve(buildNearForcingRowProblem(0.0));
+    CHECK_FALSE(exact.isInfeasible());
+    CHECK(exact.stats().forcing_row_changes == 1);
+    CHECK(reduced.num_cols == 0);
+}
+
+// =============================================================================
+// Instance-driven regression: Netlib bore3d (issue #210)
+// =============================================================================
+
+// bore3d has a known finite optimum, but presolve used to declare it
+// infeasible: removeForcingRows() compared a row's extreme activity against the
+// opposite row bound with an absolute tolerance, then fixed every variable in
+// the row at a bound. A gap of 1e-10 on a coefficient of 5.7e-3 authorized a
+// displacement of 1.7e-8 in variable space, which shifted a second equality
+// row's rhs past that same tolerance and read as infeasibility.
+//
+// Tagged [netlib] so it lands in the solver-regression label rather than the
+// fast default suite, and skips when the instance is not downloaded. The
+// data-free case above is what guards this reduction in the commit gate.
+TEST_CASE("Presolve: netlib bore3d stays feasible and keeps its optimum", "[presolve][netlib]") {
+    const std::string path = std::string(TEST_DATA_DIR) + "/netlib/bore3d.mps.gz";
+    if (!std::filesystem::exists(path)) {
+        SKIP("bore3d not downloaded. Run tests/data/download_netlib.sh");
+    }
+    const std::string solu_file = std::string(TEST_DATA_DIR) + "/netlib.solu";
+    if (!std::filesystem::exists(solu_file)) {
+        SKIP("netlib.solu not found");
+    }
+
+    Real reference = 0.0;
+    bool found_reference = false;
+    for (const auto& entry : readSolu(solu_file)) {
+        if (entry.name == "bore3d" && !entry.is_infeasible) {
+            reference = entry.value;
+            found_reference = true;
+            break;
+        }
+    }
+    if (!found_reference) {
+        SKIP("No finite bore3d objective in netlib.solu");
+    }
+
+    const auto problem = readMps(path);
+
+    Presolver presolver;
+    const auto reduced = presolver.presolve(problem);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    // The reduced problem carries the objective offset the reductions
+    // accumulated, so its optimum must match the reference on its own.
+    const Real tol = std::max<Real>(1e-6, std::abs(reference) * 1e-7);
+    CHECK_THAT(result.objective, WithinAbs(reference, tol));
+
+    // Postsolve has to land back on a point feasible for the original model --
+    // that is the property the old reduction destroyed.
+    const auto full = presolver.postsolve(solver.getPrimalValues());
+    REQUIRE(static_cast<Index>(full.size()) == problem.num_cols);
+
+    Real full_obj = problem.obj_offset;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        CHECK(full[j] >= problem.col_lower[j] - 1e-6);
+        CHECK(full[j] <= problem.col_upper[j] + 1e-6);
+        full_obj += problem.obj[j] * full[j];
+    }
+    CHECK_THAT(full_obj, WithinAbs(reference, tol));
+
+    Real max_row_violation = 0.0;
+    for (Index i = 0; i < problem.num_rows; ++i) {
+        auto rv = problem.matrix.row(i);
+        Real activity = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            activity += rv.values[k] * full[rv.indices[k]];
+        }
+        max_row_violation = std::max(
+            {max_row_violation, problem.row_lower[i] - activity, activity - problem.row_upper[i]});
+    }
+    CHECK(max_row_violation <= 1e-6);
 }
