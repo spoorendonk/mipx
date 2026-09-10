@@ -219,6 +219,17 @@ public:
     /// where the sum includes both structural and slack variables.
     void getTableauRow(Index basis_pos, std::vector<Real>& tableau_row);
 
+    /// Get row `row` of the constraint matrix in external (unscaled) space,
+    /// together with its external row bounds.
+    ///
+    /// The logical of row i is the row activity s_i = a_i^T x bounded by
+    /// [lower, upper], so this is what a cut generator needs to substitute a
+    /// nonbasic logical back into structural columns. Rows added after load()
+    /// are included, which is the point: their coefficients are not in the
+    /// LpProblem the solver was loaded from.
+    void getRowExternal(Index row, std::vector<Index>& indices, std::vector<Real>& values,
+                        Real& lower, Real& upper) const;
+
     /// Get the basis position of a variable, or -1 if nonbasic.
     [[nodiscard]] Index basisPosition(Index var) const {
         if (var < 0 || var >= static_cast<Index>(basis_pos_.size())) {

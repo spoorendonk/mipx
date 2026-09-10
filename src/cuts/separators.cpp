@@ -156,6 +156,7 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& pro
                                      CutFamilyStats& stats) {
     gomory_.setMaxCuts(max_cuts_per_family_);
     gomory_.setMinViolation(min_violation_);
+    gomory_.setGlobalRowCount(global_row_count_);
     const Int accepted = gomory_.separate(lp, problem, primals, pool);
     stats.attempted += accepted;
     stats.generated += accepted;

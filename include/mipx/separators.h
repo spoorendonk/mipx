@@ -61,6 +61,11 @@ public:
     /// separates maximal-clique inequalities from the table in addition to the
     /// pairwise row scan. The table must outlive the manager.
     void setCliqueTable(const CliqueTable* table) { clique_table_ = table; }
+    /// Declare how many leading LP rows are valid in the whole tree, for the
+    /// families that substitute a row logical back into structural columns.
+    /// See GomorySeparator::setGlobalRowCount; negative means "only the rows of
+    /// the LpProblem passed to separate()".
+    void setGlobalRowCount(Index n) { global_row_count_ = n; }
 
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
                  CutPool& pool, CutSeparationStats& stats);
@@ -118,6 +123,7 @@ private:
     GomorySeparator gomory_{};
     Int max_cuts_per_family_ = 50;
     Real min_violation_ = 1e-5;
+    Index global_row_count_ = -1;
     const VariableBoundStore* vb_store_ = nullptr;
     const CliqueTable* clique_table_ = nullptr;
 };

@@ -2541,6 +2541,15 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             for (Int round = 0; round < max_rounds; ++round) {
                 CutPool tree_pool;
                 CutSeparationStats tree_stats;
+                // Rows ahead of the first node-local one hold tree-wide; a cut
+                // that substitutes a local row's logical does not, and must
+                // stay in this subtree.
+                Index global_row_prefix = lp.numRows();
+                if (!temp_local_rows.empty()) {
+                    global_row_prefix =
+                        *std::min_element(temp_local_rows.begin(), temp_local_rows.end());
+                }
+                tree_separators.setGlobalRowCount(global_row_prefix);
                 const Int generated =
                     tree_separators.separate(lp, problem_, node_primals_out, tree_pool, tree_stats);
                 if (generated == 0) {
@@ -2558,11 +2567,21 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 values.clear();
                 lower.clear();
                 upper.clear();
-                Int global_rows = 0;
+                // Batch positions of the rows that stay in this subtree.
+                // Recorded per row rather than counted: the promoted rows are
+                // no longer a prefix of the batch now that a cut can be barred
+                // from promotion for being local, and mistaking a global row
+                // for a local one here would leave the local row in the LP for
+                // the rest of the search.
+                std::vector<Index> local_offsets;
 
                 for (Index idx : top_indices) {
                     const auto& cut = tree_pool[idx];
-                    const bool promote_global = (node.depth <= 2 && cut.efficacy >= 0.15);
+                    // A cut a separator marked local was derived from data that
+                    // only holds in this subtree (a branched bound, a local cut
+                    // row), so it can never be promoted however good it looks.
+                    const bool promote_global =
+                        (!cut.local && node.depth <= 2 && cut.efficacy >= 0.15);
 
                     starts.push_back(static_cast<Index>(col_indices.size()));
                     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -2573,9 +2592,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     upper.push_back(cut.upper);
 
                     if (promote_global) {
-                        ++global_rows;
                         ++cut_stats_.tree_cuts_global;
                     } else {
+                        local_offsets.push_back(static_cast<Index>(lower.size()) - 1);
                         Cut local_cut = cut;
                         local_cut.local = true;
                         local_cut.age = 0;
@@ -2591,8 +2610,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
                 const Index base_row = lp.numRows();
                 lp.addRows(starts, col_indices, values, lower, upper);
-                for (Index i = global_rows; i < static_cast<Index>(lower.size()); ++i) {
-                    temp_local_rows.push_back(base_row + i);
+                for (Index offset : local_offsets) {
+                    temp_local_rows.push_back(base_row + offset);
                 }
 
                 const Real prev_obj = node_obj_out;
@@ -5693,6 +5712,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         Real prev_obj = lp.getObjective();
 
         CutSeparationStats round_family_stats;
+        // Every row of the root LP holds in the whole tree: the model's own
+        // rows, plus the global cuts the rounds above added. Families that
+        // substitute a nonbasic row logical (Gomory) need that to know their
+        // cut is global rather than node-local.
+        separators.setGlobalRowCount(lp.numRows());
         Int new_cuts = separators.separate(lp, problem_, primals, pool, round_family_stats);
 
         // Fold the separation counters in before the early exits below, so the

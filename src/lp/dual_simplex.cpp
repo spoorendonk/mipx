@@ -3400,6 +3400,14 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     dual_.resize(num_rows_, 0.0);
     devex_weights_.resize(num_rows_, 1.0);
 
+    // With no basis to extend, resizing is all there is to do: pushing the new
+    // logicals onto a basis_ that does not describe the current problem, and
+    // then claiming has_basis_, is how a stale basis gets into the next solve.
+    // The cold start there builds one over the new size instead.
+    if (!has_basis_) {
+        return;
+    }
+
     for (Index i = 0; i < num_new; ++i) {
         Index slack = old_vars + i;
         basis_.push_back(slack);
@@ -3619,9 +3627,25 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
         }
     }
 
-    // Could not preserve basis safely.
+    // Could not preserve the basis. Every per-variable vector has to come down
+    // to the new variable count here, not just be marked unusable: addRows may
+    // run before the next solve(), and it resizes those vectors back into range
+    // and sets has_basis_ again. solve() then walks a nonbasic_ still holding
+    // the variable indices of rows that no longer exist and indexes bounds out
+    // of range with them (issue #211 surfaced this once Gomory started feeding
+    // the in-tree cut loop, which adds and removes rows node after node).
+    const Index new_vars = numVars();
     has_basis_ = false;
-    nonbasic_pos_.clear();
+    basis_.assign(static_cast<std::size_t>(num_rows_), -1);
+    basis_pos_.assign(static_cast<std::size_t>(new_vars), -1);
+    nonbasic_.clear();
+    nonbasic_pos_.assign(static_cast<std::size_t>(new_vars), -1);
+    var_status_.assign(static_cast<std::size_t>(new_vars), BasisStatus::AtLower);
+    primal_.assign(static_cast<std::size_t>(new_vars), 0.0);
+    reduced_cost_.assign(static_cast<std::size_t>(new_vars), 0.0);
+    dual_.assign(static_cast<std::size_t>(num_rows_), 0.0);
+    devex_weights_.assign(static_cast<std::size_t>(num_rows_), 1.0);
+    devex_reset_count_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -3697,6 +3721,34 @@ void DualSimplexSolver::getTableauRow(Index basis_pos, std::vector<Real>& tablea
             tableau_row[num_cols_ + k] *= cs_bvar * row_scale_[k];
         }
     }
+}
+
+void DualSimplexSolver::getRowExternal(Index row, std::vector<Index>& indices,
+                                       std::vector<Real>& values, Real& lower, Real& upper) const {
+    indices.clear();
+    values.clear();
+    lower = -kInf;
+    upper = kInf;
+    if (!loaded_ || row < 0 || row >= num_rows_) {
+        return;
+    }
+
+    // Internal a'_ij = a_ij * rs_i * cs_j (applyScaling), so external is the
+    // internal entry divided by both scales. Rows added after load() carry
+    // rs_i = 1 and column-scaled entries, which this same formula undoes.
+    const Real rs = scaled_ ? row_scale_[row] : 1.0;
+    auto rv = matrix_.row(row);
+    indices.reserve(static_cast<std::size_t>(rv.size()));
+    values.reserve(static_cast<std::size_t>(rv.size()));
+    for (Index p = 0; p < rv.size(); ++p) {
+        const Index j = rv.indices[p];
+        const Real cs = scaled_ ? col_scale_[j] : 1.0;
+        indices.push_back(j);
+        values.push_back(rv.values[p] / (rs * cs));
+    }
+
+    lower = (row_lower_[row] == -kInf) ? -kInf : row_lower_[row] / rs;
+    upper = (row_upper_[row] == kInf) ? kInf : row_upper_[row] / rs;
 }
 
 }  // namespace mipx

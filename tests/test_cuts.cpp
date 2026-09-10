@@ -310,6 +310,106 @@ static LpProblem buildGomoryBlowupMip() {
     return lp;
 }
 
+// A pure-integer MIP that exercises every row sense the GMI substitution has
+// to handle: a <= row, a >= row, a ranged row and an equality row. All four
+// logicals can end up nonbasic, and each is substituted back with a different
+// sign/bound pairing, so a sign error in any one of them shows up as an
+// invalid cut in the enumeration test below.
+//
+// min -2x - 3y - z
+//   4x + 5y + 3z <= 13.5        (<=)
+//   -x + 2y      >= -1.5        (>=)
+//   2x +  y      in [1.5, 4.5]  (ranged)
+//    x +  y + 2z  = 4           (equality, integral data)
+//   x, y, z integer in [0, 3]
+//
+// The integer-feasible set is {(1, 1, 1), (0, 2, 1)}; the LP relaxation
+// optimum is fractional.
+static LpProblem buildMixedSenseMip() {
+    LpProblem lp;
+    lp.name = "mixed_sense";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {-2.0, -3.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {3.0, 3.0, 3.0};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Integer};
+    lp.col_names = {"x", "y", "z"};
+
+    lp.num_rows = 4;
+    lp.row_lower = {-kInf, -1.5, 1.5, 4.0};
+    lp.row_upper = {13.5, kInf, 4.5, 4.0};
+    lp.row_names = {"le", "ge", "ranged", "eq"};
+
+    std::vector<Triplet> trips = {
+        {0, 0, 4.0}, {0, 1, 5.0}, {0, 2, 3.0}, {1, 0, -1.0}, {1, 1, 2.0},
+        {2, 0, 2.0}, {2, 1, 1.0}, {3, 0, 1.0}, {3, 1, 1.0},  {3, 2, 2.0},
+    };
+    lp.matrix = SparseMatrix(4, 3, std::move(trips));
+    return lp;
+}
+
+// Check every cut in the pool against every integer point of the box
+// [0, limit]^n that is feasible for the model. A cut that fails here removed a
+// MIP-feasible point, which includes the integer optimum.
+//
+// Only for all-integer models: a continuous column cannot be enumerated.
+static void checkCutsKeepAllFeasiblePoints(const LpProblem& problem, const CutPool& pool,
+                                           Index limit) {
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        REQUIRE(problem.col_type[j] != VarType::Continuous);
+    }
+    REQUIRE(pool.size() > 0);
+
+    const Real tol = 1e-7;
+    std::vector<Real> point(static_cast<std::size_t>(problem.num_cols), 0.0);
+    Index checked = 0;
+    while (true) {
+        bool feasible = true;
+        for (Index j = 0; j < problem.num_cols && feasible; ++j) {
+            feasible =
+                point[j] >= problem.col_lower[j] - tol && point[j] <= problem.col_upper[j] + tol;
+        }
+        for (Index i = 0; i < problem.num_rows && feasible; ++i) {
+            Real activity = 0.0;
+            auto rv = problem.matrix.row(i);
+            for (Index p = 0; p < rv.size(); ++p) {
+                activity += rv.values[p] * point[rv.indices[p]];
+            }
+            feasible =
+                activity >= problem.row_lower[i] - tol && activity <= problem.row_upper[i] + tol;
+        }
+
+        if (feasible) {
+            ++checked;
+            for (Index ci = 0; ci < pool.size(); ++ci) {
+                const Cut& cut = pool[ci];
+                Real lhs = 0.0;
+                for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+                    lhs += cut.values[k] * point[cut.indices[k]];
+                }
+                INFO("cut " << ci << " lhs " << lhs << " rhs " << cut.lower);
+                CHECK(lhs >= cut.lower - 1e-6);
+                if (cut.upper < kInf) {
+                    CHECK(lhs <= cut.upper + 1e-6);
+                }
+            }
+        }
+
+        Index pos = 0;
+        while (pos < problem.num_cols && point[pos] >= static_cast<Real>(limit) - 0.5) {
+            point[pos] = 0.0;
+            ++pos;
+        }
+        if (pos == problem.num_cols) {
+            break;
+        }
+        point[pos] += 1.0;
+    }
+    // A validity sweep that found no feasible point proves nothing.
+    REQUIRE(checked > 0);
+}
+
 // ---------------------------------------------------------------------------
 // Gomory separator tests
 // ---------------------------------------------------------------------------
@@ -340,8 +440,20 @@ TEST_CASE("Gomory: generate cuts on small MIP", "[cuts][gomory]") {
     GomorySeparator gomory;
     Int cuts = gomory.separate(lp, problem, primals, pool);
 
-    // We should get at least one cut from the fractional variable.
-    CHECK(cuts >= 0);  // May or may not generate depending on tableau structure.
+    // At least one cut off the fractional variable. This is the assertion that
+    // issue #211 is about: it was CHECK(cuts >= 0), which no behaviour can
+    // fail, and it hid a separator that returned zero on every instance.
+    CHECK(cuts >= 1);
+    CHECK(pool.size() >= 1);
+
+    // The row is used, not skipped: the tableau row of a basic structural
+    // variable always carries a nonbasic logical, and substituting it is the
+    // whole point of the fix.
+    const auto& stats = gomory.stats();
+    CHECK(stats.candidate_rows >= 1);
+    CHECK(stats.rows_skipped == 0);
+    CHECK(stats.accepted == cuts);
+    CHECK(stats.local_cuts == 0);
 
     // Verify any generated cuts are valid (not violated by the LP relaxation
     // optimum... actually they SHOULD be violated, that's the point).
@@ -413,27 +525,194 @@ TEST_CASE("Gomory: blow-up row is never pooled", "[cuts][gomory]") {
     GomorySeparator gomory;
     const Int cuts = gomory.separate(lp, problem, primals, pool);
 
-    // Nothing is pooled. NOTE: today that is *not* because the safety screen
-    // rejected the blown-up cut — the cut is never built at all. Every tableau
-    // row of a basic structural variable has a nonzero entry on some nonbasic
-    // logical (row p of B^-1 vanishes exactly on the basic logicals and cannot
-    // be the zero row), and gomory.cpp's supported_row filter rejects any row
-    // with a nonbasic slack, so GomorySeparator currently emits no cuts on any
-    // instance. That defect is issue #211; the vacuous CHECK(cuts >= 0) in
-    // "Gomory: generate cuts on small MIP" above is why it went unnoticed.
-    //
-    // When #211 is fixed this row will build a cut with a 1e7 coefficient and
-    // the safety screen becomes what keeps the pool empty — so revisit this
-    // assertion then: it must stay green for the new reason, and the screen
-    // itself is pinned by "Gomory: safety screen rejects a GMI coefficient
-    // blow-up" above.
+    // Nothing is pooled, and since #211 that is because the safety screen
+    // rejected the blown-up cut rather than because no cut was built. The row
+    // is a candidate, the cut is constructed, and the screen is the only thing
+    // standing between it and the pool — which is exactly the guarantee #196
+    // wanted and could not demonstrate while the separator emitted nothing at
+    // all on any instance.
     CHECK(cuts == 0);
     CHECK(pool.size() == 0);
+    const auto& stats = gomory.stats();
+    CHECK(stats.candidate_rows == 1);
+    CHECK(stats.rows_skipped == 0);
+    CHECK(stats.cuts_built == 1);
+    CHECK(stats.rejected_screen == 1);
+    CHECK(stats.accepted == 0);
 
     // Invariant that holds either way and is the point of issue #196: whatever
     // Gomory does pool has passed the shared numerical safety screen.
     for (Index i = 0; i < pool.size(); ++i) {
         CHECK(isNumericallySafeCut(pool[i]));
+    }
+}
+
+TEST_CASE("Gomory: cuts keep every integer-feasible point", "[cuts][gomory]") {
+    // A GMI cut is derived from one tableau row and must still hold at every
+    // integer-feasible point of the model, the optimum included. The row-sense
+    // mix here is deliberate: <=, >=, ranged and equality rows each hand their
+    // logical to the substitution with a different sign and bound.
+    auto problem = buildMixedSenseMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+    CutPool pool;
+    GomorySeparator gomory;
+    const Int cuts = gomory.separate(lp, problem, primals, pool);
+    REQUIRE(cuts >= 1);
+
+    checkCutsKeepAllFeasiblePoints(problem, pool, 3);
+}
+
+TEST_CASE("Gomory: cuts on the fractional MIP keep the integer optimum", "[cuts][gomory]") {
+    auto problem = buildFractionalMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+    CutPool pool;
+    GomorySeparator gomory;
+    REQUIRE(gomory.separate(lp, problem, primals, pool) >= 1);
+
+    // x + y <= 5.5 with x, y >= 0 integer: every feasible point lies in
+    // [0, 5]^2, so the box sweep is exhaustive here.
+    checkCutsKeepAllFeasiblePoints(problem, pool, 6);
+
+    // The MIP optimum spelled out, so the sweep cannot go vacuous unnoticed:
+    // x = 0, y = 5 is feasible and optimal at objective -100.
+    const std::vector<Real> opt = {0.0, 5.0};
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        const auto& cut = pool[ci];
+        Real lhs = 0.0;
+        for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
+            lhs += cut.values[k] * opt[cut.indices[k]];
+        }
+        INFO("cut " << ci << " at the integer optimum");
+        CHECK(lhs >= cut.lower - 1e-6);
+    }
+}
+
+TEST_CASE("Gomory: a cut off a tightened bound is marked local", "[cuts][gomory]") {
+    // The deviation of a nonbasic column is measured from the bound the LP
+    // actually holds it at. When that bound is tighter than the model's, the
+    // cut is only valid in the subtree that tightened it, and must say so: the
+    // tree cut path promotes cuts to global rows and may not promote this one.
+    auto problem = buildFractionalMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    // y is unbounded above in the model; branch it down to 5. It then sits
+    // nonbasic at 5 and x = 0.5 becomes the fractional basic integer variable.
+    lp.setColBounds(1, 0.0, 5.0);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+    REQUIRE(std::abs(primals[1] - 5.0) < 1e-9);
+
+    CutPool pool;
+    GomorySeparator gomory;
+    const Int cuts = gomory.separate(lp, problem, primals, pool);
+    REQUIRE(cuts >= 1);
+    CHECK(gomory.stats().local_cuts == cuts);
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        CHECK(pool[ci].local);
+    }
+}
+
+TEST_CASE("Gomory: cuts off a vouched-for cut row stay global", "[cuts][gomory]") {
+    // Rows added after load() are node-local as far as the separator can tell,
+    // so it flags cuts built off them -- unless the caller states how many
+    // leading rows hold tree-wide, which is what the root cut loop does.
+    auto problem = buildMixedSenseMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    // A redundant but globally valid row: 4x + 5y + 3z <= 20.
+    const std::vector<Index> starts = {0};
+    const std::vector<Index> indices = {0, 1, 2};
+    const std::vector<Real> values = {4.0, 5.0, 3.0};
+    const std::vector<Real> lower = {-kInf};
+    const std::vector<Real> upper = {20.0};
+    lp.addRows(starts, indices, values, lower, upper);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    auto primals = lp.getPrimalValues();
+
+    CutPool vouched_pool;
+    GomorySeparator vouched;
+    vouched.setGlobalRowCount(lp.numRows());
+    const Int vouched_cuts = vouched.separate(lp, problem, primals, vouched_pool);
+    REQUIRE(vouched_cuts >= 1);
+    CHECK(vouched.stats().local_cuts == 0);
+    for (Index ci = 0; ci < vouched_pool.size(); ++ci) {
+        CHECK_FALSE(vouched_pool[ci].local);
+    }
+
+    // Without the declaration the same cuts are built, only flagged local: the
+    // setting is about where a cut may be used, not about which cuts exist.
+    CutPool defaulted_pool;
+    GomorySeparator defaulted;
+    const Int defaulted_cuts = defaulted.separate(lp, problem, primals, defaulted_pool);
+    REQUIRE(defaulted_cuts == vouched_cuts);
+    REQUIRE(defaulted_pool.size() == vouched_pool.size());
+    for (Index ci = 0; ci < vouched_pool.size(); ++ci) {
+        REQUIRE(defaulted_pool[ci].indices == vouched_pool[ci].indices);
+        for (std::size_t k = 0; k < vouched_pool[ci].values.size(); ++k) {
+            CHECK_THAT(defaulted_pool[ci].values[k], WithinAbs(vouched_pool[ci].values[k], 1e-12));
+        }
+    }
+
+    checkCutsKeepAllFeasiblePoints(problem, vouched_pool, 3);
+}
+
+TEST_CASE("SeparatorManager: Gomory contributes accepted cuts", "[cuts][gomory]") {
+    // End to end through the manager, which is the path the root cut loop
+    // takes: the family stats must show Gomory accepting cuts, not just the
+    // separator in isolation.
+    auto problem = buildMixedSenseMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    CutFamilyConfig only_gomory{};
+    only_gomory.mir = false;
+    only_gomory.cover = false;
+    only_gomory.implied_bound = false;
+    only_gomory.clique = false;
+    only_gomory.zero_half = false;
+    only_gomory.mixing = false;
+    only_gomory.cmir = false;
+    only_gomory.strong_cg = false;
+    only_gomory.lifted_cover = false;
+    only_gomory.mod_k = false;
+    only_gomory.intersection_cut = false;
+    only_gomory.multi_row = false;
+
+    SeparatorManager manager;
+    manager.setConfig(only_gomory);
+    manager.setGlobalRowCount(lp.numRows());
+    CutPool pool;
+    CutSeparationStats stats;
+    const Int added = manager.separate(lp, problem, primals, pool, stats);
+
+    CHECK(added >= 1);
+    CHECK(stats.at(CutFamily::Gomory).accepted == added);
+    checkCutsKeepAllFeasiblePoints(problem, pool, 3);
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        CHECK(pool[ci].family == CutFamily::Gomory);
+        CHECK(isNumericallySafeCut(pool[ci]));
     }
 }
 
