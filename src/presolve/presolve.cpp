@@ -2165,14 +2165,16 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 
         auto tightenOneSided = [&](bool use_upper_side) {
             Real rhs = 0.0;
+            // One-sided rows only: the reduction rewrites a coefficient, which
+            // would also move the other side of a ranged or equality row.
             if (use_upper_side) {
-                if (std::isinf(lp.row_upper[i])) {
+                if (std::isinf(lp.row_upper[i]) || !std::isinf(lp.row_lower[i])) {
                     return;
                 }
                 rhs = lp.row_upper[i];
             } else {
                 if (!std::isinf(lp.row_upper[i])) {
-                    return;  // Keep transformed logic one-sided.
+                    return;
                 }
                 if (std::isinf(lp.row_lower[i])) {
                     return;
@@ -2180,9 +2182,30 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                 rhs = -lp.row_lower[i];
             }
 
-            // Compute max activity in transformed <= form.
+            // Savelsbergh's coefficient tightening, in transformed <= form
+            // a_j x_j + rest <= b. Split an integer column at its upper bound:
+            // if the row is slack by d > 0 whenever x_j <= u_j - 1, the row
+            // (a_j - d) x_j + rest <= b - d u_j cuts off the same integer points
+            // at x_j = u_j and stays redundant below it. A negative coefficient
+            // is the mirror image at the lower bound. Same arithmetic and
+            // margin as strengthenCut in the cut code.
+            constexpr Real kMarginRel = 1e-9;
+            constexpr Real kMarginAbs = 1e-9;
+            constexpr Real kMinReductionRel = 1e-6;
+            constexpr Real kIntBoundTol = 1e-6;
+            // The split needs integral bounds; an integer column's integer
+            // points lie within its rounded-in bounds anyway.
+            auto lowerOf = [&](Index j) {
+                const Real lb = lp.col_lower[j];
+                return lp.col_type[j] == VarType::Continuous ? lb : std::ceil(lb - kIntBoundTol);
+            };
+            auto upperOf = [&](Index j) {
+                const Real ub = lp.col_upper[j];
+                return lp.col_type[j] == VarType::Continuous ? ub : std::floor(ub + kIntBoundTol);
+            };
+
             Real total_max = 0.0;
-            bool has_inf = false;
+            Real magnitude = std::abs(rhs);
             for (Index k = 0; k < rv.size(); ++k) {
                 const Index j = rv.indices[k];
                 if (col_removed[j]) {
@@ -2191,19 +2214,23 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 
                 const Real a_orig = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
                 const Real a = use_upper_side ? a_orig : -a_orig;
-                const Real lb = lp.col_lower[j];
-                const Real ub = lp.col_upper[j];
-                const Real contrib = (a > 0.0) ? a * ub : a * lb;
-                if (std::isinf(contrib)) {
-                    has_inf = true;
-                    break;
+                const Real contrib = (a > 0.0) ? a * upperOf(j) : a * lowerOf(j);
+                if (!std::isfinite(contrib)) {
+                    return;
                 }
                 total_max += contrib;
+                magnitude += std::abs(contrib);
             }
-            if (has_inf) {
+            // A row the bounds already satisfy is redundant, and every
+            // reduction would shrink its coefficients towards zero. Otherwise
+            // b < total_max, so each d below stays short of its coefficient.
+            if (total_max <= rhs) {
                 return;
             }
+            const Real margin = kMarginRel * magnitude + kMarginAbs;
 
+            // Each reduction lowers total_max and the rhs by the same amount,
+            // so the slack the later columns see is unchanged.
             for (Index k = 0; k < rv.size(); ++k) {
                 const Index j = rv.indices[k];
                 if (col_removed[j]) {
@@ -2212,29 +2239,40 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                 if (lp.col_type[j] == VarType::Continuous) {
                     continue;
                 }
+                const Real lb = lowerOf(j);
+                const Real ub = upperOf(j);
+                if (ub - lb < 0.5) {
+                    continue;  // Fixed: no x_j strictly inside the bounds.
+                }
 
                 const uint64_t key = coeffKey(i, j);
                 const Real a_orig = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
                 const Real a = use_upper_side ? a_orig : -a_orig;
-                if (a <= 0.0) {
+
+                Real new_a = a;
+                Real new_rhs = rhs;
+                if (a > 0.0) {
+                    // Largest activity with x_j <= ub - 1, against the rhs.
+                    const Real rest = total_max - a * ub;
+                    const Real d = rhs - a * (ub - 1.0) - rest - margin;
+                    if (d <= kMinReductionRel * a) {
+                        continue;
+                    }
+                    new_a = a - d;
+                    new_rhs = rhs - d * ub;
+                } else if (a < 0.0) {
+                    // Largest activity with x_j >= lb + 1, against the rhs.
+                    const Real rest = total_max - a * lb;
+                    const Real d = rhs - a * (lb + 1.0) - rest - margin;
+                    if (d <= kMinReductionRel * -a) {
+                        continue;
+                    }
+                    new_a = a + d;
+                    new_rhs = rhs + d * lb;
+                } else {
                     continue;
                 }
 
-                const Real ub = lp.col_upper[j];
-                const Real lb = lp.col_lower[j];
-                if (std::isinf(ub) || lb < -kTol) {
-                    continue;
-                }
-
-                const Real max_without_j = total_max - a * ub;
-                const Real max_contrib = rhs - max_without_j;
-                if (!(max_contrib < a - kTol && max_contrib > kTol)) {
-                    continue;
-                }
-
-                const Real new_a = max_contrib;
-                const Real rhs_adjust = (a - new_a) * lb;
-                const Real new_rhs = rhs - rhs_adjust;
                 const Real new_a_orig = use_upper_side ? new_a : -new_a;
                 if (!std::isfinite(new_rhs) || !std::isfinite(new_a_orig)) {
                     continue;
@@ -2245,8 +2283,7 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                 postsolve_stack_.push(PostsolveCoeffTightening{i, j, a_orig, new_a_orig,
                                                                old_rhs_bound, new_rhs_bound});
 
-                // Update total_max for subsequent variables in this row.
-                total_max = total_max - a * ub + new_a * ub;
+                total_max += new_rhs - rhs;
                 rhs = new_rhs;
                 if (use_upper_side) {
                     lp.row_upper[i] = new_rhs;

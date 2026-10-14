@@ -9,6 +9,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
+#include <random>
 #include <string>
 
 using namespace mipx;
@@ -368,8 +369,12 @@ static LpProblem buildParallelRowProblem() {
 }
 
 /// Build a problem where coefficient tightening creates duplicate rows.
-/// Row1: 7x + y <= 8  -> tightens to 6x + y <= 8 (x integer, 0<=x<=2, -100<=y<=2)
-/// Row2: 6x + y <= 8
+/// Row1: 3x + y <= 2 -> tightens to 2x + y <= 1 (x integer in [0,1], -100<=y<=1):
+///       with x = 0 the row is slack by d = 2 - 1 = 1, so a -= 1, b -= 1.
+/// Row2: 2x + y <= 1
+/// The reduction keeps a margin of ~1e-9 of the row's magnitude, so the terms
+/// stay small enough for the tightened row to match Row2 within the
+/// duplicate-row tolerance.
 /// Plus a fixed singleton column z to force a second presolve round.
 /// Duplicate-row removal should then remove one row in that later round.
 static LpProblem buildCoeffTighteningDuplicateProblem() {
@@ -379,26 +384,27 @@ static LpProblem buildCoeffTighteningDuplicateProblem() {
     lp.num_cols = 3;
     lp.obj = {0.0, 0.0, 0.0};
     lp.col_lower = {0.0, -100.0, 0.0};
-    lp.col_upper = {2.0, 2.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 0.0};
     lp.col_type = {VarType::Integer, VarType::Continuous, VarType::Continuous};
     lp.col_names = {"x", "y", "z"};
 
     lp.num_rows = 4;
     lp.row_lower = {-kInf, -kInf, -kInf, -kInf};
-    lp.row_upper = {8.0, 8.0, 0.0, 100.0};
+    lp.row_upper = {2.0, 1.0, 0.0, 100.0};
     lp.row_names = {"r1", "r2", "r3", "r4"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 7.0}, {0, 1, 1.0}, {1, 0, 6.0}, {1, 1, 1.0}, {2, 2, 1.0}, {3, 0, 1.0}, {3, 1, -1.0},
+        {0, 0, 3.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 1.0}, {2, 2, 1.0}, {3, 0, 1.0}, {3, 1, -1.0},
     };
     lp.matrix = SparseMatrix(4, 3, std::move(trips));
     return lp;
 }
 
 /// Build a >= row case where transformed-side coefficient tightening should fire.
-/// Row1: -7x + y >= -6  -> tightens to -6x + y >= -6
-/// Row2: -6x + y >= -6 (duplicate after tightening)
-/// x is integer in [0,2], y continuous in [0,2].
+/// Row1: -3x + y >= -1 -> tightens to -2x + y >= 0 (as 3x - y <= 1, slack
+///       d = 1 with x = 0)
+/// Row2: -2x + y >= 0 (duplicate after tightening)
+/// x is integer in [0,1], y continuous in [0,5].
 static LpProblem buildCoeffTighteningLowerSideProblem() {
     LpProblem lp;
     lp.name = "coeff_tight_lower";
@@ -406,19 +412,19 @@ static LpProblem buildCoeffTighteningLowerSideProblem() {
     lp.num_cols = 2;
     lp.obj = {0.0, 0.0};
     lp.col_lower = {0.0, 0.0};
-    lp.col_upper = {2.0, 2.0};
+    lp.col_upper = {1.0, 5.0};
     lp.col_type = {VarType::Integer, VarType::Continuous};
     lp.col_names = {"x", "y"};
 
     lp.num_rows = 2;
-    lp.row_lower = {-6.0, -6.0};
+    lp.row_lower = {-1.0, 0.0};
     lp.row_upper = {kInf, kInf};
     lp.row_names = {"r1", "r2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, -7.0},
+        {0, 0, -3.0},
         {0, 1, 1.0},
-        {1, 0, -6.0},
+        {1, 0, -2.0},
         {1, 1, 1.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
@@ -930,9 +936,9 @@ TEST_CASE("Presolve: positive-scale parallel row removal", "[presolve]") {
     CHECK(reduced.num_rows == 1);
 }
 
-TEST_CASE("Presolve: negative coefficient is not tightened", "[presolve]") {
+TEST_CASE("Presolve: a negative coefficient is not tightened while x >= 1 binds", "[presolve]") {
     // Row: -3x + y <= 4, x integer in [0,2], y in [0,10]
-    // Only positive coefficients on integer vars should be tightened.
+    // With x >= 1 the row still binds (-3 + 10 > 4), so there is no slack d.
     LpProblem lp;
     lp.name = "coeff_tight_neg_skip";
     lp.sense = Sense::Minimize;
@@ -963,7 +969,6 @@ TEST_CASE("Presolve: negative coefficient is not tightened", "[presolve]") {
     auto reduced = presolver.presolve(lp);
 
     CHECK_FALSE(presolver.isInfeasible());
-    // Negative coefficient should NOT be tightened.
     CHECK(presolver.stats().coeff_tightening_changes == 0);
 }
 
@@ -980,7 +985,10 @@ TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[preso
 
     CHECK_FALSE(presolver.isInfeasible());
     CHECK(presolver.stats().coeff_tightening_changes >= 1);
-    CHECK(presolver.stats().duplicate_row_changes >= 1);
+    // The tightened row matches Row2 only within tolerance (the reduction's
+    // margin), which the parallel-row pass sees and the exact-hash
+    // duplicate-row pass does not.
+    CHECK(presolver.stats().duplicate_row_changes + presolver.stats().parallel_row_changes >= 1);
     CHECK(reduced.num_rows == 2);
 
     REQUIRE(reduced.num_cols == 2);
@@ -1000,7 +1008,7 @@ TEST_CASE("Presolve: coefficient overrides are visible to later passes", "[preso
             }
         }
         if (ay > 0.0) {
-            CHECK_THAT(ax, WithinAbs(6.0, 1e-8));
+            CHECK_THAT(ax, WithinAbs(2.0, 1e-8));
             CHECK_THAT(ay, WithinAbs(1.0, 1e-8));
             found_tightened_row = true;
             break;
@@ -1024,6 +1032,176 @@ TEST_CASE("Presolve: coefficient tightening handles one-sided >= rows", "[presol
     CHECK(presolver.stats().coeff_tightening_changes >= 1);
     CHECK(presolver.stats().rows_removed >= 1);
     CHECK(reduced.num_rows <= 1);
+}
+
+TEST_CASE("Presolve: coefficient tightening keeps the optimum of the #226 model", "[presolve]") {
+    // max 100x + y s.t. 7x + y <= 8, x integer in [0,1], y in [-100,2].
+    // The optimum is x = 1, y = 1 (101); x = 1, y = 2 violates the row.
+    LpProblem lp;
+    lp.name = "coeff_tight_226";
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 2;
+    lp.obj = {100.0, 1.0};
+    lp.col_lower = {0.0, -100.0};
+    lp.col_upper = {1.0, 2.0};
+    lp.col_type = {VarType::Integer, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {8.0};
+    lp.row_names = {"c1"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 7.0}, {0, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    PresolveOptions opts = solver.getRootPresolveOptions();
+    opts.enable_coefficient_tightening = true;
+    solver.setRootPresolveOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(101.0, 1e-6));
+}
+
+namespace {
+
+bool rowsHold(const LpProblem& lp, const std::vector<Real>& x, Real tol) {
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (x[j] < lp.col_lower[j] - tol || x[j] > lp.col_upper[j] + tol) {
+            return false;
+        }
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        auto rv = lp.matrix.row(i);
+        Real act = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            act += rv.values[k] * x[rv.indices[k]];
+        }
+        if (act < lp.row_lower[i] - tol || act > lp.row_upper[i] + tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: coefficient tightening keeps exactly the integer-feasible set", "[presolve]") {
+    // Random all-integer models over a small box, enumerated point by point.
+    // Dual reductions and aggregation are off, so every reduction left is
+    // primal: the projection of each integer point the original admits onto
+    // the kept columns satisfies the presolved model, and each integer point
+    // the presolved model admits postsolves to one the original admits.
+    // Removed columns take the value postsolve picks, so the two sets are
+    // compared through these two implications rather than point for point.
+    std::mt19937 rng(226);
+    const std::vector<Real> coef_pool = {1.0, 2.0, 3.0, 5.0, 7.0, 9.0, -1.0, -2.0, -4.0, -7.0};
+    std::uniform_int_distribution<int> pick_coef(0, static_cast<int>(coef_pool.size()) - 1);
+    std::uniform_int_distribution<int> pick_lb(-2, 1);
+    std::uniform_int_distribution<int> pick_width(1, 3);
+    std::uniform_int_distribution<int> pick_sense(0, 3);
+    std::uniform_real_distribution<Real> unit(0.0, 1.0);
+
+    Index tightened = 0;
+    const int kModels = 300;
+    for (int trial = 0; trial < kModels; ++trial) {
+        LpProblem lp;
+        lp.name = "coeff_tight_enum";
+        lp.sense = Sense::Minimize;
+        lp.num_cols = 2 + trial % 2;
+        lp.num_rows = 1 + trial % 3;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            const Real lb = pick_lb(rng);
+            lp.obj.push_back(0.0);
+            lp.col_lower.push_back(lb);
+            lp.col_upper.push_back(lb + pick_width(rng));
+            lp.col_type.push_back(VarType::Integer);
+            lp.col_names.push_back("x" + std::to_string(j));
+        }
+        std::vector<Triplet> trips;
+        for (Index i = 0; i < lp.num_rows; ++i) {
+            Real min_act = 0.0;
+            Real max_act = 0.0;
+            for (Index j = 0; j < lp.num_cols; ++j) {
+                const Real a = coef_pool[pick_coef(rng)];
+                trips.push_back({i, j, a});
+                min_act += std::min(a * lp.col_lower[j], a * lp.col_upper[j]);
+                max_act += std::max(a * lp.col_lower[j], a * lp.col_upper[j]);
+            }
+            const Real rhs = std::round(min_act + unit(rng) * (max_act - min_act));
+            switch (pick_sense(rng)) {
+                case 0:
+                    lp.row_lower.push_back(rhs);
+                    lp.row_upper.push_back(kInf);
+                    break;
+                case 1:
+                    lp.row_lower.push_back(rhs);
+                    lp.row_upper.push_back(rhs + 3.0);
+                    break;
+                default:
+                    lp.row_lower.push_back(-kInf);
+                    lp.row_upper.push_back(rhs);
+                    break;
+            }
+            lp.row_names.push_back("r" + std::to_string(i));
+        }
+        lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
+
+        Presolver presolver;
+        PresolveOptions opts = presolver.options();
+        opts.enable_dual_fixing = false;
+        opts.enable_doubleton_aggregation = false;
+        opts.enable_coefficient_tightening = true;
+        presolver.setOptions(opts);
+        const auto reduced = presolver.presolve(lp);
+        tightened += presolver.stats().coeffs_tightened;
+        const auto& mapping = presolver.colMapping();
+
+        std::vector<Real> x(lp.num_cols);
+        std::vector<Real> x_reduced(reduced.num_cols);
+        std::vector<int> step(lp.num_cols, 0);
+        while (true) {
+            for (Index j = 0; j < lp.num_cols; ++j) {
+                x[j] = lp.col_lower[j] + step[j];
+            }
+            const bool original = rowsHold(lp, x, 1e-9);
+            std::string point;
+            for (Index j = 0; j < lp.num_cols; ++j) {
+                point += " " + std::to_string(static_cast<int>(x[j]));
+            }
+            INFO("trial " << trial << " point" << point);
+            if (presolver.isInfeasible()) {
+                CHECK_FALSE(original);
+            } else {
+                for (Index jj = 0; jj < reduced.num_cols; ++jj) {
+                    x_reduced[jj] = x[mapping[jj]];
+                }
+                const bool kept = rowsHold(reduced, x_reduced, 1e-6);
+                // No integer point of the original is lost...
+                if (original) {
+                    CHECK(kept);
+                }
+                // ...and none the original excludes is admitted.
+                if (kept) {
+                    const auto full = presolver.postsolve(x_reduced);
+                    REQUIRE(full.size() == x.size());
+                    CHECK(rowsHold(lp, full, 1e-9));
+                }
+            }
+
+            Index pos = 0;
+            while (pos < lp.num_cols && lp.col_lower[pos] + step[pos] + 1 > lp.col_upper[pos]) {
+                step[pos] = 0;
+                ++pos;
+            }
+            if (pos == lp.num_cols) {
+                break;
+            }
+            ++step[pos];
+        }
+    }
+    // The models must exercise the reduction, not just pass around it.
+    CHECK(tightened >= 50);
 }
 
 TEST_CASE("Presolve: doubleton equality aggregation preserves LP objective", "[presolve]") {
