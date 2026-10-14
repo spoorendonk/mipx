@@ -191,6 +191,9 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--tree-cuts") {
             tree_cuts_enabled = true;
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage(stdout);
+            return 0;
         } else if (arg == "--probing") {
             probing_enabled = true;
         } else if (arg == "--no-probing") {

@@ -167,6 +167,7 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
     const auto run = runSolver("--help");
 
     CHECK(run.exit_code == 0);
+    CHECK(runSolver("'" + testDataDir() + "/cli_features.mps' --help").exit_code == 0);
     for (const char* flag :
          {"--probing", "--no-probing", "--probing-rounds", "--probing-probes", "--probing-time",
           "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
@@ -187,8 +188,11 @@ TEST_CASE("CLI: --probing reaches the solver", "[cli]") {
     CHECK(on.mentions("1 fixings"));
     CHECK_FALSE(off.mentions("Probing: "));
     CHECK_FALSE(toggled.mentions("Probing: "));
-    // The budget knobs are passed through: one round is all it gets.
+    // The budget knobs are passed through: one round is all it gets, and one
+    // probe per round probes far fewer variables than the default budget.
     CHECK(runFeatures("--probing --probing-rounds 1").mentions(" 1 rounds"));
+    CHECK(on.mentions("Probing: 31 vars probed"));
+    CHECK(runFeatures("--probing --probing-probes 1").mentions("Probing: 2 vars probed"));
 }
 
 TEST_CASE("CLI: --presolve-probing reaches presolve", "[cli]") {
@@ -201,7 +205,7 @@ TEST_CASE("CLI: --presolve-probing reaches presolve", "[cli]") {
     // Without probing nothing in presolve fixes x4, so no reduction is logged.
     CHECK_FALSE(off.mentions("probe=1]"));
     CHECK_FALSE(toggled.mentions("probe=1]"));
-    // A zero probe budget leaves nothing for the pass to find.
+    // A one-probe, one-round budget does not reach x4, so nothing is fixed.
     CHECK_FALSE(runFeatures("--presolve-probing --presolve-probing-probes 1 "
                             "--presolve-probing-rounds 1")
                     .mentions("probe=1]"));
