@@ -578,7 +578,14 @@ int main(int argc, char* argv[]) {
                         break;
                 }
             }
-            log.log("Objective: %.10e\n", result.objective);
+            // MipResult::objective defaults to 0, so a run that ends without an
+            // incumbent (a limit hit first, or infeasibility) would print a
+            // plausible-looking 0 (#224). Report it only with a solution.
+            if (!result.solution.empty()) {
+                log.log("Objective: %.10e\n", result.objective);
+            } else {
+                log.log("Objective: none\n");
+            }
             log.log("Nodes: %d\n", result.nodes);
             log.log("LP iterations: %d\n", result.lp_iterations);
             log.log("Work units: %.2f\n", result.work_units);

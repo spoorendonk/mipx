@@ -22,8 +22,9 @@ does not fail the gate. A listed instance without a usable reference (=best=,
 =unkn=, or none) fails the gate, as does a run in which nothing was gated;
 under --all, unlisted instances without one are reported and skipped.
 
-A MIP stopped by a time or node limit is dnf whatever its incumbent: the CLI
-prints "Objective: 0" when it has none, so the incumbent cannot be checked.
+A MIP stopped by a time or node limit is dnf whatever its incumbent. The CLI
+now prints "Objective: none" when it has none (#224), so checking a limited
+incumbent is possible; doing so is follow-up work on #223.
 
 --write-expected records the classes seen at this run's time limit; pass
 --time-limit only together with per-row limits you mean to keep.
@@ -179,9 +180,9 @@ def classify(outcome: Outcome, ref: Reference) -> str:
     claims = {"optimal": "opt", "gap_limit": "opt", "infeasible": "inf", "unbounded": "unbd"}
     claim = claims.get(outcome.status)
     if claim is None:
-        # A MIP stopped by a limit is not checked against its incumbent: the
-        # CLI prints "Objective: 0" when there is none, which cannot be told
-        # apart from a real incumbent of 0 (see #223).
+        # A MIP stopped by a limit is not checked against its incumbent yet.
+        # Since #224 the CLI prints "Objective: none" without one, so this can
+        # become an incumbent check (see #223).
         return "dnf"
     if claim != ref.kind:
         return "disagree"

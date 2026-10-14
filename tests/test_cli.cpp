@@ -163,6 +163,29 @@ TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]
     CHECK(run.mentions("Objective: none"));
 }
 
+TEST_CASE("CLI: a MIP stopped before any incumbent reports no objective", "[cli]") {
+    // Issue #224: MipResult::objective defaults to 0, and the MIP summary
+    // printed it whether or not a solution existed. The model has no integer
+    // point, so with presolve and cuts off one node cannot find or rule one out.
+    const auto run = runSolver("'" + testDataDir() +
+                               "/no_incumbent_mip.lp' --no-presolve --no-cuts --node-limit 1 "
+                               "--threads 1 --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Node limit"));
+    CHECK(run.mentions("Objective: none"));
+    CHECK_FALSE(run.mentions("Objective: 0"));
+}
+
+TEST_CASE("CLI: an infeasible MIP reports no objective", "[cli]") {
+    const auto run = runSolver("'" + testDataDir() + "/infeasible_mip.lp' --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Infeasible"));
+    CHECK(run.mentions("Objective: none"));
+    CHECK_FALSE(run.mentions("Objective: 0"));
+}
+
 TEST_CASE("CLI: --format lp forces the LP reader", "[cli][io]") {
     // The override has to work in both directions, not just as a rejection.
     const auto run = runSolver("'" + testDataDir() + "/lp_format.lp' --format lp");
