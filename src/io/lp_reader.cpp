@@ -56,8 +56,17 @@ LpSection parseLpSection(const std::string& line) {
     return LpSection::None;
 }
 
+// CPLEX LP also spells the inequalities "=<" and "=>".
+bool isLessEqual(const std::string& s) {
+    return s == "<=" || s == "<" || s == "=<";
+}
+
+bool isGreaterEqual(const std::string& s) {
+    return s == ">=" || s == ">" || s == "=>";
+}
+
 bool isSenseIndicator(const std::string& s) {
-    return s == "<=" || s == ">=" || s == "=" || s == "<" || s == ">";
+    return isLessEqual(s) || isGreaterEqual(s) || s == "=";
 }
 
 /// Parse a linear expression like "2 x1 + 3 x2 - x3" into (name, coeff)
@@ -140,10 +149,10 @@ struct BoundLine {
 /// Recognise one line of the Bounds section, or return nullopt when it matches
 /// none of the forms:
 ///   x free | x <= u | x >= l | x = v | l <= x | u >= x | v = x | l <= x <= u
-/// ('<' and '>' are read as '<=' and '>=').
+/// ('<' and '=<' are read as '<=', '>' and '=>' as '>=').
 std::optional<BoundLine> parseBoundLine(const std::vector<std::string>& tokens) {
-    const auto isLe = [](const std::string& s) { return s == "<=" || s == "<"; };
-    const auto isGe = [](const std::string& s) { return s == ">=" || s == ">"; };
+    const auto isLe = isLessEqual;
+    const auto isGe = isGreaterEqual;
 
     if (tokens.size() == 2 && isBoundName(tokens[0]) && toLower(tokens[1]) == "free") {
         return BoundLine{tokens[0], -kInf, kInf};
@@ -343,10 +352,10 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
                     triplets.push_back({row, col, coeff});
                 }
 
-                if (sense_str == "<=" || sense_str == "<") {
+                if (isLessEqual(sense_str)) {
                     prob.row_lower.push_back(-kInf);
                     prob.row_upper.push_back(rhs_val);
-                } else if (sense_str == ">=" || sense_str == ">") {
+                } else if (isGreaterEqual(sense_str)) {
                     prob.row_lower.push_back(rhs_val);
                     prob.row_upper.push_back(kInf);
                 } else {
@@ -366,7 +375,7 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
                         std::to_string(l_number) +
                         " is not a recognised bound (expected "
                         "'x free', 'x <= u', 'x >= l', 'x = v', 'l <= x', 'u >= x', "
-                        "'v = x' or 'l <= x <= u'): " +
+                        "'v = x' or 'l <= x <= u', or a section header this reader knows): " +
                         l);
                 }
                 const Index idx = getOrCreateCol(bound->name);

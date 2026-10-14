@@ -36,7 +36,8 @@ struct ReadDiagnostics {
     bool saw_content = false;
 };
 
-/// Thrown by readModel() when a file cannot be read as the format it was given.
+/// Thrown by readModel() when a file cannot be read as the format it was given,
+/// and by readLp() for a line it cannot make sense of (a malformed bound).
 ///
 /// Distinct from the plain std::runtime_error a reader raises for an
 /// unreadable file, so callers can offer format-specific advice without

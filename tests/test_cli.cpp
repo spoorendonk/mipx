@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 
@@ -101,8 +102,9 @@ TEST_CASE("CLI: an LP file with an unhelpful extension is rejected", "[cli][io]"
 TEST_CASE("CLI: a compressed LP file gets no --format hint", "[cli][io]") {
     // Neither reader can take a compressed LP file, so suggesting --format
     // would contradict the error's own advice to decompress it first.
-    const std::string path =
-        (std::filesystem::temp_directory_path() / "mipx_cli_compressed.lp.gz").string();
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("mipx_cli_compressed_" + std::to_string(::getpid()) + ".lp.gz"))
+                                 .string();
     {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         out << "not really gzip";

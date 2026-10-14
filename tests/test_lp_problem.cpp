@@ -9,6 +9,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <utility>
 #include <zlib.h>
 
@@ -378,9 +379,12 @@ TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
 
 namespace {
 
-/// Write `content` to a temporary .lp file and return its path.
+/// Write `content` to a temporary .lp file and return its path. The pid keeps
+/// concurrent test runs from different checkouts apart.
 std::string writeTempLp(const std::string& stem, const std::string& content) {
-    const std::string path = (std::filesystem::temp_directory_path() / (stem + ".lp")).string();
+    const std::string path =
+        (std::filesystem::temp_directory_path() / (stem + "_" + std::to_string(::getpid()) + ".lp"))
+            .string();
     std::ofstream out(path, std::ios::trunc);
     out << content;
     return path;
@@ -400,9 +404,10 @@ Index columnNamed(const LpProblem& prob, const std::string& name) {
 TEST_CASE("LP reader: every supported bound form parses", "[io][lp]") {
     const std::string path = writeTempLp("mipx_bound_forms",
                                          "Minimize\n"
-                                         " obj: a + b + c + d + e + f + g + h + i + j\n"
+                                         " obj: a + b + c + d + e + f + g + h + i + j + k + l\n"
                                          "Subject To\n"
-                                         " c1: a + b >= 0\n"
+                                         " c1: a + b => 1\n"
+                                         " c2: a - b =< 2\n"
                                          "Bounds\n"
                                          " a free\n"
                                          " b <= 4\n"
@@ -414,11 +419,19 @@ TEST_CASE("LP reader: every supported bound form parses", "[io][lp]") {
                                          " 6 = h\n"
                                          " -inf <= i <= 1e3\n"
                                          " j > -infinity\n"
+                                         " k =< 5\n"
+                                         " l => 1\n"
                                          "End\n");
     const auto prob = readLp(path);
     std::filesystem::remove(path);
 
-    REQUIRE(prob.num_cols == 10);
+    REQUIRE(prob.num_cols == 12);
+    // "=>" and "=<" are CPLEX spellings of >= and <=, in constraints too.
+    REQUIRE(prob.num_rows == 2);
+    CHECK(prob.row_lower[0] == 1.0);
+    CHECK(prob.row_upper[0] == kInf);
+    CHECK(prob.row_lower[1] == -kInf);
+    CHECK(prob.row_upper[1] == 2.0);
     const auto bounds = [&](const std::string& name) {
         const Index j = columnNamed(prob, name);
         REQUIRE(j >= 0);
@@ -434,17 +447,20 @@ TEST_CASE("LP reader: every supported bound form parses", "[io][lp]") {
     CHECK(bounds("h") == std::pair{6.0, 6.0});
     CHECK(bounds("i") == std::pair{-kInf, 1000.0});
     CHECK(bounds("j") == std::pair{-kInf, kInf});
+    CHECK(bounds("k") == std::pair{0.0, 5.0});
+    CHECK(bounds("l") == std::pair{1.0, kInf});
 }
 
 TEST_CASE("LP reader: a malformed bounds line is an error, not a new column", "[io][lp]") {
     // Each line is wrong in a different way; every one used to be accepted,
     // most of them by inventing a column named after the first token.
     const char* const malformed[] = {
-        "x1 => 3",        // not an operator
+        "x1 =~ 3",        // not an operator
+        "x1 >== 3",       // not an operator either
         "x1 <= abc",      // value is not a number
         "UP bnd x1 8.0",  // an MPS bound record
         "x1 <= 3 extra",  // trailing junk
-        "x1>=3",          // operator not separated by whitespace
+        "x1>=3",          // the tokenizer needs whitespace around operators
         "1 <= x1 >= 5",   // mixed double bound
         "3 <= 4",         // no column at all
         "x1 x2 free",     // free needs exactly one name
@@ -462,7 +478,7 @@ TEST_CASE("LP reader: a malformed bounds line is an error, not a new column", "[
             FAIL("expected readLp to throw");
         } catch (const ModelFormatError& e) {
             const std::string message = e.what();
-            CHECK(message.find("mipx_bad_bound.lp") != std::string::npos);
+            CHECK(message.find(path) != std::string::npos);
             CHECK(message.find("line 6") != std::string::npos);
             CHECK(message.find(line) != std::string::npos);
         }
@@ -890,7 +906,9 @@ TEST_CASE("readMps/readLp: diagnostics report whether the format was seen", "[io
     // with bound records does not get this far: its BOUNDS lines are not LP
     // bounds, and readLp refuses them.)
     const std::string no_bounds_mps =
-        (std::filesystem::temp_directory_path() / "mipx_no_bounds_test.mps").string();
+        (std::filesystem::temp_directory_path() /
+         ("mipx_no_bounds_test_" + std::to_string(::getpid()) + ".mps"))
+            .string();
     {
         std::ofstream out(no_bounds_mps, std::ios::trunc);
         out << "NAME nobounds\nROWS\n N obj\n L c1\nCOLUMNS\n x obj 1 c1 1\n"

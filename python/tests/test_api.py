@@ -94,7 +94,7 @@ def test_wrong_format_input_raises_model_format_error(call: Callable[[], object]
 
 def test_malformed_lp_bounds_line_raises(tmp_path: Path) -> None:
     path = tmp_path / "bad_bounds.lp"
-    path.write_text("Minimize\n obj: x\nSubject To\n c1: x >= 0\nBounds\n x => 3\nEnd\n")
+    path.write_text("Minimize\n obj: x\nSubject To\n c1: x >= 0\nBounds\n x =~ 3\nEnd\n")
     with pytest.raises(mipx.ModelFormatError, match="line 6"):
         mipx.read_lp(str(path))
 
