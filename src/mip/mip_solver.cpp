@@ -2572,15 +2572,13 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             for (Int round = 0; round < max_rounds; ++round) {
                 CutPool tree_pool;
                 CutSeparationStats tree_stats;
-                // Rows ahead of the first node-local one hold tree-wide; a cut
-                // that substitutes a local row's logical does not, and must
-                // stay in this subtree.
-                Index global_row_prefix = lp.numRows();
-                if (!temp_local_rows.empty()) {
-                    global_row_prefix =
-                        *std::min_element(temp_local_rows.begin(), temp_local_rows.end());
-                }
-                tree_separators.setGlobalRowCount(global_row_prefix);
+                // A cut that substitutes a node-local row's logical holds only
+                // in this subtree. The local rows are named one by one rather
+                // than by a watermark: once a round appends a mixed batch, the
+                // rows promoted in later rounds sit after a local one and are
+                // still global.
+                tree_separators.setGlobalRowCount(lp.numRows());
+                tree_separators.setLocalRows(temp_local_rows);
                 const Int generated =
                     tree_separators.separate(lp, problem_, node_primals_out, tree_pool, tree_stats);
                 if (generated == 0) {

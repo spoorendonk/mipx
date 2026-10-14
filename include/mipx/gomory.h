@@ -5,6 +5,7 @@
 #include "mipx/dual_simplex.h"
 #include "mipx/lp_problem.h"
 
+#include <algorithm>
 #include <span>
 #include <vector>
 
@@ -29,7 +30,23 @@ struct GomoryStats {
     Int cuts_built = 0;          // cuts fully constructed and offered onward
     Int accepted = 0;            // cuts added to the pool
     Int local_cuts = 0;          // accepted cuts valid only in the current subtree
+    Int relaxed_terms = 0;       // tiny coefficients dropped and paid for in the rhs
+    Real efficacy_sum = 0.0;     // summed efficacy of the accepted cuts
 };
+
+/// Drop the negligible terms of the cut `sum_j coeff[j] * x_j >= rhs` over the
+/// box `lower <= x <= upper`, and return the right-hand side that pays for them.
+///
+/// Every coefficient with `0 < |coeff[j]| <= drop_tol` is set to zero and the
+/// right-hand side is lowered by the largest value that term takes over the
+/// box (`coeff[j] * upper[j]` for a positive coefficient, `coeff[j] *
+/// lower[j]` for a negative one). The result therefore admits every point of
+/// the box the original cut did: dropping a term of a `>=` cut without that
+/// payment strengthens it, and on a wide-range column cuts off feasible
+/// points. A term whose bound in the needed direction is infinite cannot be
+/// paid for and is kept. `dropped`, when given, counts the terms removed.
+[[nodiscard]] Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
+                                std::span<const Real> upper, Real drop_tol, Int* dropped = nullptr);
 
 /// Generate Gomory mixed-integer (GMI) cuts from a simplex tableau.
 ///
@@ -61,6 +78,19 @@ public:
     /// when the caller says nothing.
     void setGlobalRowCount(Index n) { global_row_count_ = n; }
 
+    /// Declare individual LP rows inside the global prefix as node-local.
+    ///
+    /// The prefix alone cannot describe an LP whose node-local rows are
+    /// interleaved with globally valid ones, which is what the in-tree cut loop
+    /// builds once a round appends a mixed batch: a row promoted in a later
+    /// round sits after an earlier local row. Rows listed here are local
+    /// whatever the prefix says; rows at or past the prefix are local whether
+    /// listed or not. Order and duplicates do not matter.
+    void setLocalRows(std::vector<Index> rows) {
+        std::sort(rows.begin(), rows.end());
+        local_rows_ = std::move(rows);
+    }
+
     /// Accounting for the most recent separate() call.
     [[nodiscard]] const GomoryStats& stats() const { return stats_; }
 
@@ -68,6 +98,7 @@ private:
     Int max_cuts_ = 50;
     Real min_violation_ = 1e-4;
     Index global_row_count_ = -1;
+    std::vector<Index> local_rows_;  // sorted
     GomoryStats stats_{};
     static constexpr Real kIntTol = 1e-6;
     static constexpr Real kCoeffTol = 1e-10;

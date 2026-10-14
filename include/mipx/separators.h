@@ -8,6 +8,8 @@
 
 #include <array>
 #include <span>
+#include <utility>
+#include <vector>
 
 namespace mipx {
 
@@ -66,6 +68,9 @@ public:
     /// See GomorySeparator::setGlobalRowCount; negative means "only the rows of
     /// the LpProblem passed to separate()".
     void setGlobalRowCount(Index n) { global_row_count_ = n; }
+    /// Declare rows inside that prefix as node-local; see
+    /// GomorySeparator::setLocalRows.
+    void setLocalRows(std::vector<Index> rows) { gomory_.setLocalRows(std::move(rows)); }
 
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
                  CutPool& pool, CutSeparationStats& stats);

@@ -194,6 +194,15 @@ public:
     void addRows(std::span<const Index> starts, std::span<const Index> indices,
                  std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
+    /// Remove rows, keeping the basis when every remaining basic variable
+    /// survives the removal.
+    ///
+    /// Postcondition: re-solve before reading a solution. When the basis is
+    /// kept, primal and reduced-cost values of the surviving variables carry
+    /// over and the duals are zero. When it cannot be kept, there is no basis
+    /// and getPrimalValues(), the reduced costs and the duals read zero, and
+    /// getObjective() the objective offset, rather than stale values from the
+    /// old problem.
     void removeRows(std::span<const Index> rows) override;
 
     void setColBounds(Index col, Real lower, Real upper) override;

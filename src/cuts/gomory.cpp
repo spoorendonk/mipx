@@ -18,10 +18,17 @@ namespace {
 /// formula, and a wrong answer there produces an invalid cut.
 constexpr Real kDataIntTol = 1e-9;
 
-/// Largest coefficient a fractional-part snap may discard. Mirrors
-/// GomorySeparator::kCoeffTol, the threshold finalizeCut drops terms at, so the
-/// snap never removes mass the cut would otherwise have kept.
-constexpr Real kSnapCoeffTol = 1e-10;
+/// Tableau entries below this are numerical zeros of the factorization, not
+/// coefficients: B^-1 A carries round-off of this order on every entry, and a
+/// row taken at face value would put that noise on columns with no finite
+/// bound to pay for it, where it can only trip the max/min ratio screen. It
+/// reads the row identity, before any GMI scaling, so it is not a dropped cut
+/// coefficient; those are paid for in finalizeCut.
+constexpr Real kTableauZeroTol = 1e-10;
+
+/// Relative size, against the magnitude of the terms summed into it, below
+/// which a cut coefficient is cancellation round-off (a few thousand ulps).
+constexpr Real kCancellationTol = 1e-12;
 
 bool isIntegralValue(Real v, Real tol) {
     return std::abs(v - std::round(v)) <= tol;
@@ -52,27 +59,13 @@ bool isIntegerValued(VarType t) {
 /// may be set only when delta_k really is integer at every feasible point.
 Real gmiCoefficient(Real t, bool integral, Real f0) {
     if (integral) {
-        Real f = t - std::floor(t);  // in [0, 1) for negative t as well
-        // An integral t up to round-off contributes nothing: the term is an
-        // integer multiple of an integer deviation. Snapping keeps a tableau
-        // residual from entering the cut as a coefficient the max/min ratio
-        // screen would then reject the whole cut over.
-        //
-        // The threshold is on the *coefficient the snap discards*, not on f
-        // itself. The cut is sum_k c_k delta_k >= 1 with delta_k >= 0, so
-        // dropping a term strengthens it, and an over-eager snap cuts off
-        // integer-feasible points. Testing f against a bare kDataIntTol did
-        // that: the discarded coefficient is f/f0 on the low side and
-        // (1-f)/(1-f0) on the high side, and separate() only guarantees f0 is
-        // kIntTol (1e-6) away from either end -- so a 1e-9 residual becomes a
-        // coefficient of 1e-3, which on a column of range 1e5 moves the cut by
-        // 1e2. Bounding the coefficient change by kCoeffTol instead is exactly
-        // the mass finalizeCut would drop anyway. A larger residual now
-        // survives into the cut, where the ratio screen may reject it -- losing
-        // a cut, never validity.
-        if (f <= kSnapCoeffTol * f0 || 1.0 - f <= kSnapCoeffTol * (1.0 - f0)) {
-            f = 0.0;
-        }
+        // In [0, 1) for negative t as well. No snap toward 0 or 1: the cut is
+        // sum_k c_k delta_k >= 1 with delta_k >= 0, so zeroing a coefficient
+        // strengthens it, and on a wide-range column a discarded f/f0 of 1e-4
+        // moves the cut by far more than that. A near-integral t instead gives
+        // a tiny coefficient here, and finalizeCut drops it and pays for it in
+        // the right-hand side (issue #216).
+        const Real f = t - std::floor(t);
         return (f <= f0) ? f / f0 : (1.0 - f) / (1.0 - f0);
     }
     if (t > 0.0) {
@@ -108,6 +101,16 @@ struct RowScratch {
     std::vector<Real> values;
 };
 
+/// Which LP rows a cut may lean on and stay valid tree-wide.
+struct RowProvenance {
+    Index global_rows = 0;                   // rows at or past this are local
+    std::span<const Index> local_rows = {};  // sorted; local inside the prefix
+
+    [[nodiscard]] bool isLocal(Index row) const {
+        return row >= global_rows || std::binary_search(local_rows.begin(), local_rows.end(), row);
+    }
+};
+
 /// True when the activity a^T x of the given row is integer at every
 /// integer-feasible point: integer coefficients on integer columns only.
 bool rowActivityIsIntegral(const LpProblem& problem, const RowScratch& row) {
@@ -126,12 +129,26 @@ bool rowActivityIsIntegral(const LpProblem& problem, const RowScratch& row) {
     return true;
 }
 
+/// Column bounds a dropped coefficient is paid for over.
+struct ColumnBox {
+    std::span<const Real> global_lower;
+    std::span<const Real> global_upper;
+    std::vector<Real> lp_lower;
+    std::vector<Real> lp_upper;
+};
+
 /// One GMI term under construction: the cut being accumulated in the form
 /// sum_j cut_coeff[j] * x_j >= cut_rhs, plus whether it stayed global.
 struct CutBuilder {
     std::vector<Real> coeff;
+    std::vector<Real> magnitude;  // sum of |term| that went into each coeff
     Real rhs = 1.0;
     bool local = false;
+
+    void add(Index j, Real term) {
+        coeff[static_cast<std::size_t>(j)] += term;
+        magnitude[static_cast<std::size_t>(j)] += std::abs(term);
+    }
 };
 
 /// Add the term of nonbasic structural column `k` to the cut.
@@ -143,8 +160,7 @@ struct CutBuilder {
 /// sign carried through. Returns false when delta_k has no finite reference
 /// bound, which makes the whole row unusable.
 bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index k,
-                       BasisStatus status, Real alpha, Real f0, Real coeff_tol,
-                       CutBuilder& builder) {
+                       BasisStatus status, Real alpha, Real f0, CutBuilder& builder) {
     Real lp_lower = 0.0;
     Real lp_upper = 0.0;
     lp.getColBounds(k, lp_lower, lp_upper);
@@ -163,26 +179,24 @@ bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, In
         return false;
     }
 
-    // The derivation needs delta_k >= 0 for every column in the row, not only
-    // for the ones that end up with a nonzero cut coefficient, so the bound is
-    // recorded as local before the coefficient is even looked at -- including
-    // for the negligible entry dropped just below.
+    // The derivation needs delta_k >= 0 for every column in the row, whatever
+    // coefficient it ends up with, so the bound decides locality here.
     if (boundIsLocal(bound, global_bound, sign)) {
         builder.local = true;
     }
-    if (std::abs(alpha) < coeff_tol) {
-        return true;  // negligible tableau entry: no term, bound still recorded
+    if (std::abs(alpha) < kTableauZeroTol) {
+        return true;  // tableau round-off: no term, bound still recorded
     }
 
+    // A negligible coefficient is not dropped here: dropping a term of a >= cut
+    // strengthens it, so it goes into the cut and finalizeCut drops it there
+    // against the column's range, relaxing the right-hand side to match.
     const Real t = sign * alpha;
     const bool integral =
         isIntegerValued(problem.col_type[k]) && isIntegralValue(bound, kDataIntTol);
     const Real coeff = gmiCoefficient(t, integral, f0);
-    if (std::abs(coeff) < coeff_tol) {
-        return true;
-    }
 
-    builder.coeff[static_cast<std::size_t>(k)] += sign * coeff;
+    builder.add(k, sign * coeff);
     builder.rhs += sign * coeff * bound;
     return true;
 }
@@ -198,16 +212,16 @@ bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, In
 /// structural columns, which is what makes the cut expressible in x.
 /// Returns false when the row cannot be substituted.
 bool addLogicalTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index row,
-                    BasisStatus status, Real alpha, Real f0, Real coeff_tol, Index global_rows,
+                    BasisStatus status, Real alpha, Real f0, const RowProvenance& provenance,
                     RowScratch& scratch, CutBuilder& builder) {
     // As for a structural column: delta >= 0 rests on the row holding, so a row
     // the caller has not vouched for makes the cut local whatever coefficient
-    // comes out -- including none at all, when the entry below is negligible.
-    if (row >= global_rows) {
+    // comes out -- including none at all, when the entry is round-off.
+    if (provenance.isLocal(row)) {
         builder.local = true;
     }
-    if (std::abs(alpha) < coeff_tol) {
-        return true;  // negligible tableau entry: no term, row still recorded
+    if (std::abs(alpha) < kTableauZeroTol) {
+        return true;  // tableau round-off: no term, row still recorded
     }
 
     Real row_lower = 0.0;
@@ -230,7 +244,7 @@ bool addLogicalTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index
     const bool integral =
         isIntegralValue(bound, kDataIntTol) && rowActivityIsIntegral(problem, scratch);
     const Real coeff = gmiCoefficient(t, integral, f0);
-    if (std::abs(coeff) < coeff_tol) {
+    if (coeff == 0.0) {
         return true;
     }
 
@@ -239,7 +253,7 @@ bool addLogicalTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index
         if (j < 0 || j >= problem.num_cols) {
             return false;
         }
-        builder.coeff[static_cast<std::size_t>(j)] += sign * coeff * scratch.values[p];
+        builder.add(j, sign * coeff * scratch.values[p]);
     }
     builder.rhs += sign * coeff * bound;
     return true;
@@ -281,7 +295,7 @@ std::vector<Candidate> collectCandidates(const DualSimplexSolver& lp, const LpPr
 /// Returns false when a term cannot be formed, which makes the row unusable.
 bool accumulateTerms(const LpProblem& problem, const DualSimplexSolver& lp,
                      std::span<const BasisStatus> basis, std::span<const Real> tab_row, Real f0,
-                     Real coeff_tol, Index global_rows, RowScratch& scratch, CutBuilder& builder) {
+                     const RowProvenance& provenance, RowScratch& scratch, CutBuilder& builder) {
     const Index num_cols = problem.num_cols;
     const auto total_vars = static_cast<Index>(tab_row.size());
     for (Index k = 0; k < total_vars; ++k) {
@@ -289,17 +303,16 @@ bool accumulateTerms(const LpProblem& problem, const DualSimplexSolver& lp,
             continue;
         }
         // Only an exactly-zero entry means the variable is absent from the row.
-        // A small-but-nonzero one still leans on delta_k >= 0, so it is handed
-        // to the term builders, which record the bound and then drop it.
+        // A round-off-sized one still leans on delta_k >= 0, so it is handed
+        // to the term builders, which record the bound and then skip it.
         const Real alpha = tab_row[k];
         if (alpha == 0.0) {
             continue;
         }
-        const bool ok =
-            (k < num_cols)
-                ? addStructuralTerm(problem, lp, k, basis[k], alpha, f0, coeff_tol, builder)
-                : addLogicalTerm(problem, lp, k - num_cols, basis[k], alpha, f0, coeff_tol,
-                                 global_rows, scratch, builder);
+        const bool ok = (k < num_cols)
+                            ? addStructuralTerm(problem, lp, k, basis[k], alpha, f0, builder)
+                            : addLogicalTerm(problem, lp, k - num_cols, basis[k], alpha, f0,
+                                             provenance, scratch, builder);
         if (!ok) {
             return false;
         }
@@ -307,23 +320,67 @@ bool accumulateTerms(const LpProblem& problem, const DualSimplexSolver& lp,
     return std::isfinite(builder.rhs);
 }
 
-/// Turn the accumulated coefficients into a sparse cut, dropping entries below
-/// the coefficient tolerance. Returns false when nothing of substance is left.
-bool finalizeCut(const CutBuilder& builder, Index num_cols, Real coeff_tol, Cut& cut,
-                 Real& norm_sq) {
+/// Turn the accumulated coefficients into a sparse cut. Entries at or below
+/// the coefficient tolerance are dropped and paid for in the right-hand side
+/// over the column box the cut is valid in: the model's bounds for a global
+/// cut, the LP's (node) bounds for a local one, which are never looser.
+/// Returns false when nothing of substance is left.
+bool finalizeCut(CutBuilder& builder, const ColumnBox& box, Real coeff_tol, Cut& cut, Real& norm_sq,
+                 Int& relaxed_terms) {
+    const auto num_cols = static_cast<Index>(builder.coeff.size());
+    const auto lower = builder.local ? std::span<const Real>(box.lp_lower) : box.global_lower;
+    const auto upper = builder.local ? std::span<const Real>(box.lp_upper) : box.global_upper;
+    // A column reached both directly and through a substituted logical can
+    // cancel to zero in exact arithmetic and leave float round-off behind. That
+    // residual is not cut mass -- it is the same error every coefficient
+    // carries -- so it is zeroed outright rather than paid for: on a column
+    // with no finite bound it could not be paid for, and would sink the cut at
+    // the max/min ratio screen.
+    for (std::size_t j = 0; j < builder.coeff.size(); ++j) {
+        if (std::abs(builder.coeff[j]) <= kCancellationTol * builder.magnitude[j]) {
+            builder.coeff[j] = 0.0;
+        }
+    }
+
+    Int dropped = 0;
+    builder.rhs = dropAndRelax(builder.coeff, builder.rhs, lower, upper, coeff_tol, &dropped);
+    relaxed_terms += dropped;
+
     norm_sq = 0.0;
     for (Index j = 0; j < num_cols; ++j) {
         const Real value = builder.coeff[static_cast<std::size_t>(j)];
-        if (std::abs(value) > coeff_tol) {
+        if (value != 0.0) {
             cut.indices.push_back(j);
             cut.values.push_back(value);
             norm_sq += value * value;
         }
     }
-    return !cut.indices.empty() && norm_sq >= coeff_tol;
+    return !cut.indices.empty() && norm_sq >= coeff_tol && std::isfinite(builder.rhs);
 }
 
 }  // namespace
+
+Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
+                  std::span<const Real> upper, Real drop_tol, Int* dropped) {
+    for (std::size_t j = 0; j < coeff.size(); ++j) {
+        const Real value = coeff[j];
+        if (value == 0.0 || std::abs(value) > drop_tol) {
+            continue;
+        }
+        // The term's largest value over the box; lowering rhs by it keeps
+        // every point the term could have helped over the line.
+        const Real bound = (value > 0.0) ? upper[j] : lower[j];
+        if (!std::isfinite(bound)) {
+            continue;  // cannot be paid for: keep the term
+        }
+        rhs -= value * bound;
+        coeff[j] = 0.0;
+        if (dropped != nullptr) {
+            ++*dropped;
+        }
+    }
+    return rhs;
+}
 
 /// Generate Gomory mixed-integer (GMI) cuts from the simplex tableau.
 ///
@@ -373,8 +430,17 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
 
     // Rows the caller has not vouched for are treated as node-local: a cut
     // that substitutes their logical is only valid where they are.
-    const Index global_rows =
-        (global_row_count_ < 0) ? problem.num_rows : std::min(global_row_count_, num_rows);
+    // Both readings are clamped to the rows the LP holds: a problem carrying
+    // more rows than that would otherwise make every logical look global.
+    const Index declared_rows = (global_row_count_ < 0) ? problem.num_rows : global_row_count_;
+    const RowProvenance provenance{std::min(declared_rows, num_rows), local_rows_};
+
+    ColumnBox box{problem.col_lower, problem.col_upper, {}, {}};
+    box.lp_lower.resize(static_cast<std::size_t>(num_cols));
+    box.lp_upper.resize(static_cast<std::size_t>(num_cols));
+    for (Index j = 0; j < num_cols; ++j) {
+        lp.getColBounds(j, box.lp_lower[j], box.lp_upper[j]);
+    }
 
     auto basis = lp.getBasis();
     const auto candidates = collectCandidates(lp, problem, primals, kIntTol);
@@ -397,17 +463,17 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
         lp.getTableauRow(candidates[ci].basis_pos, tab_row);
 
         builder.coeff.assign(static_cast<std::size_t>(num_cols), 0.0);
+        builder.magnitude.assign(static_cast<std::size_t>(num_cols), 0.0);
         builder.rhs = 1.0;
         builder.local = false;
-        if (!accumulateTerms(problem, lp, basis, tab_row, f0, kCoeffTol, global_rows, scratch,
-                             builder)) {
+        if (!accumulateTerms(problem, lp, basis, tab_row, f0, provenance, scratch, builder)) {
             ++stats_.rows_skipped;
             continue;
         }
 
         Cut cut;
         Real norm_sq = 0.0;
-        if (!finalizeCut(builder, num_cols, kCoeffTol, cut, norm_sq)) {
+        if (!finalizeCut(builder, box, kCoeffTol, cut, norm_sq, stats_.relaxed_terms)) {
             ++stats_.rejected_empty;
             continue;
         }
@@ -459,12 +525,14 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
         cut.efficacy = violation / std::sqrt(norm_sq);
 
         const bool local = cut.local;
+        const Real efficacy = cut.efficacy;
         if (!pool.addCut(std::move(cut))) {
             ++stats_.rejected_pool;
             continue;
         }
         ++num_cuts;
         ++stats_.accepted;
+        stats_.efficacy_sum += efficacy;
         if (local) {
             ++stats_.local_cuts;
         }

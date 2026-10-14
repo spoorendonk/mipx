@@ -158,9 +158,15 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& pro
     gomory_.setMinViolation(min_violation_);
     gomory_.setGlobalRowCount(global_row_count_);
     const Int accepted = gomory_.separate(lp, problem, primals, pool);
-    stats.attempted += accepted;
-    stats.generated += accepted;
-    stats.accepted += accepted;
+    // Same meaning as the families that go through addViolatedCut: attempted
+    // counts the rows tried, generated the cuts built and offered onward, and
+    // generated - accepted the ones the screen, the violation threshold or the
+    // pool turned away.
+    const GomoryStats& gs = gomory_.stats();
+    stats.attempted += gs.candidate_rows;
+    stats.generated += gs.cuts_built;
+    stats.accepted += gs.accepted;
+    stats.efficacy_sum += gs.efficacy_sum;
     return accepted;
 }
 

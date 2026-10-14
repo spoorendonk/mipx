@@ -567,20 +567,27 @@ TEST_CASE("Gomory: blow-up row is never pooled", "[cuts][gomory]") {
     GomorySeparator gomory;
     const Int cuts = gomory.separate(lp, problem, primals, pool);
 
-    // Nothing is pooled, and since #211 that is because the safety screen
-    // rejected the blown-up cut rather than because no cut was built. The row
-    // is a candidate, the cut is constructed, and the screen is the only thing
-    // standing between it and the pool — which is exactly the guarantee #196
-    // wanted and could not demonstrate while the separator emitted nothing at
-    // all on any instance.
+    // Nothing is pooled, and since #211 that is because the built cut is
+    // rejected rather than because no cut was built: the row is a candidate
+    // and the cut is constructed, which #196 could not demonstrate while the
+    // separator emitted nothing at all on any instance.
     CHECK(cuts == 0);
     CHECK(pool.size() == 0);
     const auto& stats = gomory.stats();
     CHECK(stats.candidate_rows == 1);
     CHECK(stats.rows_skipped == 0);
     CHECK(stats.cuts_built == 1);
-    CHECK(stats.rejected_screen == 1);
     CHECK(stats.accepted == 0);
+
+    // What turns it away changed with #216. The 1e7 on y from y's own
+    // deviation and the 1e7 from substituting the row logical cancel exactly;
+    // the float residual of that sum (~4e-9) used to stay in the cut and trip
+    // the max/min ratio screen. It is now recognised as cancellation round-off
+    // and zeroed, which leaves the true GMI cut -5e5 x >= rhs, i.e. x <= 202:
+    // under every screen limit, and with an efficacy of ~2e-6 the pool refuses
+    // it.
+    CHECK(stats.rejected_screen == 0);
+    CHECK(stats.rejected_pool == 1);
 
     // Invariant that holds either way and is the point of issue #196: whatever
     // Gomory does pool has passed the shared numerical safety screen.
@@ -714,6 +721,22 @@ TEST_CASE("Gomory: cuts off a vouched-for cut row stay global", "[cuts][gomory]"
         }
     }
 
+    // Rows inside the prefix can still be named local one by one; that is how
+    // the tree cut loop describes local rows interleaved with promoted ones.
+    // Every cut leans on some nonbasic logical (a basic structural's tableau
+    // row always carries one), so naming every row local makes every cut so.
+    std::vector<Index> all_rows(static_cast<std::size_t>(lp.numRows()));
+    for (Index r = 0; r < lp.numRows(); ++r) {
+        all_rows[static_cast<std::size_t>(r)] = r;
+    }
+    CutPool listed_pool;
+    GomorySeparator listed;
+    listed.setGlobalRowCount(lp.numRows());
+    listed.setLocalRows(all_rows);
+    const Int listed_cuts = listed.separate(lp, problem, primals, listed_pool);
+    REQUIRE(listed_cuts == vouched_cuts);
+    CHECK(listed.stats().local_cuts == listed_cuts);
+
     checkCutsKeepAllFeasiblePoints(problem, vouched_pool, 3);
 }
 
@@ -761,6 +784,130 @@ TEST_CASE("SeparatorManager: Gomory contributes accepted cuts", "[cuts][gomory]"
 TEST_CASE("CutFamilyConfig defaults keep Gomory enabled", "[cuts][gomory]") {
     const CutFamilyConfig config{};
     CHECK(config.gomory);
+}
+
+TEST_CASE("Gomory: a dropped coefficient is paid for in the rhs", "[cuts][gomory]") {
+    // x0 + 5e-11 x1 - 5e-11 x2 >= 1 over x0 in [0, 1], x1 in [0, 1e12],
+    // x2 in [-1e12, 0]. Both tiny terms fall under the drop tolerance, and
+    // x1, x2 range wide enough that together they are worth up to 100.
+    std::vector<Real> coeff = {1.0, 5e-11, -5e-11};
+    const std::vector<Real> lower = {0.0, 0.0, -1e12};
+    const std::vector<Real> upper = {1.0, 1e12, 0.0};
+    const Real rhs = 1.0;
+
+    // A point of the box that satisfies the original cut only through the
+    // tiny terms: 0.5 + 5e-11 * 1e10 - 5e-11 * (-1e10) = 1.5.
+    const std::vector<Real> point = {0.5, 1e10, -1e10};
+    auto lhs = [&](const std::vector<Real>& c) {
+        Real sum = 0.0;
+        for (std::size_t j = 0; j < c.size(); ++j) {
+            sum += c[j] * point[j];
+        }
+        return sum;
+    };
+    REQUIRE(lhs(coeff) >= rhs);
+
+    Int dropped = 0;
+    const Real relaxed = dropAndRelax(coeff, rhs, lower, upper, 1e-10, &dropped);
+    CHECK(dropped == 2);
+    CHECK(coeff[1] == 0.0);
+    CHECK(coeff[2] == 0.0);
+    CHECK_THAT(relaxed, WithinAbs(1.0 - 50.0 - 50.0, 1e-9));
+
+    // Dropping without the payment (x0 >= 1) would cut the point off; the
+    // relaxed cut keeps it.
+    CHECK(lhs(coeff) < rhs);
+    CHECK(lhs(coeff) >= relaxed);
+}
+
+TEST_CASE("Gomory: a tiny coefficient on an unbounded column is kept", "[cuts][gomory]") {
+    // No finite bound in the direction the payment needs, so the term cannot
+    // be dropped soundly and stays in the cut.
+    std::vector<Real> coeff = {1.0, 5e-11, -5e-11};
+    const std::vector<Real> lower = {0.0, 0.0, -kInf};
+    const std::vector<Real> upper = {1.0, kInf, 0.0};
+
+    Int dropped = 0;
+    const Real relaxed = dropAndRelax(coeff, 1.0, lower, upper, 1e-10, &dropped);
+    CHECK(dropped == 0);
+    CHECK(coeff[1] == 5e-11);
+    CHECK(coeff[2] == -5e-11);
+    CHECK(relaxed == 1.0);
+}
+
+TEST_CASE("SeparatorManager: Gomory family stats carry the separator's counts", "[cuts][gomory]") {
+    CutFamilyConfig only_gomory{};
+    only_gomory.mir = false;
+    only_gomory.cover = false;
+    only_gomory.implied_bound = false;
+    only_gomory.clique = false;
+    only_gomory.zero_half = false;
+    only_gomory.mixing = false;
+    only_gomory.cmir = false;
+    only_gomory.strong_cg = false;
+    only_gomory.lifted_cover = false;
+    only_gomory.mod_k = false;
+    only_gomory.intersection_cut = false;
+    only_gomory.multi_row = false;
+
+    SECTION("a row whose cut is rejected") {
+        // One candidate row, one cut built, and the pool turns it away:
+        // attempted and generated must say so rather than echo the accepted
+        // count of zero.
+        auto problem = buildGomoryBlowupMip();
+        DualSimplexSolver lp;
+        lp.load(problem);
+        REQUIRE(lp.solve().status == Status::Optimal);
+        auto primals = lp.getPrimalValues();
+
+        SeparatorManager manager;
+        manager.setConfig(only_gomory);
+        CutPool pool;
+        CutSeparationStats stats;
+        CHECK(manager.separate(lp, problem, primals, pool, stats) == 0);
+
+        const auto& s = stats.at(CutFamily::Gomory);
+        CHECK(s.attempted == 1);
+        CHECK(s.generated == 1);
+        CHECK(s.accepted == 0);
+        CHECK(s.efficacy_sum == 0.0);
+    }
+
+    SECTION("rows whose cuts are accepted") {
+        auto problem = buildMixedSenseMip();
+        DualSimplexSolver lp;
+        lp.load(problem);
+        REQUIRE(lp.solve().status == Status::Optimal);
+        auto primals = lp.getPrimalValues();
+
+        SeparatorManager manager;
+        manager.setConfig(only_gomory);
+        CutPool pool;
+        CutSeparationStats stats;
+        const Int added = manager.separate(lp, problem, primals, pool, stats);
+        REQUIRE(added >= 1);
+
+        // The same separator run directly gives the reference numbers.
+        CutPool ref_pool;
+        GomorySeparator ref;
+        ref.setMinViolation(1e-5);  // SeparatorManager's default
+        REQUIRE(ref.separate(lp, problem, primals, ref_pool) == added);
+        const auto& g = ref.stats();
+
+        const auto& s = stats.at(CutFamily::Gomory);
+        CHECK(s.attempted == g.candidate_rows);
+        CHECK(s.generated == g.cuts_built);
+        CHECK(s.accepted == added);
+        CHECK(s.attempted >= s.generated);
+        CHECK(s.generated >= s.accepted);
+
+        Real pooled_efficacy = 0.0;
+        for (Index ci = 0; ci < pool.size(); ++ci) {
+            pooled_efficacy += pool[ci].efficacy;
+        }
+        CHECK(s.efficacy_sum > 0.0);
+        CHECK_THAT(s.efficacy_sum, WithinAbs(pooled_efficacy, 1e-12));
+    }
 }
 
 TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][families]") {
