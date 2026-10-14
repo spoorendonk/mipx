@@ -186,11 +186,16 @@ TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][
     lp.col_upper = {1.0 / 3.0};
     lp.col_type = {VarType::Continuous};
     lp.col_names = {"x"};
-    lp.num_rows = 1;
-    lp.row_lower = {1.0 / 7.0};
-    lp.row_upper = {kInf};
-    lp.row_names = {"obj"};
-    lp.matrix = SparseMatrix(1, 1, std::vector<Triplet>{{0, 0, 2.0}});
+    // Rows 1 and 2 are ranged with bounds far enough apart that rebuilding
+    // one bound from the other and the range rounds; each has to be written in
+    // the form that gives it back exactly. Row 3 is also named like the first
+    // fallback objective name, so the uniqueness loop runs twice.
+    lp.num_rows = 4;
+    lp.row_lower = {1.0 / 7.0, 1.0 / 3.0, 0.1, -kInf};
+    lp.row_upper = {kInf, 1e5 + 1.0 / 7.0, 1e16, 5.0};
+    lp.row_names = {"obj", "rng1", "rng2", "obj_"};
+    lp.matrix = SparseMatrix(
+        4, 1, std::vector<Triplet>{{0, 0, 2.0}, {1, 0, 1.0}, {2, 0, 1.0}, {3, 0, 1.0}});
 
     const std::string path = testDataDir() + "/precision_roundtrip.mps";
     writeMps(path, lp);
@@ -201,9 +206,13 @@ TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][
     REQUIRE(reread.num_cols == 1);
     CHECK(reread.obj[0] == lp.obj[0]);
     CHECK(reread.col_upper[0] == lp.col_upper[0]);
-    REQUIRE(reread.num_rows == 1);
-    CHECK(reread.row_lower[0] == lp.row_lower[0]);
-    CHECK(reread.row_names[0] == "obj");
+    REQUIRE(reread.num_rows == lp.num_rows);
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        INFO("row " << lp.row_names[i]);
+        CHECK(reread.row_names[i] == lp.row_names[i]);
+        CHECK(reread.row_lower[i] == lp.row_lower[i]);
+        CHECK(reread.row_upper[i] == lp.row_upper[i]);
+    }
 }
 
 TEST_CASE("LP reader: tiny.lp", "[io][lp]") {

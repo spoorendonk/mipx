@@ -10,6 +10,21 @@
 
 namespace mipx {
 
+namespace {
+
+/// A ranged row is written as an L row at its upper bound or a G row at its
+/// lower one, with |range| = up - lo; the reader rebuilds the other bound as
+/// up - range or lo + range, and that subtraction or addition rounds. Pick the
+/// form that gives the bound back exactly (L when both do), so a round trip
+/// keeps the row as it was: lo = 1/3, up = 1e5 + 1/7 comes back right only as
+/// G. Neither is exact only for bounds ~1e16 apart in magnitude, where L stays.
+bool rangedAsGreater(Real lo, Real up) {
+    const Real range = up - lo;
+    return up - range != lo && lo + range == up;
+}
+
+}  // namespace
+
 void writeMps(const std::string& filename, const LpProblem& input) {
     LpProblem linearized;
     const LpProblem* problem = &input;
@@ -22,9 +37,9 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         throw std::runtime_error("Cannot open file for writing: " + filename);
     }
 
-    // Every value written back with all of its digits, so a round trip is
-    // exact: the stream default of 6 significant digits turned an objective
-    // constant of 11.638929066 into 11.6389.
+    // Every value is written with all of its digits: the stream default of 6
+    // significant digits turned an objective constant of 11.638929066 into
+    // 11.6389. (Ranged rows also need the right form; see rangedAsGreater.)
     out.precision(std::numeric_limits<Real>::max_digits10);
 
     // The objective row needs a name no constraint has: the reader maps names
@@ -56,8 +71,8 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         } else if (up >= kInf) {
             sense = 'G';
         } else {
-            // Ranged — write as L with RANGES.
-            sense = 'L';
+            // Ranged: written with RANGES, as L or G (see rangedAsGreater).
+            sense = rangedAsGreater(lo, up) ? 'G' : 'L';
         }
         const std::string& name = i < static_cast<Index>(problem->row_names.size())
                                       ? problem->row_names[i]
@@ -123,8 +138,8 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         } else if (up >= kInf) {
             rhs = lo;
         } else {
-            // Ranged L row — RHS is upper bound.
-            rhs = up;
+            // Ranged: the RHS is the bound the row's sense names.
+            rhs = rangedAsGreater(lo, up) ? lo : up;
         }
         if (rhs != 0.0) {
             const std::string& name = i < static_cast<Index>(problem->row_names.size())
