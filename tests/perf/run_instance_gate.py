@@ -37,11 +37,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
+import math
 import re
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -146,14 +148,18 @@ def read_expected(path: Path) -> list[Expectation]:
     return rows
 
 
-def write_expected(path: Path, results: dict[tuple[str, str], str], header: str) -> None:
+def write_expected(path: Path, rows: list[Expectation], header: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as f:
         f.write(header)
         writer = csv.writer(f, lineterminator="\n")
-        writer.writerow(["instance", "backend", "expected"])
-        for (instance, backend), cls in sorted(results.items()):
-            writer.writerow([instance, backend, cls])
+        with_limits = any(row.time_limit is not None for row in rows)
+        writer.writerow(
+            ["instance", "backend", "expected"] + (["time_limit"] if with_limits else [])
+        )
+        for row in sorted(rows, key=lambda r: (r.instance, r.backend)):
+            limit = [] if not with_limits else [f"{row.time_limit:g}" if row.time_limit else ""]
+            writer.writerow([row.instance, row.backend, row.expected, *limit])
 
 
 def parse_outcome(output: str) -> Outcome:
@@ -164,11 +170,54 @@ def parse_outcome(output: str) -> Outcome:
     return Outcome(status, float(match.group(1)) if match else None)
 
 
-def classify(outcome: Outcome, ref: Reference) -> str:
+def read_maximize(path: Path) -> bool:
+    """True when the MPS file's OBJSENSE section (or line) says MAX.
+
+    Only the header is scanned: OBJSENSE has to come before ROWS.
+    """
+    opener = gzip.open if path.name.endswith(".gz") else open
+    with opener(path, "rt", encoding="latin-1") as f:
+        in_objsense = False
+        for line in f:
+            words = line.split()
+            if not words or line.startswith(("*", "NAME")):
+                continue
+            head = words[0].upper()
+            if head == "ROWS":
+                return False
+            if head == "OBJSENSE":
+                if len(words) > 1:
+                    return words[1].upper().startswith("MAX")
+                in_objsense = True
+            elif in_objsense:
+                return head.startswith("MAX")
+    return False
+
+
+def limited_incumbent_is_wrong(outcome: Outcome, ref: Reference, maximize: bool) -> bool:
+    """A MIP stopped by a limit still reports its incumbent. It is a wrong
+    answer when it is better than the proven optimum by more than 1e-4, or
+    exists at all for an infeasible instance: either way the solver accepted an
+    infeasible point."""
+    if outcome.status not in ("time_limit", "node_limit") or outcome.objective is None:
+        return False
+    if not math.isfinite(outcome.objective):
+        return False
+    if ref.kind == "inf":
+        return True
+    if ref.kind != "opt" or ref.value is None:
+        return False
+    tol = 1e-4 * max(1.0, abs(ref.value))
+    if maximize:
+        return outcome.objective > ref.value + tol
+    return outcome.objective < ref.value - tol
+
+
+def classify(outcome: Outcome, ref: Reference, maximize: bool = False) -> str:
     claims = {"optimal": "opt", "gap_limit": "opt", "infeasible": "inf", "unbounded": "unbd"}
     claim = claims.get(outcome.status)
     if claim is None:
-        return "dnf"
+        return "disagree" if limited_incumbent_is_wrong(outcome, ref, maximize) else "dnf"
     if claim != ref.kind:
         return "disagree"
     if claim != "opt":
@@ -184,7 +233,12 @@ def classify(outcome: Outcome, ref: Reference) -> str:
 
 def solver_args(backend: str, time_limit: float) -> list[str]:
     args = ["--quiet", "--threads", "1", "--time-limit", f"{time_limit:g}"]
-    if backend != "mip":
+    if backend == "mip":
+        # Close the gap, so "Optimal" means proven and the objective can be
+        # held to 1e-6: at the default 1e-4 a legitimate gap-limit stop can sit
+        # anywhere within 1e-4 of the optimum.
+        args += ["--gap-tol", "1e-9"]
+    else:
         args.append(f"--{backend}")
     return args
 
@@ -221,8 +275,9 @@ def verdict(expected: str | None, observed: str) -> str:
 class Plan:
     runs: list[tuple[str, str, float]]  # instance, backend, time limit
     expected: dict[tuple[str, str], str]  # the selected backends' list entries
-    missing: list[tuple[str, str]]
-    unreferenced: list[str]
+    missing: list[tuple[str, str]]  # listed, but no instance file
+    unreferenced: list[str]  # --all instances without a usable reference
+    no_reference: list[tuple[str, str]] = field(default_factory=list)  # listed, no reference
 
 
 def selected_backends(args: argparse.Namespace, suite: Suite) -> list[str]:
@@ -246,6 +301,10 @@ def build_plan(args: argparse.Namespace, suite: Suite, listed: list[Expectation]
         plan.expected[(row.instance, row.backend)] = row.expected
         if row.instance not in instances:
             plan.missing.append((row.instance, row.backend))
+        elif row.instance not in refs:
+            # Gating nothing must not read as a pass: a .solu that failed to
+            # download, or an entry that lost its =opt= value.
+            plan.no_reference.append((row.instance, row.backend))
         else:
             plan.runs.append((row.instance, row.backend, row.time_limit or default_limit))
     if args.all:
@@ -291,7 +350,7 @@ def execute(args: argparse.Namespace, suite: Suite, plan: Plan) -> dict[tuple[st
             print(f"  {name:<12} {backend:<8} no reference in .solu; not gated")
             continue
         outcome = run_one(binary, instances[name], backend, limit)
-        cls = classify(outcome, ref)
+        cls = classify(outcome, ref, read_maximize(instances[name]))
         results[(name, backend)] = cls
         tag = verdict(plan.expected.get((name, backend)), cls)
         obj = "" if outcome.objective is None else f" obj={outcome.objective:.10g}"
@@ -308,6 +367,8 @@ def report(plan: Plan, results: dict[tuple[str, str], str], list_written: bool) 
     ]
     for name, backend in plan.missing:
         print(f"MISSING: {name} ({backend}) is listed but its instance file is absent")
+    for name, backend in plan.no_reference:
+        print(f"MISSING: {name} ({backend}) is listed but has no usable .solu reference")
     if plan.unreferenced:
         print(f"No usable .solu reference, not run: {', '.join(plan.unreferenced)}")
     hint = "list updated" if list_written else "update the list (--write-expected)"
@@ -316,7 +377,7 @@ def report(plan: Plan, results: dict[tuple[str, str], str], list_written: bool) 
     for name, backend in failures:
         expected = plan.expected.get((name, backend), "unlisted")
         print(f"FAIL: {name} ({backend}) {results[(name, backend)]}, expected {expected}")
-    ok = not failures and not plan.missing
+    ok = not failures and not plan.missing and not plan.no_reference
     print("Instance gate: " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
@@ -348,14 +409,20 @@ def main(argv: list[str]) -> int:
     if args.write_expected:
         # Every existing entry is kept -- other backends', and listed instances
         # that did not run -- and overwritten only by what this run observed.
-        merged = {(row.instance, row.backend): row.expected for row in listed}
-        merged.update(results)
+        # Per-row time limits are kept too.
+        merged = {(row.instance, row.backend): row for row in listed}
+        for (name, backend), cls in results.items():
+            old = merged.get((name, backend))
+            merged[(name, backend)] = Expectation(
+                name, backend, cls, old.time_limit if old else None
+            )
+        script = "tests/perf/run_instance_gate.py"
         header = (
             "# Expected class per instance and backend for run_instance_gate.py.\n"
-            f"# Refresh these rows: tests/perf/run_instance_gate.py {args.suite} --write-expected\n"
-            f"# Add every instance with a reference: {args.suite} --all --write-expected\n"
+            f"# Refresh these rows: {script} {args.suite} --write-expected\n"
+            f"# Add every instance with a reference: {script} {args.suite} --all --write-expected\n"
         )
-        write_expected(suite.expected, merged, header)
+        write_expected(suite.expected, list(merged.values()), header)
         print(f"Wrote {suite.expected}")
     return report(plan, results, args.write_expected)
 

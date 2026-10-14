@@ -8,14 +8,17 @@ reference:
 |---|---|
 | `match_1e-6` | right verdict, objective within 1e-6 (relative, absolute below 1) |
 | `match_1e-4` | right verdict, objective within 1e-4 |
-| `disagree` | a wrong answer: Optimal off by more than 1e-4, or a verdict (Optimal / Infeasible / Unbounded) the reference contradicts |
+| `disagree` | a wrong answer: Optimal off by more than 1e-4; a verdict (Optimal / Infeasible / Unbounded) the reference contradicts; or a MIP stopped by a limit whose incumbent beats the proven optimum by more than 1e-4, or exists at all on an infeasible instance |
 | `dnf` | did not finish: time or iteration limit, error, crash |
 
 The expected class for each instance and backend is checked in under
 `instance_gate/` (`lp_expected.csv`, `mip_expected.csv`). The gate fails on any
 `disagree`, whatever the list says, since a wrong answer is never tolerated. It
 also fails when a run expected to match no longer does, or when a listed
-instance file is missing. Better than listed is reported, not failed.
+instance's file or `.solu` reference is missing. Better than listed is reported,
+not failed. MIPs run with `--gap-tol 1e-9`, so Optimal means proven and the
+objective can be held to 1e-6; the objective sense for the incumbent check is
+read from the instance's OBJSENSE section (minimize when absent).
 
 ```bash
 ./tests/data/download_netlib.sh && ./tests/data/download_miplib.sh --small

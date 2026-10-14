@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 import stat
 import sys
@@ -48,6 +49,16 @@ gate = load_gate()
         ("timeout", None, ("inf", None), "dnf"),
         # Near zero the error is absolute, not relative to a tiny reference.
         ("optimal", 1e-7, ("opt", 0.0), "match_1e-6"),
+        # A MIP stopped by a limit with an incumbent worse than optimal: dnf.
+        ("time_limit", 120.0, ("opt", 100.0), "dnf"),
+        ("node_limit", 100.0, ("opt", 100.0), "dnf"),
+        # ...but one better than the proven optimum is an infeasible point.
+        ("time_limit", 90.0, ("opt", 100.0), "disagree"),
+        ("node_limit", 90.0, ("opt", 100.0), "disagree"),
+        # Any incumbent on an infeasible instance is wrong.
+        ("time_limit", 5.0, ("inf", None), "disagree"),
+        # No incumbent found.
+        ("time_limit", float("inf"), ("opt", 100.0), "dnf"),
     ],
 )
 def test_classify(
@@ -55,6 +66,28 @@ def test_classify(
 ) -> None:
     outcome = gate.Outcome(status, objective)
     assert gate.classify(outcome, gate.Reference(*ref)) == expected
+
+
+def test_classify_limited_incumbent_respects_maximize() -> None:
+    ref = gate.Reference("opt", 100.0)
+    assert gate.classify(gate.Outcome("time_limit", 110.0), ref, True) == "disagree"
+    assert gate.classify(gate.Outcome("time_limit", 90.0), ref, True) == "dnf"
+
+
+@pytest.mark.parametrize(
+    ("header", "maximize"),
+    [
+        ("NAME x\nROWS\n N obj\n", False),
+        ("NAME x\nOBJSENSE\n    MAX\nROWS\n", True),
+        ("NAME x\nOBJSENSE\n    MIN\nROWS\n", False),
+        ("NAME x\nOBJSENSE MAXIMIZE\nROWS\n", True),
+    ],
+)
+def test_read_maximize(tmp_path: Path, header: str, maximize: bool) -> None:
+    path = tmp_path / "m.mps.gz"
+    with gzip.open(path, "wt") as f:
+        f.write(header)
+    assert gate.read_maximize(path) is maximize
 
 
 @pytest.mark.parametrize(
@@ -109,14 +142,15 @@ def fake_solver(tmp_path: Path, answers: dict[str, str]) -> Path:
     return path
 
 
-def setup_suite(tmp_path: Path, expected_rows: str) -> tuple[Path, Path]:
+def setup_suite(tmp_path: Path, expected_rows: str, header: bool = True) -> tuple[Path, Path]:
     data = tmp_path / "data"
     data.mkdir()
     for name in ("good", "slow", "wrong"):
         (data / f"{name}.mps").write_text("")
     (data / "miplib.solu").write_text("=opt= good 10\n=opt= slow 5\n=opt= wrong 7\n")
     expected = tmp_path / "expected.csv"
-    expected.write_text("# comment\ninstance,backend,expected\n" + expected_rows)
+    head = "# comment\ninstance,backend,expected\n" if header else ""
+    expected.write_text(head + expected_rows)
     return data, expected
 
 
@@ -153,6 +187,12 @@ def test_gate_fails_when_a_listed_instance_is_missing(tmp_path: Path) -> None:
     assert run_gate(tmp_path, data, expected) == 1
 
 
+def test_gate_fails_when_a_listed_instance_has_no_reference(tmp_path: Path) -> None:
+    data, expected = setup_suite(tmp_path, "good,mip,match_1e-6\n")
+    (data / "miplib.solu").unlink()
+    assert run_gate(tmp_path, data, expected) == 1
+
+
 def test_gate_skips_loudly_without_instances(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -164,16 +204,20 @@ def test_gate_skips_loudly_without_instances(
 
 
 def test_write_expected_regenerates_and_keeps_other_rows(tmp_path: Path) -> None:
-    data, expected = setup_suite(tmp_path, "good,mip,dnf\nother,lpx,match_1e-6\n")
+    data, expected = setup_suite(tmp_path, "instance,backend,expected,time_limit\n", header=False)
+    expected.write_text(
+        "instance,backend,expected,time_limit\ngood,mip,dnf,5\nother,lpx,match_1e-6,\n"
+    )
     # --all adds the unlisted instances; the wrong answer still fails the run.
     assert run_gate(tmp_path, data, expected, "--all", "--write-expected") == 1
     rows = expected.read_text().splitlines()
     assert rows[0].startswith("#")
     body = [r for r in rows if not r.startswith("#")]
-    assert body[0] == "instance,backend,expected"
+    assert body[0] == "instance,backend,expected,time_limit"
+    # The per-row limit survives the rewrite.
     assert set(body[1:]) == {
-        "good,mip,match_1e-6",
-        "other,lpx,match_1e-6",
-        "slow,mip,dnf",
-        "wrong,mip,disagree",
+        "good,mip,match_1e-6,5",
+        "other,lpx,match_1e-6,",
+        "slow,mip,dnf,",
+        "wrong,mip,disagree,",
     }
