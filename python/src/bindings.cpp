@@ -82,14 +82,41 @@ NB_MODULE(_core, m) {
         .def_rw("obj_offset", &LpProblem::obj_offset)
         .def("has_integers", &LpProblem::hasIntegers);
 
-    // Lambdas rather than function pointers: the readers take an optional
-    // diagnostics out-parameter that the Python API does not expose.
+    nb::enum_<mipx::ModelFormat>(m, "ModelFormat")
+        .value("Auto", mipx::ModelFormat::Auto)
+        .value("Mps", mipx::ModelFormat::Mps)
+        .value("Lp", mipx::ModelFormat::Lp);
+
+    // A ValueError: the file was readable, its content is not the format it
+    // was read as. Plain I/O failures stay RuntimeError.
+    nb::exception<mipx::ModelFormatError>(m, "ModelFormatError", PyExc_ValueError);
+
+    // Every reader goes through readModel(), which refuses a file that is not
+    // in the format it is read as. The bare readers would parse such a file to
+    // an empty or nonsense model without complaint (issues #198, #214).
     m.def(
-        "read_mps", [](const std::string& filename) { return mipx::readMps(filename); },
-        "filename"_a, "Read an MPS model from disk.");
+        "read_model",
+        [](const std::string& filename, mipx::ModelFormat format) {
+            return mipx::readModel(filename, format);
+        },
+        "filename"_a, "format"_a = mipx::ModelFormat::Auto,
+        "Read a model from disk. With format=Auto the reader is chosen from the file "
+        "extension (.lp is CPLEX LP, anything else MPS, past any .gz/.bz2 suffix). "
+        "Raises ModelFormatError when the file is not in that format.");
     m.def(
-        "read_lp", [](const std::string& filename) { return mipx::readLp(filename); }, "filename"_a,
-        "Read a CPLEX LP model from disk.");
+        "read_mps",
+        [](const std::string& filename) {
+            return mipx::readModel(filename, mipx::ModelFormat::Mps);
+        },
+        "filename"_a,
+        "Read an MPS model from disk. Raises ModelFormatError when the file is not MPS.");
+    m.def(
+        "read_lp",
+        [](const std::string& filename) {
+            return mipx::readModel(filename, mipx::ModelFormat::Lp);
+        },
+        "filename"_a,
+        "Read a CPLEX LP model from disk. Raises ModelFormatError when the file is not LP.");
     m.def("write_mps", &mipx::writeMps, "filename"_a, "problem"_a, "Write a model to MPS format.");
 
     nb::class_<MipPreRootStats>(m, "MipPreRootStats")
@@ -164,27 +191,38 @@ NB_MODULE(_core, m) {
         .def("get_pre_root_stats",
              [](const MipSolver& solver) { return solver.getPreRootStats(); });
 
-    m.def(
-        "solve_mps",
-        [](const std::string& filename, mipx::Int node_limit, double time_limit,
-           double gap_tolerance, bool verbose, bool presolve, bool cuts, mipx::Int threads,
-           HeuristicRuntimeMode heuristic_mode, std::uint64_t heuristic_seed) {
-            auto model = mipx::readMps(filename);
-            MipSolver solver;
-            solver.setNodeLimit(node_limit);
-            solver.setTimeLimit(time_limit);
-            solver.setGapTolerance(gap_tolerance);
-            solver.setVerbose(verbose);
-            solver.setPresolve(presolve);
-            solver.setCutsEnabled(cuts);
-            solver.setNumThreads(threads);
-            solver.setHeuristicMode(heuristic_mode);
-            solver.setHeuristicSeed(heuristic_seed);
-            solver.load(model);
-            return solver.solve();
-        },
-        "filename"_a, "node_limit"_a = 1000000, "time_limit"_a = 3600.0, "gap_tolerance"_a = 1e-4,
-        "verbose"_a = false, "presolve"_a = true, "cuts"_a = true, "threads"_a = 1,
-        "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic, "heuristic_seed"_a = 1,
-        "Load an MPS model and solve it with default MIP settings.");
+    const auto solve_file = [](const std::string& filename, mipx::Int node_limit, double time_limit,
+                               double gap_tolerance, bool verbose, bool presolve, bool cuts,
+                               mipx::Int threads, HeuristicRuntimeMode heuristic_mode,
+                               std::uint64_t heuristic_seed, mipx::ModelFormat format) {
+        auto model = mipx::readModel(filename, format);
+        MipSolver solver;
+        solver.setNodeLimit(node_limit);
+        solver.setTimeLimit(time_limit);
+        solver.setGapTolerance(gap_tolerance);
+        solver.setVerbose(verbose);
+        solver.setPresolve(presolve);
+        solver.setCutsEnabled(cuts);
+        solver.setNumThreads(threads);
+        solver.setHeuristicMode(heuristic_mode);
+        solver.setHeuristicSeed(heuristic_seed);
+        solver.load(model);
+        return solver.solve();
+    };
+
+    m.def("solve_file", solve_file, "filename"_a, "node_limit"_a = 1000000, "time_limit"_a = 3600.0,
+          "gap_tolerance"_a = 1e-4, "verbose"_a = false, "presolve"_a = true, "cuts"_a = true,
+          "threads"_a = 1, "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic,
+          "heuristic_seed"_a = 1, "format"_a = mipx::ModelFormat::Auto,
+          "Read a model file (see read_model) and solve it with default MIP settings.");
+
+    // The historical name. It never implied MPS-only in practice -- it now
+    // reads like solve_file, so an .lp path is solved as LP rather than parsed
+    // as MPS into an empty model -- and is kept so existing scripts keep
+    // working.
+    m.def("solve_mps", solve_file, "filename"_a, "node_limit"_a = 1000000, "time_limit"_a = 3600.0,
+          "gap_tolerance"_a = 1e-4, "verbose"_a = false, "presolve"_a = true, "cuts"_a = true,
+          "threads"_a = 1, "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic,
+          "heuristic_seed"_a = 1, "format"_a = mipx::ModelFormat::Auto,
+          "Alias of solve_file, kept for compatibility.");
 }

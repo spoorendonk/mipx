@@ -2,9 +2,13 @@
 
 #include <cctype>
 #include <charconv>
+#include <cmath>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace mipx {
@@ -104,6 +108,92 @@ std::vector<std::pair<std::string, Real>> parseExpression(const std::vector<std:
     return terms;
 }
 
+/// Parse a bound value: a number, optionally signed with '+', or an infinity
+/// spelled the way std::from_chars accepts it ("inf", "-infinity", ...).
+/// Returns nullopt for anything else, rather than the 0.0 an unchecked
+/// from_chars would leave behind.
+std::optional<Real> parseBoundValue(std::string_view tok) {
+    if (tok.size() > 1 && tok.front() == '+') {
+        tok.remove_prefix(1);
+    }
+    Real value = 0.0;
+    auto [ptr, ec] = std::from_chars(tok.data(), tok.data() + tok.size(), value);
+    // NaN is no bound, so "nan" stays available as a column name.
+    if (ec != std::errc{} || ptr != tok.data() + tok.size() || std::isnan(value)) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+/// A column name in a bounds line: anything that is neither a number nor an
+/// operator.
+bool isBoundName(const std::string& tok) {
+    return !isSenseIndicator(tok) && !parseBoundValue(tok);
+}
+
+struct BoundLine {
+    std::string name;
+    std::optional<Real> lower;
+    std::optional<Real> upper;
+};
+
+/// Recognise one line of the Bounds section, or return nullopt when it matches
+/// none of the forms:
+///   x free | x <= u | x >= l | x = v | l <= x | u >= x | v = x | l <= x <= u
+/// ('<' and '>' are read as '<=' and '>=').
+std::optional<BoundLine> parseBoundLine(const std::vector<std::string>& tokens) {
+    const auto isLe = [](const std::string& s) { return s == "<=" || s == "<"; };
+    const auto isGe = [](const std::string& s) { return s == ">=" || s == ">"; };
+
+    if (tokens.size() == 2 && isBoundName(tokens[0]) && toLower(tokens[1]) == "free") {
+        return BoundLine{tokens[0], -kInf, kInf};
+    }
+    if (tokens.size() == 3) {
+        const std::string& op = tokens[1];
+        if (isBoundName(tokens[0])) {
+            // x op value
+            const auto value = parseBoundValue(tokens[2]);
+            if (!value) {
+                return std::nullopt;
+            }
+            if (isLe(op)) {
+                return BoundLine{tokens[0], std::nullopt, *value};
+            }
+            if (isGe(op)) {
+                return BoundLine{tokens[0], *value, std::nullopt};
+            }
+            if (op == "=") {
+                return BoundLine{tokens[0], *value, *value};
+            }
+            return std::nullopt;
+        }
+        // value op x
+        const auto value = parseBoundValue(tokens[0]);
+        if (!value || !isBoundName(tokens[2])) {
+            return std::nullopt;
+        }
+        if (isLe(op)) {
+            return BoundLine{tokens[2], *value, std::nullopt};
+        }
+        if (isGe(op)) {
+            return BoundLine{tokens[2], std::nullopt, *value};
+        }
+        if (op == "=") {
+            return BoundLine{tokens[2], *value, *value};
+        }
+        return std::nullopt;
+    }
+    if (tokens.size() == 5 && isLe(tokens[1]) && isLe(tokens[3]) && isBoundName(tokens[2])) {
+        const auto lower = parseBoundValue(tokens[0]);
+        const auto upper = parseBoundValue(tokens[4]);
+        if (!lower || !upper) {
+            return std::nullopt;
+        }
+        return BoundLine{tokens[2], *lower, *upper};
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
@@ -134,10 +224,13 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
         return idx;
     };
 
-    // Read all lines and join continuation lines.
-    std::vector<std::string> lines;
+    // Read all lines and join continuation lines. Each kept line carries its
+    // 1-based line number in the file, for error messages.
+    std::vector<std::pair<size_t, std::string>> lines;
     std::string line;
+    size_t line_number = 0;
     while (std::getline(in, line)) {
+        ++line_number;
         // Recorded on the raw line, before comments are stripped: this answers
         // "was there anything in the file", not "was there anything we
         // understood".
@@ -154,7 +247,7 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
             line.pop_back();
         }
         if (!line.empty()) {
-            lines.push_back(std::move(line));
+            lines.emplace_back(line_number, std::move(line));
         }
     }
 
@@ -164,7 +257,7 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
     std::vector<Triplet> triplets;
 
     for (size_t li = 0; li < lines.size(); ++li) {
-        const auto& l = lines[li];
+        const auto& [l_number, l] = lines[li];
 
         // Check for section header.
         LpSection new_section = parseLpSection(l);
@@ -264,34 +357,24 @@ LpProblem readLp(const std::string& filename, ReadDiagnostics* diag) {
             }
 
             case LpSection::Bounds: {
-                // Forms: lb <= x <= ub, x >= lb, x <= ub, x = val, x free
-                if (tokens.size() >= 2 && toLower(tokens.back()) == "free") {
-                    Index idx = getOrCreateCol(tokens[0]);
-                    prob.col_lower[idx] = -kInf;
-                    prob.col_upper[idx] = kInf;
-                } else if (tokens.size() >= 5 && (tokens[1] == "<=" || tokens[1] == "<") &&
-                           (tokens[3] == "<=" || tokens[3] == "<")) {
-                    // lb <= x <= ub
-                    Real lb = 0.0;
-                    std::from_chars(tokens[0].data(), tokens[0].data() + tokens[0].size(), lb);
-                    Index idx = getOrCreateCol(tokens[2]);
-                    Real ub = 0.0;
-                    std::from_chars(tokens[4].data(), tokens[4].data() + tokens[4].size(), ub);
-                    prob.col_lower[idx] = lb;
-                    prob.col_upper[idx] = ub;
-                } else if (tokens.size() >= 3) {
-                    // x >= lb, x <= ub, x = val
-                    Index idx = getOrCreateCol(tokens[0]);
-                    Real val = 0.0;
-                    std::from_chars(tokens[2].data(), tokens[2].data() + tokens[2].size(), val);
-                    if (tokens[1] == ">=" || tokens[1] == ">") {
-                        prob.col_lower[idx] = val;
-                    } else if (tokens[1] == "<=" || tokens[1] == "<") {
-                        prob.col_upper[idx] = val;
-                    } else if (tokens[1] == "=") {
-                        prob.col_lower[idx] = val;
-                        prob.col_upper[idx] = val;
-                    }
+                // Recognise the whole line before touching the model, so a
+                // malformed line cannot leave a phantom column behind.
+                const auto bound = parseBoundLine(tokens);
+                if (!bound) {
+                    throw ModelFormatError(
+                        "Cannot read '" + filename + "' as CPLEX LP: line " +
+                        std::to_string(l_number) +
+                        " is not a recognised bound (expected "
+                        "'x free', 'x <= u', 'x >= l', 'x = v', 'l <= x', 'u >= x', "
+                        "'v = x' or 'l <= x <= u'): " +
+                        l);
+                }
+                const Index idx = getOrCreateCol(bound->name);
+                if (bound->lower) {
+                    prob.col_lower[idx] = *bound->lower;
+                }
+                if (bound->upper) {
+                    prob.col_upper[idx] = *bound->upper;
                 }
                 break;
             }

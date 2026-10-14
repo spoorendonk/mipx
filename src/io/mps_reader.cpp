@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <zlib.h>
@@ -291,9 +292,16 @@ private:
             int bzerr = BZ_OK;
             buf_len_ = BZ2_bzRead(&bzerr, bz_handle_, buf_, sizeof(buf_));
             buf_pos_ = 0;
+            // Checked before the EOF test: a truncated archive reports
+            // BZ_UNEXPECTED_EOF with nothing read, which must not pass for a
+            // clean end of stream (see the gzread note in the gz path).
+            if (bzerr != BZ_OK && bzerr != BZ_STREAM_END) {
+                throw std::runtime_error("Cannot read '" + filename_ +
+                                         "': bzip2 decompression failed (BZ2_bzRead error " +
+                                         std::to_string(bzerr) +
+                                         "); the file is truncated or corrupt.");
+            }
             if (bzerr == BZ_STREAM_END || buf_len_ == 0) {
-                bz_eof_ = true;
-            } else if (bzerr != BZ_OK) {
                 bz_eof_ = true;
             }
         }

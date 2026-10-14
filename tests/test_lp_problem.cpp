@@ -9,6 +9,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <zlib.h>
 
 using namespace mipx;
@@ -375,6 +376,100 @@ TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
     CHECK(prob.row_upper[2] == 7.0);
 }
 
+namespace {
+
+/// Write `content` to a temporary .lp file and return its path.
+std::string writeTempLp(const std::string& stem, const std::string& content) {
+    const std::string path = (std::filesystem::temp_directory_path() / (stem + ".lp")).string();
+    std::ofstream out(path, std::ios::trunc);
+    out << content;
+    return path;
+}
+
+Index columnNamed(const LpProblem& prob, const std::string& name) {
+    for (Index j = 0; j < prob.num_cols; ++j) {
+        if (prob.col_names[j] == name) {
+            return j;
+        }
+    }
+    return -1;
+}
+
+}  // namespace
+
+TEST_CASE("LP reader: every supported bound form parses", "[io][lp]") {
+    const std::string path = writeTempLp("mipx_bound_forms",
+                                         "Minimize\n"
+                                         " obj: a + b + c + d + e + f + g + h + i + j\n"
+                                         "Subject To\n"
+                                         " c1: a + b >= 0\n"
+                                         "Bounds\n"
+                                         " a free\n"
+                                         " b <= 4\n"
+                                         " c >= -2.5\n"
+                                         " d = 3\n"
+                                         " -1 <= e <= +7\n"
+                                         " 2 <= f\n"
+                                         " 9 >= g\n"
+                                         " 6 = h\n"
+                                         " -inf <= i <= 1e3\n"
+                                         " j > -infinity\n"
+                                         "End\n");
+    const auto prob = readLp(path);
+    std::filesystem::remove(path);
+
+    REQUIRE(prob.num_cols == 10);
+    const auto bounds = [&](const std::string& name) {
+        const Index j = columnNamed(prob, name);
+        REQUIRE(j >= 0);
+        return std::pair{prob.col_lower[j], prob.col_upper[j]};
+    };
+    CHECK(bounds("a") == std::pair{-kInf, kInf});
+    CHECK(bounds("b") == std::pair{0.0, 4.0});
+    CHECK(bounds("c") == std::pair{-2.5, kInf});
+    CHECK(bounds("d") == std::pair{3.0, 3.0});
+    CHECK(bounds("e") == std::pair{-1.0, 7.0});
+    CHECK(bounds("f") == std::pair{2.0, kInf});
+    CHECK(bounds("g") == std::pair{0.0, 9.0});
+    CHECK(bounds("h") == std::pair{6.0, 6.0});
+    CHECK(bounds("i") == std::pair{-kInf, 1000.0});
+    CHECK(bounds("j") == std::pair{-kInf, kInf});
+}
+
+TEST_CASE("LP reader: a malformed bounds line is an error, not a new column", "[io][lp]") {
+    // Each line is wrong in a different way; every one used to be accepted,
+    // most of them by inventing a column named after the first token.
+    const char* const malformed[] = {
+        "x1 => 3",        // not an operator
+        "x1 <= abc",      // value is not a number
+        "UP bnd x1 8.0",  // an MPS bound record
+        "x1 <= 3 extra",  // trailing junk
+        "x1>=3",          // operator not separated by whitespace
+        "1 <= x1 >= 5",   // mixed double bound
+        "3 <= 4",         // no column at all
+        "x1 x2 free",     // free needs exactly one name
+    };
+    for (const char* line : malformed) {
+        CAPTURE(line);
+        const std::string path = writeTempLp("mipx_bad_bound", std::string("Minimize\n"
+                                                                           " obj: x1\n"
+                                                                           "Subject To\n"
+                                                                           " c1: x1 >= 0\n"
+                                                                           "Bounds\n ") +
+                                                                   line + "\nEnd\n");
+        try {
+            readLp(path);
+            FAIL("expected readLp to throw");
+        } catch (const ModelFormatError& e) {
+            const std::string message = e.what();
+            CHECK(message.find("mipx_bad_bound.lp") != std::string::npos);
+            CHECK(message.find("line 6") != std::string::npos);
+            CHECK(message.find(line) != std::string::npos);
+        }
+        std::filesystem::remove(path);
+    }
+}
+
 TEST_CASE("Solu reader: tiny.solu", "[io][solu]") {
     auto entries = readSolu(testDataDir() + "/tiny.solu");
 
@@ -700,8 +795,10 @@ TEST_CASE("readModel: BOUNDS alone does not identify a format", "[io][format]") 
     // parse nor a plausible-looking model size can be trusted here: only a
     // header exclusive to the format settles it.
 
-    // An MPS file forced through the LP reader. Its BOUNDS records invent
-    // columns, so the parsed model is not empty -- and still must be refused.
+    // An MPS file forced through the LP reader. Its BOUNDS records used to
+    // invent columns, so the parsed model was not empty; the LP reader now
+    // refuses them as malformed bound lines, and the file must be refused
+    // either way.
     CHECK_THROWS_AS(readModel(testDataDir() + "/tiny.mps", ModelFormat::Lp), ModelFormatError);
 
     // The mirror image: an uppercase LP file whose extension says nothing, so
@@ -789,9 +886,22 @@ TEST_CASE("readMps/readLp: diagnostics report whether the format was seen", "[io
     readMps(testDataDir() + "/lp_format_upper.txt", &diag);
     CHECK_FALSE(diag.saw_format_section);
 
-    // And the same in reverse: an MPS file has no LP-exclusive header.
-    readLp(testDataDir() + "/tiny.mps", &diag);
+    // And the same in reverse: an MPS file has no LP-exclusive header. (One
+    // with bound records does not get this far: its BOUNDS lines are not LP
+    // bounds, and readLp refuses them.)
+    const std::string no_bounds_mps =
+        (std::filesystem::temp_directory_path() / "mipx_no_bounds_test.mps").string();
+    {
+        std::ofstream out(no_bounds_mps, std::ios::trunc);
+        out << "NAME nobounds\nROWS\n N obj\n L c1\nCOLUMNS\n x obj 1 c1 1\n"
+               "RHS\n rhs c1 4\nENDATA\n";
+    }
+    readLp(no_bounds_mps, &diag);
+    std::filesystem::remove(no_bounds_mps);
+    CHECK(diag.saw_content);
     CHECK_FALSE(diag.saw_format_section);
+    CHECK_THROWS_AS(readLp(testDataDir() + "/tiny.mps"), ModelFormatError);
+    CHECK_THROWS_AS(readLp(testDataDir() + "/empty_model.mps"), ModelFormatError);
 
     // saw_content answers "was there anything in the file at all", separately
     // from whether any of it was understood.

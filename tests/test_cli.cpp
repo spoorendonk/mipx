@@ -15,6 +15,8 @@
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
@@ -94,6 +96,30 @@ TEST_CASE("CLI: an LP file with an unhelpful extension is rejected", "[cli][io]"
     CHECK(run.exit_code != 0);
     CHECK(run.mentions("lp_format_upper.txt"));
     CHECK_FALSE(run.mentions("Status: Optimal"));
+}
+
+TEST_CASE("CLI: a compressed LP file gets no --format hint", "[cli][io]") {
+    // Neither reader can take a compressed LP file, so suggesting --format
+    // would contradict the error's own advice to decompress it first.
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "mipx_cli_compressed.lp.gz").string();
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "not really gzip";
+    }
+    const auto run = runSolver("'" + path + "'");
+    std::filesystem::remove(path);
+
+    CHECK(run.exit_code != 0);
+    CHECK(run.mentions("Decompress"));
+    CHECK_FALSE(run.mentions("Hint:"));
+}
+
+TEST_CASE("CLI: a format error from a guessed reader keeps its hint", "[cli][io]") {
+    const auto run = runSolver("'" + testDataDir() + "/lp_format_upper.txt'");
+
+    CHECK(run.exit_code != 0);
+    CHECK(run.mentions("Hint:"));
 }
 
 TEST_CASE("CLI: an MPS file forced to LP is rejected", "[cli][io]") {

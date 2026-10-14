@@ -1,3 +1,4 @@
+#include "../io/file_suffix.h"
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
@@ -411,7 +412,13 @@ int main(int argc, char* argv[]) {
         lp = mipx::readModel(filename, model_format);
     } catch (const mipx::ModelFormatError& e) {
         std::fprintf(stderr, "Error: %s\n", e.what());
-        if (model_format == mipx::ModelFormat::Auto) {
+        // A compressed LP file is the one format error --format cannot
+        // fix: neither reader takes it, and the error already says to
+        // decompress the file.
+        const bool compressed_lp =
+            mipx::detectModelFormat(filename) == mipx::ModelFormat::Lp &&
+            mipx::io_detail::stripCompressionSuffix(filename).size() != filename.size();
+        if (model_format == mipx::ModelFormat::Auto && !compressed_lp) {
             // Only worth saying when the reader was guessed from the
             // extension. Spelled out in full because the model file has to be
             // the first argument -- "--format lp model.lp" is rejected with

@@ -99,9 +99,17 @@ python3 -m venv .venv
 ```python
 import mipx
 
-result = mipx.solve_mps("instance.mps", time_limit=60, verbose=False)
+result = mipx.solve_file("instance.mps", time_limit=60, verbose=False)
 print(result.status, result.objective)
+
+model = mipx.read_model("instance.lp")                           # reader from the extension
+model = mipx.read_model("instance.txt", format=mipx.ModelFormat.Lp)  # or forced
 ```
+
+Every reader checks that the file really is in the format it is read as and
+raises `mipx.ModelFormatError` (a `ValueError`) when it is not, rather than
+returning an empty model. `solve_mps` is the older name of `solve_file` and
+behaves identically: despite the name it reads `.lp` files as LP.
 
 ## Tests
 
