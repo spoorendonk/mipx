@@ -1,3 +1,8 @@
+<!-- wcp: CLAUDE.md base=1bac607d050f type=cpp-python -->
+<!-- wcp-declined: 0a31dfa4139f Hooks Are Files In This Repository -->
+<!-- wcp-declined: aa0470cfe1e7 Working Through Issues -->
+<!-- wcp-declined: dc8b00a1938c Self-Review -->
+<!-- wcp-declined: 7e7de94f1273 Testing Bindings -->
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -24,7 +29,7 @@ This is a preference, not a prohibition. Shelling out to `grep`/`rg` is fine whe
 plan (non-trivial) → implement → test → /review → push to main
 ```
 
-Hooks auto-format and type-check on save — don't fix formatting manually. `.githooks/pre-commit` also runs `clang-format -i` and `clang-tidy --fix` over every *staged* C++ file and re-stages the result, so touching a file that has drifted from `.clang-format` pulls the whole file's reflow into your diff. That is the hook working, not scope creep, and `--no-verify` is not the answer. Stage the file, let the hook reflow it, and commit that as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate.
+`.githooks/pre-commit` checks and does not fix: it runs `clang-format --dry-run -Werror` over every *tracked* C/C++ file, not just the staged ones, plus `ruff` and `mypy` through `uv run` where they can be run (a tool that cannot is reported and skipped). A commit is refused while any tracked file has drifted from `.clang-format`, and `--no-verify` is not the answer. Run `clang-format -i` on the files it names and commit that reflow as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate: it refuses merge commits on main and a push without a review receipt (see Agent Self-Review), then runs the `## Build & Test` blocks in a fresh worktree as a local CI.
 
 ## Git Workflow
 
@@ -39,9 +44,30 @@ After a successful push:
 - **Close any gh issue the work resolved**: `gh issue close <num> -c "<one-line note>"`. Do this for every issue covered by the push.
 - **Delete the feature branch** if one was used: `git branch -d <branch>` locally, plus `git push origin --delete <branch>` if it was pushed. Don't leave stale branches behind.
 
+## This Document Carries A Provenance Line
+
+The comment at the top of this file is wcp's record of the bytes it wrote, in the same scheme the hooks use. `wcp doctor` reads it to tell an edit you made from a version wcp has moved past, and it is where this project's type is recorded — there is no `.wcp/` directory and no config file beside it.
+
+**The prose is yours.** wcp writes this document once and never rewrites it unasked; edit it freely. When wcp adds or changes a section you have not edited, `wcp doctor` names it and `wcp init --interactive` offers it, one section at a time; answering `n` declines that version for good. Leave the top line in place, and the tooling stays able to tell your changes from its own.
+
+## Running wcp
+
+wcp is a command-line tool installed once per machine, outside any repository. The hooks never call it, so a machine without it is still gated.
+
+```sh
+uv tool install git+https://github.com/spoorendonk/wcp   # once per machine; @vX.Y.Z for a release
+uv tool upgrade wcp                                       # to update an install without a tag
+uv tool install --force git+https://github.com/spoorendonk/wcp@vX.Y.Z   # to move a tagged one
+wcp --help                                                # the commands; `wcp <command> --help` for each one
+```
+
+- **Run `wcp doctor`** after pulling, after updating wcp, and before editing the hooks or this file. It changes nothing, and every finding names the command that fixes it. It exits 1 only when the gate does not work, e.g. `core.hooksPath` is unset, which is how every fresh clone starts until someone runs `wcp init` in it.
+- **Files wcp wrote carry a `wcp:` provenance line**: `# wcp:` in each hook, and the comment at the top of this file. Edit the files when the project needs to, but leave that line in place. It is how `wcp doctor` tells your edits apart from a newer wcp version.
+- **If `wcp` is not on PATH**, say so rather than installing it unasked. Installing it is a machine-wide change.
+
 ## Hooks
 
-Git hooks live in `.githooks/` (`core.hooksPath`) and are the only hooks in this repo. They are vendored here — there is no upstream to escalate to, so a wrong or too-strict hook is fixed here.
+Git hooks live in `.githooks/` (`core.hooksPath`, set to the relative `.githooks`) and are the only hooks in this repo. They were installed by [wcp](https://github.com/spoorendonk/wcp) (`wcp init`) and are committed like any other file; they call no wcp, so a clone without it is still gated once `core.hooksPath` is set. A wrong or too-strict hook is fixed here, and said upstream if wcp's default was wrong for everyone. See Running wcp for the `# wcp:` provenance line each one carries.
 
 `.claude/` is untracked and carries no hooks. Don't add Claude Code hooks to it: agent-side hooks duplicated the git hooks' job while being invisible to anyone not running Claude Code, and the branch-creation one could not be satisfied from a git worktree at all. Enforcement belongs in `.githooks/`, where every contributor and CI runs it.
 
@@ -56,6 +82,30 @@ GitHub Issues is the tracker. Use the `gh` CLI.
 - **Read an issue** with `gh issue view <num> --json title,body,labels,state,comments`. Plain `gh issue view <num>` is deprecated for programmatic use.
 - Don't propose deferring work via a new gh issue unless it is substantial. Small follow-ups should be either fixed inline or left alone — don't open an issue just because you noticed something.
 
+### Labelling Work In Progress
+
+Label every issue you work on with `session:<name>`, where `<name>` is your session's name; if the session has none, ask for one. Every session acts as the same GitHub user, so the assignee cannot tell sessions apart. The label can, and the issue's timeline records when it was added and removed.
+
+With wcp installed, use it: `claim` refuses an issue that is closed, an epic or held by another session (naming it), and when another session claims it at the same moment either fails (taking its label off) or warns. Add `--as <name>` unless the session is registered in a wcp group.
+
+```sh
+wcp claim <num>      # when you start; `wcp claim --list` shows what you hold here
+wcp release <num>    # when you stop, hand over, or close it; never another session's label
+```
+
+On a machine without wcp, the same by hand:
+
+```sh
+gh label create "session:<name>" --color 5319E7 --force   # once per repo; --force makes it safe to repeat
+gh issue edit <num> --add-label "session:<name>"          # when you start
+gh issue edit <num> --remove-label "session:<name>"       # when you stop, hand over, or close it
+```
+
+- **Add it when you start**, including on issues already underway when you adopt this.
+- **Remove it when you stop, hand over, or close the issue.** A label left on an issue nobody is working on reads as a claim.
+- **If your session is renamed**, relabel the issues you hold.
+- **To see what a session holds:** `gh issue list --label "session:<name>"`, or across repositories `gh search issues --owner <owner> --label "session:<name>" --state open`.
+
 ### Writing Issues
 
 Issues get picked up later in fresh sessions, often by a different agent with no access to the author's machine. Write them to be picked up cold:
@@ -69,6 +119,15 @@ Issues get picked up later in fresh sessions, often by a different agent with no
 
 **Any agent or agent team that produces code must run `/review` on its own changes before that code can merge to main.** No subagent returns unreviewed work; no orchestrator merges unreviewed work. This applies to every agent team, not just the parallel-issue workflow.
 
+**Then record the review, and push it with the commit**, or `pre-push` refuses the push:
+
+```sh
+git update-ref "refs/reviews/$(git rev-parse HEAD)" HEAD
+git push --atomic origin HEAD "refs/reviews/$(git rev-parse HEAD)"
+```
+
+The receipt, `refs/reviews/<sha>`, records that a review happened at that commit and nothing more; `--atomic` lands the branch and its receipt together or not at all. A later commit has no receipt, so the commit that fixes what a review found needs reviewing too. Record it only on a clean tree — commit first, then review, then record — or it names a commit that does not contain what was read.
+
 ## Parallel Issue Workflow
 
 When the user brings multiple gh issues to work on at once:
@@ -77,9 +136,9 @@ When the user brings multiple gh issues to work on at once:
 2. **Orchestrator role.** Spawn one subagent per issue (Agent tool with `isolation: "worktree"`). Subagents branch from main, not from the orchestrator's working branch, and work in their own git worktree. Pass each subagent its gh issue number and any plan file path.
 3. **Subagents self-review** per the Agent Self-Review rule above. Subagents commit locally in their worktree and **do not push** — worktrees share `.git`, so the orchestrator sees their commits via `git log <branch>` with no network round-trip.
 4. **No merging without user OK.** Subagents never merge into main; the orchestrator never merges a subagent's branch without explicit user approval.
-5. **Final combined review, then push.** The orchestrator integrates all approved branches into local main, runs `/review` over the merged result, and only then runs `git push origin main`. No pushes — of main or feature branches — happen before that final review.
+5. **Final combined review, then push.** The orchestrator integrates all approved branches into local main, runs `/review` over the merged result, and only then records the receipt and pushes (`git push --atomic origin HEAD "refs/reviews/$(git rev-parse HEAD)"`, as above). No pushes — of main or feature branches — happen before that final review.
 
-**Integrate without merge commits.** "Merge" above means the result, not the command: main keeps linear history, so `git merge --no-ff` is wrong here and the commit-msg hook rejects it anyway — `merge` is not a Conventional Commit type. Fast-forward the first branch (`git merge --ff-only <branch>`), then `git cherry-pick` each remaining branch's commits in order. Cherry-picked branches are no longer ancestors of main, so `git branch -d` will refuse them: verify with `git cherry main <branch>` (every line prefixed `-` means already applied) and then `git branch -D`.
+**Integrate without merge commits.** "Merge" above means the result, not the command: main keeps linear history, so `git merge --no-ff` is wrong here and the pre-push hook refuses a push that adds a merge commit to main. Fast-forward the first branch (`git merge --ff-only <branch>`), then `git cherry-pick` each remaining branch's commits in order. Cherry-picked branches are no longer ancestors of main, so `git branch -d` will refuse them: verify with `git cherry main <branch>` (every line prefixed `-` means already applied) and then `git branch -D`.
 
 ## Commit Messages
 
