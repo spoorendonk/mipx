@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import importlib.util
 import stat
 import sys
@@ -49,16 +48,10 @@ gate = load_gate()
         ("timeout", None, ("inf", None), "dnf"),
         # Near zero the error is absolute, not relative to a tiny reference.
         ("optimal", 1e-7, ("opt", 0.0), "match_1e-6"),
-        # A MIP stopped by a limit with an incumbent worse than optimal: dnf.
-        ("time_limit", 120.0, ("opt", 100.0), "dnf"),
-        ("node_limit", 100.0, ("opt", 100.0), "dnf"),
-        # ...but one better than the proven optimum is an infeasible point.
-        ("time_limit", 90.0, ("opt", 100.0), "disagree"),
-        ("node_limit", 90.0, ("opt", 100.0), "disagree"),
-        # Any incumbent on an infeasible instance is wrong.
-        ("time_limit", 5.0, ("inf", None), "disagree"),
-        # No incumbent found.
-        ("time_limit", float("inf"), ("opt", 100.0), "dnf"),
+        # A MIP stopped by a limit is dnf whatever it reports as objective:
+        # with no incumbent the CLI prints 0, which is not a wrong answer.
+        ("time_limit", 0.0, ("opt", 100.0), "dnf"),
+        ("node_limit", 0.0, ("inf", None), "dnf"),
     ],
 )
 def test_classify(
@@ -66,28 +59,6 @@ def test_classify(
 ) -> None:
     outcome = gate.Outcome(status, objective)
     assert gate.classify(outcome, gate.Reference(*ref)) == expected
-
-
-def test_classify_limited_incumbent_respects_maximize() -> None:
-    ref = gate.Reference("opt", 100.0)
-    assert gate.classify(gate.Outcome("time_limit", 110.0), ref, True) == "disagree"
-    assert gate.classify(gate.Outcome("time_limit", 90.0), ref, True) == "dnf"
-
-
-@pytest.mark.parametrize(
-    ("header", "maximize"),
-    [
-        ("NAME x\nROWS\n N obj\n", False),
-        ("NAME x\nOBJSENSE\n    MAX\nROWS\n", True),
-        ("NAME x\nOBJSENSE\n    MIN\nROWS\n", False),
-        ("NAME x\nOBJSENSE MAXIMIZE\nROWS\n", True),
-    ],
-)
-def test_read_maximize(tmp_path: Path, header: str, maximize: bool) -> None:
-    path = tmp_path / "m.mps.gz"
-    with gzip.open(path, "wt") as f:
-        f.write(header)
-    assert gate.read_maximize(path) is maximize
 
 
 @pytest.mark.parametrize(
@@ -191,6 +162,12 @@ def test_gate_fails_when_a_listed_instance_has_no_reference(tmp_path: Path) -> N
     data, expected = setup_suite(tmp_path, "good,mip,match_1e-6\n")
     (data / "miplib.solu").unlink()
     assert run_gate(tmp_path, data, expected) == 1
+
+
+def test_gate_fails_when_nothing_is_gated(tmp_path: Path) -> None:
+    data, expected = setup_suite(tmp_path, "")
+    assert run_gate(tmp_path, data, expected) == 1
+    assert run_gate(tmp_path, data, tmp_path / "no-such-list.csv") == 1
 
 
 def test_gate_skips_loudly_without_instances(

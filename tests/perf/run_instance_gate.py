@@ -18,8 +18,15 @@ and compared with the expected class checked in for it. The gate fails when
     instance's file is missing.
 
 A run that does better than listed is reported so the list can be updated, and
-does not fail the gate. Instances without a usable reference (=best=, =unkn=,
-or none) are reported and never gate.
+does not fail the gate. A listed instance without a usable reference (=best=,
+=unkn=, or none) fails the gate, as does a run in which nothing was gated;
+under --all, unlisted instances without one are reported and skipped.
+
+A MIP stopped by a time or node limit is dnf whatever its incumbent: the CLI
+prints "Objective: 0" when it has none, so the incumbent cannot be checked.
+
+--write-expected records the classes seen at this run's time limit; pass
+--time-limit only together with per-row limits you mean to keep.
 
     run_instance_gate.py lp  [--backends dual,barrier,pdlp]   # Netlib, per LP backend
     run_instance_gate.py mip                                   # curated MIPLIB subset
@@ -37,8 +44,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import gzip
-import math
 import re
 import subprocess
 import sys
@@ -170,54 +175,14 @@ def parse_outcome(output: str) -> Outcome:
     return Outcome(status, float(match.group(1)) if match else None)
 
 
-def read_maximize(path: Path) -> bool:
-    """True when the MPS file's OBJSENSE section (or line) says MAX.
-
-    Only the header is scanned: OBJSENSE has to come before ROWS.
-    """
-    opener = gzip.open if path.name.endswith(".gz") else open
-    with opener(path, "rt", encoding="latin-1") as f:
-        in_objsense = False
-        for line in f:
-            words = line.split()
-            if not words or line.startswith(("*", "NAME")):
-                continue
-            head = words[0].upper()
-            if head == "ROWS":
-                return False
-            if head == "OBJSENSE":
-                if len(words) > 1:
-                    return words[1].upper().startswith("MAX")
-                in_objsense = True
-            elif in_objsense:
-                return head.startswith("MAX")
-    return False
-
-
-def limited_incumbent_is_wrong(outcome: Outcome, ref: Reference, maximize: bool) -> bool:
-    """A MIP stopped by a limit still reports its incumbent. It is a wrong
-    answer when it is better than the proven optimum by more than 1e-4, or
-    exists at all for an infeasible instance: either way the solver accepted an
-    infeasible point."""
-    if outcome.status not in ("time_limit", "node_limit") or outcome.objective is None:
-        return False
-    if not math.isfinite(outcome.objective):
-        return False
-    if ref.kind == "inf":
-        return True
-    if ref.kind != "opt" or ref.value is None:
-        return False
-    tol = 1e-4 * max(1.0, abs(ref.value))
-    if maximize:
-        return outcome.objective > ref.value + tol
-    return outcome.objective < ref.value - tol
-
-
-def classify(outcome: Outcome, ref: Reference, maximize: bool = False) -> str:
+def classify(outcome: Outcome, ref: Reference) -> str:
     claims = {"optimal": "opt", "gap_limit": "opt", "infeasible": "inf", "unbounded": "unbd"}
     claim = claims.get(outcome.status)
     if claim is None:
-        return "disagree" if limited_incumbent_is_wrong(outcome, ref, maximize) else "dnf"
+        # A MIP stopped by a limit is not checked against its incumbent: the
+        # CLI prints "Objective: 0" when there is none, which cannot be told
+        # apart from a real incumbent of 0 (see #223).
+        return "dnf"
     if claim != ref.kind:
         return "disagree"
     if claim != "opt":
@@ -346,11 +311,10 @@ def execute(args: argparse.Namespace, suite: Suite, plan: Plan) -> dict[tuple[st
     results: dict[tuple[str, str], str] = {}
     for name, backend, limit in plan.runs:
         ref = refs.get(name)
-        if ref is None:
-            print(f"  {name:<12} {backend:<8} no reference in .solu; not gated")
+        if ref is None:  # build_plan only schedules instances with a reference
             continue
         outcome = run_one(binary, instances[name], backend, limit)
-        cls = classify(outcome, ref, read_maximize(instances[name]))
+        cls = classify(outcome, ref)
         results[(name, backend)] = cls
         tag = verdict(plan.expected.get((name, backend)), cls)
         obj = "" if outcome.objective is None else f" obj={outcome.objective:.10g}"
@@ -377,7 +341,11 @@ def report(plan: Plan, results: dict[tuple[str, str], str], list_written: bool) 
     for name, backend in failures:
         expected = plan.expected.get((name, backend), "unlisted")
         print(f"FAIL: {name} ({backend}) {results[(name, backend)]}, expected {expected}")
-    ok = not failures and not plan.missing and not plan.no_reference
+    if not results:
+        # A missing or empty list (or a mistyped --expected-file) must not
+        # pass by gating nothing.
+        print("Nothing was gated: no listed instance ran. Check the expected list.")
+    ok = bool(results) and not failures and not plan.missing and not plan.no_reference
     print("Instance gate: " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
