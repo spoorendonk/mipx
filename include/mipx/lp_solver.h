@@ -45,8 +45,10 @@ public:
     /// Farkas certificate of primal infeasibility (a dual ray), one entry per
     /// row, in the space of the loaded problem (unscaled, original row order).
     ///
-    /// Returned when the last solve() ended Status::Infeasible; empty after any
+    /// Returned when the last solve() proved the LP infeasible; empty after any
     /// other status, and from backends that do not produce one (the default).
+    /// Also empty when the dual simplex reports Infeasible only as a status
+    /// carried over from an earlier solve (issue #222).
     ///
     /// Contract, for the ray y and d = A^T y:
     ///   - y_i > 0 only where row_upper_i is finite, y_i < 0 only where

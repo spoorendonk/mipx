@@ -1448,20 +1448,20 @@ TEST_CASE("DualSimplex: dual ray carries the row scaling back", "[dual_simplex][
                              {3, 1, -0.02}}));
 }
 
-TEST_CASE("DualSimplex: a re-solve does not inherit an Infeasible verdict",
-          "[dual_simplex][farkas]") {
+TEST_CASE("DualSimplex: no dual ray without a proof in the last solve", "[dual_simplex][farkas]") {
     // x + y = 5 with x, y in [0, 2] is infeasible; with x <= 10 it is not.
-    // Re-solved with no iterations allowed, the answer is "ran out", never the
-    // previous solve's Infeasible.
+    // Re-solved with no iterations allowed, nothing is proven. The status may
+    // still read Infeasible, carried over from the first solve (#222), but
+    // there must be no ray to go with it.
     DualSimplexSolver solver;
     solver.setVerbose(false);
     solver.load(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
                         {{0, 0, 1.0}, {0, 1, 1.0}}));
     REQUIRE(solver.solve().status == Status::Infeasible);
+    REQUIRE_FALSE(solver.getDualRay().empty());
     solver.setColBounds(0, 0.0, 10.0);
     solver.setIterationLimit(0);
-    const auto status = solver.solve().status;
-    CHECK(status != Status::Infeasible);
+    solver.solve();
     CHECK(solver.getDualRay().empty());
 }
 

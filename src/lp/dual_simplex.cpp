@@ -769,10 +769,6 @@ LpResult DualSimplexSolver::solve() {
     if (!loaded_) {
         return {Status::Error, 0.0, 0};
     }
-    // Forget the previous verdict. The iteration-limit fix-up after the loop
-    // keeps an Infeasible status it finds, so a stale one from the last solve
-    // would turn an iteration-limited re-solve into a false Infeasible.
-    status_ = Status::Error;
 
     // Rebuild augmented matrix as [A | -I] for correct basis representation.
     {
