@@ -2193,6 +2193,7 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
             constexpr Real kMarginAbs = 1e-9;
             constexpr Real kMinReductionRel = 1e-6;
             constexpr Real kIntBoundTol = 1e-6;
+            constexpr Real kRedundantTol = 1e-6;
             // The split needs integral bounds; an integer column's integer
             // points lie within its rounded-in bounds anyway.
             auto lowerOf = [&](Index j) {
@@ -2224,7 +2225,10 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
             // A row the bounds already satisfy is redundant, and every
             // reduction would shrink its coefficients towards zero. Otherwise
             // b < total_max, so each d below stays short of its coefficient.
-            if (total_max <= rhs) {
+            // A row redundant only within the feasibility tolerance is left
+            // alone too: tightening it would scale that violation up to a
+            // full one on coefficients near zero.
+            if (total_max <= rhs + kRedundantTol) {
                 return;
             }
             const Real margin = kMarginRel * magnitude + kMarginAbs;
