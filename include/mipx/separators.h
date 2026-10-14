@@ -106,16 +106,13 @@ private:
 
     [[nodiscard]] bool isEnabled(CutFamily family) const;
 
-    /// Common acceptance path for every separator. Screens the cut for
-    /// numerical safety, applies the minimum-violation threshold, computes the
-    /// efficacy and updates @p stats when the pool takes the cut. Every family
-    /// SeparatorManager owns routes through this. GomorySeparator is a separate
-    /// class and keeps its own accept path, but that path applies the same
-    /// isNumericallySafeCut screen, so neither a manager-owned family nor
-    /// Gomory can pool an unscreened cut. CliqueTable::separateCliqueCover is
-    /// the one place that calls CutPool::addCut without screening, which is why
-    /// separateCliqueTableCover hands it a scratch pool and re-runs every cut
-    /// it produces through here.
+    /// Common acceptance path for every separator. Applies the minimum-violation
+    /// threshold, computes the efficacy and updates @p stats when the pool
+    /// takes the cut. Every family SeparatorManager owns routes through this;
+    /// separateCliqueTableCover re-offers its scratch pool's cuts here so their
+    /// statistics flow through it too. The numerical-safety screen is enforced
+    /// by CutPool::addCut; it is applied here first only to skip computing the
+    /// efficacy of a cut the pool would reject.
     bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
                         CutFamilyStats& stats) const;
 

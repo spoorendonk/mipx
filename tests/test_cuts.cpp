@@ -13,6 +13,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -72,29 +73,69 @@ TEST_CASE("CutPool: parallelism filtering", "[cuts]") {
     CutPool pool;
     pool.setParallelismThreshold(0.95);
 
+    // Cuts are sparse: the pool screens out explicit zero coefficients.
     Cut c1;
-    c1.indices = {0, 1};
-    c1.values = {1.0, 0.0};
+    c1.indices = {0};
+    c1.values = {1.0};
     c1.lower = 1.0;
     c1.efficacy = 0.5;
     REQUIRE(pool.addCut(c1));
 
     // Same direction, slightly different magnitude.
     Cut c2;
-    c2.indices = {0, 1};
-    c2.values = {2.0, 0.0};
+    c2.indices = {0};
+    c2.values = {2.0};
     c2.lower = 2.0;
     c2.efficacy = 0.4;  // Lower efficacy, parallel.
     CHECK_FALSE(pool.addCut(c2));
 
     // Orthogonal cut: accepted.
     Cut c3;
-    c3.indices = {0, 1};
-    c3.values = {0.0, 1.0};
+    c3.indices = {1};
+    c3.values = {1.0};
     c3.lower = 1.0;
     c3.efficacy = 0.5;
     CHECK(pool.addCut(c3));
     CHECK(pool.size() == 2);
+}
+
+TEST_CASE("CutPool: addCut rejects a numerically unsafe cut itself", "[cuts]") {
+    // Issue #212. The screen is the pool's, not its callers', so a cut offered
+    // straight to addCut is screened too -- however efficacious it claims to be.
+    CutPool pool;
+
+    Cut safe;
+    safe.indices = {0, 1};
+    safe.values = {1.0, 2.0};
+    safe.lower = 1.0;
+    safe.efficacy = 0.5;
+    REQUIRE(isNumericallySafeCut(safe));
+
+    // Each variant fails a different check of isNumericallySafeCut, and the pool
+    // is empty and the efficacy high, so only the screen can reject it.
+    Cut huge = safe;
+    huge.values = {1.0, 2e6};  // max |coef| above 1e6
+    Cut unsorted = safe;
+    unsorted.indices = {1, 0};
+    Cut zero = safe;
+    zero.values = {1.0, 0.0};
+    Cut non_finite = safe;
+    non_finite.values = {1.0, std::numeric_limits<Real>::quiet_NaN()};
+    Cut empty = safe;
+    empty.indices.clear();
+    empty.values.clear();
+
+    for (const Cut* bad : {&huge, &unsorted, &zero, &non_finite, &empty}) {
+        REQUIRE_FALSE(isNumericallySafeCut(*bad));
+        Cut offered = *bad;
+        offered.efficacy = 10.0;
+        CHECK_FALSE(pool.addCut(offered));
+    }
+    CHECK(pool.size() == 0);
+
+    // The safe original still goes in.
+    CHECK(pool.addCut(safe));
+    CHECK(pool.size() == 1);
 }
 
 TEST_CASE("CutPool: age and purge", "[cuts]") {

@@ -418,8 +418,9 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
         cut.family = CutFamily::Gomory;
         cut.local = builder.local;
 
-        // Same numerical safety screen every other family gets through
-        // SeparatorManager::addViolatedCut. No check is skipped: the ones the
+        // The numerical safety screen CutPool::addCut enforces on every cut,
+        // applied here first so a rejection is counted as rejected_screen
+        // rather than rejected_pool. No check is skipped: the ones the
         // construction above already guarantees (sorted indices, |coef| above
         // kCoeffTol, finite rhs, non-empty support, norm_sq above kCoeffTol)
         // are cheap to re-test, and the ones it does not guarantee -- a maximum
@@ -439,7 +440,7 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
         // gets the same screen as everyone else, and a Gomory-only exemption
         // would put the ill-conditioned cut it is meant to catch straight into
         // the LP. The fix, when it comes, is a relative drop tolerance applied
-        // to every family before screening (issues #209 and #212), not a
+        // to every family before screening (issue #209), not a
         // carve-out here.
         if (!isNumericallySafeCut(cut)) {
             ++stats_.rejected_screen;

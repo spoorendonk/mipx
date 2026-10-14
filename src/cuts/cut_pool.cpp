@@ -143,6 +143,12 @@ Real CutPool::cosineSimilarity(std::span<const Index> ind_a, std::span<const Rea
 }
 
 bool CutPool::addCut(Cut cut) {
+    // The pool screens every cut itself, so no path into it can bypass
+    // isNumericallySafeCut (issue #212).
+    if (!isNumericallySafeCut(cut)) {
+        return false;
+    }
+
     // Check minimum efficacy.
     if (cut.efficacy < min_efficacy_) {
         return false;

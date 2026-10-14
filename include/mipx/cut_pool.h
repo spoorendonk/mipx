@@ -42,13 +42,12 @@ struct Cut {
     Int activity = 0;     // number of rounds where cut was active
 };
 
-/// Screen a cut for numerical safety before it is offered to a CutPool.
+/// Screen a cut for numerical safety.
 ///
-/// Shared by the two classes that offer cuts to a pool directly:
-/// SeparatorManager applies it in addViolatedCut, GomorySeparator applies it
-/// on its own accept path. (CliqueTable::separateCliqueCover also calls
-/// CutPool::addCut, but only on a scratch pool whose cuts are re-offered
-/// through addViolatedCut.) A cut is rejected when it is empty, its index and
+/// CutPool::addCut applies it to every cut it is offered, so no cut that fails
+/// it can enter a pool, whichever separator built it. Callers may screen
+/// earlier as well, to skip work on a doomed cut or to count rejections, but
+/// the guarantee does not rest on them. A cut is rejected when it is empty, its index and
 /// value arrays disagree in length, a bound is infinite in the direction that
 /// bounds it (a lower of +inf or an upper of -inf), its indices are negative
 /// or not strictly increasing, any coefficient is non-finite or no larger
@@ -69,7 +68,9 @@ class CutPool {
 public:
     CutPool() = default;
 
-    /// Add a cut to the pool. Returns true if accepted (not too parallel).
+    /// Add a cut to the pool. Returns true if accepted: the cut passes
+    /// isNumericallySafeCut, meets the minimum efficacy, and is not too
+    /// parallel to a pooled cut of at least its efficacy.
     bool addCut(Cut cut);
 
     /// Age all cuts by one round. Mark active cuts (those within tol of binding).
