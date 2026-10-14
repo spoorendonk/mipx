@@ -268,6 +268,16 @@ Run them deliberately:
 ctest --test-dir build -L solver-regression --output-on-failure
 ```
 
+The instance gate (#208) classifies Netlib/MIPLIB results against `.solu`
+and the expected lists in `tests/perf/instance_gate/`; a wrong answer always
+fails it. It carries both labels, so the hooks skip it:
+
+```bash
+ctest --test-dir build -L instance-gate --output-on-failure
+```
+
+See `tests/perf/README.md` for running it directly and regenerating the lists.
+
 Don't add new wall-clock assertions to the default suite. Timing work belongs
 in a benchmark bed with recorded baselines, not in pass/fail unit tests — see
 #213 for folding this label into the MIPLIB benchmark suite.

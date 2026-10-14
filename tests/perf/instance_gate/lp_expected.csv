@@ -1,0 +1,21 @@
+# Expected class per instance and backend for run_instance_gate.py.
+# Refresh these rows: tests/perf/run_instance_gate.py lp --write-expected
+# Add every instance with a reference: lp --all --write-expected
+instance,backend,expected
+adlittle,barrier,dnf
+adlittle,dual,match_1e-6
+adlittle,pdlp,match_1e-4
+afiro,barrier,dnf
+afiro,dual,match_1e-6
+afiro,pdlp,match_1e-6
+blend,barrier,dnf
+blend,dual,match_1e-6
+blend,pdlp,match_1e-4
+sc105,dual,match_1e-6
+sc205,dual,match_1e-6
+sc50a,barrier,dnf
+sc50a,dual,match_1e-6
+sc50a,pdlp,match_1e-6
+share1b,dual,match_1e-6
+ship12l,dual,match_1e-6
+sierra,dual,match_1e-6

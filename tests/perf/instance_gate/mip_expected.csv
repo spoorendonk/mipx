@@ -1,0 +1,8 @@
+# Expected class per instance and backend for run_instance_gate.py.
+# Refresh these rows: tests/perf/run_instance_gate.py mip --write-expected
+# Add every instance with a reference: mip --all --write-expected
+instance,backend,expected
+flugpl,mip,match_1e-6
+gen,mip,match_1e-6
+gt2,mip,match_1e-6
+p0201,mip,match_1e-6

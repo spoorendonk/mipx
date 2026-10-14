@@ -1,3 +1,54 @@
+# Instance Gate (correctness on real instances)
+
+`run_instance_gate.py` solves Netlib LPs (per backend: dual, barrier, PDLP) and
+the curated MIPLIB subset, and classifies every result against the `.solu`
+reference:
+
+| Class | Meaning |
+|---|---|
+| `match_1e-6` | right verdict, objective within 1e-6 (relative, absolute below 1) |
+| `match_1e-4` | right verdict, objective within 1e-4 |
+| `disagree` | a wrong answer: Optimal off by more than 1e-4, or a verdict (Optimal / Infeasible / Unbounded) the reference contradicts |
+| `dnf` | did not finish: time or iteration limit, error, crash |
+
+The expected class for each instance and backend is checked in under
+`instance_gate/` (`lp_expected.csv`, `mip_expected.csv`). The gate fails on any
+`disagree`, whatever the list says, since a wrong answer is never tolerated. It
+also fails when a run expected to match no longer does, or when a listed
+instance file is missing. Better than listed is reported, not failed.
+
+```bash
+./tests/data/download_netlib.sh && ./tests/data/download_miplib.sh --small
+python3 tests/perf/run_instance_gate.py lp      # all three LP backends
+python3 tests/perf/run_instance_gate.py mip     # curated MIPLIB subset
+ctest --test-dir build -L instance-gate --output-on-failure   # both, via ctest
+```
+
+Each run prints one line per instance and a per-backend count of the four
+classes. Without downloaded instances the script prints `SKIPPED` and exits 77,
+which ctest shows as a skip. Options: `--backends dual,pdlp`, `--time-limit S`
+(defaults: 10s per LP, 60s per MIP), `--binary PATH`.
+
+Regenerating the lists:
+
+```bash
+python3 tests/perf/run_instance_gate.py lp --write-expected        # refresh listed rows
+python3 tests/perf/run_instance_gate.py lp --all --write-expected  # add every instance with a reference
+```
+
+`--write-expected` keeps every existing row and overwrites only what this run
+observed. Review the diff before committing it: a row moving to `dnf` is a
+regression, and `disagree` is a bug to file, not a class to accept.
+
+The lists currently cover the instances the unit tests already gate: dual
+simplex on nine Netlib LPs, and barrier and PDLP on a four-instance smoke subset
+(barrier is `dnf` throughout, see #204). The MIP list covers flugpl, gen, gt2
+and p0201. Widening them to the full sets is a benchmark-scale run,
+tracked in #223. The gate records no timings; timing baselines belong to
+#213.
+
+The gate's own tests: `uv run --with pytest pytest tests/perf/test_run_instance_gate.py`.
+
 # Performance Regression Gate
 
 Use the benchmark scripts + `check_regression.py` to enforce no-regression policy.

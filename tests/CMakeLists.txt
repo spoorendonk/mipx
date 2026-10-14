@@ -76,3 +76,27 @@ catch_discover_tests(mipx-tests
     TEST_PREFIX "solver-regression: "
     PROPERTIES LABELS "solver-regression"
 )
+
+# Instance gate (#208): every listed Netlib LP (per backend) and curated MIPLIB
+# MIP is classified against its .solu reference and held to the expected class
+# checked in under tests/perf/instance_gate/. A wrong answer always fails.
+#
+#   ctest --test-dir build -L instance-gate --output-on-failure
+#
+# Also labelled solver-regression, so the commit and push gates (which run
+# -LE solver-regression) leave it out. Without downloaded instances the script
+# exits 77, which ctest reports as skipped.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(TARGET mipx-solve AND Python3_Interpreter_FOUND)
+    foreach(suite lp mip)
+        add_test(NAME "instance-gate: ${suite}"
+            COMMAND Python3::Interpreter
+                "${PROJECT_SOURCE_DIR}/tests/perf/run_instance_gate.py" ${suite}
+                --binary "$<TARGET_FILE:mipx-solve>"
+        )
+        set_tests_properties("instance-gate: ${suite}" PROPERTIES
+            LABELS "solver-regression;instance-gate"
+            SKIP_RETURN_CODE 77
+        )
+    endforeach()
+endif()
