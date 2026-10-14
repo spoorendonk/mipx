@@ -103,6 +103,10 @@ private:
 
     /// Number of original binary variables (for sizing lit_to_cliques_).
     Index num_cols_ = 0;
+
+    /// Per column: whether the graph the table was built from tracks it as
+    /// binary.
+    std::vector<bool> binary_;
 };
 
 }  // namespace mipx

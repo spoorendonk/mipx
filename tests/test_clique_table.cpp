@@ -187,6 +187,12 @@ TEST_CASE("CliqueTable: extractFromCut", "[clique_table]") {
     cut.upper = 1.0;
     cut.family = CutFamily::Clique;
 
+    // Valid only in a subtree, the same cut is no clique of the global table.
+    Cut local_cut = cut;
+    local_cut.local = true;
+    CHECK(table.extractFromCut(local_cut, prob, graph) == 0);
+    CHECK(table.numCliques() == before);
+
     Int added = table.extractFromCut(cut, prob, graph);
     CHECK(added == 1);
     CHECK(table.numCliques() == before + 1);
@@ -496,4 +502,55 @@ TEST_CASE("CliqueTable: findSubstitutions", "[clique_table]") {
         }
     }
     CHECK(found);
+}
+
+TEST_CASE("ConflictGraph: Integer [0, 1] columns count as binaries", "[clique_table]") {
+    // MIPLIB declares 0/1 variables as MARKER INTORG integers with UP 1, which
+    // the MPS reader types Integer, not Binary (issue #218).
+    auto prob = makeFiveBinarySetPacking();
+    for (auto& type : prob.col_type) {
+        type = VarType::Integer;
+    }
+
+    ConflictGraph graph;
+    graph.build(prob);
+    CHECK(graph.numBinaries() == 5);
+    // Every pair inside each of the two rows: 3 + 3.
+    CHECK(graph.numEdges() == 6);
+    CHECK(graph.conflicts({0, false}, {1, false}));
+    CHECK(graph.conflicts({2, false}, {4, false}));
+    CHECK_FALSE(graph.conflicts({0, false}, {3, false}));
+
+    CliqueTable table;
+    table.build(prob, graph);
+    CHECK(table.numCliques() >= 2);
+    const std::vector<Real> primals = {0.5, 0.5, 0.0, 0.5, 0.5};
+    CHECK_FALSE(table.cliquePartition(primals, prob).empty());
+
+    // Asked for typed binaries only, the same model has none.
+    ConflictGraph typed;
+    typed.build(prob, BinaryColumns::TypedOnly);
+    CHECK(typed.numBinaries() == 0);
+    CHECK(typed.numEdges() == 0);
+}
+
+TEST_CASE("ConflictGraph: a general integer column is not a binary", "[clique_table]") {
+    // x2 ranges over {0, 1, 2}: the row still forbids x0 = x1 = 1, but x2
+    // takes no part in the graph.
+    auto prob = makeFiveBinarySetPacking();
+    for (auto& type : prob.col_type) {
+        type = VarType::Integer;
+    }
+    prob.col_upper[2] = 2.0;
+
+    CHECK(isBinaryColumn(prob, 0));
+    CHECK_FALSE(isBinaryColumn(prob, 2));
+
+    ConflictGraph graph;
+    graph.build(prob);
+    CHECK(graph.numBinaries() == 4);
+    CHECK_FALSE(graph.isBinary(2));
+    CHECK(graph.conflicts({0, false}, {1, false}));
+    CHECK(graph.conflicts({3, false}, {4, false}));
+    CHECK(graph.numEdges() == 2);
 }

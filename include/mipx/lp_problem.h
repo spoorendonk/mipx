@@ -72,4 +72,16 @@ void validateModelFeatures(const LpProblem& problem);
 /// Linearize SOS/indicator/semi features into core row/bound form.
 LpProblem linearizeModelFeatures(const LpProblem& problem);
 
+/// True when column @p j is a 0/1 variable by the problem's own bounds: typed
+/// VarType::Binary, or VarType::Integer with bounds exactly [0, 1]. The MPS
+/// reader types only a BV bound as Binary, so the MARKER INTORG columns with
+/// UP 1 that MIPLIB uses for its 0/1 variables stay Integer. The bounds read
+/// are those of @p problem, so a general integer a node has tightened to
+/// [0, 1] counts only in a problem carrying the node's bounds.
+[[nodiscard]] inline bool isBinaryColumn(const LpProblem& problem, Index j) {
+    const VarType type = problem.col_type[j];
+    return type == VarType::Binary ||
+           (type == VarType::Integer && problem.col_lower[j] == 0.0 && problem.col_upper[j] == 1.0);
+}
+
 }  // namespace mipx

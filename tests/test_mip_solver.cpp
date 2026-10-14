@@ -1676,6 +1676,30 @@ TEST_CASE("MipSolver: clique table is built at root and preserves optimum", "[mi
     CHECK(repeat_stats.cliques_from_cuts == stats.cliques_from_cuts);
 }
 
+TEST_CASE("MipSolver: clique table is built over Integer [0, 1] columns", "[mip][clique]") {
+    // The same 0/1 model with its columns typed the way MIPLIB's MARKER INTORG
+    // integers read in (issue #218): the table must not come out empty.
+    auto lp = buildOddCycleSetPackingMip();
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        REQUIRE(lp.col_lower[j] == 0.0);
+        REQUIRE(lp.col_upper[j] == 1.0);
+        lp.col_type[j] = VarType::Integer;
+    }
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCliqueTableEnabled(true);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-2.0, 1e-9));
+
+    const MipCliqueStats stats = solver.getCliqueStats();
+    CHECK(stats.num_binaries == lp.num_cols);
+    CHECK(stats.num_conflict_edges >= 1);
+    CHECK(stats.num_cliques > 0);
+}
+
 TEST_CASE("MipSolver: root cuts feed the clique table", "[mip][clique]") {
     const auto lp = buildBinaryConflictRowMip();
 

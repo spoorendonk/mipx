@@ -190,8 +190,13 @@ std::optional<HeuristicSolution> CliqueRoundingHeuristic::run(
         return std::nullopt;
     }
 
+    // Typed binaries only, as countBinaries and the bound pass count them.
+    // Widening this heuristic to Integer [0, 1] columns would change the
+    // default search, which #218 leaves as it was, and needs care besides:
+    // the problem here may carry node bounds, under which a general integer
+    // tightened to [0, 1] would read as binary.
     ConflictGraph graph;
-    graph.build(problem);
+    graph.build(problem, BinaryColumns::TypedOnly);
     CliqueTable table;
     table.build(problem, graph);
     last_clique_count_ = static_cast<Int>(table.numCliques());

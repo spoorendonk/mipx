@@ -8,6 +8,12 @@ namespace mipx {
 void CliqueTable::build(const LpProblem& problem, const ConflictGraph& graph) {
     num_cols_ = problem.num_cols;
     cliques_.clear();
+    // The table's binaries are the graph's, so a caller choosing which columns
+    // count (BinaryColumns) chooses for both.
+    binary_.assign(static_cast<std::size_t>(num_cols_), false);
+    for (Index j = 0; j < num_cols_; ++j) {
+        binary_[static_cast<std::size_t>(j)] = graph.isBinary(j);
+    }
     // Literal id space: 2 * num_cols (one for each polarity of each column).
     lit_to_cliques_.assign(2 * num_cols_, {});
 
@@ -31,7 +37,7 @@ void CliqueTable::build(const LpProblem& problem, const ConflictGraph& graph) {
         for (Index k = 0; k < row.size(); ++k) {
             Index j = row.indices[k];
             Real a = row.values[k];
-            if (problem.col_type[j] != VarType::Binary) {
+            if (!graph.isBinary(j)) {
                 valid = false;
                 break;
             }
@@ -72,7 +78,7 @@ void CliqueTable::build(const LpProblem& problem, const ConflictGraph& graph) {
                 all_binary = false;
                 break;
             }
-            if (problem.col_type[j] != VarType::Binary) {
+            if (!graph.isBinary(j)) {
                 all_binary = false;
                 break;
             }
@@ -125,6 +131,9 @@ Int CliqueTable::extractFromCut(const Cut& cut, const LpProblem& problem,
     // sum of binary variables <= 1.
     if (cut.upper > 1.0 + 1e-9 || cut.upper < 1.0 - 1e-9)
         return 0;
+    // The table is global: a cut valid only in a subtree is no clique of it.
+    if (cut.local)
+        return 0;
 
     Clique clique;
     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -132,7 +141,7 @@ Int CliqueTable::extractFromCut(const Cut& cut, const LpProblem& problem,
         Real v = cut.values[k];
         if (j < 0 || j >= problem.num_cols)
             return 0;
-        if (problem.col_type[j] != VarType::Binary)
+        if (!graph.isBinary(j))
             return 0;
         if (std::abs(v - 1.0) > 1e-9)
             return 0;
@@ -341,7 +350,7 @@ std::vector<Clique> CliqueTable::findObjectiveCliques(const LpProblem& problem,
     };
     std::vector<ObjBin> pos_obj_bins;
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] != VarType::Binary)
+        if (!graph.isBinary(j))
             continue;
         Real c = (problem.sense == Sense::Minimize) ? problem.obj[j] : -problem.obj[j];
         if (c > 1e-9) {
@@ -392,7 +401,7 @@ std::vector<Clique> CliqueTable::cliquePartition(std::span<const Real> primals,
     };
     std::vector<FracBin> frac_bins;
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] != VarType::Binary)
+        if (j >= num_cols_ || !binary_[static_cast<std::size_t>(j)])
             continue;
         if (j >= static_cast<Index>(primals.size()))
             continue;

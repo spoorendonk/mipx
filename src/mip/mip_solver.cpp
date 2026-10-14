@@ -1340,9 +1340,12 @@ void MipSolver::buildCliqueTable() {
         return;
     }
 
+    // The table is global, so it is built on the model's bounds: a 0/1 column
+    // here is one over the whole tree, typed Binary or Integer over [0, 1]
+    // (issue #218: MIPLIB declares its 0/1 variables the second way).
     Index num_binaries = 0;
     for (Index j = 0; j < problem_.num_cols; ++j) {
-        if (problem_.col_type[j] == VarType::Binary) {
+        if (isBinaryColumn(problem_, j)) {
             ++num_binaries;
         }
     }
@@ -1365,7 +1368,7 @@ void MipSolver::buildCliqueTable() {
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    conflict_graph_.build(problem_);
+    conflict_graph_.build(problem_, BinaryColumns::ZeroOne);
     clique_table_.build(problem_, conflict_graph_);
     clique_stats_.build_time_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
