@@ -18,14 +18,6 @@ namespace {
 /// formula, and a wrong answer there produces an invalid cut.
 constexpr Real kDataIntTol = 1e-9;
 
-/// Tableau entries below this are numerical zeros of the factorization, not
-/// coefficients: B^-1 A carries round-off of this order on every entry, and a
-/// row taken at face value would put that noise on columns with no finite
-/// bound to pay for it, where it can only trip the max/min ratio screen. It
-/// reads the row identity, before any GMI scaling, so it is not a dropped cut
-/// coefficient; those are paid for in finalizeCut.
-constexpr Real kTableauZeroTol = 1e-10;
-
 /// Relative size, against the magnitude of the terms summed into it, below
 /// which a cut coefficient is cancellation round-off (a few thousand ulps).
 constexpr Real kCancellationTol = 1e-12;
@@ -184,9 +176,6 @@ bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, In
     if (boundIsLocal(bound, global_bound, sign)) {
         builder.local = true;
     }
-    if (std::abs(alpha) < kTableauZeroTol) {
-        return true;  // tableau round-off: no term, bound still recorded
-    }
 
     // A negligible coefficient is not dropped here: dropping a term of a >= cut
     // strengthens it, so it goes into the cut and finalizeCut drops it there
@@ -216,12 +205,9 @@ bool addLogicalTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index
                     RowScratch& scratch, CutBuilder& builder) {
     // As for a structural column: delta >= 0 rests on the row holding, so a row
     // the caller has not vouched for makes the cut local whatever coefficient
-    // comes out -- including none at all, when the entry is round-off.
+    // comes out.
     if (provenance.isLocal(row)) {
         builder.local = true;
-    }
-    if (std::abs(alpha) < kTableauZeroTol) {
-        return true;  // tableau round-off: no term, row still recorded
     }
 
     Real row_lower = 0.0;
@@ -303,8 +289,8 @@ bool accumulateTerms(const LpProblem& problem, const DualSimplexSolver& lp,
             continue;
         }
         // Only an exactly-zero entry means the variable is absent from the row.
-        // A round-off-sized one still leans on delta_k >= 0, so it is handed
-        // to the term builders, which record the bound and then skip it.
+        // A tiny one still leans on delta_k >= 0 and still carries a
+        // coefficient, which finalizeCut pays for if it drops it.
         const Real alpha = tab_row[k];
         if (alpha == 0.0) {
             continue;
@@ -331,19 +317,13 @@ bool finalizeCut(CutBuilder& builder, const ColumnBox& box, Real coeff_tol, Cut&
     const auto lower = builder.local ? std::span<const Real>(box.lp_lower) : box.global_lower;
     const auto upper = builder.local ? std::span<const Real>(box.lp_upper) : box.global_upper;
     // A column reached both directly and through a substituted logical can
-    // cancel to zero in exact arithmetic and leave float round-off behind. That
-    // residual is not cut mass -- it is the same error every coefficient
-    // carries -- so it is zeroed outright rather than paid for: on a column
-    // with no finite bound it could not be paid for, and would sink the cut at
-    // the max/min ratio screen.
-    for (std::size_t j = 0; j < builder.coeff.size(); ++j) {
-        if (std::abs(builder.coeff[j]) <= kCancellationTol * builder.magnitude[j]) {
-            builder.coeff[j] = 0.0;
-        }
-    }
-
+    // cancel to zero in exact arithmetic and leave float round-off behind.
+    // Where the column is bounded that residue is paid for like any other
+    // small term; where it is not, it is zeroed as the round-off it is, since
+    // keeping it would sink the cut at the max/min ratio screen.
     Int dropped = 0;
-    builder.rhs = dropAndRelax(builder.coeff, builder.rhs, lower, upper, coeff_tol, &dropped);
+    builder.rhs = dropAndRelax(builder.coeff, builder.rhs, lower, upper, coeff_tol, &dropped,
+                               builder.magnitude, kCancellationTol);
     relaxed_terms += dropped;
 
     norm_sq = 0.0;
@@ -361,22 +341,28 @@ bool finalizeCut(CutBuilder& builder, const ColumnBox& box, Real coeff_tol, Cut&
 }  // namespace
 
 Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
-                  std::span<const Real> upper, Real drop_tol, Int* dropped) {
+                  std::span<const Real> upper, Real drop_tol, Int* dropped,
+                  std::span<const Real> magnitude, Real cancel_tol) {
     for (std::size_t j = 0; j < coeff.size(); ++j) {
         const Real value = coeff[j];
-        if (value == 0.0 || std::abs(value) > drop_tol) {
+        if (value == 0.0) {
+            continue;
+        }
+        const Real cancellation = magnitude.empty() ? 0.0 : cancel_tol * magnitude[j];
+        if (std::abs(value) > std::max(drop_tol, cancellation)) {
             continue;
         }
         // The term's largest value over the box; lowering rhs by it keeps
         // every point the term could have helped over the line.
         const Real bound = (value > 0.0) ? upper[j] : lower[j];
-        if (!std::isfinite(bound)) {
-            continue;  // cannot be paid for: keep the term
-        }
-        rhs -= value * bound;
-        coeff[j] = 0.0;
-        if (dropped != nullptr) {
-            ++*dropped;
+        if (std::isfinite(bound)) {
+            rhs -= value * bound;
+            coeff[j] = 0.0;
+            if (dropped != nullptr) {
+                ++*dropped;
+            }
+        } else if (std::abs(value) <= cancellation) {
+            coeff[j] = 0.0;  // round-off of the sum, not cut mass
         }
     }
     return rhs;
@@ -486,28 +472,19 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
 
         // The numerical safety screen CutPool::addCut enforces on every cut,
         // applied here first so a rejection is counted as rejected_screen
-        // rather than rejected_pool. No check is skipped: the ones the
-        // construction above already guarantees (sorted indices, |coef| above
-        // kCoeffTol, finite rhs, non-empty support, norm_sq above kCoeffTol)
-        // are cheap to re-test, and the ones it does not guarantee -- a maximum
-        // coefficient above 1e6, a max/min coefficient ratio above 1e8, and a
-        // squared norm above 1e16 -- are exactly why the screen is here. A GMI
-        // coefficient is t/f0 (or fj/f0) on a nonbasic column, so a basic
-        // variable whose fractional part f0 sits just above kIntTol blows the
-        // coefficient up without any of the local checks noticing.
+        // rather than rejected_pool. What the construction above does not
+        // guarantee -- a maximum coefficient above 1e6, a max/min coefficient
+        // ratio above 1e8, a squared norm above 1e16 -- is exactly why the
+        // screen is here: a GMI coefficient is t/f0 (or fj/f0) on a nonbasic
+        // column, so a basic variable whose fractional part f0 sits just above
+        // kIntTol blows the coefficient up without any local check noticing.
         //
-        // Note the screen is stricter than the sparsification in finalizeCut:
-        // it drops the whole cut when max|coef| / min|coef| exceeds 1e8, while
-        // finalizeCut keeps every coefficient above kCoeffTol = 1e-10. A cut
-        // carrying an O(1) coefficient next to a 5e-10 cancellation residual is
-        // therefore rejected outright -- and substituting a logical back over a
-        // whole row is a ready source of such residuals, so stats()
-        // .rejected_screen is worth watching. That is still deliberate: Gomory
-        // gets the same screen as everyone else, and a Gomory-only exemption
-        // would put the ill-conditioned cut it is meant to catch straight into
-        // the LP. The fix, when it comes, is a relative drop tolerance applied
-        // to every family before screening (issue #209), not a
-        // carve-out here.
+        // The screen also rejects a cut that keeps a coefficient finalizeCut
+        // could not pay to drop: a small genuine term on a column with no
+        // finite bound in the needed direction trips the ratio limit. Losing
+        // that cut is the price of validity. Gomory gets the same screen as
+        // every other family; a Gomory-only exemption would put the
+        // ill-conditioned cut it is meant to catch straight into the LP.
         if (!isNumericallySafeCut(cut)) {
             ++stats_.rejected_screen;
             continue;

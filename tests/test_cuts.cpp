@@ -835,6 +835,27 @@ TEST_CASE("Gomory: a tiny coefficient on an unbounded column is kept", "[cuts][g
     CHECK(relaxed == 1.0);
 }
 
+TEST_CASE("Gomory: cancellation residue is paid where bounded, zeroed where not",
+          "[cuts][gomory]") {
+    // Each coefficient here is what is left of terms summing to magnitude 1e8.
+    // 1e-5 is well above the absolute drop tolerance but within 1e-12 * 1e8,
+    // so it is round-off of the sum: paid for over a bounded column, zeroed on
+    // an unbounded one. A residue the same size on a column whose own terms
+    // were tiny is genuine and, unbounded, has to stay.
+    std::vector<Real> coeff = {1.0, 1e-5, 1e-5, 1e-5};
+    const std::vector<Real> magnitude = {1.0, 1e8, 1e8, 1e-5};
+    const std::vector<Real> lower = {0.0, 0.0, 0.0, 0.0};
+    const std::vector<Real> upper = {1.0, 10.0, kInf, kInf};
+
+    Int dropped = 0;
+    const Real relaxed = dropAndRelax(coeff, 1.0, lower, upper, 1e-10, &dropped, magnitude, 1e-12);
+    CHECK(dropped == 1);
+    CHECK_THAT(relaxed, WithinAbs(1.0 - 1e-4, 1e-15));
+    CHECK(coeff[1] == 0.0);
+    CHECK(coeff[2] == 0.0);
+    CHECK(coeff[3] == 1e-5);
+}
+
 TEST_CASE("SeparatorManager: Gomory family stats carry the separator's counts", "[cuts][gomory]") {
     CutFamilyConfig only_gomory{};
     only_gomory.mir = false;
@@ -2003,4 +2024,59 @@ TEST_CASE("MipSolver: one cut family at a time silences all the others",
     // At least one solo run has to separate something; otherwise every check
     // above would hold vacuously.
     CHECK(solo_accepted_total > 0);
+}
+
+TEST_CASE("Gomory: a dropped term is paid over the box the cut is valid in", "[cuts][gomory]") {
+    // min -x - 1e-10 z  s.t.  x + 1e-11 z <= 2.2,  x in [0, 10] integer,
+    // z in [0, 1e9] continuous. z sits at its upper bound and its GMI term
+    // survives the logical substitution as a coefficient below kCoeffTol, so
+    // finalizeCut drops it -- and has to pay for it over z's range.
+    LpProblem problem;
+    problem.sense = Sense::Minimize;
+    problem.num_cols = 2;
+    problem.obj = {-1.0, -1e-10};
+    problem.col_lower = {0.0, 0.0};
+    problem.col_upper = {10.0, 1e9};
+    problem.col_type = {VarType::Integer, VarType::Continuous};
+    problem.num_rows = 1;
+    problem.row_lower = {-kInf};
+    problem.row_upper = {2.2};
+    problem.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1e-11}});
+
+    // Returns the x limit the single-column cut -a x >= -b states (x <= b/a).
+    auto separateOne = [&](Real z_upper, bool expect_local, const std::vector<Real>& z_points) {
+        DualSimplexSolver lp;
+        lp.load(problem);
+        lp.setColBounds(1, 0.0, z_upper);
+        REQUIRE(lp.solve().status == Status::Optimal);
+        auto primals = lp.getPrimalValues();
+        REQUIRE(primals[1] == z_upper);
+
+        CutPool pool;
+        GomorySeparator gomory;
+        REQUIRE(gomory.separate(lp, problem, primals, pool) == 1);
+        CHECK(gomory.stats().relaxed_terms == 1);
+        const auto& cut = pool[0];
+        CHECK(cut.local == expect_local);
+        REQUIRE(cut.indices == std::vector<Index>{0});  // z dropped
+
+        // Every feasible point of the cut's box survives it: x <= 2 at any z
+        // there, since x + 1e-11 z <= 2.2 holds for z up to 2e10.
+        for (Real x = 0.0; x <= 2.0; x += 1.0) {
+            for (Real z : z_points) {
+                REQUIRE(x + 1e-11 * z <= 2.2);
+                CHECK(cut.values[0] * x >= cut.lower - 1e-9);
+            }
+        }
+        return cut.lower / cut.values[0];
+    };
+
+    // Global cut: paid over the model's z range [0, 1e9].
+    const Real global_limit = separateOne(1e9, false, {0.0, 1e6, 1e9});
+    // Node-tightened z <= 1e6: the cut is local and pays over the node range.
+    // Paying over the model range instead would relax it about as much as
+    // the global cut, three orders of magnitude more than needed.
+    const Real local_limit = separateOne(1e6, true, {0.0, 1e6});
+    CHECK(global_limit > 2.01);
+    CHECK(local_limit < 2.001);
 }

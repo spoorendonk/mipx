@@ -37,16 +37,23 @@ struct GomoryStats {
 /// Drop the negligible terms of the cut `sum_j coeff[j] * x_j >= rhs` over the
 /// box `lower <= x <= upper`, and return the right-hand side that pays for them.
 ///
-/// Every coefficient with `0 < |coeff[j]| <= drop_tol` is set to zero and the
-/// right-hand side is lowered by the largest value that term takes over the
-/// box (`coeff[j] * upper[j]` for a positive coefficient, `coeff[j] *
-/// lower[j]` for a negative one). The result therefore admits every point of
-/// the box the original cut did: dropping a term of a `>=` cut without that
-/// payment strengthens it, and on a wide-range column cuts off feasible
-/// points. A term whose bound in the needed direction is infinite cannot be
-/// paid for and is kept. `dropped`, when given, counts the terms removed.
+/// A term is negligible when `|coeff[j]| <= max(drop_tol, cancel_tol *
+/// magnitude[j])`, `magnitude[j]` being the summed size of the terms that were
+/// added up into `coeff[j]` (empty: no relative test). A negligible term is set
+/// to zero and the right-hand side lowered by the largest value it takes over
+/// the box (`coeff[j] * upper[j]` for a positive coefficient, `coeff[j] *
+/// lower[j]` for a negative one), so the result admits every point of the box
+/// the original cut did: dropping a term of a `>=` cut without that payment
+/// strengthens it, and on a wide-range column cuts off feasible points.
+///
+/// A negligible term whose bound in the needed direction is infinite cannot be
+/// paid for. It is kept, unless it is within `cancel_tol * magnitude[j]`: then
+/// it is cancellation round-off of the sum, of the same order as the error on
+/// every other coefficient, and is zeroed. `dropped`, when given, counts the
+/// terms paid for.
 [[nodiscard]] Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
-                                std::span<const Real> upper, Real drop_tol, Int* dropped = nullptr);
+                                std::span<const Real> upper, Real drop_tol, Int* dropped = nullptr,
+                                std::span<const Real> magnitude = {}, Real cancel_tol = 0.0);
 
 /// Generate Gomory mixed-integer (GMI) cuts from a simplex tableau.
 ///
