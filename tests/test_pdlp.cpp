@@ -3,6 +3,7 @@
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
 #include "mipx/presolve.h"
+#include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -99,9 +100,7 @@ LpProblem buildBranchingMip() {
 
 }  // namespace
 
-static std::string testDataDir() {
-    return std::string(TEST_DATA_DIR);
-}
+using mipx::test::testDataDir;
 
 TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     auto lp = buildSimpleLp();

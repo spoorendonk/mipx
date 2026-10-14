@@ -26,6 +26,7 @@ add_executable(mipx-tests
     test_clique_table.cpp
     test_reduced_cost_fixer.cpp
     test_cli.cpp
+    test_paths.cpp
 )
 
 target_link_libraries(mipx-tests PRIVATE
@@ -35,14 +36,19 @@ target_link_libraries(mipx-tests PRIVATE
 
 mipx_set_compiler_flags(mipx-tests)
 
-target_compile_definitions(mipx-tests PRIVATE
+# Absolute paths go to test_paths.cpp alone. On the whole target they would put
+# the checkout's path on every test file's command line, so each fresh
+# worktree the pre-push gate builds in would miss the compiler cache for all of
+# them (#217); here one small file misses instead.
+set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
 
 # The CLI tests in test_cli.cpp spawn the real binary; they compile to nothing
 # when there is no binary to spawn (MIPX_BUILD_CLI=OFF).
 if(TARGET mipx-solve)
-    target_compile_definitions(mipx-tests PRIVATE
+    target_compile_definitions(mipx-tests PRIVATE MIPX_HAS_SOLVE_BINARY)
+    set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
         MIPX_SOLVE_BINARY="$<TARGET_FILE:mipx-solve>"
     )
     add_dependencies(mipx-tests mipx-solve)

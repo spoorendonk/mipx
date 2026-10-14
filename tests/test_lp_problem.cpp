@@ -1,6 +1,7 @@
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
+#include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -13,9 +14,7 @@
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
-static std::string testDataDir() {
-    return std::string(TEST_DATA_DIR);
-}
+using mipx::test::testDataDir;
 
 static MipResult solveFeatureModel(const LpProblem& lp) {
     MipSolver solver;

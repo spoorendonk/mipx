@@ -2,6 +2,7 @@
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
+#include "test_paths.hpp"
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -19,9 +20,7 @@ using Catch::Matchers::WithinAbs;
 
 namespace fs = std::filesystem;
 
-static std::string testDataDir() {
-    return std::string(TEST_DATA_DIR);
-}
+using mipx::test::testDataDir;
 
 // ---------------------------------------------------------------------------
 // Netlib instance parsing tests — verify we can read all downloaded instances.

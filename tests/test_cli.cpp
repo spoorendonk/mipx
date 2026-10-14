@@ -8,7 +8,9 @@
 // The whole file is compiled out when the CLI is not built (MIPX_BUILD_CLI=OFF
 // leaves no binary to run) or on platforms without popen().
 
-#if defined(MIPX_SOLVE_BINARY) && !defined(_WIN32)
+#if defined(MIPX_HAS_SOLVE_BINARY) && !defined(_WIN32)
+
+#include "test_paths.hpp"
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
@@ -19,9 +21,7 @@
 
 namespace {
 
-std::string testDataDir() {
-    return std::string(TEST_DATA_DIR);
-}
+using mipx::test::testDataDir;
 
 struct CliRun {
     int exit_code = -1;
@@ -37,7 +37,7 @@ struct CliRun {
 /// Arguments are single-quoted, so paths with spaces survive; none of them
 /// contain a single quote.
 CliRun runSolver(const std::string& args) {
-    const std::string command = std::string("'") + MIPX_SOLVE_BINARY + "' " + args + " 2>&1";
+    const std::string command = "'" + mipx::test::solveBinary() + "' " + args + " 2>&1";
 
     CliRun run;
     FILE* pipe = popen(command.c_str(), "r");
@@ -138,4 +138,4 @@ TEST_CASE("CLI: --format rejects an unknown value", "[cli][io]") {
     CHECK(run.mentions("Invalid --format value"));
 }
 
-#endif  // MIPX_SOLVE_BINARY && !_WIN32
+#endif  // MIPX_HAS_SOLVE_BINARY && !_WIN32

@@ -2,6 +2,7 @@
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
+#include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -144,9 +145,7 @@ Real originalObjective(const LpProblem& lp, std::span<const Real> x) {
 }
 
 #ifdef MIPX_HAS_CUDSS
-std::string testDataDir() {
-    return std::string(TEST_DATA_DIR);
-}
+using mipx::test::testDataDir;
 
 void testBarrierNetlib(const std::string& name, Real expected_obj, BarrierAlgorithm algo,
                        Real rel_tol = 1e-4) {

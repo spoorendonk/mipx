@@ -2,6 +2,7 @@
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "mipx/presolve.h"
+#include "test_paths.hpp"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -1605,11 +1606,11 @@ TEST_CASE("Presolve: a row forcing only within tolerance is not reduced", "[pres
 // fast default suite, and skips when the instance is not downloaded. The
 // data-free case above is what guards this reduction in the commit gate.
 TEST_CASE("Presolve: netlib bore3d stays feasible and keeps its optimum", "[presolve][netlib]") {
-    const std::string path = std::string(TEST_DATA_DIR) + "/netlib/bore3d.mps.gz";
+    const std::string path = mipx::test::testDataDir() + "/netlib/bore3d.mps.gz";
     if (!std::filesystem::exists(path)) {
         SKIP("bore3d not downloaded. Run tests/data/download_netlib.sh");
     }
-    const std::string solu_file = std::string(TEST_DATA_DIR) + "/netlib.solu";
+    const std::string solu_file = mipx::test::testDataDir() + "/netlib.solu";
     if (!std::filesystem::exists(solu_file)) {
         SKIP("netlib.solu not found");
     }

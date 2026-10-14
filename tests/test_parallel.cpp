@@ -1,5 +1,6 @@
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
+#include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -629,7 +630,7 @@ TEST_CASE("Parallel: deterministic aggressive search updates search controls",
 }
 
 TEST_CASE("Parallel: MIPLIB gt2", "[parallel][tbb][miplib]") {
-    std::string path = std::string(TEST_DATA_DIR) + "/miplib/gt2.mps.gz";
+    std::string path = mipx::test::testDataDir() + "/miplib/gt2.mps.gz";
     if (!std::filesystem::exists(path)) {
         SKIP("gt2.mps.gz not found (run download_miplib.sh --small)");
     }
