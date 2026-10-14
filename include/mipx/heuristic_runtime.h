@@ -1,15 +1,15 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/heuristics.h"
+#include "mipx/lp_problem.h"
+
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/heuristics.h"
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -48,9 +48,7 @@ class SolutionPool {
 public:
     explicit SolutionPool(Sense sense = Sense::Minimize) : sense_(sense) {}
 
-    bool submit(HeuristicSolution solution,
-                const char* source = "",
-                Int thread_id = -1);
+    bool submit(HeuristicSolution solution, const char* source = "", Int thread_id = -1);
 
     [[nodiscard]] std::optional<HeuristicSolution> bestSolution() const;
     [[nodiscard]] bool hasSolution() const;
@@ -78,8 +76,7 @@ public:
 
     void setSeed(uint64_t seed) { seed_ = seed; }
 
-    [[nodiscard]] RestartStrategy choose(HeuristicRuntimeMode mode,
-                                         Int epoch,
+    [[nodiscard]] RestartStrategy choose(HeuristicRuntimeMode mode, Int epoch,
                                          Int stagnation_epochs) const;
     [[nodiscard]] static const char* name(RestartStrategy s);
 
@@ -229,8 +226,7 @@ public:
     [[nodiscard]] HeuristicRuntimeMode mode() const { return config_.mode; }
     [[nodiscard]] const HeuristicRuntimeStats& stats() const { return stats_; }
 
-    RootHeuristicOutcome runRootPortfolio(const RootHeuristicContext& ctx,
-                                          Real& incumbent,
+    RootHeuristicOutcome runRootPortfolio(const RootHeuristicContext& ctx, Real& incumbent,
                                           std::vector<Real>& best_solution);
 
     WorkerHeuristicOutcome runTreeWorker(const WorkerHeuristicContext& ctx);

@@ -1,12 +1,12 @@
 #pragma once
 
-#include <span>
-#include <vector>
-
 #include "mipx/conflict_graph.h"
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
 #include "mipx/lp_problem.h"
+
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -31,13 +31,10 @@ public:
 
     /// Extract cliques from a new cut added to the pool.
     /// Returns the number of new cliques found.
-    Int extractFromCut(const Cut& cut, const LpProblem& problem,
-                       const ConflictGraph& graph);
+    Int extractFromCut(const Cut& cut, const LpProblem& problem, const ConflictGraph& graph);
 
     /// Number of cliques stored.
-    [[nodiscard]] Index numCliques() const {
-        return static_cast<Index>(cliques_.size());
-    }
+    [[nodiscard]] Index numCliques() const { return static_cast<Index>(cliques_.size()); }
 
     /// Access a clique by index.
     [[nodiscard]] const Clique& clique(Index i) const { return cliques_[i]; }
@@ -52,23 +49,20 @@ public:
 
     /// Separate violated clique cover inequalities from the current LP solution.
     /// Returns the number of cuts added to the pool.
-    Int separateCliqueCover(const LpProblem& problem,
-                            std::span<const Real> primals, CutPool& pool,
-                            Real min_violation = 1e-5,
-                            Int max_cuts = 50) const;
+    Int separateCliqueCover(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
+                            Real min_violation = 1e-5, Int max_cuts = 50) const;
 
     /// Get objective cliques from 0-1 knapsack analysis of the objective.
     /// These identify sets of variables where at most one should be 1
     /// based on objective function structure.
-    [[nodiscard]] std::vector<Clique> findObjectiveCliques(
-        const LpProblem& problem, const ConflictGraph& graph) const;
+    [[nodiscard]] std::vector<Clique> findObjectiveCliques(const LpProblem& problem,
+                                                           const ConflictGraph& graph) const;
 
     /// Clique partitioning for branching: partition binary variables into
     /// clique covers. Returns a vector of cliques covering the fractional
     /// binary variables.
-    [[nodiscard]] std::vector<Clique> cliquePartition(
-        std::span<const Real> primals,
-        const LpProblem& problem) const;
+    [[nodiscard]] std::vector<Clique> cliquePartition(std::span<const Real> primals,
+                                                      const LpProblem& problem) const;
 
     /// Propagate cliques: if a literal in a clique is fixed to 1,
     /// fix all other literals to 0. Returns false if infeasibility detected.
@@ -91,8 +85,7 @@ public:
         bool complement;  // eliminated = complement ? (1 - substitute)
                           //                         : substitute
     };
-    [[nodiscard]] std::vector<Substitution> findSubstitutions(
-        const LpProblem& problem) const;
+    [[nodiscard]] std::vector<Substitution> findSubstitutions(const LpProblem& problem) const;
 
 private:
     /// Greedy extension of a partial clique to a maximal clique.

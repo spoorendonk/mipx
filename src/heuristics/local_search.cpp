@@ -1,10 +1,9 @@
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
-
-#include "mipx/dual_simplex.h"
 
 namespace mipx {
 
@@ -35,19 +34,16 @@ Real clampToBounds(Real val, Real lb, Real ub) {
 // 1-opt local search
 // ---------------------------------------------------------------------------
 
-std::optional<HeuristicSolution> OneOptHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> OneOptHeuristic::run(const LpProblem& problem,
+                                                      [[maybe_unused]] DualSimplexSolver& lp,
+                                                      std::span<const Real> primals,
+                                                      Real incumbent) {
     return run(problem, primals, incumbent);
 }
 
-std::optional<HeuristicSolution> OneOptHeuristic::run(
-    const LpProblem& problem,
-    std::span<const Real> incumbent_values,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> OneOptHeuristic::run(const LpProblem& problem,
+                                                      std::span<const Real> incumbent_values,
+                                                      Real incumbent) {
     const Index n = problem.num_cols;
     if (incumbent == kInf || static_cast<Index>(incumbent_values.size()) != n) {
         return std::nullopt;
@@ -68,7 +64,8 @@ std::optional<HeuristicSolution> OneOptHeuristic::run(
 
     // Try +1/-1 moves for each integer variable.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
 
         for (Real delta : {-1.0, 1.0}) {
             Real new_val = x[j] + delta;
@@ -77,11 +74,13 @@ std::optional<HeuristicSolution> OneOptHeuristic::run(
             }
             new_val = clampToBounds(new_val, problem.col_lower[j], problem.col_upper[j]);
             Real change = new_val - x[j];
-            if (std::abs(change) < 1e-12) continue;
+            if (std::abs(change) < 1e-12)
+                continue;
 
             // Check objective improvement.
             Real obj_change = problem.obj[j] * change;
-            if (obj_change >= -kObjectiveTol) continue;  // Not improving.
+            if (obj_change >= -kObjectiveTol)
+                continue;  // Not improving.
 
             // Check feasibility incrementally.
             auto col = problem.matrix.col(j);
@@ -108,10 +107,12 @@ std::optional<HeuristicSolution> OneOptHeuristic::run(
         }
     }
 
-    if (!improved) return std::nullopt;
+    if (!improved)
+        return std::nullopt;
 
     Real obj = computeObjective(problem, x);
-    if (obj >= incumbent - kObjectiveTol) return std::nullopt;
+    if (obj >= incumbent - kObjectiveTol)
+        return std::nullopt;
 
     return HeuristicSolution{std::move(x), obj};
 }
@@ -120,19 +121,16 @@ std::optional<HeuristicSolution> OneOptHeuristic::run(
 // 2-opt local search
 // ---------------------------------------------------------------------------
 
-std::optional<HeuristicSolution> TwoOptHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
+std::optional<HeuristicSolution> TwoOptHeuristic::run(const LpProblem& problem,
+                                                      [[maybe_unused]] DualSimplexSolver& lp,
+                                                      std::span<const Real> primals,
+                                                      Real incumbent) {
     return run(problem, primals, incumbent);
 }
 
-std::optional<HeuristicSolution> TwoOptHeuristic::run(
-    const LpProblem& problem,
-    std::span<const Real> incumbent_values,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> TwoOptHeuristic::run(const LpProblem& problem,
+                                                      std::span<const Real> incumbent_values,
+                                                      Real incumbent) {
     const Index n = problem.num_cols;
     if (incumbent == kInf || static_cast<Index>(incumbent_values.size()) != n) {
         return std::nullopt;
@@ -142,9 +140,11 @@ std::optional<HeuristicSolution> TwoOptHeuristic::run(
     std::vector<Index> int_vars;
     int_vars.reserve(n);
     for (Index j = 0; j < n; ++j) {
-        if (isIntegerVar(problem.col_type[j])) int_vars.push_back(j);
+        if (isIntegerVar(problem.col_type[j]))
+            int_vars.push_back(j);
     }
-    if (static_cast<Int>(int_vars.size()) < 2) return std::nullopt;
+    if (static_cast<Int>(int_vars.size()) < 2)
+        return std::nullopt;
 
     std::vector<Real> x(incumbent_values.begin(), incumbent_values.end());
 
@@ -163,7 +163,8 @@ std::optional<HeuristicSolution> TwoOptHeuristic::run(
     // Try swaps of pairs of integer variables (one up, one down).
     for (Index a = 0; a < static_cast<Index>(int_vars.size()) && pairs_checked < max_pairs_; ++a) {
         Index ja = int_vars[a];
-        for (Index b = a + 1; b < static_cast<Index>(int_vars.size()) && pairs_checked < max_pairs_; ++b) {
+        for (Index b = a + 1; b < static_cast<Index>(int_vars.size()) && pairs_checked < max_pairs_;
+             ++b) {
             ++pairs_checked;
             Index jb = int_vars[b];
 
@@ -184,11 +185,12 @@ std::optional<HeuristicSolution> TwoOptHeuristic::run(
 
                     Real change_a = new_a - x[ja];
                     Real change_b = new_b - x[jb];
-                    if (std::abs(change_a) < 1e-12 && std::abs(change_b) < 1e-12) continue;
+                    if (std::abs(change_a) < 1e-12 && std::abs(change_b) < 1e-12)
+                        continue;
 
-                    Real obj_change = problem.obj[ja] * change_a +
-                                      problem.obj[jb] * change_b;
-                    if (obj_change >= -kObjectiveTol) continue;
+                    Real obj_change = problem.obj[ja] * change_a + problem.obj[jb] * change_b;
+                    if (obj_change >= -kObjectiveTol)
+                        continue;
 
                     // Check feasibility.
                     // Temporarily apply changes to activity.
@@ -224,14 +226,16 @@ std::optional<HeuristicSolution> TwoOptHeuristic::run(
                     }
                 }
             }
-            next_pair:;
+        next_pair:;
         }
     }
 
-    if (!improved) return std::nullopt;
+    if (!improved)
+        return std::nullopt;
 
     Real obj = computeObjective(problem, x);
-    if (obj >= incumbent - kObjectiveTol) return std::nullopt;
+    if (obj >= incumbent - kObjectiveTol)
+        return std::nullopt;
 
     return HeuristicSolution{std::move(x), obj};
 }

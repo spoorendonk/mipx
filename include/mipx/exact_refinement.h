@@ -1,10 +1,10 @@
 #pragma once
 
-#include <span>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
+
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -20,19 +20,13 @@ struct LpCertificateMetrics {
 };
 
 /// Evaluate primal/certificate quality in long-double arithmetic.
-LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
-                                           std::span<const Real> primals,
-                                           Real reported_objective,
-                                           bool rational_check,
-                                           Real certificate_tol,
-                                           Real rational_scale,
+LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem, std::span<const Real> primals,
+                                           Real reported_objective, bool rational_check,
+                                           Real certificate_tol, Real rational_scale,
                                            double* work_units = nullptr);
 
 /// Deterministic row/bound polishing pass for numerically noisy primals.
-void iterativePrimalRepair(const LpProblem& problem,
-                           std::vector<Real>& primals,
-                           Real feasibility_tol,
-                           Int max_passes,
-                           double* work_units = nullptr);
+void iterativePrimalRepair(const LpProblem& problem, std::vector<Real>& primals,
+                           Real feasibility_tol, Int max_passes, double* work_units = nullptr);
 
 }  // namespace mipx

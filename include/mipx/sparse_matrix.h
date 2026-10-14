@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <mutex>
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -41,8 +41,8 @@ public:
 
     /// Construct from pre-formed CSR arrays (moved in). col_indices must be
     /// sorted within each row.
-    SparseMatrix(Index rows, Index cols, std::vector<Real> values,
-                 std::vector<Index> col_indices, std::vector<Index> row_starts);
+    SparseMatrix(Index rows, Index cols, std::vector<Real> values, std::vector<Index> col_indices,
+                 std::vector<Index> row_starts);
     SparseMatrix(const SparseMatrix& other);
     SparseMatrix& operator=(const SparseMatrix& other);
     SparseMatrix(SparseMatrix&& other) noexcept;
@@ -50,9 +50,7 @@ public:
 
     [[nodiscard]] Index numRows() const { return rows_; }
     [[nodiscard]] Index numCols() const { return cols_; }
-    [[nodiscard]] Index numNonzeros() const {
-        return static_cast<Index>(values_.size());
-    }
+    [[nodiscard]] Index numNonzeros() const { return static_cast<Index>(values_.size()); }
 
     /// Access row i as a sparse vector view.
     [[nodiscard]] SparseVectorView row(Index i) const;
@@ -80,12 +78,8 @@ public:
 
     /// Raw CSR access.
     [[nodiscard]] std::span<const Real> csr_values() const { return values_; }
-    [[nodiscard]] std::span<const Index> csr_col_indices() const {
-        return col_indices_;
-    }
-    [[nodiscard]] std::span<const Index> csr_row_starts() const {
-        return row_starts_;
-    }
+    [[nodiscard]] std::span<const Index> csr_col_indices() const { return col_indices_; }
+    [[nodiscard]] std::span<const Index> csr_row_starts() const { return row_starts_; }
 
 private:
     void buildCSC() const;

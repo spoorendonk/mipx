@@ -1,11 +1,10 @@
+#include "mipx/branching.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
-
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
 
 namespace mipx {
 
@@ -25,8 +24,10 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
         for (Index k = 0; k < row.size(); ++k) {
             activity += row.values[k] * values[row.indices[k]];
         }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
+        if (activity < problem.row_lower[i] - kFeasTol)
+            return false;
+        if (activity > problem.row_upper[i] + kFeasTol)
+            return false;
     }
     return true;
 }
@@ -34,11 +35,8 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
 }  // namespace
 
 std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
+    const LpProblem& problem, [[maybe_unused]] DualSimplexSolver& lp, std::span<const Real> primals,
     Real incumbent) {
-
     const Index n = problem.num_cols;
     std::vector<Real> x(primals.begin(), primals.end());
     std::vector<Real> lower(problem.col_lower.begin(), problem.col_lower.end());
@@ -46,7 +44,8 @@ std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
 
     // Step 1: Fix near-integral integer variables.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
         if (std::abs(primals[j] - std::round(primals[j])) <= kFeasTol) {
             Real val = std::round(primals[j]);
             val = std::max(val, lower[j]);
@@ -74,19 +73,21 @@ std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
 
             for (Index k = 0; k < row.size(); ++k) {
                 Index j = row.indices[k];
-                if (isIntegerVar(problem.col_type[j]) &&
-                    std::abs(lower[j] - upper[j]) > kFeasTol) {
+                if (isIntegerVar(problem.col_type[j]) && std::abs(lower[j] - upper[j]) > kFeasTol) {
                     ++unfixed_count;
                     unfixed_var = j;
                     unfixed_coeff = row.values[k];
-                    if (unfixed_count > 1) break;
+                    if (unfixed_count > 1)
+                        break;
                 } else {
                     fixed_activity += row.values[k] * x[j];
                 }
             }
 
-            if (unfixed_count != 1) continue;
-            if (std::abs(unfixed_coeff) < 1e-12) continue;
+            if (unfixed_count != 1)
+                continue;
+            if (std::abs(unfixed_coeff) < 1e-12)
+                continue;
 
             // Derive bounds for the unfixed variable.
             // row_lower <= fixed_activity + coeff * x_j <= row_upper
@@ -136,13 +137,16 @@ std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
             }
         }
 
-        if (!changed) break;
+        if (!changed)
+            break;
     }
 
     // Step 3: Round remaining unfixed integer variables.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
-        if (std::abs(lower[j] - upper[j]) <= kFeasTol) continue;  // Already fixed.
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
+        if (std::abs(lower[j] - upper[j]) <= kFeasTol)
+            continue;  // Already fixed.
 
         Real rounded = std::round(x[j]);
         rounded = std::max(rounded, lower[j]);
@@ -150,12 +154,15 @@ std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
         x[j] = rounded;
     }
 
-    if (!isRowFeasible(problem, x)) return std::nullopt;
+    if (!isRowFeasible(problem, x))
+        return std::nullopt;
 
     // Check integrality.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
-        if (std::abs(x[j] - std::round(x[j])) > kFeasTol) return std::nullopt;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
+        if (std::abs(x[j] - std::round(x[j])) > kFeasTol)
+            return std::nullopt;
     }
 
     Real obj = problem.obj_offset;
@@ -163,7 +170,8 @@ std::optional<HeuristicSolution> PropagationCompletionHeuristic::run(
         obj += problem.obj[j] * x[j];
     }
 
-    if (obj >= incumbent - kObjectiveTol) return std::nullopt;
+    if (obj >= incumbent - kObjectiveTol)
+        return std::nullopt;
 
     return HeuristicSolution{std::move(x), obj};
 }

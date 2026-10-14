@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
 #include "mipx/branching.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/symmetry.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
 
@@ -191,7 +191,8 @@ TEST_CASE("SymmetryManager adds canonical symmetry cuts", "[symmetry]") {
     lp.row_upper = {1.0};
     lp.row_names = {"sum"};
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
 
@@ -231,8 +232,10 @@ TEST_CASE("SymmetryManager orbit and cut order is deterministic", "[symmetry]") 
     lp.row_upper = {1.0, 1.0};
     lp.row_names = {"r0", "r1"};
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 2, 1.0}, {1, 3, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 2, 1.0},
+        {1, 3, 1.0},
     };
     lp.matrix = SparseMatrix(2, 4, std::move(trips));
 
@@ -273,7 +276,8 @@ TEST_CASE("Symmetry detection enforces canonical branching", "[branching][symmet
     lp.row_upper = {1.0};
     lp.row_names = {"sum"};
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
 
@@ -298,14 +302,7 @@ TEST_CASE("Symmetry detection enforces canonical branching", "[branching][symmet
     std::vector<Real> lb = lp.col_lower;
     std::vector<Real> ub = lp.col_upper;
     BranchingTelemetry telemetry;
-    auto selection = branching.select(solver,
-                                      lp,
-                                      primal,
-                                      lb,
-                                      ub,
-                                      0.0,
-                                      false,
-                                      telemetry);
+    auto selection = branching.select(solver, lp, primal, lb, ub, 0.0, false, telemetry);
     CHECK(selection.variable == 0);
 }
 

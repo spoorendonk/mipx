@@ -1,10 +1,10 @@
+#include "mipx/sparse_matrix.h"
+
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <atomic>
 #include <thread>
 #include <vector>
-
-#include "mipx/sparse_matrix.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -25,8 +25,7 @@ TEST_CASE("SparseMatrix: triplet construction", "[sparse_matrix]") {
     // 2x3 matrix:
     // [1  0  2]
     // [0  3  0]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}};
     SparseMatrix A(2, 3, trips);
 
     CHECK(A.numRows() == 2);
@@ -42,8 +41,7 @@ TEST_CASE("SparseMatrix: triplet construction", "[sparse_matrix]") {
 }
 
 TEST_CASE("SparseMatrix: duplicate summing", "[sparse_matrix]") {
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 0, 2.0}, {0, 0, 3.0}, {1, 1, 5.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 0, 2.0}, {0, 0, 3.0}, {1, 1, 5.0}};
     SparseMatrix A(2, 2, trips);
 
     CHECK(A.coeff(0, 0) == 6.0);
@@ -66,8 +64,7 @@ TEST_CASE("SparseMatrix: CSR construction", "[sparse_matrix]") {
 }
 
 TEST_CASE("SparseMatrix: row access", "[sparse_matrix]") {
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}, {2, 0, 4.0}, {2, 2, 5.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}, {2, 0, 4.0}, {2, 2, 5.0}};
     SparseMatrix A(3, 3, trips);
 
     auto r0 = A.row(0);
@@ -88,8 +85,7 @@ TEST_CASE("SparseMatrix: column access (CSC)", "[sparse_matrix]") {
     // [1  0  2]
     // [0  3  0]
     // [4  0  5]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}, {2, 0, 4.0}, {2, 2, 5.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}, {2, 0, 4.0}, {2, 2, 5.0}};
     SparseMatrix A(3, 3, trips);
 
     auto c0 = A.col(0);
@@ -112,8 +108,7 @@ TEST_CASE("SparseMatrix: column access (CSC)", "[sparse_matrix]") {
 TEST_CASE("SparseMatrix: SpMV multiply", "[sparse_matrix]") {
     // [1  2]
     // [3  4]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 2.0}, {1, 0, 3.0}, {1, 1, 4.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 2.0}, {1, 0, 3.0}, {1, 1, 4.0}};
     SparseMatrix A(2, 2, trips);
 
     std::vector<Real> x = {1.0, 2.0};
@@ -129,8 +124,7 @@ TEST_CASE("SparseMatrix: SpMV multiplyTranspose", "[sparse_matrix]") {
     // [3  4]
     // A^T = [1  3]
     //       [2  4]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 2.0}, {1, 0, 3.0}, {1, 1, 4.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 2.0}, {1, 0, 3.0}, {1, 1, 4.0}};
     SparseMatrix A(2, 2, trips);
 
     std::vector<Real> x = {1.0, 2.0};
@@ -165,8 +159,7 @@ TEST_CASE("SparseMatrix: identity SpMV", "[sparse_matrix]") {
 }
 
 TEST_CASE("SparseMatrix: addRow", "[sparse_matrix]") {
-    SparseMatrix A(2, 3, std::vector<Triplet>{
-                             {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}});
+    SparseMatrix A(2, 3, std::vector<Triplet>{{0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}});
 
     std::vector<Index> indices = {0, 2};
     std::vector<Real> values = {7.0, 8.0};
@@ -183,8 +176,7 @@ TEST_CASE("SparseMatrix: removeRow swap-and-pop", "[sparse_matrix]") {
     // [1  0]
     // [0  2]
     // [3  4]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {1, 1, 2.0}, {2, 0, 3.0}, {2, 1, 4.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 2.0}, {2, 0, 3.0}, {2, 1, 4.0}};
     SparseMatrix A(3, 2, trips);
 
     // Remove row 0 — row 2 [3,4] should take its place.
@@ -208,8 +200,7 @@ TEST_CASE("SparseMatrix: removeRowStable", "[sparse_matrix]") {
     // [1  0]
     // [0  2]
     // [3  4]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {1, 1, 2.0}, {2, 0, 3.0}, {2, 1, 4.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 1, 2.0}, {2, 0, 3.0}, {2, 1, 4.0}};
     SparseMatrix A(3, 2, trips);
 
     // Remove row 0 — rows 1, 2 shift up.
@@ -270,9 +261,8 @@ TEST_CASE("SparseMatrix: larger matrix SpMV", "[sparse_matrix]") {
     // [0  3  4  0]
     // [5  0  6  7]
     // [0  0  0  8]
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 2.0}, {1, 1, 3.0}, {1, 2, 4.0},
-        {2, 0, 5.0}, {2, 2, 6.0}, {2, 3, 7.0}, {3, 3, 8.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 2.0}, {1, 1, 3.0}, {1, 2, 4.0},
+                                  {2, 0, 5.0}, {2, 2, 6.0}, {2, 3, 7.0}, {3, 3, 8.0}};
     SparseMatrix A(4, 4, trips);
 
     std::vector<Real> x = {1.0, 2.0, 3.0, 4.0};
@@ -378,8 +368,7 @@ TEST_CASE("SparseMatrix: addRow unsorted indices", "[sparse_matrix]") {
 }
 
 TEST_CASE("SparseMatrix: copy assignment keeps independent storage", "[sparse_matrix]") {
-    std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 2, 2.0}, {1, 1, 3.0}};
     SparseMatrix A(2, 3, trips);
     (void)A.col(0);  // Build CSC cache in source matrix.
 
@@ -443,7 +432,8 @@ TEST_CASE("SparseMatrix: concurrent read-only column access is stable",
             fingerprints[static_cast<std::size_t>(t)] = fp;
         });
     }
-    for (auto& th : workers) th.join();
+    for (auto& th : workers)
+        th.join();
 
     CHECK_FALSE(failed.load(std::memory_order_relaxed));
     for (int t = 1; t < kThreads; ++t) {

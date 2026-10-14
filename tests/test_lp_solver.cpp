@@ -1,8 +1,8 @@
+#include "mipx/lp_solver.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <memory>
-
-#include "mipx/lp_solver.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -42,18 +42,14 @@ public:
         return std::vector<Real>(static_cast<std::size_t>(num_cols_), -0.25);
     }
 
-    std::vector<BasisStatus> getBasis() const override {
-        return basis_;
-    }
+    std::vector<BasisStatus> getBasis() const override { return basis_; }
 
     void setBasis(std::span<const BasisStatus> basis) override {
         basis_.assign(basis.begin(), basis.end());
     }
 
-    void addRows(std::span<const Index> /*starts*/,
-                 std::span<const Index> /*indices*/,
-                 std::span<const Real> /*values*/,
-                 std::span<const Real> lower,
+    void addRows(std::span<const Index> /*starts*/, std::span<const Index> /*indices*/,
+                 std::span<const Real> /*values*/, std::span<const Real> lower,
                  std::span<const Real> /*upper*/) override {
         // Just track how many rows were added.
         rows_added_ += static_cast<Index>(lower.size());
@@ -71,9 +67,7 @@ public:
         last_upper_ = upper;
     }
 
-    void setObjective(std::span<const Real> obj) override {
-        obj_.assign(obj.begin(), obj.end());
-    }
+    void setObjective(std::span<const Real> obj) override { obj_.assign(obj.begin(), obj.end()); }
 
     // Accessors for test inspection.
     bool loaded() const { return loaded_; }
@@ -154,11 +148,8 @@ TEST_CASE("LpSolver: basis operations", "[lp_solver]") {
     MockLpSolver mock;
 
     std::vector<BasisStatus> basis = {
-        BasisStatus::Basic,
-        BasisStatus::AtLower,
-        BasisStatus::AtUpper,
-        BasisStatus::Fixed,
-        BasisStatus::Free,
+        BasisStatus::Basic, BasisStatus::AtLower, BasisStatus::AtUpper,
+        BasisStatus::Fixed, BasisStatus::Free,
     };
     mock.setBasis(basis);
 

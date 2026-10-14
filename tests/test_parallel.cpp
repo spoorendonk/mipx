@@ -1,9 +1,9 @@
+#include "mipx/io.h"
+#include "mipx/mip_solver.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <filesystem>
-
-#include "mipx/io.h"
-#include "mipx/mip_solver.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -31,7 +31,8 @@ static LpProblem buildBranchingMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -55,7 +56,8 @@ static LpProblem buildSymmetryBranchingMip() {
     lp.row_names = {"sum"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
     };
     lp.matrix = SparseMatrix(1, 2, std::move(trips));
     return lp;
@@ -67,13 +69,11 @@ static LpProblem buildLpLightProbeMip() {
     lp.name = "parallel_lplight_probe_mip";
     lp.sense = Sense::Minimize;
     lp.num_cols = n;
-    lp.obj = {-12.0, -11.0, -10.0, -9.0, -8.0, -7.0,
-              -6.0,  -5.0,  -4.0,  -3.0, -2.0, -1.0};
+    lp.obj = {-12.0, -11.0, -10.0, -9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -2.0, -1.0};
     lp.col_lower.assign(n, 0.0);
     lp.col_upper.assign(n, 1.0);
     lp.col_type.assign(n, VarType::Binary);
-    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6",
-                    "x7", "x8", "x9", "x10", "x11", "x12"};
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12"};
 
     lp.num_rows = 1;
     lp.row_lower = {-kInf};
@@ -99,8 +99,7 @@ static LpProblem buildSearchStagnationMip() {
     lp.col_lower.assign(n, 0.0);
     lp.col_upper.assign(n, 1.0);
     lp.col_type.assign(n, VarType::Binary);
-    lp.col_names = {"x1", "x2", "x3", "x4", "x5",
-                    "x6", "x7", "x8", "x9", "x10"};
+    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10"};
 
     lp.num_rows = 1;
     lp.row_lower = {4.5};
@@ -139,7 +138,9 @@ static LpProblem buildKnapsackMip() {
     lp.row_names = {"capacity"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 3.0}, {0, 1, 2.0}, {0, 2, 2.0},
+        {0, 0, 3.0},
+        {0, 1, 2.0},
+        {0, 2, 2.0},
     };
     lp.matrix = SparseMatrix(1, 3, std::move(trips));
     return lp;
@@ -242,8 +243,7 @@ TEST_CASE("Parallel: matches serial on knapsack", "[parallel][tbb]") {
     }
 }
 
-TEST_CASE("Parallel: deterministic heuristic mode is reproducible",
-          "[parallel][tbb][heuristics]") {
+TEST_CASE("Parallel: deterministic heuristic mode is reproducible", "[parallel][tbb][heuristics]") {
     auto lp = buildBranchingMip();
 
     MipSolver solver_a;
@@ -353,8 +353,7 @@ TEST_CASE("Parallel: deterministic mode with symmetry is reproducible",
     CHECK(solver_b.getSymmetryStats().cuts_applied);
 }
 
-TEST_CASE("Parallel: opportunistic heuristic mode remains valid",
-          "[parallel][tbb][heuristics]") {
+TEST_CASE("Parallel: opportunistic heuristic mode remains valid", "[parallel][tbb][heuristics]") {
     auto lp = buildBranchingMip();
 
     MipSolver solver;
@@ -366,8 +365,7 @@ TEST_CASE("Parallel: opportunistic heuristic mode remains valid",
     solver.load(lp);
     const auto result = solver.solve();
 
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }
 
@@ -464,8 +462,10 @@ TEST_CASE("Parallel: deterministic multi-thread pre-root LP-light is reproducibl
     CHECK_THAT(a_stats.work_units, WithinAbs(b_stats.work_units, 1e-9));
 }
 
-TEST_CASE("Parallel: deterministic multi-thread pre-root adaptive request is forced fixed and reproducible",
-          "[parallel][tbb][heuristics][preroot][deterministic][portfolio]") {
+TEST_CASE(
+    "Parallel: deterministic multi-thread pre-root adaptive request is forced fixed and "
+    "reproducible",
+    "[parallel][tbb][heuristics][preroot][deterministic][portfolio]") {
     auto lp = buildLpLightProbeMip();
 
     auto run_once = [&]() {
@@ -619,8 +619,7 @@ TEST_CASE("Parallel: deterministic aggressive search updates search controls",
     solver.load(lp);
     const auto result = solver.solve();
 
-    CHECK((result.status == Status::Infeasible ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Infeasible || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
     const auto& sstats = solver.getSearchStats();
     CHECK(sstats.policy_switches >= 1);
@@ -650,8 +649,7 @@ TEST_CASE("Parallel: MIPLIB gt2", "[parallel][tbb][miplib]") {
     if (result.status == Status::Optimal) {
         CHECK_THAT(result.objective, WithinAbs(21166.0, 1.0));
     }
-    CHECK((result.status == Status::Optimal ||
-           result.status == Status::NodeLimit ||
+    CHECK((result.status == Status::Optimal || result.status == Status::NodeLimit ||
            result.status == Status::TimeLimit));
 }
 #endif

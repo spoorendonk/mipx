@@ -1,10 +1,10 @@
 #pragma once
 
-#include <string>
-#include <vector>
-
 #include "mipx/automorphism.h"
 #include "mipx/core.h"
+
+#include <string>
+#include <vector>
 
 namespace mipx {
 
@@ -48,11 +48,9 @@ public:
     /// @param num_cols     Number of variables.
     /// @param max_constraints  Maximum number of constraints to generate.
     /// @return Vector of symmetry-breaking constraints.
-    std::vector<SymbreakConstraint> generate(
-        const std::vector<Permutation>& generators,
-        const std::vector<VarType>& col_type,
-        Index num_cols,
-        Index max_constraints = 64) const;
+    std::vector<SymbreakConstraint> generate(const std::vector<Permutation>& generators,
+                                             const std::vector<VarType>& col_type, Index num_cols,
+                                             Index max_constraints = 64) const;
 
     /// Add symmetry-breaking constraints to the problem formulation.
     /// @param problem      The LP/MIP problem (modified in place).
@@ -65,38 +63,31 @@ public:
     /// For each orbit, fix the canonical (smallest index) variable to be
     /// lexicographically first: x_canon >= x_j for all j in orbit.
     static std::vector<SymbreakConstraint> generateLexFixing(
-        const std::vector<std::vector<Index>>& orbits,
-        const std::vector<VarType>& col_type,
+        const std::vector<std::vector<Index>>& orbits, const std::vector<VarType>& col_type,
         Index num_cols);
 
     /// Aggregate symmetric constraints in the formulation.
     /// If two constraints are symmetric (one maps to the other under a
     /// generator), replace them with a single tighter constraint.
     /// @return Number of constraints removed by aggregation.
-    static Index aggregateSymmetricConstraints(
-        LpProblem& problem,
-        const std::vector<Permutation>& generators);
+    static Index aggregateSymmetricConstraints(LpProblem& problem,
+                                               const std::vector<Permutation>& generators);
 
 private:
     /// Generate a symresack constraint for a single generator.
-    static SymbreakConstraint generateSymresack(
-        const Permutation& generator,
-        const std::vector<VarType>& col_type,
-        Index num_cols,
-        Index constraint_idx);
+    static SymbreakConstraint generateSymresack(const Permutation& generator,
+                                                const std::vector<VarType>& col_type,
+                                                Index num_cols, Index constraint_idx);
 
     /// Generate a lex-leader constraint for a single generator.
-    static SymbreakConstraint generateLexLeader(
-        const Permutation& generator,
-        const std::vector<VarType>& col_type,
-        Index num_cols,
-        Index constraint_idx);
+    static SymbreakConstraint generateLexLeader(const Permutation& generator,
+                                                const std::vector<VarType>& col_type,
+                                                Index num_cols, Index constraint_idx);
 
     /// Detect orbitope structure in a set of generators.
     /// Returns column groups that form an orbitope, or empty if none found.
     static std::vector<std::vector<Index>> detectOrbitope(
-        const std::vector<Permutation>& generators,
-        const std::vector<VarType>& col_type,
+        const std::vector<Permutation>& generators, const std::vector<VarType>& col_type,
         Index num_cols);
 };
 
@@ -109,8 +100,7 @@ public:
     IsomorphismPruner() = default;
 
     /// Set the symmetry generators.
-    void setGenerators(const std::vector<Permutation>& generators,
-                       Index num_vars);
+    void setGenerators(const std::vector<Permutation>& generators, Index num_vars);
 
     /// Check if the current node's bound state can be pruned due to
     /// symmetry with an already-explored configuration.
@@ -121,8 +111,7 @@ public:
                                 const std::vector<Real>& col_upper) const;
 
     /// Record a node's bound configuration as explored.
-    void recordExplored(const std::vector<Real>& col_lower,
-                        const std::vector<Real>& col_upper);
+    void recordExplored(const std::vector<Real>& col_lower, const std::vector<Real>& col_upper);
 
     /// Clear all recorded configurations.
     void clear();
@@ -132,9 +121,8 @@ public:
 
 private:
     /// Compute a canonical hash for a bound configuration under symmetry.
-    [[nodiscard]] std::size_t canonicalHash(
-        const std::vector<Real>& col_lower,
-        const std::vector<Real>& col_upper) const;
+    [[nodiscard]] std::size_t canonicalHash(const std::vector<Real>& col_lower,
+                                            const std::vector<Real>& col_upper) const;
 
     std::vector<Permutation> generators_;
     Index num_vars_ = 0;

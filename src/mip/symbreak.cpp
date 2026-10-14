@@ -1,5 +1,7 @@
 #include "mipx/symbreak.h"
 
+#include "mipx/lp_problem.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstdint>
@@ -8,19 +10,15 @@
 #include <numeric>
 #include <unordered_set>
 
-#include "mipx/lp_problem.h"
-
 namespace mipx {
 
 // ---------------------------------------------------------------------------
 // SymbreakGenerator
 // ---------------------------------------------------------------------------
 
-SymbreakConstraint SymbreakGenerator::generateSymresack(
-    const Permutation& generator,
-    const std::vector<VarType>& col_type,
-    Index num_cols,
-    Index constraint_idx) {
+SymbreakConstraint SymbreakGenerator::generateSymresack(const Permutation& generator,
+                                                        const std::vector<VarType>& col_type,
+                                                        Index num_cols, Index constraint_idx) {
     SymbreakConstraint constraint;
     constraint.type = SymbreakType::Symresack;
 
@@ -29,13 +27,16 @@ SymbreakConstraint SymbreakGenerator::generateSymresack(
     //   Only count each 2-cycle once to avoid cancellation.
     //   This enforces x >= sigma(x) lexicographically.
 
-    for (Index j = 0; j < num_cols &&
-         j < static_cast<Index>(generator.size()); ++j) {
+    for (Index j = 0; j < num_cols && j < static_cast<Index>(generator.size()); ++j) {
         Index sigma_j = generator[j];
-        if (sigma_j <= j) continue;  // only j < sigma(j) to avoid double-counting
-        if (sigma_j >= num_cols) continue;
-        if (col_type[j] == VarType::Continuous) continue;
-        if (col_type[sigma_j] == VarType::Continuous) continue;
+        if (sigma_j <= j)
+            continue;  // only j < sigma(j) to avoid double-counting
+        if (sigma_j >= num_cols)
+            continue;
+        if (col_type[j] == VarType::Continuous)
+            continue;
+        if (col_type[sigma_j] == VarType::Continuous)
+            continue;
 
         // Add x_j - x_{sigma(j)} >= 0 contribution.
         constraint.col_indices.push_back(j);
@@ -50,11 +51,9 @@ SymbreakConstraint SymbreakGenerator::generateSymresack(
     return constraint;
 }
 
-SymbreakConstraint SymbreakGenerator::generateLexLeader(
-    const Permutation& generator,
-    const std::vector<VarType>& col_type,
-    Index num_cols,
-    Index /*constraint_idx*/) {
+SymbreakConstraint SymbreakGenerator::generateLexLeader(const Permutation& generator,
+                                                        const std::vector<VarType>& col_type,
+                                                        Index num_cols, Index /*constraint_idx*/) {
     SymbreakConstraint constraint;
     constraint.type = SymbreakType::Lexicographic;
 
@@ -62,12 +61,14 @@ SymbreakConstraint SymbreakGenerator::generateLexLeader(
     //   x_j >= x_{sigma(j)}
     // This is a simple but effective symmetry-breaking inequality.
 
-    for (Index j = 0; j < num_cols &&
-         j < static_cast<Index>(generator.size()); ++j) {
+    for (Index j = 0; j < num_cols && j < static_cast<Index>(generator.size()); ++j) {
         Index sigma_j = generator[j];
-        if (sigma_j == j) continue;
-        if (sigma_j < 0 || sigma_j >= num_cols) continue;
-        if (col_type[j] == VarType::Continuous) continue;
+        if (sigma_j == j)
+            continue;
+        if (sigma_j < 0 || sigma_j >= num_cols)
+            continue;
+        if (col_type[j] == VarType::Continuous)
+            continue;
 
         // x_j - x_{sigma(j)} >= 0
         constraint.col_indices = {j, sigma_j};
@@ -82,8 +83,7 @@ SymbreakConstraint SymbreakGenerator::generateLexLeader(
 }
 
 std::vector<std::vector<Index>> SymbreakGenerator::detectOrbitope(
-    const std::vector<Permutation>& generators,
-    const std::vector<VarType>& col_type,
+    const std::vector<Permutation>& generators, const std::vector<VarType>& col_type,
     Index num_cols) {
     // Detect if generators form a symmetric group on a set of columns.
     // An orbitope exists when a set of k variables form a complete orbit
@@ -112,26 +112,25 @@ std::vector<std::vector<Index>> SymbreakGenerator::detectOrbitope(
 }
 
 std::vector<SymbreakConstraint> SymbreakGenerator::generate(
-    const std::vector<Permutation>& generators,
-    const std::vector<VarType>& col_type,
-    Index num_cols,
-    Index max_constraints) const {
+    const std::vector<Permutation>& generators, const std::vector<VarType>& col_type,
+    Index num_cols, Index max_constraints) const {
     std::vector<SymbreakConstraint> constraints;
 
-    if (generators.empty()) return constraints;
+    if (generators.empty())
+        return constraints;
 
     // Strategy: generate symresack constraints for binary generators,
     // lex-leader for general integer generators.
     Index constraint_idx = 0;
 
     for (const auto& gen : generators) {
-        if (constraint_idx >= max_constraints) break;
+        if (constraint_idx >= max_constraints)
+            break;
 
         // Check if this generator only moves binary variables.
         bool all_binary = true;
         bool has_moved = false;
-        for (Index j = 0; j < num_cols &&
-             j < static_cast<Index>(gen.size()); ++j) {
+        for (Index j = 0; j < num_cols && j < static_cast<Index>(gen.size()); ++j) {
             if (gen[j] != j) {
                 has_moved = true;
                 if (col_type[j] != VarType::Binary) {
@@ -140,7 +139,8 @@ std::vector<SymbreakConstraint> SymbreakGenerator::generate(
                 }
             }
         }
-        if (!has_moved) continue;
+        if (!has_moved)
+            continue;
 
         if (all_binary) {
             auto c = generateSymresack(gen, col_type, num_cols, constraint_idx);
@@ -160,11 +160,13 @@ std::vector<SymbreakConstraint> SymbreakGenerator::generate(
     // Also try orbitope detection for additional constraints.
     auto orbitopes = detectOrbitope(generators, col_type, num_cols);
     for (const auto& orbit : orbitopes) {
-        if (constraint_idx >= max_constraints) break;
+        if (constraint_idx >= max_constraints)
+            break;
         // For each orbitope, add pairwise ordering: x_{orbit[0]} >= x_{orbit[1]}
         // >= ... >= x_{orbit[k-1]}
         for (std::size_t i = 0; i + 1 < orbit.size(); ++i) {
-            if (constraint_idx >= max_constraints) break;
+            if (constraint_idx >= max_constraints)
+                break;
             SymbreakConstraint c;
             c.type = SymbreakType::Orbitope;
             c.col_indices = {orbit[i], orbit[i + 1]};
@@ -180,10 +182,10 @@ std::vector<SymbreakConstraint> SymbreakGenerator::generate(
     return constraints;
 }
 
-Index SymbreakGenerator::addConstraints(
-    LpProblem& problem,
-    const std::vector<SymbreakConstraint>& constraints) {
-    if (constraints.empty()) return 0;
+Index SymbreakGenerator::addConstraints(LpProblem& problem,
+                                        const std::vector<SymbreakConstraint>& constraints) {
+    if (constraints.empty())
+        return 0;
 
     // Ensure row_names is sized correctly.
     if (problem.row_names.size() < static_cast<std::size_t>(problem.num_rows)) {
@@ -192,7 +194,8 @@ Index SymbreakGenerator::addConstraints(
 
     Index added = 0;
     for (const auto& c : constraints) {
-        if (c.col_indices.empty()) continue;
+        if (c.col_indices.empty())
+            continue;
 
         // Sort entries by column index for CSR format.
         std::vector<std::pair<Index, Real>> entries;
@@ -229,11 +232,11 @@ Index SymbreakGenerator::addConstraints(
             }
         }
 
-        if (final_cols.empty()) continue;
+        if (final_cols.empty())
+            continue;
 
-        problem.matrix.addRow(
-            std::span<const Index>(final_cols.data(), final_cols.size()),
-            std::span<const Real>(final_vals.data(), final_vals.size()));
+        problem.matrix.addRow(std::span<const Index>(final_cols.data(), final_cols.size()),
+                              std::span<const Real>(final_vals.data(), final_vals.size()));
         problem.row_lower.push_back(c.lower);
         problem.row_upper.push_back(c.upper);
         problem.row_names.push_back(c.name);
@@ -245,20 +248,23 @@ Index SymbreakGenerator::addConstraints(
 }
 
 std::vector<SymbreakConstraint> SymbreakGenerator::generateLexFixing(
-    const std::vector<std::vector<Index>>& orbits,
-    const std::vector<VarType>& col_type,
+    const std::vector<std::vector<Index>>& orbits, const std::vector<VarType>& col_type,
     Index num_cols) {
     std::vector<SymbreakConstraint> constraints;
 
     for (const auto& orbit : orbits) {
-        if (orbit.size() < 2) continue;
+        if (orbit.size() < 2)
+            continue;
         Index canon = orbit.front();
-        if (col_type[canon] == VarType::Continuous) continue;
+        if (col_type[canon] == VarType::Continuous)
+            continue;
 
         for (std::size_t i = 1; i < orbit.size(); ++i) {
             Index j = orbit[i];
-            if (j >= num_cols) continue;
-            if (col_type[j] == VarType::Continuous) continue;
+            if (j >= num_cols)
+                continue;
+            if (col_type[j] == VarType::Continuous)
+                continue;
 
             SymbreakConstraint c;
             c.type = SymbreakType::Lexicographic;
@@ -274,10 +280,10 @@ std::vector<SymbreakConstraint> SymbreakGenerator::generateLexFixing(
     return constraints;
 }
 
-Index SymbreakGenerator::aggregateSymmetricConstraints(
-    LpProblem& problem,
-    const std::vector<Permutation>& generators) {
-    if (generators.empty() || problem.num_rows == 0) return 0;
+Index SymbreakGenerator::aggregateSymmetricConstraints(LpProblem& problem,
+                                                       const std::vector<Permutation>& generators) {
+    if (generators.empty() || problem.num_rows == 0)
+        return 0;
 
     // For each pair of rows, check if any generator maps one to the other.
     // If so, they are symmetric and we can tighten by taking the intersection
@@ -309,7 +315,8 @@ Index SymbreakGenerator::aggregateSymmetricConstraints(
     // For each generator, check if it maps row i to row j.
     for (const auto& gen : generators) {
         for (Index i = 0; i < problem.num_rows; ++i) {
-            if (row_merged[i]) continue;
+            if (row_merged[i])
+                continue;
 
             auto sig_i = getRowSig(i);
 
@@ -317,8 +324,7 @@ Index SymbreakGenerator::aggregateSymmetricConstraints(
             RowSig permuted;
             permuted.entries.reserve(sig_i.entries.size());
             for (const auto& [col, val] : sig_i.entries) {
-                Index new_col = (col < static_cast<Index>(gen.size()))
-                                    ? gen[col] : col;
+                Index new_col = (col < static_cast<Index>(gen.size())) ? gen[col] : col;
                 permuted.entries.emplace_back(new_col, val);
             }
             std::sort(permuted.entries.begin(), permuted.entries.end());
@@ -327,7 +333,8 @@ Index SymbreakGenerator::aggregateSymmetricConstraints(
 
             // Check if permuted row matches any other row.
             for (Index j = i + 1; j < problem.num_rows; ++j) {
-                if (row_merged[j]) continue;
+                if (row_merged[j])
+                    continue;
 
                 auto sig_j = getRowSig(j);
                 if (permuted.entries == sig_j.entries &&
@@ -335,10 +342,8 @@ Index SymbreakGenerator::aggregateSymmetricConstraints(
                     std::abs(permuted.upper - sig_j.upper) < 1e-12) {
                     // Row j is the image of row i under this generator.
                     // Tighten row i bounds to the intersection.
-                    problem.row_lower[i] = std::max(problem.row_lower[i],
-                                                     problem.row_lower[j]);
-                    problem.row_upper[i] = std::min(problem.row_upper[i],
-                                                     problem.row_upper[j]);
+                    problem.row_lower[i] = std::max(problem.row_lower[i], problem.row_lower[j]);
+                    problem.row_upper[i] = std::min(problem.row_upper[i], problem.row_upper[j]);
                     row_merged[j] = true;
                     ++aggregated;
                     break;
@@ -354,17 +359,15 @@ Index SymbreakGenerator::aggregateSymmetricConstraints(
 // IsomorphismPruner
 // ---------------------------------------------------------------------------
 
-void IsomorphismPruner::setGenerators(
-    const std::vector<Permutation>& generators, Index num_vars) {
+void IsomorphismPruner::setGenerators(const std::vector<Permutation>& generators, Index num_vars) {
     generators_ = generators;
     num_vars_ = num_vars;
     explored_hashes_.clear();
     num_pruned_ = 0;
 }
 
-std::size_t IsomorphismPruner::canonicalHash(
-    const std::vector<Real>& col_lower,
-    const std::vector<Real>& col_upper) const {
+std::size_t IsomorphismPruner::canonicalHash(const std::vector<Real>& col_lower,
+                                             const std::vector<Real>& col_upper) const {
     // Compute a canonical hash for the bound configuration.
     // We sort the bound fingerprints under generator action to find
     // a canonical representative.
@@ -378,7 +381,7 @@ std::size_t IsomorphismPruner::canonicalHash(
     std::vector<Fingerprint> fps(static_cast<std::size_t>(num_vars_));
     for (Index j = 0; j < num_vars_; ++j) {
         fps[j] = {std::bit_cast<std::uint64_t>(col_lower[j]),
-                   std::bit_cast<std::uint64_t>(col_upper[j])};
+                  std::bit_cast<std::uint64_t>(col_upper[j])};
     }
 
     // Try each generator and its inverse, keep the lexicographically
@@ -386,10 +389,10 @@ std::size_t IsomorphismPruner::canonicalHash(
     auto hashFingerprints = [](const std::vector<Fingerprint>& f) -> std::size_t {
         std::size_t h = 0;
         for (const auto& fp : f) {
-            h ^= std::hash<std::uint64_t>()(fp.lb_bits) +
-                 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-            h ^= std::hash<std::uint64_t>()(fp.ub_bits) +
-                 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+            h ^= std::hash<std::uint64_t>()(fp.lb_bits) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+                 (h >> 2);
+            h ^= std::hash<std::uint64_t>()(fp.ub_bits) + 0x9e3779b97f4a7c15ULL + (h << 6) +
+                 (h >> 2);
         }
         return h;
     };
@@ -411,10 +414,10 @@ std::size_t IsomorphismPruner::canonicalHash(
     return best_hash;
 }
 
-bool IsomorphismPruner::canPrune(
-    const std::vector<Real>& col_lower,
-    const std::vector<Real>& col_upper) const {
-    if (generators_.empty()) return false;
+bool IsomorphismPruner::canPrune(const std::vector<Real>& col_lower,
+                                 const std::vector<Real>& col_upper) const {
+    if (generators_.empty())
+        return false;
 
     std::size_t h = canonicalHash(col_lower, col_upper);
 
@@ -427,19 +430,18 @@ bool IsomorphismPruner::canPrune(
     return false;
 }
 
-void IsomorphismPruner::recordExplored(
-    const std::vector<Real>& col_lower,
-    const std::vector<Real>& col_upper) {
-    if (generators_.empty()) return;
+void IsomorphismPruner::recordExplored(const std::vector<Real>& col_lower,
+                                       const std::vector<Real>& col_upper) {
+    if (generators_.empty())
+        return;
     explored_hashes_.push_back(canonicalHash(col_lower, col_upper));
 
     // Limit memory: keep at most a fixed number of configurations.
     static constexpr std::size_t kMaxExplored = 10000;
     if (explored_hashes_.size() > kMaxExplored) {
-        explored_hashes_.erase(explored_hashes_.begin(),
-                               explored_hashes_.begin() +
-                                   static_cast<std::ptrdiff_t>(
-                                       explored_hashes_.size() / 2));
+        explored_hashes_.erase(
+            explored_hashes_.begin(),
+            explored_hashes_.begin() + static_cast<std::ptrdiff_t>(explored_hashes_.size() / 2));
     }
 }
 

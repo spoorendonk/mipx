@@ -35,8 +35,7 @@ SchreierSims::Level SchreierSims::computeOrbitAndTransversal(
             Index image = gen[current];
             if (level.transversal.find(image) == level.transversal.end()) {
                 // new orbit element: transversal[image] = gen * transversal[current]
-                level.transversal[image] = composePermutations(
-                    level.transversal[current], gen);
+                level.transversal[image] = composePermutations(level.transversal[current], gen);
                 level.orbit.push_back(image);
                 queue.push(image);
             }
@@ -71,7 +70,7 @@ Permutation SchreierSims::sift(const Permutation& perm) const {
 // ---------------------------------------------------------------------------
 
 void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
-                          Index num_tracked_points) {
+                         Index num_tracked_points) {
     n_ = n;
     num_tracked_ = (num_tracked_points < 0) ? n : num_tracked_points;
     levels_.clear();
@@ -89,16 +88,19 @@ void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
     std::vector<bool> moved(static_cast<std::size_t>(n), false);
     for (const auto& gen : generators) {
         for (Index i = 0; i < n && i < static_cast<Index>(gen.size()); ++i) {
-            if (gen[i] != i) moved[i] = true;
+            if (gen[i] != i)
+                moved[i] = true;
         }
     }
 
     // First add moved variable vertices, then others.
     for (Index i = 0; i < num_tracked_; ++i) {
-        if (moved[i]) base_.push_back(i);
+        if (moved[i])
+            base_.push_back(i);
     }
     for (Index i = num_tracked_; i < n; ++i) {
-        if (moved[i]) base_.push_back(i);
+        if (moved[i])
+            base_.push_back(i);
     }
 
     // Build levels using Schreier-Sims algorithm.
@@ -106,7 +108,8 @@ void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
     std::vector<Permutation> current_gens = generators;
 
     for (Index base_idx = 0; base_idx < static_cast<Index>(base_.size()); ++base_idx) {
-        if (current_gens.empty()) break;
+        if (current_gens.empty())
+            break;
 
         Index bp = base_[base_idx];
         Level level = computeOrbitAndTransversal(bp, current_gens, n);
@@ -120,10 +123,10 @@ void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
             for (const auto& gen : current_gens) {
                 Index image = gen[o];
                 auto it = level.transversal.find(image);
-                if (it == level.transversal.end()) continue;
+                if (it == level.transversal.end())
+                    continue;
 
-                Permutation schreier = composePermutations(
-                    level.transversal[o], gen);
+                Permutation schreier = composePermutations(level.transversal[o], gen);
                 Permutation inv_t = inversePermutation(it->second);
                 schreier = composePermutations(schreier, inv_t);
 
@@ -134,16 +137,21 @@ void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
                     // Simple duplicate check: test if it's already present.
                     bool duplicate = false;
                     for (const auto& existing : stab_gens) {
-                        if (existing == schreier) { duplicate = true; break; }
+                        if (existing == schreier) {
+                            duplicate = true;
+                            break;
+                        }
                     }
                     if (!duplicate) {
                         stab_gens.push_back(std::move(schreier));
                         // Limit stabilizer generators to avoid explosion.
-                        if (stab_gens.size() > 64) break;
+                        if (stab_gens.size() > 64)
+                            break;
                     }
                 }
             }
-            if (stab_gens.size() > 64) break;
+            if (stab_gens.size() > 64)
+                break;
         }
 
         level.stabilizer_generators = stab_gens;
@@ -164,7 +172,8 @@ void SchreierSims::build(const std::vector<Permutation>& generators, Index n,
                 new_gens.push_back(std::move(residual));
             }
         }
-        if (new_gens.empty()) break;
+        if (new_gens.empty())
+            break;
         for (auto& g : new_gens) {
             addGenerator(g);
         }
@@ -182,7 +191,8 @@ void SchreierSims::addGenerator(const Permutation& perm) {
     levels_.clear();
 
     for (Index base_idx = 0; base_idx < static_cast<Index>(base_.size()); ++base_idx) {
-        if (current_gens.empty()) break;
+        if (current_gens.empty())
+            break;
 
         Index bp = base_[base_idx];
         Level level = computeOrbitAndTransversal(bp, current_gens, n_);
@@ -193,10 +203,10 @@ void SchreierSims::addGenerator(const Permutation& perm) {
             for (const auto& gen : current_gens) {
                 Index image = gen[o];
                 auto it = level.transversal.find(image);
-                if (it == level.transversal.end()) continue;
+                if (it == level.transversal.end())
+                    continue;
 
-                Permutation schreier = composePermutations(
-                    level.transversal[o], gen);
+                Permutation schreier = composePermutations(level.transversal[o], gen);
                 Permutation inv_t = inversePermutation(it->second);
                 schreier = composePermutations(schreier, inv_t);
                 work_units_ += static_cast<double>(n_);
@@ -204,15 +214,20 @@ void SchreierSims::addGenerator(const Permutation& perm) {
                 if (!isIdentity(schreier)) {
                     bool duplicate = false;
                     for (const auto& existing : stab_gens) {
-                        if (existing == schreier) { duplicate = true; break; }
+                        if (existing == schreier) {
+                            duplicate = true;
+                            break;
+                        }
                     }
                     if (!duplicate) {
                         stab_gens.push_back(std::move(schreier));
-                        if (stab_gens.size() > 64) break;
+                        if (stab_gens.size() > 64)
+                            break;
                     }
                 }
             }
-            if (stab_gens.size() > 64) break;
+            if (stab_gens.size() > 64)
+                break;
         }
 
         level.stabilizer_generators = stab_gens;
@@ -226,13 +241,15 @@ void SchreierSims::addGenerator(const Permutation& perm) {
 // ---------------------------------------------------------------------------
 
 bool SchreierSims::isMember(const Permutation& perm) const {
-    if (!built_) return false;
+    if (!built_)
+        return false;
     Permutation residual = sift(perm);
     return isIdentity(residual);
 }
 
 std::vector<Index> SchreierSims::orbit(Index point) const {
-    if (!built_ || levels_.empty()) return {point};
+    if (!built_ || levels_.empty())
+        return {point};
 
     // Use all strong generators to compute the orbit via BFS.
     std::unordered_set<Index> visited;
@@ -244,7 +261,8 @@ std::vector<Index> SchreierSims::orbit(Index point) const {
         Index current = queue.front();
         queue.pop();
         for (const auto& gen : strong_generators_) {
-            if (current >= static_cast<Index>(gen.size())) continue;
+            if (current >= static_cast<Index>(gen.size()))
+                continue;
             Index image = gen[current];
             if (visited.insert(image).second) {
                 queue.push(image);
@@ -259,7 +277,8 @@ std::vector<Index> SchreierSims::orbit(Index point) const {
 
 std::vector<Index> SchreierSims::orbitUnderStabilizer(
     Index point, const std::vector<Index>& fixed_points) const {
-    if (!built_) return {point};
+    if (!built_)
+        return {point};
 
     // Collect generators that fix all fixed_points.
     std::vector<const Permutation*> stab_gens;
@@ -286,7 +305,8 @@ std::vector<Index> SchreierSims::orbitUnderStabilizer(
         Index current = queue.front();
         queue.pop();
         for (const auto* gen : stab_gens) {
-            if (current >= static_cast<Index>(gen->size())) continue;
+            if (current >= static_cast<Index>(gen->size()))
+                continue;
             Index image = (*gen)[current];
             if (visited.insert(image).second) {
                 queue.push(image);
@@ -300,9 +320,9 @@ std::vector<Index> SchreierSims::orbitUnderStabilizer(
 }
 
 std::vector<std::vector<Index>> SchreierSims::allOrbits() const {
-    if (!built_) return {};
-    return computeVariableOrbits(strong_generators_,
-                                  (num_tracked_ >= 0) ? num_tracked_ : n_);
+    if (!built_)
+        return {};
+    return computeVariableOrbits(strong_generators_, (num_tracked_ >= 0) ? num_tracked_ : n_);
 }
 
 }  // namespace mipx

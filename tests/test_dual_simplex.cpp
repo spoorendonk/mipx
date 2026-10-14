@@ -1259,8 +1259,8 @@ TEST_CASE("DualSimplex: warm basis with stale Fixed statuses still reaches the o
     lp.row_upper = {kInf, 11.0, kInf, 6.0};
     lp.row_names = {"R0", "R1", "R2", "R3"};
     std::vector<Triplet> trips = {
-        {0, 0, 5.0},  {1, 1, -5.0}, {1, 2, 5.0},  {1, 3, -5.0}, {2, 0, -5.0},
-        {2, 2, 2.0},  {2, 3, -1.0}, {3, 0, -3.0}, {3, 1, 3.0},  {3, 3, -5.0},
+        {0, 0, 5.0}, {1, 1, -5.0}, {1, 2, 5.0},  {1, 3, -5.0}, {2, 0, -5.0},
+        {2, 2, 2.0}, {2, 3, -1.0}, {3, 0, -3.0}, {3, 1, 3.0},  {3, 3, -5.0},
     };
     lp.matrix = SparseMatrix(4, 4, std::move(trips));
 

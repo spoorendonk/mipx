@@ -26,14 +26,17 @@ void ConflictGraph::build(const LpProblem& problem) {
     fixed_value_.assign(num_binaries_, 0.0);
     num_edges_ = 0;
 
-    if (num_binaries_ < 2) return;
+    if (num_binaries_ < 2)
+        return;
 
     // Scan constraint rows for conflicts.
     for (Index i = 0; i < problem.num_rows; ++i) {
         // Only look at rows with finite upper bound (<= constraints).
-        if (problem.row_upper[i] >= kInf) continue;
+        if (problem.row_upper[i] >= kInf)
+            continue;
         const Real rhs = problem.row_upper[i];
-        if (!std::isfinite(rhs)) continue;
+        if (!std::isfinite(rhs))
+            continue;
 
         auto row = problem.matrix.row(i);
 
@@ -59,13 +62,13 @@ void ConflictGraph::build(const LpProblem& problem) {
                 binaries.push_back({j, a});
             }
         }
-        if (!valid || binaries.size() < 2) continue;
+        if (!valid || binaries.size() < 2)
+            continue;
 
         // For each pair, check if their coefficients sum exceeds rhs.
         // This means they conflict (can't both be 1).
         for (Index p = 0; p < static_cast<Index>(binaries.size()); ++p) {
-            for (Index q = p + 1; q < static_cast<Index>(binaries.size());
-                 ++q) {
+            for (Index q = p + 1; q < static_cast<Index>(binaries.size()); ++q) {
                 if (binaries[p].coeff + binaries[q].coeff > rhs + 1e-9) {
                     Literal a = {binaries[p].col, false};
                     Literal b = {binaries[q].col, false};
@@ -87,8 +90,10 @@ void ConflictGraph::build(const LpProblem& problem) {
 void ConflictGraph::addConflict(Literal a, Literal b) {
     Index a_bin = toBinaryIndex(a.var);
     Index b_bin = toBinaryIndex(b.var);
-    if (a_bin < 0 || b_bin < 0) return;
-    if (a.var == b.var && a.complemented == b.complemented) return;
+    if (a_bin < 0 || b_bin < 0)
+        return;
+    if (a.var == b.var && a.complemented == b.complemented)
+        return;
 
     Literal a_int = {a.var, a.complemented};
     Literal b_int = {b.var, b.complemented};
@@ -97,7 +102,8 @@ void ConflictGraph::addConflict(Literal a, Literal b) {
     Index a_id = a_int.id();
     Index b_id = b_int.id();
     const Index num_lits = static_cast<Index>(adj_.size());
-    if (a_id < 0 || a_id >= num_lits || b_id < 0 || b_id >= num_lits) return;
+    if (a_id < 0 || a_id >= num_lits || b_id < 0 || b_id >= num_lits)
+        return;
     for (const auto& lit : adj_[a_id]) {
         if (lit.var == b_int.var && lit.complemented == b_int.complemented) {
             return;  // Already exists.
@@ -111,17 +117,21 @@ void ConflictGraph::addConflict(Literal a, Literal b) {
 
 std::span<const Literal> ConflictGraph::neighbors(Literal lit) const {
     Index bin = toBinaryIndex(lit.var);
-    if (bin < 0) return {};
+    if (bin < 0)
+        return {};
     Index id = lit.id();
-    if (id < 0 || id >= static_cast<Index>(adj_.size())) return {};
+    if (id < 0 || id >= static_cast<Index>(adj_.size()))
+        return {};
     return adj_[id];
 }
 
 bool ConflictGraph::conflicts(Literal a, Literal b) const {
     Index a_bin = toBinaryIndex(a.var);
-    if (a_bin < 0) return false;
+    if (a_bin < 0)
+        return false;
     Index a_id = a.id();
-    if (a_id < 0 || a_id >= static_cast<Index>(adj_.size())) return false;
+    if (a_id < 0 || a_id >= static_cast<Index>(adj_.size()))
+        return false;
     for (const auto& lit : adj_[a_id]) {
         if (lit.var == b.var && lit.complemented == b.complemented) {
             return true;
@@ -131,22 +141,24 @@ bool ConflictGraph::conflicts(Literal a, Literal b) const {
 }
 
 Index ConflictGraph::toBinaryIndex(Index col) const {
-    if (col < 0 || col >= static_cast<Index>(col_to_bin_.size())) return -1;
+    if (col < 0 || col >= static_cast<Index>(col_to_bin_.size()))
+        return -1;
     return col_to_bin_[col];
 }
 
 Index ConflictGraph::toOriginalIndex(Index bin_idx) const {
-    if (bin_idx < 0 || bin_idx >= num_binaries_) return -1;
+    if (bin_idx < 0 || bin_idx >= num_binaries_)
+        return -1;
     return bin_to_col_[bin_idx];
 }
 
-std::vector<Index> ConflictGraph::connectedComponents(
-    Index& num_components) const {
+std::vector<Index> ConflictGraph::connectedComponents(Index& num_components) const {
     std::vector<Index> comp(num_binaries_, -1);
     num_components = 0;
 
     for (Index b = 0; b < num_binaries_; ++b) {
-        if (comp[b] >= 0) continue;
+        if (comp[b] >= 0)
+            continue;
 
         // BFS from binary variable b.
         Index comp_id = num_components++;
@@ -179,26 +191,30 @@ std::vector<Index> ConflictGraph::connectedComponents(
 
 void ConflictGraph::fixVariable(Index col, Real value) {
     Index bin = toBinaryIndex(col);
-    if (bin < 0) return;
+    if (bin < 0)
+        return;
     fixed_[bin] = true;
     fixed_value_[bin] = value;
 }
 
 void ConflictGraph::unfixVariable(Index col) {
     Index bin = toBinaryIndex(col);
-    if (bin < 0) return;
+    if (bin < 0)
+        return;
     fixed_[bin] = false;
 }
 
 bool ConflictGraph::isFixed(Index col) const {
     Index bin = toBinaryIndex(col);
-    if (bin < 0) return false;
+    if (bin < 0)
+        return false;
     return fixed_[bin];
 }
 
 Real ConflictGraph::fixedValue(Index col) const {
     Index bin = toBinaryIndex(col);
-    if (bin < 0) return 0.0;
+    if (bin < 0)
+        return 0.0;
     return fixed_value_[bin];
 }
 

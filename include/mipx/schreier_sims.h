@@ -1,12 +1,12 @@
 #pragma once
 
+#include "mipx/automorphism.h"
+#include "mipx/core.h"
+
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
 #include <vector>
-
-#include "mipx/automorphism.h"
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -27,8 +27,7 @@ public:
     /// Build the BSGS from a set of generators on n elements.
     /// Only tracks orbits for the first num_tracked_points elements
     /// (typically variable vertices only).
-    void build(const std::vector<Permutation>& generators, Index n,
-               Index num_tracked_points = -1);
+    void build(const std::vector<Permutation>& generators, Index n, Index num_tracked_points = -1);
 
     /// Check if a permutation belongs to the group.
     [[nodiscard]] bool isMember(const Permutation& perm) const;
@@ -65,14 +64,14 @@ private:
     /// A level in the Schreier-Sims structure, corresponding to one base point.
     struct Level {
         Index base_point = -1;
-        std::vector<Index> orbit;                         // orbit of base_point
+        std::vector<Index> orbit;                            // orbit of base_point
         std::unordered_map<Index, Permutation> transversal;  // coset reps
-        std::vector<Permutation> stabilizer_generators;   // generators for next level
+        std::vector<Permutation> stabilizer_generators;      // generators for next level
     };
 
     /// Compute the orbit and transversal for a given point and set of generators.
-    static Level computeOrbitAndTransversal(
-        Index point, const std::vector<Permutation>& generators, Index n);
+    static Level computeOrbitAndTransversal(Index point, const std::vector<Permutation>& generators,
+                                            Index n);
 
     /// Sift a permutation through the BSGS. Returns the residual
     /// (identity if the element is in the group).

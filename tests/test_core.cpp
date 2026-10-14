@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "mipx/core.h"
+
+#include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("Core type aliases", "[core]") {
     static_assert(std::is_same_v<mipx::Real, double>);

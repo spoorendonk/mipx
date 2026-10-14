@@ -1,10 +1,10 @@
 #pragma once
 
-#include <memory>
-#include <span>
-
 #include "mipx/barrier.h"
 #include "mipx/sparse_matrix.h"
+
+#include <memory>
+#include <span>
 
 namespace mipx {
 
@@ -19,20 +19,15 @@ public:
     virtual ~NewtonSolver() = default;
 
     /// One-time setup: analyze sparsity, allocate storage.
-    virtual bool setup(const SparseMatrix& A, Index m, Index n,
-                       const BarrierOptions& opts) = 0;
+    virtual bool setup(const SparseMatrix& A, Index m, Index n, const BarrierOptions& opts) = 0;
 
     /// Per-iteration: form and factor the linear system from current z, s.
-    virtual bool factorize(std::span<const Real> z,
-                           std::span<const Real> s, Real reg) = 0;
+    virtual bool factorize(std::span<const Real> z, std::span<const Real> s, Real reg) = 0;
 
     /// Solve Newton system: given residuals (rp, rd, rc), produce search
     /// directions (dz, dy, ds).
-    virtual bool solveNewton(std::span<const Real> rp,
-                             std::span<const Real> rd,
-                             std::span<const Real> rc,
-                             std::span<Real> dz,
-                             std::span<Real> dy,
+    virtual bool solveNewton(std::span<const Real> rp, std::span<const Real> rd,
+                             std::span<const Real> rc, std::span<Real> dz, std::span<Real> dy,
                              std::span<Real> ds) = 0;
 };
 

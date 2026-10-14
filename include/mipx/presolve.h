@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/lp_problem.h"
+
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
-#include <cstdint>
-
-#include "mipx/core.h"
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -29,13 +29,13 @@ struct PostsolveSingletonRow {
 /// A singleton column was substituted out.
 struct PostsolveSingletonCol {
     Index orig_col;
-    Index orig_row;       // The single constraint it appeared in.
-    Real coeff;           // The coefficient a_{row,col}.
-    Real obj_coeff;       // Original objective coefficient.
-    Real row_lower;       // Original row bounds.
+    Index orig_row;  // The single constraint it appeared in.
+    Real coeff;      // The coefficient a_{row,col}.
+    Real obj_coeff;  // Original objective coefficient.
+    Real row_lower;  // Original row bounds.
     Real row_upper;
-    VarType var_type;     // Original variable type.
-    Real col_lower;       // Original variable bounds.
+    VarType var_type;  // Original variable type.
+    Real col_lower;    // Original variable bounds.
     Real col_upper;
 };
 
@@ -60,7 +60,7 @@ struct PostsolveCoeffTightening {
     Index orig_col;
     Real old_coeff;
     Real new_coeff;
-    Real old_rhs;       // The row_upper that was adjusted.
+    Real old_rhs;  // The row_upper that was adjusted.
     Real new_rhs;
 };
 
@@ -75,15 +75,9 @@ struct PostsolveDoubletonEquality {
     Real eliminated_upper;
 };
 
-using PostsolveOp = std::variant<
-    PostsolveFixVariable,
-    PostsolveSingletonRow,
-    PostsolveSingletonCol,
-    PostsolveForcingRow,
-    PostsolveDominatedRow,
-    PostsolveCoeffTightening,
-    PostsolveDoubletonEquality
->;
+using PostsolveOp = std::variant<PostsolveFixVariable, PostsolveSingletonRow, PostsolveSingletonCol,
+                                 PostsolveForcingRow, PostsolveDominatedRow,
+                                 PostsolveCoeffTightening, PostsolveDoubletonEquality>;
 
 // ---- PostsolveStack ---------------------------------------------------------
 
@@ -99,12 +93,9 @@ public:
     /// reconstruct the full solution (indexed by original column).
     /// `col_mapping` maps presolved col index -> original col index.
     std::vector<Real> postsolve(const std::vector<Real>& presolved_solution,
-                                 const std::vector<Index>& col_mapping,
-                                 Index orig_num_cols) const;
+                                const std::vector<Index>& col_mapping, Index orig_num_cols) const;
 
-    [[nodiscard]] Index size() const {
-        return static_cast<Index>(ops_.size());
-    }
+    [[nodiscard]] Index size() const { return static_cast<Index>(ops_.size()); }
 
 private:
     std::vector<PostsolveOp> ops_;
@@ -172,9 +163,7 @@ public:
     [[nodiscard]] const PresolveStats& stats() const { return stats_; }
 
     /// Access the column mapping (presolved col -> original col).
-    [[nodiscard]] const std::vector<Index>& colMapping() const {
-        return col_mapping_;
-    }
+    [[nodiscard]] const std::vector<Index>& colMapping() const { return col_mapping_; }
 
     /// Set maximum number of presolve rounds.
     void setMaxRounds(Index rounds) { max_rounds_ = rounds; }
@@ -185,111 +174,96 @@ public:
 private:
     // Individual reductions. Return number of changes made.
     Index removeFixedVariables(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               std::vector<Index>& row_active_nnz,
+                               std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
                                std::vector<Index>& col_active_nnz,
                                const std::vector<Index>& dirty_cols,
                                std::vector<uint8_t>& next_dirty_rows,
                                std::vector<uint8_t>& next_dirty_cols);
     Index removeSingletonRows(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               std::vector<Index>& row_active_nnz,
-                               std::vector<Index>& col_active_nnz,
-                               const std::vector<Index>& dirty_rows,
-                               std::vector<uint8_t>& next_dirty_rows,
-                               std::vector<uint8_t>& next_dirty_cols);
-    Index removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               std::vector<Index>& row_active_nnz,
-                               std::vector<Index>& col_active_nnz,
-                               const std::vector<Index>& dirty_cols,
-                               std::vector<uint8_t>& next_dirty_rows,
-                               std::vector<uint8_t>& next_dirty_cols);
-    Index removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
-                             std::vector<bool>& row_removed,
-                             std::vector<Index>& row_active_nnz,
-                             std::vector<Index>& col_active_nnz,
-                             const std::vector<Index>& dirty_rows,
-                             std::vector<uint8_t>& next_dirty_rows,
-                             std::vector<uint8_t>& next_dirty_cols);
-    Index removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               std::vector<Index>& row_active_nnz,
-                               std::vector<Index>& col_active_nnz,
-                               const std::vector<Index>& dirty_rows,
-                               std::vector<uint8_t>& next_dirty_rows,
-                               std::vector<uint8_t>& next_dirty_cols);
-    Index detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
-                                  std::vector<bool>& row_removed,
-                                  const std::vector<Index>& dirty_rows,
-                                  std::vector<uint8_t>& next_dirty_rows,
-                                  std::vector<uint8_t>& next_dirty_cols);
-    Index activityBoundTightening(LpProblem& lp, std::vector<bool>& col_removed,
-                                   std::vector<bool>& row_removed,
-                                   const std::vector<Index>& dirty_rows,
-                                   std::vector<uint8_t>& next_dirty_rows,
-                                   std::vector<uint8_t>& next_dirty_cols);
-    Index dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
-                      std::vector<bool>& row_removed,
-                      std::vector<Index>& row_active_nnz,
-                      std::vector<Index>& col_active_nnz,
-                      const std::vector<Index>& dirty_cols,
-                      std::vector<uint8_t>& next_dirty_rows,
-                      std::vector<uint8_t>& next_dirty_cols);
-    Index removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
-                              std::vector<bool>& row_removed,
-                              std::vector<Index>& row_active_nnz,
-                              std::vector<Index>& col_active_nnz,
-                              const std::vector<Index>& dirty_cols,
-                              std::vector<uint8_t>& next_dirty_rows,
-                              std::vector<uint8_t>& next_dirty_cols);
-    Index removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               std::vector<Index>& row_active_nnz,
-                               std::vector<Index>& col_active_nnz,
-                               const std::vector<Index>& dirty_rows,
-                               std::vector<uint8_t>& next_dirty_rows,
-                               std::vector<uint8_t>& next_dirty_cols);
-    Index removeParallelRows(LpProblem& lp, std::vector<bool>& col_removed,
-                              std::vector<bool>& row_removed,
-                              std::vector<Index>& row_active_nnz,
+                              std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
                               std::vector<Index>& col_active_nnz,
                               const std::vector<Index>& dirty_rows,
                               std::vector<uint8_t>& next_dirty_rows,
                               std::vector<uint8_t>& next_dirty_cols);
+    Index removeSingletonCols(LpProblem& lp, std::vector<bool>& col_removed,
+                              std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                              std::vector<Index>& col_active_nnz,
+                              const std::vector<Index>& dirty_cols,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
+    Index removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
+                            std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                            std::vector<Index>& col_active_nnz,
+                            const std::vector<Index>& dirty_rows,
+                            std::vector<uint8_t>& next_dirty_rows,
+                            std::vector<uint8_t>& next_dirty_cols);
+    Index removeDominatedRows(LpProblem& lp, std::vector<bool>& col_removed,
+                              std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                              std::vector<Index>& col_active_nnz,
+                              const std::vector<Index>& dirty_rows,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
+    Index detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
+                                 std::vector<bool>& row_removed,
+                                 const std::vector<Index>& dirty_rows,
+                                 std::vector<uint8_t>& next_dirty_rows,
+                                 std::vector<uint8_t>& next_dirty_cols);
+    Index activityBoundTightening(LpProblem& lp, std::vector<bool>& col_removed,
+                                  std::vector<bool>& row_removed,
+                                  const std::vector<Index>& dirty_rows,
+                                  std::vector<uint8_t>& next_dirty_rows,
+                                  std::vector<uint8_t>& next_dirty_cols);
+    Index dualFixing(LpProblem& lp, std::vector<bool>& col_removed, std::vector<bool>& row_removed,
+                     std::vector<Index>& row_active_nnz, std::vector<Index>& col_active_nnz,
+                     const std::vector<Index>& dirty_cols, std::vector<uint8_t>& next_dirty_rows,
+                     std::vector<uint8_t>& next_dirty_cols);
+    Index removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                             std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                             std::vector<Index>& col_active_nnz,
+                             const std::vector<Index>& dirty_cols,
+                             std::vector<uint8_t>& next_dirty_rows,
+                             std::vector<uint8_t>& next_dirty_cols);
+    Index removeDuplicateRows(LpProblem& lp, std::vector<bool>& col_removed,
+                              std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                              std::vector<Index>& col_active_nnz,
+                              const std::vector<Index>& dirty_rows,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
+    Index removeParallelRows(LpProblem& lp, std::vector<bool>& col_removed,
+                             std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                             std::vector<Index>& col_active_nnz,
+                             const std::vector<Index>& dirty_rows,
+                             std::vector<uint8_t>& next_dirty_rows,
+                             std::vector<uint8_t>& next_dirty_cols);
     Index aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& col_removed,
-                                        std::vector<bool>& row_removed,
-                                        std::vector<Index>& row_active_nnz,
-                                        std::vector<Index>& col_active_nnz,
-                                        const std::vector<Index>& dirty_rows,
-                                        std::vector<uint8_t>& next_dirty_rows,
-                                        std::vector<uint8_t>& next_dirty_cols);
+                                       std::vector<bool>& row_removed,
+                                       std::vector<Index>& row_active_nnz,
+                                       std::vector<Index>& col_active_nnz,
+                                       const std::vector<Index>& dirty_rows,
+                                       std::vector<uint8_t>& next_dirty_rows,
+                                       std::vector<uint8_t>& next_dirty_cols);
     // Root probing: fixes variables whose opposite branch propagates to
     // infeasibility, and strengthens coefficients with the learned variable
     // bounds. Runs at most once per presolve call.
     Index probingPass(LpProblem& lp, const std::vector<bool>& col_removed,
-                      const std::vector<bool>& row_removed,
-                      std::vector<uint8_t>& next_dirty_rows,
+                      const std::vector<bool>& row_removed, std::vector<uint8_t>& next_dirty_rows,
                       std::vector<uint8_t>& next_dirty_cols);
-    Index strengthenCoefficientsFromVarBounds(
-        LpProblem& lp, const VariableBoundStore& vb_store,
-        const std::vector<bool>& col_removed,
-        const std::vector<bool>& row_removed,
-        std::vector<uint8_t>& next_dirty_rows,
-        std::vector<uint8_t>& next_dirty_cols);
+    Index strengthenCoefficientsFromVarBounds(LpProblem& lp, const VariableBoundStore& vb_store,
+                                              const std::vector<bool>& col_removed,
+                                              const std::vector<bool>& row_removed,
+                                              std::vector<uint8_t>& next_dirty_rows,
+                                              std::vector<uint8_t>& next_dirty_cols);
     Index tightenCoefficients(LpProblem& lp, std::vector<bool>& col_removed,
-                               std::vector<bool>& row_removed,
-                               const std::vector<Index>& dirty_rows,
-                               std::vector<uint8_t>& next_dirty_rows,
-                               std::vector<uint8_t>& next_dirty_cols);
+                              std::vector<bool>& row_removed, const std::vector<Index>& dirty_rows,
+                              std::vector<uint8_t>& next_dirty_rows,
+                              std::vector<uint8_t>& next_dirty_cols);
 
     // Build the reduced problem from the original with removed rows/cols.
-    LpProblem buildReducedProblem(const LpProblem& lp,
-                                   const std::vector<bool>& col_removed,
-                                   const std::vector<bool>& row_removed);
+    LpProblem buildReducedProblem(const LpProblem& lp, const std::vector<bool>& col_removed,
+                                  const std::vector<bool>& row_removed);
 
     PostsolveStack postsolve_stack_;
-    std::vector<Index> col_mapping_;   // presolved col -> original col
+    std::vector<Index> col_mapping_;  // presolved col -> original col
     Index orig_num_cols_ = 0;
     PresolveStats stats_;
     PresolveOptions options_{};

@@ -1,11 +1,11 @@
 #pragma once
 
-#include <array>
-#include <string>
-
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
 #include "mipx/separators.h"
+
+#include <array>
+#include <string>
 
 namespace mipx {
 
@@ -45,31 +45,23 @@ public:
     [[nodiscard]] CutEffortMode mode() const { return mode_; }
 
     void setBaseLimits(Int max_rounds, Int max_cuts_per_round);
-    void setBudgets(double per_node_budget, double per_round_budget,
-                    double global_budget);
+    void setBudgets(double per_node_budget, double per_round_budget, double global_budget);
 
     void resetNodeState(bool is_root, Index depth);
-    [[nodiscard]] CutRoundPolicy beginRound(Int round,
-                                            bool is_root,
-                                            Index depth,
+    [[nodiscard]] CutRoundPolicy beginRound(Int round, bool is_root, Index depth,
                                             double node_cut_work_used,
                                             double global_cut_work_used) const;
 
-    void recordRound(const CutSeparationStats& separation_stats,
-                     const std::array<Int, static_cast<std::size_t>(CutFamily::Count)>&
-                         selected_by_family,
-                     Real lp_delta,
-                     Real orthogonality,
-                     double separation_seconds,
-                     double reopt_work,
-                     bool is_root,
-                     Index depth);
+    void recordRound(
+        const CutSeparationStats& separation_stats,
+        const std::array<Int, static_cast<std::size_t>(CutFamily::Count)>& selected_by_family,
+        Real lp_delta, Real orthogonality, double separation_seconds, double reopt_work,
+        bool is_root, Index depth);
 
     [[nodiscard]] bool familyEnabled(CutFamily family) const;
     void setFamilyEnabled(CutFamily family, bool enabled);
-    [[nodiscard]] const std::array<CutFamilyKpi,
-                                   static_cast<std::size_t>(CutFamily::Count)>&
-    kpis() const {
+    [[nodiscard]] const std::array<CutFamilyKpi, static_cast<std::size_t>(CutFamily::Count)>& kpis()
+        const {
         return family_kpis_;
     }
     [[nodiscard]] std::string summarizeState() const;
@@ -79,9 +71,7 @@ private:
         return static_cast<std::size_t>(family);
     }
     void applyAutoAdjustments(bool is_root, Index depth);
-    [[nodiscard]] bool conservativeFamilyEnabled(CutFamily family,
-                                                 bool is_root,
-                                                 Index depth) const;
+    [[nodiscard]] bool conservativeFamilyEnabled(CutFamily family, bool is_root, Index depth) const;
 
     CutEffortMode mode_ = CutEffortMode::Auto;
     Int base_max_rounds_ = 20;

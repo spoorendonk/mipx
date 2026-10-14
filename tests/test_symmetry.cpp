@@ -1,10 +1,3 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
-#include <algorithm>
-#include <numeric>
-#include <vector>
-
 #include "mipx/automorphism.h"
 #include "mipx/lp_problem.h"
 #include "mipx/orbital_fixing.h"
@@ -12,6 +5,12 @@
 #include "mipx/sparse_matrix.h"
 #include "mipx/symbreak.h"
 #include "mipx/symmetry.h"
+
+#include <algorithm>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <numeric>
+#include <vector>
 
 using namespace mipx;
 
@@ -176,10 +175,18 @@ TEST_CASE("Automorphism on four symmetric binary variables", "[automorphism]") {
     // 1 constraint vertex (color 1)
     g.addVertex(1);
     // Intermediate vertices for each edge (same coefficient -> same color 2)
-    g.addVertex(2); g.addEdge(0, 5); g.addEdge(5, 4);
-    g.addVertex(2); g.addEdge(1, 6); g.addEdge(6, 4);
-    g.addVertex(2); g.addEdge(2, 7); g.addEdge(7, 4);
-    g.addVertex(2); g.addEdge(3, 8); g.addEdge(8, 4);
+    g.addVertex(2);
+    g.addEdge(0, 5);
+    g.addEdge(5, 4);
+    g.addVertex(2);
+    g.addEdge(1, 6);
+    g.addEdge(6, 4);
+    g.addVertex(2);
+    g.addEdge(2, 7);
+    g.addEdge(7, 4);
+    g.addVertex(2);
+    g.addEdge(3, 8);
+    g.addEdge(8, 4);
 
     auto result = computeAutomorphisms(g, 4);
     // Should find symmetry among variables 0,1,2,3.
@@ -593,8 +600,10 @@ TEST_CASE("SymmetryManager: four-variable orbit determinism", "[symmetry]") {
     lp.row_lower = {-kInf, -kInf};
     lp.row_upper = {1.0, 1.0};
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 2, 1.0}, {1, 3, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 2, 1.0},
+        {1, 3, 1.0},
     };
     lp.matrix = SparseMatrix(2, 4, std::move(trips));
 

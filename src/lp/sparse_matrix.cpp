@@ -47,9 +47,7 @@ SparseMatrix::SparseMatrix(Index rows, Index cols, std::vector<Triplet> triplets
         Index rend = pos[i];
         // Sort this row's entries by column.
         std::sort(sorted.begin() + rstart, sorted.begin() + rend,
-                  [](const Triplet& a, const Triplet& b) {
-                      return a.col < b.col;
-                  });
+                  [](const Triplet& a, const Triplet& b) { return a.col < b.col; });
         // Sum duplicates.
         for (Index k = rstart; k < rend;) {
             Index c = sorted[k].col;
@@ -73,16 +71,14 @@ SparseMatrix::SparseMatrix(Index rows, Index cols, std::vector<Triplet> triplets
 }
 
 SparseMatrix::SparseMatrix(Index rows, Index cols, std::vector<Real> values,
-                           std::vector<Index> col_indices,
-                           std::vector<Index> row_starts)
+                           std::vector<Index> col_indices, std::vector<Index> row_starts)
     : rows_(rows),
       cols_(cols),
       values_(std::move(values)),
       col_indices_(std::move(col_indices)),
       row_starts_(std::move(row_starts)) {
     assert(static_cast<Index>(row_starts_.size()) == rows_ + 1);
-    assert(static_cast<Index>(values_.size()) ==
-           static_cast<Index>(col_indices_.size()));
+    assert(static_cast<Index>(values_.size()) == static_cast<Index>(col_indices_.size()));
 }
 
 SparseMatrix::SparseMatrix(const SparseMatrix& other)
@@ -96,7 +92,8 @@ SparseMatrix::SparseMatrix(const SparseMatrix& other)
 }
 
 SparseMatrix& SparseMatrix::operator=(const SparseMatrix& other) {
-    if (this == &other) return *this;
+    if (this == &other)
+        return *this;
     std::lock_guard<std::mutex> lock(csc_mutex_);
     rows_ = other.rows_;
     cols_ = other.cols_;
@@ -119,13 +116,13 @@ SparseMatrix::SparseMatrix(SparseMatrix&& other) noexcept
       csc_values_(std::move(other.csc_values_)),
       csc_row_indices_(std::move(other.csc_row_indices_)),
       csc_col_starts_(std::move(other.csc_col_starts_)) {
-    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed),
-                     std::memory_order_relaxed);
+    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.csc_valid_.store(false, std::memory_order_relaxed);
 }
 
 SparseMatrix& SparseMatrix::operator=(SparseMatrix&& other) noexcept {
-    if (this == &other) return *this;
+    if (this == &other)
+        return *this;
     std::lock_guard<std::mutex> lock(csc_mutex_);
     rows_ = other.rows_;
     cols_ = other.cols_;
@@ -135,8 +132,7 @@ SparseMatrix& SparseMatrix::operator=(SparseMatrix&& other) noexcept {
     csc_values_ = std::move(other.csc_values_);
     csc_row_indices_ = std::move(other.csc_row_indices_);
     csc_col_starts_ = std::move(other.csc_col_starts_);
-    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed),
-                     std::memory_order_relaxed);
+    csc_valid_.store(other.csc_valid_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     other.csc_valid_.store(false, std::memory_order_relaxed);
     return *this;
 }
@@ -160,9 +156,8 @@ SparseVectorView SparseMatrix::col(Index j) const {
     }
     Index start = csc_col_starts_[j];
     Index end = csc_col_starts_[j + 1];
-    return {
-        std::span<const Index>(csc_row_indices_.data() + start, end - start),
-        std::span<const Real>(csc_values_.data() + start, end - start)};
+    return {std::span<const Index>(csc_row_indices_.data() + start, end - start),
+            std::span<const Real>(csc_values_.data() + start, end - start)};
 }
 
 Real SparseMatrix::coeff(Index i, Index j) const {
@@ -170,8 +165,7 @@ Real SparseMatrix::coeff(Index i, Index j) const {
     assert(j >= 0 && j < cols_);
     Index start = row_starts_[i];
     Index end = row_starts_[i + 1];
-    auto it = std::lower_bound(col_indices_.begin() + start,
-                               col_indices_.begin() + end, j);
+    auto it = std::lower_bound(col_indices_.begin() + start, col_indices_.begin() + end, j);
     if (it != col_indices_.begin() + end && *it == j) {
         return values_[it - col_indices_.begin()];
     }
@@ -192,13 +186,13 @@ void SparseMatrix::multiply(std::span<const Real> x, std::span<Real> y) const {
     }
 }
 
-void SparseMatrix::multiplyTranspose(std::span<const Real> x,
-                                     std::span<Real> y) const {
+void SparseMatrix::multiplyTranspose(std::span<const Real> x, std::span<Real> y) const {
     assert(static_cast<Index>(x.size()) == rows_);
     assert(static_cast<Index>(y.size()) == cols_);
     std::fill(y.begin(), y.end(), 0.0);
     for (Index i = 0; i < rows_; ++i) {
-        if (x[i] == 0.0) continue;
+        if (x[i] == 0.0)
+            continue;
         Index start = row_starts_[i];
         Index end = row_starts_[i + 1];
         for (Index k = start; k < end; ++k) {
@@ -207,10 +201,8 @@ void SparseMatrix::multiplyTranspose(std::span<const Real> x,
     }
 }
 
-void SparseMatrix::addRow(std::span<const Index> indices,
-                          std::span<const Real> values) {
-    assert(static_cast<Index>(indices.size()) ==
-           static_cast<Index>(values.size()));
+void SparseMatrix::addRow(std::span<const Index> indices, std::span<const Real> values) {
+    assert(static_cast<Index>(indices.size()) == static_cast<Index>(values.size()));
     invalidateCSC();
 
     // Build sorted (index, value) pairs.
@@ -219,9 +211,7 @@ void SparseMatrix::addRow(std::span<const Index> indices,
     for (Index k = 0; k < static_cast<Index>(indices.size()); ++k) {
         entries.emplace_back(indices[k], values[k]);
     }
-    std::ranges::sort(entries, [](const auto& a, const auto& b) {
-        return a.first < b.first;
-    });
+    std::ranges::sort(entries, [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (const auto& [col, val] : entries) {
         col_indices_.push_back(col);
@@ -252,8 +242,7 @@ void SparseMatrix::removeRow(Index i) {
         Index last_nnz = last_end - last_start;
 
         // Copy last row's data.
-        std::vector<Real> last_vals(values_.begin() + last_start,
-                                    values_.begin() + last_end);
+        std::vector<Real> last_vals(values_.begin() + last_start, values_.begin() + last_end);
         std::vector<Index> last_cols(col_indices_.begin() + last_start,
                                      col_indices_.begin() + last_end);
 
@@ -264,21 +253,16 @@ void SparseMatrix::removeRow(Index i) {
         // Simpler approach: rebuild the affected portion.
         // Remove both rows' entries from the flat arrays.
         // Since last row is always at the end, remove it first, then row i.
-        values_.erase(values_.begin() + last_start,
-                      values_.begin() + last_end);
-        col_indices_.erase(col_indices_.begin() + last_start,
-                           col_indices_.begin() + last_end);
+        values_.erase(values_.begin() + last_start, values_.begin() + last_end);
+        col_indices_.erase(col_indices_.begin() + last_start, col_indices_.begin() + last_end);
 
         // Now row i is still at the same position (last_start > i_end).
         values_.erase(values_.begin() + i_start, values_.begin() + i_end);
-        col_indices_.erase(col_indices_.begin() + i_start,
-                           col_indices_.begin() + i_end);
+        col_indices_.erase(col_indices_.begin() + i_start, col_indices_.begin() + i_end);
 
         // Insert last row's data at position i_start.
-        values_.insert(values_.begin() + i_start, last_vals.begin(),
-                       last_vals.end());
-        col_indices_.insert(col_indices_.begin() + i_start, last_cols.begin(),
-                            last_cols.end());
+        values_.insert(values_.begin() + i_start, last_vals.begin(), last_vals.end());
+        col_indices_.insert(col_indices_.begin() + i_start, last_cols.begin(), last_cols.end());
 
         // Rebuild row_starts_ from scratch since the shifts are complex.
         // Adjust row_starts_: row i now has last_nnz entries.
@@ -303,8 +287,7 @@ void SparseMatrix::removeRowStable(Index i) {
     Index nnz = end - start;
 
     values_.erase(values_.begin() + start, values_.begin() + end);
-    col_indices_.erase(col_indices_.begin() + start,
-                       col_indices_.begin() + end);
+    col_indices_.erase(col_indices_.begin() + start, col_indices_.begin() + end);
 
     // Shift row_starts_ down.
     row_starts_.erase(row_starts_.begin() + i);
@@ -342,7 +325,6 @@ void SparseMatrix::buildCSC() const {
             csc_values_[p] = values_[k];
         }
     }
-
 }
 
 void SparseMatrix::invalidateCSC() const {

@@ -38,10 +38,9 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             // Ranged — write as L with RANGES.
             sense = 'L';
         }
-        const std::string& name =
-            i < static_cast<Index>(problem->row_names.size())
-                ? problem->row_names[i]
-                : std::format("R{}", i);
+        const std::string& name = i < static_cast<Index>(problem->row_names.size())
+                                      ? problem->row_names[i]
+                                      : std::format("R{}", i);
         out << " " << sense << "  " << name << '\n';
     }
 
@@ -49,9 +48,9 @@ void writeMps(const std::string& filename, const LpProblem& input) {
     out << "COLUMNS\n";
     bool in_int = false;
     for (Index j = 0; j < problem->num_cols; ++j) {
-        bool is_int = (j < static_cast<Index>(problem->col_type.size())) &&
-                      (problem->col_type[j] == VarType::Integer ||
-                       problem->col_type[j] == VarType::Binary);
+        bool is_int =
+            (j < static_cast<Index>(problem->col_type.size())) &&
+            (problem->col_type[j] == VarType::Integer || problem->col_type[j] == VarType::Binary);
 
         if (is_int && !in_int) {
             out << "    INTMARK   'MARKER'                 'INTORG'\n";
@@ -61,14 +60,12 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             in_int = false;
         }
 
-        const std::string& col_name =
-            j < static_cast<Index>(problem->col_names.size())
-                ? problem->col_names[j]
-                : std::format("C{}", j);
+        const std::string& col_name = j < static_cast<Index>(problem->col_names.size())
+                                          ? problem->col_names[j]
+                                          : std::format("C{}", j);
 
         // Objective coefficient.
-        if (j < static_cast<Index>(problem->obj.size()) &&
-            problem->obj[j] != 0.0) {
+        if (j < static_cast<Index>(problem->obj.size()) && problem->obj[j] != 0.0) {
             out << "    " << col_name << "  obj  " << problem->obj[j] << '\n';
         }
 
@@ -77,12 +74,10 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         for (Index i = 0; i < problem->num_rows; ++i) {
             Real val = problem->matrix.coeff(i, j);
             if (val != 0.0) {
-                const std::string& row_name =
-                    i < static_cast<Index>(problem->row_names.size())
-                        ? problem->row_names[i]
-                        : std::format("R{}", i);
-                out << "    " << col_name << "  " << row_name << "  " << val
-                    << '\n';
+                const std::string& row_name = i < static_cast<Index>(problem->row_names.size())
+                                                  ? problem->row_names[i]
+                                                  : std::format("R{}", i);
+                out << "    " << col_name << "  " << row_name << "  " << val << '\n';
             }
         }
     }
@@ -107,10 +102,9 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             rhs = up;
         }
         if (rhs != 0.0) {
-            const std::string& name =
-                i < static_cast<Index>(problem->row_names.size())
-                    ? problem->row_names[i]
-                    : std::format("R{}", i);
+            const std::string& name = i < static_cast<Index>(problem->row_names.size())
+                                          ? problem->row_names[i]
+                                          : std::format("R{}", i);
             out << "    rhs  " << name << "  " << rhs << '\n';
         }
     }
@@ -125,10 +119,9 @@ void writeMps(const std::string& filename, const LpProblem& input) {
                 out << "RANGES\n";
                 has_ranges = true;
             }
-            const std::string& name =
-                i < static_cast<Index>(problem->row_names.size())
-                    ? problem->row_names[i]
-                    : std::format("R{}", i);
+            const std::string& name = i < static_cast<Index>(problem->row_names.size())
+                                          ? problem->row_names[i]
+                                          : std::format("R{}", i);
             out << "    rng  " << name << "  " << (up - lo) << '\n';
         }
     }
@@ -136,20 +129,14 @@ void writeMps(const std::string& filename, const LpProblem& input) {
     // BOUNDS section.
     bool has_bounds = false;
     for (Index j = 0; j < problem->num_cols; ++j) {
-        Real lo = j < static_cast<Index>(problem->col_lower.size())
-                      ? problem->col_lower[j]
-                      : 0.0;
-        Real up = j < static_cast<Index>(problem->col_upper.size())
-                      ? problem->col_upper[j]
-                      : kInf;
-        VarType type = j < static_cast<Index>(problem->col_type.size())
-                           ? problem->col_type[j]
-                           : VarType::Continuous;
+        Real lo = j < static_cast<Index>(problem->col_lower.size()) ? problem->col_lower[j] : 0.0;
+        Real up = j < static_cast<Index>(problem->col_upper.size()) ? problem->col_upper[j] : kInf;
+        VarType type = j < static_cast<Index>(problem->col_type.size()) ? problem->col_type[j]
+                                                                        : VarType::Continuous;
 
-        const std::string& col_name =
-            j < static_cast<Index>(problem->col_names.size())
-                ? problem->col_names[j]
-                : std::format("C{}", j);
+        const std::string& col_name = j < static_cast<Index>(problem->col_names.size())
+                                          ? problem->col_names[j]
+                                          : std::format("C{}", j);
 
         bool default_bounds = (lo == 0.0 && up == kInf);
         if (type == VarType::Binary) {

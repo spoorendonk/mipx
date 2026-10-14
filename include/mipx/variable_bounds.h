@@ -1,9 +1,9 @@
 #pragma once
 
+#include "mipx/core.h"
+
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -43,12 +43,10 @@ public:
     void clear();
 
     /// Add a VUB for variable `var`: var <= coeff * binary_var + constant.
-    void addVUB(Index var, Index binary_var, Real coeff, Real constant,
-                Index source_row = -1);
+    void addVUB(Index var, Index binary_var, Real coeff, Real constant, Index source_row = -1);
 
     /// Add a VLB for variable `var`: var >= coeff * binary_var + constant.
-    void addVLB(Index var, Index binary_var, Real coeff, Real constant,
-                Index source_row = -1);
+    void addVLB(Index var, Index binary_var, Real coeff, Real constant, Index source_row = -1);
 
     /// Get all VUBs for a variable.
     [[nodiscard]] const std::vector<VariableUpperBound>& vubs(Index var) const;
@@ -122,10 +120,8 @@ public:
     /// `row_values` are the effective coefficients of the row.
     /// Returns {coeff, 0, false} when no strengthening applies.
     [[nodiscard]] CoefficientStrengthening strengthenCoefficient(
-        Index binary_var, Real coeff, Real rhs,
-        std::span<const Index> row_indices,
-        std::span<const Real> row_values,
-        const std::vector<Real>& col_lower,
+        Index binary_var, Real coeff, Real rhs, std::span<const Index> row_indices,
+        std::span<const Real> row_values, const std::vector<Real>& col_lower,
         const std::vector<Real>& col_upper) const;
 
 private:

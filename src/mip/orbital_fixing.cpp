@@ -1,10 +1,10 @@
 #include "mipx/orbital_fixing.h"
 
+#include "mipx/schreier_sims.h"
+
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
-
-#include "mipx/schreier_sims.h"
 
 namespace mipx {
 
@@ -18,12 +18,9 @@ bool isFixed(Real lb, Real ub) {
 
 }  // namespace
 
-OrbitalFixingResult OrbitalFixer::fix(
-    std::vector<Real>& col_lower,
-    std::vector<Real>& col_upper,
-    const std::vector<VarType>& col_type,
-    const std::vector<Index>& fixed_vars,
-    Index num_cols) const {
+OrbitalFixingResult OrbitalFixer::fix(std::vector<Real>& col_lower, std::vector<Real>& col_upper,
+                                      const std::vector<VarType>& col_type,
+                                      const std::vector<Index>& fixed_vars, Index num_cols) const {
     OrbitalFixingResult result;
 
     if (schreier_sims_ == nullptr || !schreier_sims_->isBuilt()) {
@@ -51,15 +48,19 @@ OrbitalFixingResult OrbitalFixer::fix(
     std::vector<bool> processed(static_cast<std::size_t>(num_cols), false);
 
     for (Index j : fixed_vars) {
-        if (j < 0 || j >= num_cols) continue;
-        if (col_type[j] == VarType::Continuous) continue;
-        if (processed[j]) continue;
+        if (j < 0 || j >= num_cols)
+            continue;
+        if (col_type[j] == VarType::Continuous)
+            continue;
+        if (processed[j])
+            continue;
 
         // Compute orbit of j under stabilizer of other fixed variables.
         std::vector<Index> other_fixed;
         other_fixed.reserve(all_fixed.size());
         for (Index f : all_fixed) {
-            if (f != j) other_fixed.push_back(f);
+            if (f != j)
+                other_fixed.push_back(f);
         }
 
         auto orbit = schreier_sims_->orbitUnderStabilizer(j, other_fixed);
@@ -69,9 +70,12 @@ OrbitalFixingResult OrbitalFixer::fix(
         Real ub_j = col_upper[j];
 
         for (Index k : orbit) {
-            if (k < 0 || k >= num_cols) continue;
-            if (k == j) continue;
-            if (col_type[k] == VarType::Continuous) continue;
+            if (k < 0 || k >= num_cols)
+                continue;
+            if (k == j)
+                continue;
+            if (col_type[k] == VarType::Continuous)
+                continue;
             processed[k] = true;
 
             bool changed = false;
@@ -108,21 +112,22 @@ OrbitalFixingResult OrbitalFixer::fix(
     return result;
 }
 
-OrbitalFixingResult OrbitalFixer::fixFromCanonical(
-    std::vector<Real>& col_lower,
-    std::vector<Real>& col_upper,
-    const std::vector<Index>& canonical,
-    Index num_cols) {
+OrbitalFixingResult OrbitalFixer::fixFromCanonical(std::vector<Real>& col_lower,
+                                                   std::vector<Real>& col_upper,
+                                                   const std::vector<Index>& canonical,
+                                                   Index num_cols) {
     OrbitalFixingResult result;
 
-    if (canonical.empty()) return result;
+    if (canonical.empty())
+        return result;
 
     bool changed = true;
     while (changed) {
         changed = false;
         for (Index j = 0; j < num_cols; ++j) {
             Index canon = canonical[j];
-            if (canon < 0 || canon == j || canon >= num_cols) continue;
+            if (canon < 0 || canon == j || canon >= num_cols)
+                continue;
 
             result.work_units += 1.0;
 

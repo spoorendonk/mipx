@@ -18,7 +18,8 @@ std::vector<SoluEntry> readSolu(const std::string& filename) {
 
     while (std::getline(in, line)) {
         // Skip empty lines and comments.
-        if (line.empty() || line[0] == '#') continue;
+        if (line.empty() || line[0] == '#')
+            continue;
 
         std::istringstream iss(line);
         std::string tag, name;
@@ -31,8 +32,7 @@ std::vector<SoluEntry> readSolu(const std::string& filename) {
             std::string val_str;
             iss >> val_str;
             if (!val_str.empty()) {
-                std::from_chars(val_str.data(),
-                                val_str.data() + val_str.size(), val);
+                std::from_chars(val_str.data(), val_str.data() + val_str.size(), val);
             }
             entries.push_back({std::move(name), val, false});
         }

@@ -1,11 +1,11 @@
 #pragma once
 
-#include <span>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/sparse_matrix.h"
+
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -59,8 +59,7 @@ public:
     [[nodiscard]] Index toOriginalIndex(Index bin_idx) const;
 
     /// Find connected components. Returns component id per binary variable.
-    [[nodiscard]] std::vector<Index> connectedComponents(
-        Index& num_components) const;
+    [[nodiscard]] std::vector<Index> connectedComponents(Index& num_components) const;
 
     /// Fix a variable during tree search, updating adjacency info.
     /// This does not structurally remove nodes; it marks them as fixed.

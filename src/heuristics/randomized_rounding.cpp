@@ -1,11 +1,10 @@
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
-
-#include "mipx/dual_simplex.h"
 
 namespace mipx {
 
@@ -25,8 +24,10 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
         for (Index k = 0; k < row.size(); ++k) {
             activity += row.values[k] * values[row.indices[k]];
         }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
+        if (activity < problem.row_lower[i] - kFeasTol)
+            return false;
+        if (activity > problem.row_upper[i] + kFeasTol)
+            return false;
     }
     return true;
 }
@@ -42,11 +43,8 @@ uint64_t splitmix64(uint64_t x) {
 }  // namespace
 
 std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
+    const LpProblem& problem, [[maybe_unused]] DualSimplexSolver& lp, std::span<const Real> primals,
     Real incumbent) {
-
     const Index n = problem.num_cols;
     std::optional<HeuristicSolution> best;
 
@@ -58,15 +56,16 @@ std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
         // Randomized rounding: for each fractional integer variable,
         // round up with probability = fractionality, down otherwise.
         for (Index j = 0; j < n; ++j) {
-            if (!isIntegerVar(problem.col_type[j])) continue;
+            if (!isIntegerVar(problem.col_type[j]))
+                continue;
             Real val = primals[j];
             Real frac = val - std::floor(val);
             if (frac < kFeasTol || frac > 1.0 - kFeasTol) {
                 x[j] = std::round(val);
             } else {
                 rng_state = splitmix64(rng_state + static_cast<uint64_t>(trial * n + j));
-                Real threshold = static_cast<Real>(rng_state & 0xFFFFFFFFULL) /
-                                 static_cast<Real>(0xFFFFFFFFULL);
+                Real threshold =
+                    static_cast<Real>(rng_state & 0xFFFFFFFFULL) / static_cast<Real>(0xFFFFFFFFULL);
                 x[j] = (threshold < frac) ? std::ceil(val) : std::floor(val);
             }
             x[j] = std::max(x[j], problem.col_lower[j]);
@@ -103,7 +102,8 @@ std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
                 for (Index k = 0; k < row.size(); ++k) {
                     Index j = row.indices[k];
                     Real coeff = row.values[k];
-                    if (std::abs(coeff) < 1e-12) continue;
+                    if (std::abs(coeff) < 1e-12)
+                        continue;
 
                     Real shift = 0.0;
                     if (need_decrease) {
@@ -124,7 +124,8 @@ std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
                         }
                     }
 
-                    if (std::abs(shift) < 1e-12) continue;
+                    if (std::abs(shift) < 1e-12)
+                        continue;
 
                     // For integer vars, round shift.
                     Real new_val = x[j] + shift;
@@ -134,7 +135,8 @@ std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
                         new_val = std::max(new_val, problem.col_lower[j]);
                         new_val = std::min(new_val, problem.col_upper[j]);
                         shift = new_val - x[j];
-                        if (std::abs(shift) < 1e-12) continue;
+                        if (std::abs(shift) < 1e-12)
+                            continue;
                     }
 
                     Real cost = std::abs(problem.obj[j] * shift);
@@ -155,21 +157,25 @@ std::optional<HeuristicSolution> RandomizedRoundingHeuristic::run(
                     changed = true;
                 }
             }
-            if (!changed) break;
+            if (!changed)
+                break;
         }
 
-        if (!isRowFeasible(problem, x)) continue;
+        if (!isRowFeasible(problem, x))
+            continue;
 
         // Check integrality.
         bool integral = true;
         for (Index j = 0; j < n; ++j) {
-            if (!isIntegerVar(problem.col_type[j])) continue;
+            if (!isIntegerVar(problem.col_type[j]))
+                continue;
             if (std::abs(x[j] - std::round(x[j])) > kFeasTol) {
                 integral = false;
                 break;
             }
         }
-        if (!integral) continue;
+        if (!integral)
+            continue;
 
         Real obj = problem.obj_offset;
         for (Index j = 0; j < n; ++j) {

@@ -1,5 +1,7 @@
 #include "mipx/automorphism.h"
 
+#include "mipx/lp_problem.h"
+
 #include <algorithm>
 #include <bit>
 #include <cassert>
@@ -9,8 +11,6 @@
 #include <stack>
 #include <unordered_map>
 #include <vector>
-
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -39,9 +39,7 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
     // Color encoding for variables:
     // We hash (var_type, obj_bits, lb_bits, ub_bits) into a color.
     // Color offset: 0 for variables, variable colors + 1 for constraints.
-    auto hashDouble = [](Real v) -> std::uint64_t {
-        return std::bit_cast<std::uint64_t>(v);
-    };
+    auto hashDouble = [](Real v) -> std::uint64_t { return std::bit_cast<std::uint64_t>(v); };
 
     struct VarSig {
         VarType type;
@@ -54,8 +52,7 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
         std::size_t operator()(const VarSig& s) const {
             std::size_t h = std::hash<int>()(static_cast<int>(s.type));
             auto mix = [&](std::uint64_t v) {
-                h ^= std::hash<std::uint64_t>()(v) + 0x9e3779b97f4a7c15ULL +
-                     (h << 6) + (h >> 2);
+                h ^= std::hash<std::uint64_t>()(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             };
             mix(s.obj_bits);
             mix(s.lb_bits);
@@ -70,10 +67,10 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
     // Add variable vertices (0..num_cols-1).
     for (Index j = 0; j < problem.num_cols; ++j) {
         VarSig sig{problem.col_type[j], hashDouble(problem.obj[j]),
-                   hashDouble(problem.col_lower[j]),
-                   hashDouble(problem.col_upper[j])};
+                   hashDouble(problem.col_lower[j]), hashDouble(problem.col_upper[j])};
         auto [it, inserted] = var_color_map.try_emplace(sig, next_color);
-        if (inserted) ++next_color;
+        if (inserted)
+            ++next_color;
         graph.addVertex(it->second);
     }
 
@@ -86,8 +83,8 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
     struct RowSigHash {
         std::size_t operator()(const RowSig& s) const {
             std::size_t h = std::hash<std::uint64_t>()(s.lb_bits);
-            h ^= std::hash<std::uint64_t>()(s.ub_bits) + 0x9e3779b97f4a7c15ULL +
-                 (h << 6) + (h >> 2);
+            h ^=
+                std::hash<std::uint64_t>()(s.ub_bits) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             return h;
         }
     };
@@ -96,10 +93,10 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
 
     // Add constraint vertices (num_cols..num_cols+num_rows-1).
     for (Index i = 0; i < problem.num_rows; ++i) {
-        RowSig sig{hashDouble(problem.row_lower[i]),
-                   hashDouble(problem.row_upper[i])};
+        RowSig sig{hashDouble(problem.row_lower[i]), hashDouble(problem.row_upper[i])};
         auto [it, inserted] = row_color_map.try_emplace(sig, next_color);
-        if (inserted) ++next_color;
+        if (inserted)
+            ++next_color;
         graph.addVertex(it->second);
     }
 
@@ -131,7 +128,8 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
 
             CoeffSig sig{hashDouble(val)};
             auto [it, inserted] = coeff_color_map.try_emplace(sig, next_color);
-            if (inserted) ++next_color;
+            if (inserted)
+                ++next_color;
 
             // Create intermediate vertex with coefficient color.
             Index mid = graph.num_vertices;
@@ -174,7 +172,8 @@ Permutation inversePermutation(const Permutation& perm) {
 
 bool isIdentity(const Permutation& perm) {
     for (std::size_t i = 0; i < perm.size(); ++i) {
-        if (perm[i] != static_cast<Index>(i)) return false;
+        if (perm[i] != static_cast<Index>(i))
+            return false;
     }
     return true;
 }
@@ -187,8 +186,8 @@ namespace {
 
 class UnionFind {
 public:
-    explicit UnionFind(Index n) : parent_(static_cast<std::size_t>(n)),
-                                   rank_(static_cast<std::size_t>(n), 0) {
+    explicit UnionFind(Index n)
+        : parent_(static_cast<std::size_t>(n)), rank_(static_cast<std::size_t>(n), 0) {
         std::iota(parent_.begin(), parent_.end(), 0);
     }
 
@@ -203,10 +202,13 @@ public:
     void unite(Index x, Index y) {
         x = find(x);
         y = find(y);
-        if (x == y) return;
-        if (rank_[x] < rank_[y]) std::swap(x, y);
+        if (x == y)
+            return;
+        if (rank_[x] < rank_[y])
+            std::swap(x, y);
         parent_[y] = x;
-        if (rank_[x] == rank_[y]) ++rank_[x];
+        if (rank_[x] == rank_[y])
+            ++rank_[x];
     }
 
 private:
@@ -245,8 +247,8 @@ std::vector<std::vector<Index>> computeOrbitsFromGenerators(
     return orbits;
 }
 
-std::vector<std::vector<Index>> computeVariableOrbits(
-    const std::vector<Permutation>& generators, Index num_vars) {
+std::vector<std::vector<Index>> computeVariableOrbits(const std::vector<Permutation>& generators,
+                                                      Index num_vars) {
     // Only consider how generators permute the first num_vars elements.
     UnionFind uf(num_vars);
     for (const auto& perm : generators) {
@@ -297,9 +299,9 @@ namespace {
 /// Each cell is a contiguous range in the perm array.
 /// cell_starts_[k] gives the beginning of cell k in perm_.
 struct Partition {
-    std::vector<Index> perm;          // vertex ordering
-    std::vector<Index> inv_perm;      // position of each vertex in perm
-    std::vector<Index> cell_starts;   // start positions of cells (sorted)
+    std::vector<Index> perm;         // vertex ordering
+    std::vector<Index> inv_perm;     // position of each vertex in perm
+    std::vector<Index> cell_starts;  // start positions of cells (sorted)
     Index n = 0;
 
     explicit Partition(Index num_vertices)
@@ -314,9 +316,7 @@ struct Partition {
     Partition() = default;
 
     /// Number of cells.
-    [[nodiscard]] Index numCells() const {
-        return static_cast<Index>(cell_starts.size());
-    }
+    [[nodiscard]] Index numCells() const { return static_cast<Index>(cell_starts.size()); }
 
     /// Is the partition discrete (all singletons)?
     [[nodiscard]] bool isDiscrete() const { return numCells() == n; }
@@ -331,7 +331,8 @@ struct Partition {
     /// Find the index of the first non-singleton cell. Returns -1 if discrete.
     [[nodiscard]] Index firstNonSingletonCell() const {
         for (Index c = 0; c < numCells(); ++c) {
-            if (cellSize(c) > 1) return c;
+            if (cellSize(c) > 1)
+                return c;
         }
         return -1;
     }
@@ -360,10 +361,8 @@ struct Partition {
 /// Refine a partition by adjacency to a "target" cell.
 /// For each cell, split it by the number of neighbors each vertex has
 /// in the target cell. Returns true if any split occurred.
-bool refineByCell(Partition& pi,
-                  const std::vector<std::vector<Index>>& adj,
-                  Index target_cell_start, Index target_cell_end,
-                  double& work) {
+bool refineByCell(Partition& pi, const std::vector<std::vector<Index>>& adj,
+                  Index target_cell_start, Index target_cell_end, double& work) {
     bool changed = false;
     // Count adjacency of each vertex to the target cell.
     std::vector<Index> degree(static_cast<std::size_t>(pi.n), 0);
@@ -384,7 +383,8 @@ bool refineByCell(Partition& pi,
         Index end = (c + 1 < pi.numCells()) ? pi.cell_starts[c + 1] : pi.n;
         new_cell_starts.push_back(start);
 
-        if (end - start <= 1) continue;
+        if (end - start <= 1)
+            continue;
 
         // Sort vertices in this cell by degree.
         std::sort(pi.perm.begin() + start, pi.perm.begin() + end,
@@ -411,8 +411,7 @@ bool refineByCell(Partition& pi,
 }
 
 /// Full refinement: repeatedly refine by all cells until stable.
-void refine(Partition& pi, const std::vector<std::vector<Index>>& adj,
-            double& work) {
+void refine(Partition& pi, const std::vector<std::vector<Index>>& adj, double& work) {
     bool changed = true;
     while (changed) {
         changed = false;
@@ -435,9 +434,7 @@ Partition makeInitialPartition(const std::vector<Index>& colors) {
 
     // Sort vertices by color.
     std::sort(pi.perm.begin(), pi.perm.end(),
-              [&](Index a, Index b) {
-                  return colors[a] < colors[b];
-              });
+              [&](Index a, Index b) { return colors[a] < colors[b]; });
 
     // Build cell starts.
     pi.cell_starts.clear();
@@ -468,13 +465,13 @@ struct SearchState {
 
 }  // namespace
 
-AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
-                                        Index num_variable_vertices) {
+AutomorphismResult computeAutomorphisms(const ColoredGraph& graph, Index num_variable_vertices) {
     AutomorphismResult result;
     result.num_vertices = graph.num_vertices;
     result.num_variable_vertices = num_variable_vertices;
 
-    if (graph.num_vertices == 0) return result;
+    if (graph.num_vertices == 0)
+        return result;
 
     // Build initial partition from colors.
     Partition initial = makeInitialPartition(graph.colors);
@@ -521,7 +518,8 @@ AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
     }
 
     while (!stack.empty()) {
-        if (search_nodes >= kMaxSearchNodes) break;
+        if (search_nodes >= kMaxSearchNodes)
+            break;
 
         auto& frame = stack.top();
 
@@ -551,16 +549,14 @@ AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
         }
 
         // Insert new cell boundary after the singleton.
-        auto insert_it = std::lower_bound(child.cell_starts.begin(),
-                                          child.cell_starts.end(),
-                                          swap_pos + 1);
+        auto insert_it =
+            std::lower_bound(child.cell_starts.begin(), child.cell_starts.end(), swap_pos + 1);
         if (insert_it == child.cell_starts.end() || *insert_it != swap_pos + 1) {
             child.cell_starts.insert(insert_it, swap_pos + 1);
         }
         // Ensure the singleton's cell start is present.
-        auto start_it = std::lower_bound(child.cell_starts.begin(),
-                                         child.cell_starts.end(),
-                                         swap_pos);
+        auto start_it =
+            std::lower_bound(child.cell_starts.begin(), child.cell_starts.end(), swap_pos);
         if (start_it == child.cell_starts.end() || *start_it != swap_pos) {
             child.cell_starts.insert(start_it, swap_pos);
         }
@@ -596,9 +592,15 @@ AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
                             Index av = aut[v];
                             bool found = false;
                             for (Index w : graph.adj[av]) {
-                                if (w == au) { found = true; break; }
+                                if (w == au) {
+                                    found = true;
+                                    break;
+                                }
                             }
-                            if (!found) { valid = false; break; }
+                            if (!found) {
+                                valid = false;
+                                break;
+                            }
                         }
                     }
                     if (valid) {
@@ -613,9 +615,8 @@ AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
                 Frame next;
                 next.cell_idx = next_cell;
                 next.cell_start = child.cell_starts[next_cell];
-                next.cell_end = (next_cell + 1 < child.numCells())
-                                    ? child.cell_starts[next_cell + 1]
-                                    : child.n;
+                next.cell_end =
+                    (next_cell + 1 < child.numCells()) ? child.cell_starts[next_cell + 1] : child.n;
                 next.next_pos_in_cell = next.cell_start;
                 next.pi = std::move(child);
                 stack.push(std::move(next));

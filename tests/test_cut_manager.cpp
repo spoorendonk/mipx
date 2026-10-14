@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "mipx/cut_manager.h"
+
+#include <catch2/catch_test_macros.hpp>
 
 using namespace mipx;
 
@@ -68,7 +68,8 @@ TEST_CASE("CutManager policy decisions are deterministic", "[cuts][policy]") {
 
         for (Int round = 0; round < 5; ++round) {
             auto policy = manager.beginRound(round, true, 0, 10.0 * round, 20.0 * round);
-            if (!policy.run) break;
+            if (!policy.run)
+                break;
 
             CutSeparationStats stats;
             auto& gomory = stats.at(CutFamily::Gomory);

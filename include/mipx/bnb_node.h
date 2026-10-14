@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/cut_pool.h"
+#include "mipx/lp_solver.h"
+
 #include <map>
 #include <optional>
 #include <set>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/cut_pool.h"
-#include "mipx/lp_solver.h"
 
 namespace mipx {
 

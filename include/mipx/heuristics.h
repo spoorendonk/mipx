@@ -1,13 +1,13 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/lp_problem.h"
+
 #include <algorithm>
 #include <memory>
 #include <optional>
 #include <span>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/lp_problem.h"
 
 namespace mipx {
 
@@ -38,11 +38,8 @@ public:
     /// @param primals    The LP relaxation primal values.
     /// @param incumbent  Current best objective (kInf if none).
     /// @return A feasible solution, or std::nullopt.
-    virtual std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) = 0;
+    virtual std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                                 std::span<const Real> primals, Real incumbent) = 0;
 
     /// Name for logging.
     [[nodiscard]] virtual const char* name() const = 0;
@@ -52,11 +49,8 @@ public:
 /// check feasibility of the resulting solution.
 class RoundingHeuristic : public Heuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "rounding"; }
 };
@@ -73,17 +67,13 @@ public:
 protected:
     /// Select the variable to fix and which bound to fix it to.
     /// Returns (variable_index, fixed_value), or (-1, 0) if no candidate.
-    virtual std::pair<Index, Real> selectVariable(
-        const LpProblem& problem,
-        std::span<const Real> primals,
-        std::span<const Real> obj) const = 0;
+    virtual std::pair<Index, Real> selectVariable(const LpProblem& problem,
+                                                  std::span<const Real> primals,
+                                                  std::span<const Real> obj) const = 0;
 
     /// Common diving loop implementation.
-    std::optional<HeuristicSolution> dive(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent);
+    std::optional<HeuristicSolution> dive(const LpProblem& problem, DualSimplexSolver& lp,
+                                          std::span<const Real> primals, Real incumbent);
 
     Int max_dives_ = 100;
     Int backtrack_limit_ = 3;
@@ -92,38 +82,28 @@ protected:
 /// Fractional diving: fix the most fractional variable to its nearest integer.
 class FractionalDiving : public DivingHeuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "fracdiving"; }
 
 protected:
-    std::pair<Index, Real> selectVariable(
-        const LpProblem& problem,
-        std::span<const Real> primals,
-        std::span<const Real> obj) const override;
+    std::pair<Index, Real> selectVariable(const LpProblem& problem, std::span<const Real> primals,
+                                          std::span<const Real> obj) const override;
 };
 
 /// Coefficient diving: fix the variable with smallest objective coefficient
 /// impact per unit rounding.
 class CoefficientDiving : public DivingHeuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "coefdiving"; }
 
 protected:
-    std::pair<Index, Real> selectVariable(
-        const LpProblem& problem,
-        std::span<const Real> primals,
-        std::span<const Real> obj) const override;
+    std::pair<Index, Real> selectVariable(const LpProblem& problem, std::span<const Real> primals,
+                                          std::span<const Real> obj) const override;
 };
 
 /// RINS (Relaxation Induced Neighborhood Search)-style heuristic.
@@ -147,19 +127,13 @@ public:
     /// If true, try rounded-repair when restricted LP is fractional.
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     /// Classic incumbent-guided RINS.
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        std::span<const Real> incumbent_values);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         std::span<const Real> incumbent_values);
 
     [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
@@ -197,11 +171,8 @@ public:
     void setMinFixedRate(Real rate) { min_fixed_rate_ = rate; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
@@ -235,11 +206,8 @@ public:
     void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
     void setCyclePerturbationPeriod(Int period) { cycle_perturb_period_ = period; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
     [[nodiscard]] double lastWorkUnits() const { return last_work_units_; }
@@ -264,19 +232,13 @@ public:
     void setMinBinaryVars(Int count) { min_binary_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     /// Incumbent-guided local branching.
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        std::span<const Real> incumbent_values);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         std::span<const Real> incumbent_values);
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] bool lastSkippedNoIncumbent() const { return last_skipped_no_incumbent_; }
@@ -310,18 +272,12 @@ public:
     void setMinActiveIntegerVars(Int count) { min_active_integer_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        std::span<const Real> incumbent_values);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         std::span<const Real> incumbent_values);
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] bool lastSkippedTooSmall() const { return last_skipped_too_small_; }
@@ -351,11 +307,8 @@ public:
     void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
@@ -384,11 +337,8 @@ public:
     void setMaxIterations(Int iters) { max_iterations_ = iters; }
     void setMaxRestarts(Int restarts) { max_restarts_ = restarts; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "feasjump"; }
 
@@ -409,19 +359,13 @@ public:
     void setMinFixedVars(Int count) { min_fixed_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     /// Crossover of LP relaxation and incumbent solution.
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        std::span<const Real> incumbent_values);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         std::span<const Real> incumbent_values);
 
     [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
@@ -453,18 +397,12 @@ public:
     void setMinBinaryVars(Int count) { min_binary_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        std::span<const Real> incumbent_values);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         std::span<const Real> incumbent_values);
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] Int lastLpIterations() const { return last_lp_iterations_; }
@@ -494,11 +432,8 @@ public:
     void setMinFreeVars(Int count) { min_free_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
@@ -525,11 +460,8 @@ private:
 /// ZI-rounding: round integer variables without worsening the objective.
 class ZiRoundingHeuristic : public Heuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "zirounding"; }
 };
@@ -539,11 +471,8 @@ public:
 /// remaining integer variables to nearest.
 class CliqueRoundingHeuristic : public Heuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     /// Number of cliques in the table built by the last run() call.
     [[nodiscard]] Int lastCliqueCount() const { return last_clique_count_; }
@@ -573,11 +502,8 @@ class ShiftingHeuristic : public Heuristic {
 public:
     void setMaxPasses(Int passes) { max_passes_ = passes; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "shifting"; }
 
@@ -591,11 +517,8 @@ public:
     void setNumTrials(Int trials) { num_trials_ = trials; }
     void setMaxRepairPasses(Int passes) { max_repair_passes_ = passes; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "randrounding"; }
 
@@ -617,11 +540,8 @@ public:
     void setMinFixedVars(Int count) { min_fixed_vars_ = count; }
     void setEnableRoundingRepair(bool enable) { enable_rounding_repair_ = enable; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] bool lastExecutedSolve() const { return last_executed_solve_; }
     [[nodiscard]] Int lastFixedCount() const { return last_fixed_count_; }
@@ -648,11 +568,8 @@ class PropagationCompletionHeuristic : public Heuristic {
 public:
     void setMaxPropagationRounds(Int rounds) { max_propagation_rounds_ = rounds; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
     [[nodiscard]] const char* name() const override { return "propcompletion"; }
 
@@ -667,16 +584,11 @@ private:
 /// 1-opt local search: single variable improvement moves on incumbent.
 class OneOptHeuristic : public Heuristic {
 public:
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        std::span<const Real> incumbent_values,
-        Real incumbent);
+    std::optional<HeuristicSolution> run(const LpProblem& problem,
+                                         std::span<const Real> incumbent_values, Real incumbent);
 
     [[nodiscard]] const char* name() const override { return "oneopt"; }
 };
@@ -686,16 +598,11 @@ class TwoOptHeuristic : public Heuristic {
 public:
     void setMaxPairs(Int pairs) { max_pairs_ = pairs; }
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent) override;
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent) override;
 
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        std::span<const Real> incumbent_values,
-        Real incumbent);
+    std::optional<HeuristicSolution> run(const LpProblem& problem,
+                                         std::span<const Real> incumbent_values, Real incumbent);
 
     [[nodiscard]] const char* name() const override { return "twoopt"; }
 
@@ -736,8 +643,7 @@ private:
 class HeuristicScheduler {
 public:
     /// Add a heuristic with a timing policy.
-    void addHeuristic(std::unique_ptr<Heuristic> heuristic,
-                      HeuristicTiming timing,
+    void addHeuristic(std::unique_ptr<Heuristic> heuristic, HeuristicTiming timing,
                       Int frequency = 10);
 
     /// Run heuristics appropriate for the current context.
@@ -747,17 +653,12 @@ public:
     /// @param incumbent  Current best objective.
     /// @param node_count Current node count (0 = root).
     /// @return Best solution found (if any).
-    std::optional<HeuristicSolution> run(
-        const LpProblem& problem,
-        DualSimplexSolver& lp,
-        std::span<const Real> primals,
-        Real incumbent,
-        Int node_count);
+    std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
+                                         std::span<const Real> primals, Real incumbent,
+                                         Int node_count);
 
     /// Number of registered heuristics.
-    [[nodiscard]] Int numHeuristics() const {
-        return static_cast<Int>(entries_.size());
-    }
+    [[nodiscard]] Int numHeuristics() const { return static_cast<Int>(entries_.size()); }
 
     /// Total solutions found across all heuristics.
     [[nodiscard]] Int totalSolutionsFound() const { return total_solutions_; }
@@ -766,8 +667,8 @@ private:
     struct Entry {
         std::unique_ptr<Heuristic> heuristic;
         HeuristicTiming timing;
-        Int frequency;   ///< For Periodic timing: run every N nodes.
-        Int solutions;   ///< Number of solutions found by this heuristic.
+        Int frequency;  ///< For Periodic timing: run every N nodes.
+        Int solutions;  ///< Number of solutions found by this heuristic.
     };
 
     std::vector<Entry> entries_;

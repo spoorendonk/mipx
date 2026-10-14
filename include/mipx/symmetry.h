@@ -1,13 +1,13 @@
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
 #include "mipx/automorphism.h"
 #include "mipx/lp_problem.h"
 #include "mipx/orbital_fixing.h"
 #include "mipx/schreier_sims.h"
 #include "mipx/symbreak.h"
+
+#include <cstddef>
+#include <vector>
 
 namespace mipx {
 
@@ -59,21 +59,18 @@ public:
     /// @param fixed_vars   Variables fixed at this node.
     /// @param num_cols     Number of columns.
     /// @return Orbital fixing result with tightenings.
-    [[nodiscard]] OrbitalFixingResult applyOrbitalFixing(
-        std::vector<Real>& col_lower,
-        std::vector<Real>& col_upper,
-        const std::vector<VarType>& col_type,
-        const std::vector<Index>& fixed_vars,
-        Index num_cols) const;
+    [[nodiscard]] OrbitalFixingResult applyOrbitalFixing(std::vector<Real>& col_lower,
+                                                         std::vector<Real>& col_upper,
+                                                         const std::vector<VarType>& col_type,
+                                                         const std::vector<Index>& fixed_vars,
+                                                         Index num_cols) const;
 
     /// Check if a node can be pruned by isomorphism.
-    [[nodiscard]] bool canPruneByIsomorphism(
-        const std::vector<Real>& col_lower,
-        const std::vector<Real>& col_upper) const;
+    [[nodiscard]] bool canPruneByIsomorphism(const std::vector<Real>& col_lower,
+                                             const std::vector<Real>& col_upper) const;
 
     /// Record a node configuration as explored (for isomorphism pruning).
-    void recordExplored(const std::vector<Real>& col_lower,
-                        const std::vector<Real>& col_upper);
+    void recordExplored(const std::vector<Real>& col_lower, const std::vector<Real>& col_upper);
 
     /// Get the isomorphism pruner statistics.
     [[nodiscard]] Index numIsomorphismPrunes() const;

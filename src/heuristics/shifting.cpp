@@ -1,10 +1,9 @@
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
-
-#include "mipx/dual_simplex.h"
 
 namespace mipx {
 
@@ -24,26 +23,27 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
         for (Index k = 0; k < row.size(); ++k) {
             activity += row.values[k] * values[row.indices[k]];
         }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
+        if (activity < problem.row_lower[i] - kFeasTol)
+            return false;
+        if (activity > problem.row_upper[i] + kFeasTol)
+            return false;
     }
     return true;
 }
 
 }  // namespace
 
-std::optional<HeuristicSolution> ShiftingHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> ShiftingHeuristic::run(const LpProblem& problem,
+                                                        [[maybe_unused]] DualSimplexSolver& lp,
+                                                        std::span<const Real> primals,
+                                                        Real incumbent) {
     const Index n = problem.num_cols;
     std::vector<Real> x(primals.begin(), primals.end());
 
     // Step 1: round all integer variables to nearest integer.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
         x[j] = std::round(primals[j]);
         x[j] = std::max(x[j], problem.col_lower[j]);
         x[j] = std::min(x[j], problem.col_upper[j]);
@@ -80,7 +80,8 @@ std::optional<HeuristicSolution> ShiftingHeuristic::run(
             for (Index k = 0; k < row.size(); ++k) {
                 Index j = row.indices[k];
                 Real coeff = row.values[k];
-                if (std::abs(coeff) < 1e-12) continue;
+                if (std::abs(coeff) < 1e-12)
+                    continue;
 
                 Real shift = 0.0;
                 if (need_decrease) {
@@ -108,7 +109,8 @@ std::optional<HeuristicSolution> ShiftingHeuristic::run(
                     }
                 }
 
-                if (std::abs(shift) < 1e-12) continue;
+                if (std::abs(shift) < 1e-12)
+                    continue;
 
                 // For integer variables, round the shift to an integer.
                 Real new_val = x[j] + shift;
@@ -121,7 +123,8 @@ std::optional<HeuristicSolution> ShiftingHeuristic::run(
                     new_val = std::max(new_val, problem.col_lower[j]);
                     new_val = std::min(new_val, problem.col_upper[j]);
                     shift = new_val - x[j];
-                    if (std::abs(shift) < 1e-12) continue;
+                    if (std::abs(shift) < 1e-12)
+                        continue;
                 }
 
                 // Cost = objective degradation.
@@ -144,15 +147,19 @@ std::optional<HeuristicSolution> ShiftingHeuristic::run(
             }
         }
 
-        if (!changed) break;
+        if (!changed)
+            break;
     }
 
-    if (!isRowFeasible(problem, x)) return std::nullopt;
+    if (!isRowFeasible(problem, x))
+        return std::nullopt;
 
     // Check integrality.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
-        if (std::abs(x[j] - std::round(x[j])) > kFeasTol) return std::nullopt;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
+        if (std::abs(x[j] - std::round(x[j])) > kFeasTol)
+            return std::nullopt;
     }
 
     Real obj = problem.obj_offset;
@@ -160,7 +167,8 @@ std::optional<HeuristicSolution> ShiftingHeuristic::run(
         obj += problem.obj[j] * x[j];
     }
 
-    if (obj >= incumbent - kObjectiveTol) return std::nullopt;
+    if (obj >= incumbent - kObjectiveTol)
+        return std::nullopt;
 
     return HeuristicSolution{std::move(x), obj};
 }

@@ -1,14 +1,14 @@
+#include "mipx/branching.h"
+#include "mipx/dual_simplex.h"
+#include "mipx/heuristic_runtime.h"
+#include "mipx/heuristics.h"
+#include "mipx/lp_problem.h"
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <memory>
 #include <thread>
-
-#include "mipx/branching.h"
-#include "mipx/dual_simplex.h"
-#include "mipx/heuristics.h"
-#include "mipx/heuristic_runtime.h"
-#include "mipx/lp_problem.h"
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -17,18 +17,20 @@ using Catch::Matchers::WithinAbs;
 // Helper: check that a solution is feasible for the given problem.
 // ---------------------------------------------------------------------------
 
-static bool isFeasible(const LpProblem& problem,
-                       std::span<const Real> sol,
-                       Real tol = 1e-6) {
+static bool isFeasible(const LpProblem& problem, std::span<const Real> sol, Real tol = 1e-6) {
     // Check variable bounds.
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (sol[j] < problem.col_lower[j] - tol) return false;
-        if (sol[j] > problem.col_upper[j] + tol) return false;
+        if (sol[j] < problem.col_lower[j] - tol)
+            return false;
+        if (sol[j] > problem.col_upper[j] + tol)
+            return false;
     }
     // Check integrality.
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
-        if (!isIntegral(sol[j], tol)) return false;
+        if (problem.col_type[j] == VarType::Continuous)
+            continue;
+        if (!isIntegral(sol[j], tol))
+            return false;
     }
     // Check constraints.
     for (Index i = 0; i < problem.num_rows; ++i) {
@@ -37,8 +39,10 @@ static bool isFeasible(const LpProblem& problem,
         for (Index k = 0; k < row.size(); ++k) {
             activity += row.values[k] * sol[row.indices[k]];
         }
-        if (activity < problem.row_lower[i] - tol) return false;
-        if (activity > problem.row_upper[i] + tol) return false;
+        if (activity < problem.row_lower[i] - tol)
+            return false;
+        if (activity > problem.row_upper[i] + tol)
+            return false;
     }
     return true;
 }
@@ -66,7 +70,8 @@ static LpProblem buildEasyRoundingMip() {
     lp.row_names = {"sum", "ub_x", "ub_y"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
         {1, 0, 1.0},
         {2, 1, 1.0},
     };
@@ -101,8 +106,10 @@ static LpProblem buildHardRoundingMip() {
     lp.row_names = {"ub", "lb"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 0, 1.0}, {1, 1, 2.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {1, 0, 1.0},
+        {1, 1, 2.0},
     };
     lp.matrix = SparseMatrix(2, 2, std::move(trips));
     return lp;
@@ -133,7 +140,9 @@ static LpProblem buildKnapsack() {
     lp.row_names = {"capacity"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 3.0}, {0, 1, 2.0}, {0, 2, 2.0},
+        {0, 0, 3.0},
+        {0, 1, 2.0},
+        {0, 2, 2.0},
     };
     lp.matrix = SparseMatrix(1, 3, std::move(trips));
     return lp;
@@ -183,8 +192,7 @@ static LpProblem buildCliquePackingMip() {
     lp.obj = {-3.0, -3.0, -1.0, -1.0};
     lp.col_lower = {0.0, 0.0, 0.0, 0.0};
     lp.col_upper = {1.0, 1.0, 1.0, 1.0};
-    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary,
-                   VarType::Binary};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary};
     lp.col_names = {"x1", "x2", "x3", "x4"};
 
     lp.num_rows = 2;
@@ -193,7 +201,9 @@ static LpProblem buildCliquePackingMip() {
     lp.row_names = {"pack", "cap_x4"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
+        {0, 0, 1.0},
+        {0, 1, 1.0},
+        {0, 2, 1.0},
         {1, 3, 1.0},
     };
     lp.matrix = SparseMatrix(2, 4, std::move(trips));
@@ -215,8 +225,7 @@ static LpProblem buildOverlappingCliqueMip() {
     lp.obj = {-3.0, -3.0, -1.0, -1.0};
     lp.col_lower = {0.0, 0.0, 0.0, 0.0};
     lp.col_upper = {1.0, 1.0, 1.0, 1.0};
-    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary,
-                   VarType::Binary};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary};
     lp.col_names = {"x1", "x2", "x3", "x4"};
 
     lp.num_rows = 2;
@@ -225,8 +234,7 @@ static LpProblem buildOverlappingCliqueMip() {
     lp.row_names = {"pack1", "pack2"};
 
     std::vector<Triplet> trips = {
-        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0},
-        {1, 0, 1.0}, {1, 3, 1.0},
+        {0, 0, 1.0}, {0, 1, 1.0}, {0, 2, 1.0}, {1, 0, 1.0}, {1, 3, 1.0},
     };
     lp.matrix = SparseMatrix(2, 4, std::move(trips));
     return lp;
@@ -742,8 +750,7 @@ TEST_CASE("HeuristicScheduler: triggers at correct points", "[heuristics]") {
     HeuristicScheduler scheduler;
 
     // Add rounding at root only.
-    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(),
-                           HeuristicTiming::Root);
+    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(), HeuristicTiming::Root);
 
     CHECK(scheduler.numHeuristics() == 1);
 
@@ -765,8 +772,7 @@ TEST_CASE("HeuristicScheduler: periodic timing", "[heuristics]") {
     auto primals = lp.getPrimalValues();
 
     HeuristicScheduler scheduler;
-    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(),
-                           HeuristicTiming::Periodic, 5);
+    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(), HeuristicTiming::Periodic, 5);
 
     // Should run at: 0, 5, 10, 15, ...
     auto r0 = scheduler.run(problem, lp, primals, kInf, 0);
@@ -788,8 +794,7 @@ TEST_CASE("HeuristicScheduler: every-node timing", "[heuristics]") {
     auto primals = lp.getPrimalValues();
 
     HeuristicScheduler scheduler;
-    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(),
-                           HeuristicTiming::EveryNode);
+    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(), HeuristicTiming::EveryNode);
 
     // Should run at every node.
     for (Int n = 0; n < 5; ++n) {
@@ -809,10 +814,8 @@ TEST_CASE("HeuristicScheduler: multiple heuristics, best solution wins", "[heuri
     auto primals = lp.getPrimalValues();
 
     HeuristicScheduler scheduler;
-    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(),
-                           HeuristicTiming::Root);
-    scheduler.addHeuristic(std::make_unique<FractionalDiving>(),
-                           HeuristicTiming::Root);
+    scheduler.addHeuristic(std::make_unique<RoundingHeuristic>(), HeuristicTiming::Root);
+    scheduler.addHeuristic(std::make_unique<FractionalDiving>(), HeuristicTiming::Root);
 
     CHECK(scheduler.numHeuristics() == 2);
 
@@ -854,10 +857,11 @@ TEST_CASE("SolutionPool: concurrent submits preserve best solution", "[heuristic
             }
         });
     }
-    for (auto& w : workers) w.join();
+    for (auto& w : workers)
+        w.join();
 
-    const Real expected = 10'000.0 -
-                          static_cast<Real>((kThreads - 1) * kPerThread + (kPerThread - 1));
+    const Real expected =
+        10'000.0 - static_cast<Real>((kThreads - 1) * kPerThread + (kPerThread - 1));
     auto best = pool.bestSolution();
     REQUIRE(best.has_value());
     CHECK_THAT(best->objective, WithinAbs(expected, 1e-9));
@@ -886,8 +890,7 @@ TEST_CASE("HeuristicRuntime: finish triggers callback", "[heuristics][runtime]")
     CHECK(callback.last_stats.improvements == 0);
 }
 
-TEST_CASE("RestartStrategyEngine: seed controls opportunistic sequence",
-          "[heuristics][runtime]") {
+TEST_CASE("RestartStrategyEngine: seed controls opportunistic sequence", "[heuristics][runtime]") {
     RestartStrategyEngine a(42);
     RestartStrategyEngine b(42);
     RestartStrategyEngine c(99);
@@ -1229,8 +1232,7 @@ TEST_CASE("CliqueRoundingHeuristic: skips models above the binary cap", "[heuris
     CHECK(clique_rounding.lastCliqueCount() >= 1);
 }
 
-TEST_CASE("CliqueRoundingHeuristic: solution is feasible when returned",
-          "[heuristics]") {
+TEST_CASE("CliqueRoundingHeuristic: solution is feasible when returned", "[heuristics]") {
     SECTION("knapsack row carries no clique structure") {
         auto problem = buildKnapsack();
 
@@ -1282,8 +1284,7 @@ TEST_CASE("CliqueRoundingHeuristic: respects incumbent cutoff", "[heuristics]") 
     CHECK(!result.has_value());
 }
 
-TEST_CASE("CliqueRoundingHeuristic: never rounds two clique members to 1",
-          "[heuristics]") {
+TEST_CASE("CliqueRoundingHeuristic: never rounds two clique members to 1", "[heuristics]") {
     auto problem = buildCliquePackingMip();
 
     DualSimplexSolver lp;
@@ -1303,7 +1304,8 @@ TEST_CASE("CliqueRoundingHeuristic: never rounds two clique members to 1",
 
     Int ones = 0;
     for (Index j = 0; j < 3; ++j) {
-        if (result->values[j] > 0.5) ++ones;
+        if (result->values[j] > 0.5)
+            ++ones;
     }
     CHECK(ones <= 1);
 }
@@ -1550,8 +1552,7 @@ TEST_CASE("TwoOptHeuristic: requires incumbent", "[heuristics]") {
 // Pins the wiring of runRootPortfolio: every heuristic in the root portfolio
 // must actually be invoked. Without this the per-heuristic call counters are
 // asserted nowhere and a heuristic could silently drop out of the portfolio.
-TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic",
-          "[heuristics]") {
+TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic", "[heuristics]") {
     auto problem = buildKnapsack();
 
     DualSimplexSolver lp;
@@ -1563,9 +1564,11 @@ TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic",
     Int root_int_inf = 0;
     Int root_int_vars = 0;
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
+        if (problem.col_type[j] == VarType::Continuous)
+            continue;
         ++root_int_vars;
-        if (!isIntegral(primals[j], 1e-6)) ++root_int_inf;
+        if (!isIntegral(primals[j], 1e-6))
+            ++root_int_inf;
     }
     REQUIRE(root_int_inf > 0);
 

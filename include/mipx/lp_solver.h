@@ -1,10 +1,10 @@
 #pragma once
 
-#include <span>
-#include <vector>
-
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
+
+#include <span>
+#include <vector>
 
 namespace mipx {
 
@@ -47,10 +47,8 @@ public:
     virtual void setBasis(std::span<const BasisStatus> basis) = 0;
 
     /// Incremental modifications (for branch-and-cut).
-    virtual void addRows(std::span<const Index> starts,
-                         std::span<const Index> indices,
-                         std::span<const Real> values,
-                         std::span<const Real> lower,
+    virtual void addRows(std::span<const Index> starts, std::span<const Index> indices,
+                         std::span<const Real> values, std::span<const Real> lower,
                          std::span<const Real> upper) = 0;
     virtual void removeRows(std::span<const Index> rows) = 0;
 

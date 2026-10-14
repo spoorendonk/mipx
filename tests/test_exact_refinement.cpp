@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "mipx/exact_refinement.h"
+
+#include <catch2/catch_test_macros.hpp>
 
 using namespace mipx;
 
@@ -32,8 +32,7 @@ LpProblem buildRefinementProbeLp() {
 TEST_CASE("Exact refinement metrics detect row violations", "[exact_refinement]") {
     const auto lp = buildRefinementProbeLp();
     const std::vector<Real> x = {0.8, 0.7};
-    const auto metrics = evaluateLpCertificate(
-        lp, x, 1.5, false, 1e-8, 1e6, nullptr);
+    const auto metrics = evaluateLpCertificate(lp, x, 1.5, false, 1e-8, 1e6, nullptr);
 
     CHECK(metrics.max_row_violation > 0.49);
     CHECK(metrics.max_col_violation < 1e-12);
@@ -42,12 +41,10 @@ TEST_CASE("Exact refinement metrics detect row violations", "[exact_refinement]"
 TEST_CASE("Exact refinement primal repair reduces violation", "[exact_refinement]") {
     const auto lp = buildRefinementProbeLp();
     std::vector<Real> x = {0.8, 0.7};
-    const auto before = evaluateLpCertificate(
-        lp, x, 1.5, false, 1e-8, 1e6, nullptr);
+    const auto before = evaluateLpCertificate(lp, x, 1.5, false, 1e-8, 1e6, nullptr);
 
     iterativePrimalRepair(lp, x, 1e-9, 4, nullptr);
-    const auto after = evaluateLpCertificate(
-        lp, x, x[0] + x[1], false, 1e-8, 1e6, nullptr);
+    const auto after = evaluateLpCertificate(lp, x, x[0] + x[1], false, 1e-8, 1e6, nullptr);
 
     CHECK(after.max_row_violation <= before.max_row_violation + 1e-12);
     CHECK(after.max_row_violation < 1e-6);
@@ -57,8 +54,7 @@ TEST_CASE("Exact refinement scaled-rational verification can certify clean point
           "[exact_refinement]") {
     const auto lp = buildRefinementProbeLp();
     const std::vector<Real> x = {0.25, 0.75};
-    const auto metrics = evaluateLpCertificate(
-        lp, x, 1.0, true, 1e-9, 1e6, nullptr);
+    const auto metrics = evaluateLpCertificate(lp, x, 1.0, true, 1e-9, 1e6, nullptr);
 
     CHECK(metrics.rational_supported);
     CHECK(metrics.rational_ok);
@@ -69,8 +65,7 @@ TEST_CASE("Exact refinement scaled-rational verification reports unsupported sca
           "[exact_refinement]") {
     const auto lp = buildRefinementProbeLp();
     const std::vector<Real> x = {0.25, 0.75};
-    const auto metrics = evaluateLpCertificate(
-        lp, x, 1.0, true, 1e-9, 1e10, nullptr);
+    const auto metrics = evaluateLpCertificate(lp, x, 1.0, true, 1e-9, 1e10, nullptr);
 
     CHECK_FALSE(metrics.rational_supported);
     CHECK_FALSE(metrics.rational_ok);

@@ -1,8 +1,8 @@
 #pragma once
 
-#include <vector>
-
 #include "mipx/core.h"
+
+#include <vector>
 
 namespace mipx {
 
@@ -48,20 +48,17 @@ public:
     /// @param fixed_vars   Variables fixed at this node (bound equal).
     /// @param num_cols     Number of columns.
     /// @return Result describing tightenings and infeasibility.
-    OrbitalFixingResult fix(std::vector<Real>& col_lower,
-                            std::vector<Real>& col_upper,
+    OrbitalFixingResult fix(std::vector<Real>& col_lower, std::vector<Real>& col_upper,
                             const std::vector<VarType>& col_type,
-                            const std::vector<Index>& fixed_vars,
-                            Index num_cols) const;
+                            const std::vector<Index>& fixed_vars, Index num_cols) const;
 
     /// Lightweight orbital fixing using precomputed orbit representatives
     /// (for use when Schreier-Sims is not available or too expensive).
     /// This uses the simple canonical[] mapping from SymmetryManager.
-    static OrbitalFixingResult fixFromCanonical(
-        std::vector<Real>& col_lower,
-        std::vector<Real>& col_upper,
-        const std::vector<Index>& canonical,
-        Index num_cols);
+    static OrbitalFixingResult fixFromCanonical(std::vector<Real>& col_lower,
+                                                std::vector<Real>& col_upper,
+                                                const std::vector<Index>& canonical,
+                                                Index num_cols);
 
 private:
     const SchreierSims* schreier_sims_ = nullptr;

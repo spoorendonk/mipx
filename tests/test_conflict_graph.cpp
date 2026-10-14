@@ -1,6 +1,6 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include "mipx/conflict_graph.h"
+
+#include <catch2/catch_test_macros.hpp>
 
 using namespace mipx;
 
@@ -11,10 +11,13 @@ LpProblem makeSetPackingProblem() {
     LpProblem prob;
     prob.num_cols = 3;
     prob.num_rows = 2;
-    prob.matrix = SparseMatrix(2, 3, {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 1, 1.0}, {1, 2, 1.0},
-    });
+    prob.matrix = SparseMatrix(2, 3,
+                               {
+                                   {0, 0, 1.0},
+                                   {0, 1, 1.0},
+                                   {1, 1, 1.0},
+                                   {1, 2, 1.0},
+                               });
     prob.row_lower = {-kInf, -kInf};
     prob.row_upper = {1.0, 1.0};
     prob.col_lower = {0.0, 0.0, 0.0};
@@ -30,9 +33,11 @@ LpProblem makeKnapsackConflict() {
     LpProblem prob;
     prob.num_cols = 2;
     prob.num_rows = 1;
-    prob.matrix = SparseMatrix(1, 2, {
-        {0, 0, 3.0}, {0, 1, 4.0},
-    });
+    prob.matrix = SparseMatrix(1, 2,
+                               {
+                                   {0, 0, 3.0},
+                                   {0, 1, 4.0},
+                               });
     prob.row_lower = {-kInf};
     prob.row_upper = {5.0};
     prob.col_lower = {0.0, 0.0};
@@ -46,9 +51,11 @@ LpProblem makeNoBinaryProblem() {
     LpProblem prob;
     prob.num_cols = 2;
     prob.num_rows = 1;
-    prob.matrix = SparseMatrix(1, 2, {
-        {0, 0, 1.0}, {0, 1, 1.0},
-    });
+    prob.matrix = SparseMatrix(1, 2,
+                               {
+                                   {0, 0, 1.0},
+                                   {0, 1, 1.0},
+                               });
     prob.row_lower = {-kInf};
     prob.row_upper = {10.0};
     prob.col_lower = {0.0, 0.0};
@@ -171,16 +178,18 @@ TEST_CASE("ConflictGraph: disconnected components", "[conflict_graph]") {
     LpProblem prob;
     prob.num_cols = 4;
     prob.num_rows = 2;
-    prob.matrix = SparseMatrix(2, 4, {
-        {0, 0, 1.0}, {0, 1, 1.0},
-        {1, 2, 1.0}, {1, 3, 1.0},
-    });
+    prob.matrix = SparseMatrix(2, 4,
+                               {
+                                   {0, 0, 1.0},
+                                   {0, 1, 1.0},
+                                   {1, 2, 1.0},
+                                   {1, 3, 1.0},
+                               });
     prob.row_lower = {-kInf, -kInf};
     prob.row_upper = {1.0, 1.0};
     prob.col_lower = {0.0, 0.0, 0.0, 0.0};
     prob.col_upper = {1.0, 1.0, 1.0, 1.0};
-    prob.col_type = {VarType::Binary, VarType::Binary,
-                     VarType::Binary, VarType::Binary};
+    prob.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary};
     prob.obj = {0.0, 0.0, 0.0, 0.0};
 
     ConflictGraph graph;

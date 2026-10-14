@@ -1,9 +1,9 @@
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
 #include "mipx/domain.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -11,12 +11,9 @@ using Catch::Matchers::WithinAbs;
 namespace {
 
 // Helper to build a simple LpProblem.
-LpProblem makeProblem(Index num_cols, Index num_rows,
-                      std::vector<Triplet> triplets,
-                      std::vector<Real> row_lower,
-                      std::vector<Real> row_upper,
-                      std::vector<Real> col_lower,
-                      std::vector<Real> col_upper,
+LpProblem makeProblem(Index num_cols, Index num_rows, std::vector<Triplet> triplets,
+                      std::vector<Real> row_lower, std::vector<Real> row_upper,
+                      std::vector<Real> col_lower, std::vector<Real> col_upper,
                       std::vector<VarType> col_type = {}) {
     LpProblem prob;
     prob.num_cols = num_cols;
@@ -40,11 +37,8 @@ LpProblem makeProblem(Index num_cols, Index num_rows,
 TEST_CASE("Domain: simple bound tightening", "[domain]") {
     // x + y <= 5, x >= 3, y >= 0
     // Should tighten y <= 2.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {5.0},
-        {3.0, 0.0}, {kInf, kInf});
+    auto prob =
+        makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {5.0}, {3.0, 0.0}, {kInf, kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -55,12 +49,7 @@ TEST_CASE("Domain: simple bound tightening", "[domain]") {
 
 TEST_CASE("Domain: integer rounding", "[domain]") {
     // 2x <= 5, x >= 0, x integer => x <= 2
-    auto prob = makeProblem(
-        1, 1,
-        {{0, 0, 2.0}},
-        {-kInf}, {5.0},
-        {0.0}, {kInf},
-        {VarType::Integer});
+    auto prob = makeProblem(1, 1, {{0, 0, 2.0}}, {-kInf}, {5.0}, {0.0}, {kInf}, {VarType::Integer});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -70,11 +59,7 @@ TEST_CASE("Domain: integer rounding", "[domain]") {
 
 TEST_CASE("Domain: infeasibility detection", "[domain]") {
     // Constraint with rl > ru is infeasible.
-    auto prob = makeProblem(
-        1, 1,
-        {{0, 0, 1.0}},
-        {5.0}, {3.0},
-        {0.0}, {kInf});
+    auto prob = makeProblem(1, 1, {{0, 0, 1.0}}, {5.0}, {3.0}, {0.0}, {kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -83,11 +68,8 @@ TEST_CASE("Domain: infeasibility detection", "[domain]") {
 
 TEST_CASE("Domain: infeasibility from bound tightening", "[domain]") {
     // x + y <= 3, x >= 2, y >= 2 => x <= 1 and y <= 1, contradicts.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {3.0},
-        {2.0, 2.0}, {kInf, kInf});
+    auto prob =
+        makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {3.0}, {2.0, 2.0}, {kInf, kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -96,11 +78,8 @@ TEST_CASE("Domain: infeasibility from bound tightening", "[domain]") {
 
 TEST_CASE("Domain: checkpoint/restore", "[domain]") {
     // x + y <= 10, x >= 0, y >= 0
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {10.0},
-        {0.0, 0.0}, {kInf, kInf});
+    auto prob =
+        makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {10.0}, {0.0, 0.0}, {kInf, kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -128,11 +107,8 @@ TEST_CASE("Domain: chain of implications", "[domain]") {
     // x >= 5
     // All non-negative.
     // => y <= 5 (from row 1), z <= 6 (from row 2 with y >= 0).
-    auto prob = makeProblem(
-        3, 2,
-        {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}},
-        {-kInf, -kInf}, {10.0, 6.0},
-        {5.0, 0.0, 0.0}, {kInf, kInf, kInf});
+    auto prob = makeProblem(3, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 1.0}},
+                            {-kInf, -kInf}, {10.0, 6.0}, {5.0, 0.0, 0.0}, {kInf, kInf, kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -145,11 +121,8 @@ TEST_CASE("Domain: free variables", "[domain]") {
     // x + y <= 10, x free, y free
     // Both free => act_min = -inf (2 inf contributions), act_max = +inf (2 inf).
     // No tightening possible.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {10.0},
-        {-kInf, -kInf}, {kInf, kInf});
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {10.0}, {-kInf, -kInf},
+                            {kInf, kInf});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -163,11 +136,8 @@ TEST_CASE("Domain: free variables", "[domain]") {
 TEST_CASE("Domain: no tightening when already tight", "[domain]") {
     // x + y <= 10, x in [0, 5], y in [0, 5]
     // Activity max = 10 = row_upper, so no tightening needed.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 1.0}, {0, 1, 1.0}},
-        {-kInf}, {10.0},
-        {0.0, 0.0}, {5.0, 5.0});
+    auto prob =
+        makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, 1.0}}, {-kInf}, {10.0}, {0.0, 0.0}, {5.0, 5.0});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -181,11 +151,8 @@ TEST_CASE("Domain: no tightening when already tight", "[domain]") {
 TEST_CASE("Domain: negative coefficients", "[domain]") {
     // -2x + y = 4, x in [0, 10], y in [0, 10]
     // => x <= 3, y >= 4.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, -2.0}, {0, 1, 1.0}},
-        {4.0}, {4.0},
-        {0.0, 0.0}, {10.0, 10.0});
+    auto prob =
+        makeProblem(2, 1, {{0, 0, -2.0}, {0, 1, 1.0}}, {4.0}, {4.0}, {0.0, 0.0}, {10.0, 10.0});
 
     DomainPropagator dp;
     dp.load(prob);
@@ -197,12 +164,8 @@ TEST_CASE("Domain: negative coefficients", "[domain]") {
 TEST_CASE("Domain: binary variable fixing", "[domain]") {
     // 3x + 2y >= 5, x binary, y binary
     // act_max = 5 = rl, so both must be 1.
-    auto prob = makeProblem(
-        2, 1,
-        {{0, 0, 3.0}, {0, 1, 2.0}},
-        {5.0}, {kInf},
-        {0.0, 0.0}, {1.0, 1.0},
-        {VarType::Binary, VarType::Binary});
+    auto prob = makeProblem(2, 1, {{0, 0, 3.0}, {0, 1, 2.0}}, {5.0}, {kInf}, {0.0, 0.0}, {1.0, 1.0},
+                            {VarType::Binary, VarType::Binary});
 
     DomainPropagator dp;
     dp.load(prob);

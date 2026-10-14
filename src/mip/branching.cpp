@@ -14,22 +14,23 @@ constexpr Real kPseudocostEstimateIntTol = 1e-6;
 
 }  // namespace
 
-Index MostFractionalBranching::select(
-    std::span<const Real> primal_values,
-    std::span<const VarType> var_types,
-    std::span<const Real> col_lower,
-    std::span<const Real> col_upper) const {
-
+Index MostFractionalBranching::select(std::span<const Real> primal_values,
+                                      std::span<const VarType> var_types,
+                                      std::span<const Real> col_lower,
+                                      std::span<const Real> col_upper) const {
     Index best = -1;
     Real best_score = -1.0;  // Best = closest to 0.5.
 
     for (Index j = 0; j < static_cast<Index>(var_types.size()); ++j) {
-        if (var_types[j] == VarType::Continuous) continue;
+        if (var_types[j] == VarType::Continuous)
+            continue;
         // Skip fixed variables.
-        if (col_lower[j] == col_upper[j]) continue;
+        if (col_lower[j] == col_upper[j])
+            continue;
 
         Real val = primal_values[j];
-        if (isIntegral(val)) continue;
+        if (isIntegral(val))
+            continue;
 
         Real frac = fractionality(val);
         // Score: closer to 0.5 is better. Use 0.5 - |frac - 0.5|.
@@ -42,15 +43,15 @@ Index MostFractionalBranching::select(
     return best;
 }
 
-Index FirstFractionalBranching::select(
-    std::span<const Real> primal_values,
-    std::span<const VarType> var_types,
-    std::span<const Real> col_lower,
-    std::span<const Real> col_upper) const {
-
+Index FirstFractionalBranching::select(std::span<const Real> primal_values,
+                                       std::span<const VarType> var_types,
+                                       std::span<const Real> col_lower,
+                                       std::span<const Real> col_upper) const {
     for (Index j = 0; j < static_cast<Index>(var_types.size()); ++j) {
-        if (var_types[j] == VarType::Continuous) continue;
-        if (col_lower[j] == col_upper[j]) continue;
+        if (var_types[j] == VarType::Continuous)
+            continue;
+        if (col_lower[j] == col_upper[j])
+            continue;
 
         if (!isIntegral(primal_values[j])) {
             return j;
@@ -60,43 +61,49 @@ Index FirstFractionalBranching::select(
 }
 
 void ReliabilityBranching::reset(Index num_cols) {
-    pseudocosts_.assign(static_cast<std::size_t>(std::max<Index>(0, num_cols)),
-                        PseudoCost{});
+    pseudocosts_.assign(static_cast<std::size_t>(std::max<Index>(0, num_cols)), PseudoCost{});
 }
 
 bool ReliabilityBranching::isReliable(Index var) const {
-    if (!inRange(var)) return false;
+    if (!inRange(var))
+        return false;
     const auto& pc = pseudocosts_[var];
-    return pc.up_count >= reliability_threshold_ &&
-           pc.down_count >= reliability_threshold_;
+    return pc.up_count >= reliability_threshold_ && pc.down_count >= reliability_threshold_;
 }
 
 Real ReliabilityBranching::upPseudoCost(Index var) const {
-    if (!inRange(var)) return pseudocost_fallback_;
+    if (!inRange(var))
+        return pseudocost_fallback_;
     const auto& pc = pseudocosts_[var];
-    if (pc.up_count <= 0) return pseudocost_fallback_;
+    if (pc.up_count <= 0)
+        return pseudocost_fallback_;
     return std::max<Real>(pc.up, 1e-8);
 }
 
 Real ReliabilityBranching::downPseudoCost(Index var) const {
-    if (!inRange(var)) return pseudocost_fallback_;
+    if (!inRange(var))
+        return pseudocost_fallback_;
     const auto& pc = pseudocosts_[var];
-    if (pc.down_count <= 0) return pseudocost_fallback_;
+    if (pc.down_count <= 0)
+        return pseudocost_fallback_;
     return std::max<Real>(pc.down, 1e-8);
 }
 
 Int ReliabilityBranching::upReliability(Index var) const {
-    if (!inRange(var)) return 0;
+    if (!inRange(var))
+        return 0;
     return pseudocosts_[var].up_count;
 }
 
 Int ReliabilityBranching::downReliability(Index var) const {
-    if (!inRange(var)) return 0;
+    if (!inRange(var))
+        return 0;
     return pseudocosts_[var].down_count;
 }
 
 void ReliabilityBranching::updatePseudoCost(Index var, bool up_direction, Real gain_per_unit) {
-    if (!inRange(var) || !std::isfinite(gain_per_unit)) return;
+    if (!inRange(var) || !std::isfinite(gain_per_unit))
+        return;
     gain_per_unit = std::max<Real>(gain_per_unit, 0.0);
 
     auto& pc = pseudocosts_[var];
@@ -125,13 +132,11 @@ Real ReliabilityBranching::blendScore(Real frac, Real pseudo_score) {
     return frac_term + 0.15 * pseudo_term;
 }
 
-BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
-                                                const LpProblem& problem,
+BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpProblem& problem,
                                                 std::span<const Real> primal_values,
                                                 std::span<const Real> col_lower,
                                                 std::span<const Real> col_upper,
-                                                Real node_objective,
-                                                bool force_strong_branch,
+                                                Real node_objective, bool force_strong_branch,
                                                 BranchingTelemetry& telemetry) {
     BranchingSelection selection;
     ++telemetry.selections;
@@ -140,17 +145,21 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
     candidates.reserve(static_cast<std::size_t>(problem.num_cols));
 
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous) continue;
-        if (col_lower[j] >= col_upper[j] - 1e-12) continue;
+        if (problem.col_type[j] == VarType::Continuous)
+            continue;
+        if (col_lower[j] >= col_upper[j] - 1e-12)
+            continue;
 
         const Real value = primal_values[j];
-        if (isIntegral(value)) continue;
+        if (isIntegral(value))
+            continue;
 
         const Real floor_v = std::floor(value);
         const Real ceil_v = std::ceil(value);
         const Real down_dist = std::max<Real>(0.0, value - floor_v);
         const Real up_dist = std::max<Real>(0.0, ceil_v - value);
-        if (down_dist <= 1e-8 || up_dist <= 1e-8) continue;
+        if (down_dist <= 1e-8 || up_dist <= 1e-8)
+            continue;
 
         Candidate c;
         c.var = j;
@@ -159,13 +168,13 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
         c.down_dist = down_dist;
         c.up_dist = up_dist;
         c.reliable = isReliable(j);
-        c.pseudo_score = std::max(down_dist * safeDownCost(j),
-                                  up_dist * safeUpCost(j));
+        c.pseudo_score = std::max(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
         c.prefilter_score = blendScore(c.frac, c.pseudo_score);
         candidates.push_back(c);
     }
 
-    if (candidates.empty()) return selection;
+    if (candidates.empty())
+        return selection;
 
     if (symmetry_manager_ != nullptr) {
         std::vector<Candidate> filtered;
@@ -180,22 +189,22 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
         }
     }
 
-    std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) {
-                  if (a.prefilter_score != b.prefilter_score) {
-                      return a.prefilter_score > b.prefilter_score;
-                  }
-                  return a.var < b.var;
-              });
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.prefilter_score != b.prefilter_score) {
+            return a.prefilter_score > b.prefilter_score;
+        }
+        return a.var < b.var;
+    });
 
-    const Index max_candidates = std::min<Index>(
-        static_cast<Index>(candidates.size()), strong_branch_max_candidates_);
+    const Index max_candidates =
+        std::min<Index>(static_cast<Index>(candidates.size()), strong_branch_max_candidates_);
     candidates.resize(static_cast<std::size_t>(max_candidates));
 
     Index best_reliable = -1;
     Real best_reliable_score = -std::numeric_limits<Real>::infinity();
     for (const auto& c : candidates) {
-        if (!c.reliable) continue;
+        if (!c.reliable)
+            continue;
         if (c.pseudo_score > best_reliable_score) {
             best_reliable_score = c.pseudo_score;
             best_reliable = c.var;
@@ -215,8 +224,10 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
 
         Int probe_budget = strong_branch_probe_budget_;
         for (const auto& c : candidates) {
-            if (probe_budget < 2) break;
-            if (!force_strong_branch && c.reliable) continue;
+            if (probe_budget < 2)
+                break;
+            if (!force_strong_branch && c.reliable)
+                continue;
 
             const Real orig_lb = col_lower[c.var];
             const Real orig_ub = col_upper[c.var];
@@ -299,14 +310,13 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp,
         return selection;
     }
 
-    const auto best_it = std::max_element(
-        candidates.begin(), candidates.end(),
-        [](const Candidate& a, const Candidate& b) {
-            if (a.pseudo_score != b.pseudo_score) {
-                return a.pseudo_score < b.pseudo_score;
-            }
-            return a.var > b.var;
-        });
+    const auto best_it = std::max_element(candidates.begin(), candidates.end(),
+                                          [](const Candidate& a, const Candidate& b) {
+                                              if (a.pseudo_score != b.pseudo_score) {
+                                                  return a.pseudo_score < b.pseudo_score;
+                                              }
+                                              return a.var > b.var;
+                                          });
 
     selection.variable = (best_it == candidates.end()) ? -1 : best_it->var;
     if (selection.variable >= 0) {
@@ -348,9 +358,7 @@ Real pseudocostNodeEstimate(const ReliabilityBranching& rule, const LpProblem& p
     return lp_bound + penalty;
 }
 
-std::pair<BnbNode, BnbNode> createChildren(BnbNode parent,
-                                            Index branch_var,
-                                            Real branch_val) {
+std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val) {
     Real floor_val = std::floor(branch_val);
     Real ceil_val = std::ceil(branch_val);
 

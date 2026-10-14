@@ -1,11 +1,11 @@
 #pragma once
 
+#include "mipx/core.h"
+#include "mipx/sparse_matrix.h"
+
 #include <limits>
 #include <string>
 #include <vector>
-
-#include "mipx/core.h"
-#include "mipx/sparse_matrix.h"
 
 namespace mipx {
 

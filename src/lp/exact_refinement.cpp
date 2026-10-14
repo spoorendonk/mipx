@@ -28,12 +28,14 @@ Real absViolation(Real lhs, Real lower, Real upper) {
 }
 
 long double safeValue(std::span<const Real> values, Index idx) {
-    if (idx < 0 || idx >= static_cast<Index>(values.size())) return 0.0L;
+    if (idx < 0 || idx >= static_cast<Index>(values.size()))
+        return 0.0L;
     return static_cast<long double>(values[idx]);
 }
 
 bool canScaleToI64(long double v, long double scale) {
-    if (!std::isfinite(v)) return false;
+    if (!std::isfinite(v))
+        return false;
     const long double max_mag =
         static_cast<long double>(std::numeric_limits<std::int64_t>::max()) / scale;
     return std::abs(v) <= max_mag;
@@ -45,12 +47,9 @@ long double scaledRound(long double v, long double scale) {
 
 }  // namespace
 
-LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
-                                           std::span<const Real> primals,
-                                           Real reported_objective,
-                                           bool rational_check,
-                                           Real certificate_tol,
-                                           Real rational_scale,
+LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem, std::span<const Real> primals,
+                                           Real reported_objective, bool rational_check,
+                                           Real certificate_tol, Real rational_scale,
                                            double* work_units) {
     LpCertificateMetrics metrics;
     metrics.rows_evaluated = problem.num_rows;
@@ -61,12 +60,12 @@ LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
     for (Index j = 0; j < problem.num_cols; ++j) {
         const Real x = static_cast<Real>(safeValue(primals, j));
         if (isFinite(problem.col_lower[j])) {
-            metrics.max_col_violation = std::max(metrics.max_col_violation,
-                                                 std::max<Real>(0.0, problem.col_lower[j] - x));
+            metrics.max_col_violation =
+                std::max(metrics.max_col_violation, std::max<Real>(0.0, problem.col_lower[j] - x));
         }
         if (isFinite(problem.col_upper[j])) {
-            metrics.max_col_violation = std::max(metrics.max_col_violation,
-                                                 std::max<Real>(0.0, x - problem.col_upper[j]));
+            metrics.max_col_violation =
+                std::max(metrics.max_col_violation, std::max<Real>(0.0, x - problem.col_upper[j]));
         }
         if (work_units != nullptr) {
             *work_units += 1e-6;
@@ -81,9 +80,9 @@ LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
             activity += static_cast<long double>(row.values[k]) * safeValue(primals, j);
         }
         const Real lhs = static_cast<Real>(activity);
-        metrics.max_row_violation = std::max(
-            metrics.max_row_violation,
-            absViolation(lhs, problem.row_lower[i], problem.row_upper[i]));
+        metrics.max_row_violation =
+            std::max(metrics.max_row_violation,
+                     absViolation(lhs, problem.row_lower[i], problem.row_upper[i]));
         if (work_units != nullptr) {
             *work_units += static_cast<double>(row.size()) * 1e-6;
         }
@@ -94,8 +93,8 @@ LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
         recomputed_obj += static_cast<long double>(problem.obj[j]) * safeValue(primals, j);
     }
     metrics.recomputed_objective = static_cast<Real>(recomputed_obj);
-    metrics.objective_mismatch = static_cast<Real>(
-        std::abs(recomputed_obj - static_cast<long double>(reported_objective)));
+    metrics.objective_mismatch =
+        static_cast<Real>(std::abs(recomputed_obj - static_cast<long double>(reported_objective)));
     if (work_units != nullptr) {
         *work_units += static_cast<double>(problem.num_cols) * 1e-6;
     }
@@ -106,9 +105,8 @@ LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
         return metrics;
     }
 
-    const long double scale =
-        std::max(static_cast<long double>(kMinRationalScale),
-                 static_cast<long double>(rational_scale));
+    const long double scale = std::max(static_cast<long double>(kMinRationalScale),
+                                       static_cast<long double>(rational_scale));
     const long double scale_sq = scale * scale;
     const long double col_tol_q = ltol * scale + 1.0L;
     const long double row_tol_q = ltol * scale_sq + 1.0L;
@@ -200,12 +198,10 @@ LpCertificateMetrics evaluateLpCertificate(const LpProblem& problem,
     return metrics;
 }
 
-void iterativePrimalRepair(const LpProblem& problem,
-                           std::vector<Real>& primals,
-                           Real feasibility_tol,
-                           Int max_passes,
-                           double* work_units) {
-    if (max_passes <= 0 || problem.num_cols <= 0 || problem.num_rows <= 0) return;
+void iterativePrimalRepair(const LpProblem& problem, std::vector<Real>& primals,
+                           Real feasibility_tol, Int max_passes, double* work_units) {
+    if (max_passes <= 0 || problem.num_cols <= 0 || problem.num_rows <= 0)
+        return;
 
     if (primals.size() < static_cast<std::size_t>(problem.num_cols)) {
         primals.resize(problem.num_cols, 0.0);
@@ -241,8 +237,8 @@ void iterativePrimalRepair(const LpProblem& problem,
             long double activity_ld = 0.0L;
             for (Index k = 0; k < row.size(); ++k) {
                 const Index j = row.indices[k];
-                activity_ld += static_cast<long double>(row.values[k]) *
-                               static_cast<long double>(primals[j]);
+                activity_ld +=
+                    static_cast<long double>(row.values[k]) * static_cast<long double>(primals[j]);
             }
             Real activity = static_cast<Real>(activity_ld);
             if (work_units != nullptr) {
@@ -251,7 +247,8 @@ void iterativePrimalRepair(const LpProblem& problem,
 
             auto adjust = [&](bool enforce_upper, Real rhs) {
                 Real violation = enforce_upper ? (activity - rhs) : (rhs - activity);
-                if (violation <= tol) return;
+                if (violation <= tol)
+                    return;
 
                 Index best_col = -1;
                 Real best_delta = 0.0;
@@ -262,7 +259,8 @@ void iterativePrimalRepair(const LpProblem& problem,
                 for (Index k = 0; k < row.size(); ++k) {
                     const Index j = row.indices[k];
                     const Real a = row.values[k];
-                    if (std::abs(a) <= kMinTol) continue;
+                    if (std::abs(a) <= kMinTol)
+                        continue;
 
                     bool increase_x = false;
                     if (enforce_upper) {
@@ -282,12 +280,14 @@ void iterativePrimalRepair(const LpProblem& problem,
                     }
 
                     Real delta = violation / abs_a;
-                    if (isFinite(cap)) delta = std::min(delta, cap);
-                    if (!std::isfinite(delta) || delta <= tol) continue;
+                    if (isFinite(cap))
+                        delta = std::min(delta, cap);
+                    if (!std::isfinite(delta) || delta <= tol)
+                        continue;
 
-                    if (best_col < 0 ||
-                        abs_a > best_abs_coeff + kMinTol ||
-                        (std::abs(abs_a - best_abs_coeff) <= kMinTol && delta > best_delta + kMinTol)) {
+                    if (best_col < 0 || abs_a > best_abs_coeff + kMinTol ||
+                        (std::abs(abs_a - best_abs_coeff) <= kMinTol &&
+                         delta > best_delta + kMinTol)) {
                         best_col = j;
                         best_delta = delta;
                         best_abs_coeff = abs_a;
@@ -296,7 +296,8 @@ void iterativePrimalRepair(const LpProblem& problem,
                     }
                 }
 
-                if (best_col < 0 || best_delta <= tol) return;
+                if (best_col < 0 || best_delta <= tol)
+                    return;
                 const Real before_value = primals[best_col];
                 primals[best_col] += best_direction * best_delta;
                 clamp_col(best_col);
@@ -313,7 +314,8 @@ void iterativePrimalRepair(const LpProblem& problem,
             }
         }
 
-        if (!changed) break;
+        if (!changed)
+            break;
     }
 }
 

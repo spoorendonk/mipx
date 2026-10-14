@@ -13,20 +13,15 @@ namespace mipx {
 
 bool LpProblem::hasIntegers() const {
     return std::ranges::any_of(col_type, [](VarType t) {
-        return t == VarType::Integer || t == VarType::Binary ||
-               t == VarType::SemiContinuous || t == VarType::SemiInteger;
+        return t == VarType::Integer || t == VarType::Binary || t == VarType::SemiContinuous ||
+               t == VarType::SemiInteger;
     });
 }
 
 namespace {
 
-Index addColumn(LpProblem& problem,
-                Real obj,
-                Real lower,
-                Real upper,
-                VarType type,
-                const std::string& name,
-                Real semi_lower = 0.0) {
+Index addColumn(LpProblem& problem, Real obj, Real lower, Real upper, VarType type,
+                const std::string& name, Real semi_lower = 0.0) {
     const Index idx = problem.num_cols++;
     problem.obj.push_back(obj);
     problem.col_lower.push_back(lower);
@@ -37,19 +32,15 @@ Index addColumn(LpProblem& problem,
     return idx;
 }
 
-Index addRow(LpProblem& problem,
-             std::vector<Triplet>& trips,
-             std::span<const Index> indices,
-             std::span<const Real> values,
-             Real lower,
-             Real upper,
-             const std::string& name) {
+Index addRow(LpProblem& problem, std::vector<Triplet>& trips, std::span<const Index> indices,
+             std::span<const Real> values, Real lower, Real upper, const std::string& name) {
     const Index row = problem.num_rows++;
     problem.row_lower.push_back(lower);
     problem.row_upper.push_back(upper);
     problem.row_names.push_back(name);
     for (Index k = 0; k < static_cast<Index>(indices.size()); ++k) {
-        if (std::abs(values[k]) <= 1e-16) continue;
+        if (std::abs(values[k]) <= 1e-16)
+            continue;
         trips.push_back({row, indices[k], values[k]});
     }
     return row;
@@ -80,7 +71,8 @@ void validateModelFeatures(const LpProblem& problem) {
             throw std::runtime_error("col_type size must match num_cols");
         }
         const VarType t = problem.col_type[j];
-        if (t != VarType::SemiContinuous && t != VarType::SemiInteger) continue;
+        if (t != VarType::SemiContinuous && t != VarType::SemiInteger)
+            continue;
 
         if (problem.col_lower[j] < -1e-9) {
             throw std::runtime_error("semi variable lower bound must be >= 0");
@@ -103,8 +95,7 @@ void validateModelFeatures(const LpProblem& problem) {
         const VarType bt = problem.col_type[ic.binary_var];
         const bool is_binary_type =
             (bt == VarType::Binary) ||
-            (bt == VarType::Integer &&
-             problem.col_lower[ic.binary_var] >= -1e-9 &&
+            (bt == VarType::Integer && problem.col_lower[ic.binary_var] >= -1e-9 &&
              problem.col_upper[ic.binary_var] <= 1.0 + 1e-9);
         if (!is_binary_type) {
             throw std::runtime_error("indicator requires binary trigger variable");
@@ -120,8 +111,7 @@ void validateModelFeatures(const LpProblem& problem) {
             if (j < 0 || j >= problem.num_cols) {
                 throw std::runtime_error("indicator references variable out of range");
             }
-            if (!std::isfinite(problem.col_lower[j]) ||
-                !std::isfinite(problem.col_upper[j])) {
+            if (!std::isfinite(problem.col_lower[j]) || !std::isfinite(problem.col_upper[j])) {
                 throw std::runtime_error(
                     "indicator fallback needs finite bounds on referenced variables");
             }
@@ -132,8 +122,7 @@ void validateModelFeatures(const LpProblem& problem) {
         if (sos.vars.empty()) {
             throw std::runtime_error("SOS set cannot be empty");
         }
-        if (!sos.weights.empty() &&
-            sos.weights.size() != sos.vars.size()) {
+        if (!sos.weights.empty() && sos.weights.size() != sos.vars.size()) {
             throw std::runtime_error("SOS weights size mismatch");
         }
         std::unordered_set<Index> seen;
@@ -183,15 +172,13 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
     const Index orig_cols = problem.num_cols;
     for (Index j = 0; j < orig_cols; ++j) {
         const VarType t = out.col_type[j];
-        if (t != VarType::SemiContinuous && t != VarType::SemiInteger) continue;
+        if (t != VarType::SemiContinuous && t != VarType::SemiInteger)
+            continue;
 
-        const Real L = out.col_semi_lower[j] > 0.0
-                           ? out.col_semi_lower[j]
-                           : std::max<Real>(0.0, out.col_lower[j]);
+        const Real L = out.col_semi_lower[j] > 0.0 ? out.col_semi_lower[j]
+                                                   : std::max<Real>(0.0, out.col_lower[j]);
         const Real U = out.col_upper[j];
-        out.col_type[j] = (t == VarType::SemiInteger)
-                              ? VarType::Integer
-                              : VarType::Continuous;
+        out.col_type[j] = (t == VarType::SemiInteger) ? VarType::Integer : VarType::Continuous;
         out.col_lower[j] = 0.0;
         out.col_semi_lower[j] = 0.0;
 
@@ -199,8 +186,7 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
             (j < static_cast<Index>(out.col_names.size()) && !out.col_names[j].empty())
                 ? out.col_names[j]
                 : ("x" + std::to_string(j));
-        const Index z = addColumn(out, 0.0, 0.0, 1.0, VarType::Binary,
-                                  base + "_semi_active");
+        const Index z = addColumn(out, 0.0, 0.0, 1.0, VarType::Binary, base + "_semi_active");
 
         std::array<Index, 2> inds = {j, z};
         std::array<Real, 2> vals = {1.0, -U};
@@ -254,7 +240,8 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
         std::iota(order.begin(), order.end(), 0);
         if (!sos.weights.empty()) {
             std::sort(order.begin(), order.end(), [&](Index a, Index b) {
-                if (sos.weights[a] != sos.weights[b]) return sos.weights[a] < sos.weights[b];
+                if (sos.weights[a] != sos.weights[b])
+                    return sos.weights[a] < sos.weights[b];
                 return sos.vars[a] < sos.vars[b];
             });
         }
@@ -262,9 +249,8 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
         std::vector<Index> y(order.size(), -1);
         for (Index p = 0; p < static_cast<Index>(order.size()); ++p) {
             const Index var = sos.vars[order[p]];
-            const std::string base = sos.name.empty()
-                                         ? ("sos_" + std::to_string(var))
-                                         : (sos.name + "_" + std::to_string(p));
+            const std::string base = sos.name.empty() ? ("sos_" + std::to_string(var))
+                                                      : (sos.name + "_" + std::to_string(p));
             y[p] = addColumn(out, 0.0, 0.0, 1.0, VarType::Binary, base + "_active");
             std::array<Index, 2> inds = {var, y[p]};
             std::array<Real, 2> vals = {1.0, -out.col_upper[var]};
@@ -282,8 +268,7 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
                     std::array<Index, 2> inds = {y[i], y[j]};
                     std::array<Real, 2> vals = {1.0, 1.0};
                     addRow(out, trips, inds, vals, -kInf, 1.0,
-                           sos.name.empty() ? "sos2_adj"
-                                            : (sos.name + "_adj"));
+                           sos.name.empty() ? "sos2_adj" : (sos.name + "_adj"));
                 }
             }
         }

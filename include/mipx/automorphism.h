@@ -1,10 +1,10 @@
 #pragma once
 
+#include "mipx/core.h"
+
 #include <cstddef>
 #include <functional>
 #include <vector>
-
-#include "mipx/core.h"
 
 namespace mipx {
 
@@ -20,8 +20,8 @@ using Permutation = std::vector<Index>;
 /// Edges are undirected, stored as adjacency lists.
 struct ColoredGraph {
     Index num_vertices = 0;
-    std::vector<std::vector<Index>> adj;   // adjacency lists
-    std::vector<Index> colors;             // vertex colors
+    std::vector<std::vector<Index>> adj;  // adjacency lists
+    std::vector<Index> colors;            // vertex colors
 
     void addEdge(Index u, Index v);
     void addVertex(Index color);
@@ -41,7 +41,7 @@ struct AutomorphismResult {
     std::vector<Permutation> generators;
     std::vector<std::vector<Index>> orbits;  // variable-only orbits
     Index num_vertices = 0;
-    Index num_variable_vertices = 0;         // first N vertices are variables
+    Index num_variable_vertices = 0;  // first N vertices are variables
     double work_units = 0.0;
 };
 
@@ -50,8 +50,7 @@ struct AutomorphismResult {
 ///
 /// Callback is invoked for each discovered generator.
 /// Only generators that move at least one vertex are reported.
-AutomorphismResult computeAutomorphisms(const ColoredGraph& graph,
-                                        Index num_variable_vertices);
+AutomorphismResult computeAutomorphisms(const ColoredGraph& graph, Index num_variable_vertices);
 
 /// Apply a permutation to a vector of indices.
 void applyPermutation(const Permutation& perm, std::vector<Index>& vec);
@@ -71,7 +70,7 @@ std::vector<std::vector<Index>> computeOrbitsFromGenerators(
     const std::vector<Permutation>& generators, Index n);
 
 /// Compute orbits restricted to a subset of elements (variable indices).
-std::vector<std::vector<Index>> computeVariableOrbits(
-    const std::vector<Permutation>& generators, Index num_vars);
+std::vector<std::vector<Index>> computeVariableOrbits(const std::vector<Permutation>& generators,
+                                                      Index num_vars);
 
 }  // namespace mipx

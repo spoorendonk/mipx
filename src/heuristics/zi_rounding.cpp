@@ -1,9 +1,8 @@
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristics.h"
 
 #include <cmath>
 #include <vector>
-
-#include "mipx/dual_simplex.h"
 
 namespace mipx {
 
@@ -23,20 +22,20 @@ bool isRowFeasible(const LpProblem& problem, std::span<const Real> values) {
         for (Index k = 0; k < row.size(); ++k) {
             activity += row.values[k] * values[row.indices[k]];
         }
-        if (activity < problem.row_lower[i] - kFeasTol) return false;
-        if (activity > problem.row_upper[i] + kFeasTol) return false;
+        if (activity < problem.row_lower[i] - kFeasTol)
+            return false;
+        if (activity > problem.row_upper[i] + kFeasTol)
+            return false;
     }
     return true;
 }
 
 }  // namespace
 
-std::optional<HeuristicSolution> ZiRoundingHeuristic::run(
-    const LpProblem& problem,
-    [[maybe_unused]] DualSimplexSolver& lp,
-    std::span<const Real> primals,
-    Real incumbent) {
-
+std::optional<HeuristicSolution> ZiRoundingHeuristic::run(const LpProblem& problem,
+                                                          [[maybe_unused]] DualSimplexSolver& lp,
+                                                          std::span<const Real> primals,
+                                                          Real incumbent) {
     const Index n = problem.num_cols;
     std::vector<Real> x(primals.begin(), primals.end());
 
@@ -44,7 +43,8 @@ std::optional<HeuristicSolution> ZiRoundingHeuristic::run(
     // direction that does not worsen the objective. If the objective
     // coefficient is zero, round to nearest.
     for (Index j = 0; j < n; ++j) {
-        if (!isIntegerVar(problem.col_type[j])) continue;
+        if (!isIntegerVar(problem.col_type[j]))
+            continue;
         if (std::abs(x[j] - std::round(x[j])) <= kFeasTol) {
             x[j] = std::round(x[j]);
             continue;
@@ -71,14 +71,16 @@ std::optional<HeuristicSolution> ZiRoundingHeuristic::run(
         }
     }
 
-    if (!isRowFeasible(problem, x)) return std::nullopt;
+    if (!isRowFeasible(problem, x))
+        return std::nullopt;
 
     Real obj = problem.obj_offset;
     for (Index j = 0; j < n; ++j) {
         obj += problem.obj[j] * x[j];
     }
 
-    if (obj >= incumbent - kObjectiveTol) return std::nullopt;
+    if (obj >= incumbent - kObjectiveTol)
+        return std::nullopt;
 
     return HeuristicSolution{std::move(x), obj};
 }
