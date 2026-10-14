@@ -408,6 +408,10 @@ public:
         }
     }
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
+    /// Tighten separated cuts' coefficients against the global bounds before
+    /// they are scored and pooled (SeparatorManager::setStrengthenCuts).
+    void setCutStrengthening(bool enabled) { cut_strengthening_ = enabled; }
+    [[nodiscard]] bool getCutStrengthening() const { return cut_strengthening_; }
     void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
         tree_presolve_max_depth_ = std::max<Int>(1, max_depth);
         tree_presolve_min_frac_ = std::max<Int>(1, min_frac);
@@ -645,6 +649,8 @@ private:
     // Serial in-tree cuts are disabled by default while correctness hardening
     // is in progress for benchmark regressions.
     bool tree_cuts_enabled_ = false;
+    // Off until a benchmark decides: on, it changes the default search.
+    bool cut_strengthening_ = false;
     MipLpStats lp_stats_{};
     MipCutStats cut_stats_{};
     CutSeparationStats root_cut_family_stats_{};

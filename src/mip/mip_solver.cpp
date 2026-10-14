@@ -2566,6 +2566,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if (run_tree_rounds) {
             SeparatorManager tree_separators;
             tree_separators.setConfig(cut_family_config_);
+            // problem_ carries the global bounds, so strengthened cuts stay
+            // eligible for promotion.
+            tree_separators.setStrengthenCuts(cut_strengthening_);
             if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
                 tree_separators.setVariableBoundStore(&vb_store_);
             }
@@ -5652,6 +5655,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
     CutPool pool;
     SeparatorManager separators;
+    separators.setStrengthenCuts(cut_strengthening_);
     if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
         separators.setVariableBoundStore(&vb_store_);
     }
@@ -5780,6 +5784,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             dst.accepted += src.accepted;
             dst.efficacy_sum += src.efficacy_sum;
             dst.time_seconds += src.time_seconds;
+            dst.strengthened += src.strengthened;
+            dst.strengthened_coefs += src.strengthened_coefs;
+            dst.strengthen_efficacy_gain += src.strengthen_efficacy_gain;
         }
 
         if (new_cuts == 0) {
@@ -5950,6 +5957,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 "avg_eff=%.3e lp_delta=%.3e time=%.3fs\n",
                 cutFamilyName(family), s.attempted, s.generated, s.accepted, avg_eff, s.lp_delta,
                 s.time_seconds);
+            if (s.strengthened > 0) {
+                log_.log("  strengthened[%s]: cuts=%d coefs=%d avg_eff_gain=%.3e\n",
+                         cutFamilyName(family), s.strengthened, s.strengthened_coefs,
+                         s.strengthen_efficacy_gain / static_cast<Real>(s.strengthened));
+            }
         }
         for (std::size_t fi = 0; fi < cut_manager.kpis().size(); ++fi) {
             const auto family = static_cast<CutFamily>(fi);

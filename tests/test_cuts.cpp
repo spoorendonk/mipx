@@ -1,6 +1,7 @@
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
 #include "mipx/cut_pool.h"
+#include "mipx/cut_strengthening.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
 #include "mipx/io.h"
@@ -14,6 +15,9 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <random>
+#include <span>
+#include <vector>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -1566,11 +1570,13 @@ LpProblem buildDivisibleRowMip(const char* name, Real coeff, Real rhs) {
 // Branch-and-cut `problem` with presolve off and only `config`'s family armed,
 // so a cut that removes the optimum shows up as a wrong objective rather than
 // being masked by another family or by presolve.
-MipResult solveWithCutFamilies(const LpProblem& problem, const CutFamilyConfig& config) {
+MipResult solveWithCutFamilies(const LpProblem& problem, const CutFamilyConfig& config,
+                               bool strengthen = false) {
     MipSolver solver;
     solver.setVerbose(false);
     solver.setPresolve(false);
     solver.setCutFamilyConfig(config);
+    solver.setCutStrengthening(strengthen);
     solver.load(problem);
     return solver.solve();
 }
@@ -1627,8 +1633,9 @@ CutFamilyConfig onlyModKConfig() {
 // lands on the true optimum. The objective alone is a weak assertion -- a point
 // merely *near* x = 100001 would satisfy it -- so pin the solution vector too,
 // which is what actually proves no cut removed the integer optimum.
-void checkNearIntegerOptimum(const LpProblem& problem, const CutFamilyConfig& config) {
-    const auto result = solveWithCutFamilies(problem, config);
+void checkNearIntegerOptimum(const LpProblem& problem, const CutFamilyConfig& config,
+                             bool strengthen = false) {
+    const auto result = solveWithCutFamilies(problem, config, strengthen);
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-kNearIntegerOptimum, 1e-6));
     REQUIRE(result.solution.size() == 2);
@@ -1640,7 +1647,7 @@ void checkNearIntegerOptimum(const LpProblem& problem, const CutFamilyConfig& co
 // cut in the pool is satisfied by the integer-feasible point `x`. Returns the
 // number of cuts that were checked.
 Index separateAndCheckCutsKeep(const LpProblem& problem, const std::vector<Real>& x,
-                               const CutFamilyConfig& config) {
+                               const CutFamilyConfig& config, bool strengthen = false) {
     // The reference point really is feasible and integral for the model.
     for (Index j = 0; j < problem.num_cols; ++j) {
         const Real v = x[static_cast<std::size_t>(j)];
@@ -1671,6 +1678,7 @@ Index separateAndCheckCutsKeep(const LpProblem& problem, const std::vector<Real>
     SeparatorManager manager;
     manager.setConfig(config);
     manager.setMaxCutsPerFamily(10);
+    manager.setStrengthenCuts(strengthen);
 
     CutSeparationStats stats;
     manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
@@ -2323,4 +2331,493 @@ TEST_CASE("MultiRow: a cut off a tightened bound or a node-local row is marked l
             CHECK(pool[ci].local);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// #201: coefficient strengthening of separated cuts
+// ---------------------------------------------------------------------------
+
+namespace {
+
+Real cutLhs(const Cut& cut, std::span<const Real> x) {
+    Real lhs = 0.0;
+    for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+        lhs += cut.values[k] * x[static_cast<std::size_t>(cut.indices[k])];
+    }
+    return lhs;
+}
+
+bool cutHolds(const Cut& cut, std::span<const Real> x, Real tol) {
+    const Real lhs = cutLhs(cut, x);
+    return lhs <= cut.upper + tol && lhs >= cut.lower - tol;
+}
+
+Real cutCoef(const Cut& cut, Index j) {
+    for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+        if (cut.indices[k] == j) {
+            return cut.values[k];
+        }
+    }
+    return 0.0;
+}
+
+// Columns only; strengthenCut reads bounds and types, never rows.
+LpProblem columnsOnly(std::vector<Real> lower, std::vector<Real> upper,
+                      std::vector<VarType> types) {
+    LpProblem lp;
+    lp.num_cols = static_cast<Index>(lower.size());
+    lp.num_rows = 0;
+    lp.obj.assign(lower.size(), 0.0);
+    lp.col_lower = std::move(lower);
+    lp.col_upper = std::move(upper);
+    lp.col_type = std::move(types);
+    lp.matrix = SparseMatrix(0, lp.num_cols, {});
+    return lp;
+}
+
+Cut upperCut(std::vector<Index> idx, std::vector<Real> val, Real rhs) {
+    Cut cut;
+    cut.indices = std::move(idx);
+    cut.values = std::move(val);
+    cut.upper = rhs;
+    return cut;
+}
+
+// Big-M rows over binaries and y, so separated cuts carry coefficients the
+// bounds can tighten. With y a general integer the model is all-integer and
+// bounded, for the enumeration check; with y continuous the optimum is
+// x0 = 1, x1 = x2 = 0, y = 1.5 (objective -4.5).
+LpProblem buildBigMMip(bool continuous_y = false) {
+    LpProblem lp;
+    lp.name = "bigm_strengthen";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.num_rows = 2;
+    lp.obj = {-3.0, -1.0, -1.0, -1.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 2.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary,
+                   continuous_y ? VarType::Continuous : VarType::Integer};
+    lp.col_names = {"x0", "x1", "x2", "y"};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {8.5, 3.5};
+    lp.row_names = {"R1", "R2"};
+    std::vector<Triplet> trips = {{0, 0, 7.0}, {0, 1, 2.0}, {0, 2, 2.0}, {0, 3, 1.0},
+                                  {1, 1, 1.0}, {1, 2, 1.0}, {1, 3, 1.0}};
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+    return lp;
+}
+
+CutFamilyConfig onlyFamilyConfig(CutFamily family) {
+    CutFamilyConfig config = noCutFamiliesConfig();
+    switch (family) {
+        case CutFamily::Gomory:
+            config.gomory = true;
+            break;
+        case CutFamily::Mir:
+            config.mir = true;
+            break;
+        case CutFamily::Cover:
+            config.cover = true;
+            break;
+        case CutFamily::ImpliedBound:
+            config.implied_bound = true;
+            break;
+        case CutFamily::Clique:
+            config.clique = true;
+            break;
+        case CutFamily::ZeroHalf:
+            config.zero_half = true;
+            break;
+        case CutFamily::Mixing:
+            config.mixing = true;
+            break;
+        case CutFamily::Cmir:
+            config.cmir = true;
+            break;
+        case CutFamily::StrongCg:
+            config.strong_cg = true;
+            break;
+        case CutFamily::LiftedCover:
+            config.lifted_cover = true;
+            break;
+        case CutFamily::ModK:
+            config.mod_k = true;
+            break;
+        case CutFamily::IntersectionCut:
+            config.intersection_cut = true;
+            break;
+        case CutFamily::MultiRow:
+            config.multi_row = true;
+            break;
+        case CutFamily::Unknown:
+        case CutFamily::Count:
+        default:
+            break;
+    }
+    return config;
+}
+
+// Root-LP separation of `problem` with one family armed.
+CutPool separateOneFamily(const LpProblem& problem, CutFamily family, bool strengthen,
+                          CutSeparationStats& stats) {
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    CutPool pool;
+    SeparatorManager manager;
+    manager.setConfig(onlyFamilyConfig(family));
+    manager.setMaxCutsPerFamily(10);
+    manager.setStrengthenCuts(strengthen);
+    manager.separate(lp, problem, lp.getPrimalValues(), pool, stats);
+    return pool;
+}
+
+}  // namespace
+
+TEST_CASE("strengthenCut: lowers a big-M binary coefficient and the rhs", "[cuts][strengthen]") {
+    const auto problem =
+        columnsOnly({0, 0, 0}, {1, 1, 1}, {VarType::Binary, VarType::Binary, VarType::Binary});
+    // 5 x0 + x1 + x2 <= 5: with x0 = 0 the row is slack by 3, so x0's
+    // coefficient and the rhs both drop by 3.
+    Cut cut = upperCut({0, 1, 2}, {5.0, 1.0, 1.0}, 5.0);
+    CHECK(strengthenCut(cut, problem) == 1);
+    CHECK_THAT(cutCoef(cut, 0), WithinAbs(2.0, 1e-7));
+    CHECK_THAT(cutCoef(cut, 1), WithinAbs(1.0, 0.0));
+    CHECK_THAT(cut.upper, WithinAbs(2.0, 1e-7));
+    // The margin only ever weakens: never below the exact reduction.
+    CHECK(cutCoef(cut, 0) >= 2.0);
+    CHECK(cut.upper >= 2.0);
+}
+
+TEST_CASE("strengthenCut: a >= cut is tightened through its negation", "[cuts][strengthen]") {
+    const auto problem =
+        columnsOnly({0, 0, 0}, {1, 1, 1}, {VarType::Binary, VarType::Binary, VarType::Binary});
+    Cut cut;
+    cut.indices = {0, 1, 2};
+    cut.values = {-5.0, -1.0, -1.0};
+    cut.lower = -5.0;
+    CHECK(strengthenCut(cut, problem) == 1);
+    CHECK_THAT(cutCoef(cut, 0), WithinAbs(-2.0, 1e-7));
+    CHECK_THAT(cut.lower, WithinAbs(-2.0, 1e-7));
+    CHECK(cut.upper == kInf);
+}
+
+TEST_CASE("strengthenCut: a negative coefficient is tightened at its lower bound",
+          "[cuts][strengthen]") {
+    const auto problem =
+        columnsOnly({0, 0, 0, 0}, {1, 1, 1, 1},
+                    {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary});
+    // -5 x0 + x1 + x2 + x3 <= 0: with x0 = 1 the row is slack by 2.
+    Cut cut = upperCut({0, 1, 2, 3}, {-5.0, 1.0, 1.0, 1.0}, 0.0);
+    CHECK(strengthenCut(cut, problem) == 1);
+    CHECK_THAT(cutCoef(cut, 0), WithinAbs(-3.0, 1e-7));
+    CHECK_THAT(cut.upper, WithinAbs(0.0, 1e-7));
+}
+
+TEST_CASE("strengthenCut: a general integer is tightened against its upper bound",
+          "[cuts][strengthen]") {
+    const auto problem = columnsOnly({0, 0}, {3, 1}, {VarType::Integer, VarType::Continuous});
+    // 10 y + z <= 25 with y in {0..3}: y <= 2 leaves slack 4, so 6 y + z <= 13.
+    // The LP bound on y drops from 2.5 to 13/6; y = 2, z = 1 still fits.
+    Cut cut = upperCut({0, 1}, {10.0, 1.0}, 25.0);
+    CHECK(strengthenCut(cut, problem) == 1);
+    CHECK_THAT(cutCoef(cut, 0), WithinAbs(6.0, 1e-7));
+    CHECK_THAT(cutCoef(cut, 1), WithinAbs(1.0, 0.0));
+    CHECK_THAT(cut.upper, WithinAbs(13.0, 1e-6));
+}
+
+TEST_CASE("strengthenCut: leaves alone what it cannot tighten", "[cuts][strengthen]") {
+    SECTION("an already tight cover") {
+        const auto problem =
+            columnsOnly({0, 0, 0}, {1, 1, 1}, {VarType::Binary, VarType::Binary, VarType::Binary});
+        Cut cut = upperCut({0, 1, 2}, {1.0, 1.0, 1.0}, 2.0);
+        const Cut before = cut;
+        CHECK(strengthenCut(cut, problem) == 0);
+        CHECK(cut.values == before.values);
+        CHECK(cut.upper == before.upper);
+    }
+    SECTION("a cut the bounds already satisfy") {
+        // -5 x0 + x1 + x2 <= 2 holds on the whole box: no point to separate,
+        // and tightening it would only shrink every coefficient towards zero.
+        const auto problem =
+            columnsOnly({0, 0, 0}, {1, 1, 1}, {VarType::Binary, VarType::Binary, VarType::Binary});
+        Cut cut = upperCut({0, 1, 2}, {-5.0, 1.0, 1.0}, 2.0);
+        CHECK(strengthenCut(cut, problem) == 0);
+    }
+    SECTION("a column unbounded in the direction that raises the activity") {
+        const auto problem = columnsOnly({0, 0}, {1, kInf}, {VarType::Binary, VarType::Continuous});
+        Cut cut = upperCut({0, 1}, {5.0, 1.0}, 5.0);
+        CHECK(strengthenCut(cut, problem) == 0);
+    }
+    SECTION("a continuous column") {
+        const auto problem =
+            columnsOnly({0, 0}, {1, 1}, {VarType::Continuous, VarType::Continuous});
+        Cut cut = upperCut({0, 1}, {5.0, 1.0}, 5.0);
+        CHECK(strengthenCut(cut, problem) == 0);
+    }
+    SECTION("a two-sided cut") {
+        const auto problem =
+            columnsOnly({0, 0, 0}, {1, 1, 1}, {VarType::Binary, VarType::Binary, VarType::Binary});
+        Cut cut = upperCut({0, 1, 2}, {5.0, 1.0, 1.0}, 5.0);
+        cut.lower = 0.0;
+        CHECK(strengthenCut(cut, problem) == 0);
+    }
+    SECTION("an index outside the problem") {
+        const auto problem = columnsOnly({0}, {1}, {VarType::Binary});
+        Cut cut = upperCut({0, 1}, {5.0, 1.0}, 5.0);
+        CHECK(strengthenCut(cut, problem) == 0);
+    }
+}
+
+TEST_CASE("strengthenCut: random cuts keep every integer point and imply the original",
+          "[cuts][strengthen]") {
+    // Each random one-sided cut over a few bounded columns is checked on a grid
+    // with step 1/4 over the box. At every point integral on the integer
+    // columns that satisfies the cut, the strengthened cut must hold too
+    // (validity); at every grid point that satisfies the strengthened cut, the
+    // original must hold (it is never weaker inside the bounds). The near-
+    // integer coefficients are the #195 shape.
+    std::mt19937 rng(201);
+    const std::vector<Real> coef_pool = {1.0,  2.0,        3.0,           5.0,       7.0,
+                                         -1.0, -2.0,       -4.0,          -6.0,      0.5,
+                                         2.5,  1.0 - 1e-9, -(1.0 - 1e-9), 3.0 + 1e-9};
+    std::uniform_int_distribution<int> pick_coef(0, static_cast<int>(coef_pool.size()) - 1);
+    std::uniform_int_distribution<int> pick_type(0, 2);
+    std::uniform_int_distribution<int> pick_lb(-2, 1);
+    std::uniform_int_distribution<int> pick_width(1, 3);
+    std::uniform_real_distribution<Real> unit(0.0, 1.0);
+
+    Int strengthened = 0;
+    const int kCuts = 400;
+    for (int trial = 0; trial < kCuts; ++trial) {
+        const Index n = 2 + trial % 3;
+        std::vector<Real> lower(n);
+        std::vector<Real> upper(n);
+        std::vector<VarType> types(n);
+        for (Index j = 0; j < n; ++j) {
+            const int t = pick_type(rng);
+            if (t == 0) {
+                types[j] = VarType::Binary;
+                lower[j] = 0.0;
+                upper[j] = 1.0;
+            } else if (t == 1) {
+                types[j] = VarType::Integer;
+                lower[j] = pick_lb(rng);
+                upper[j] = lower[j] + pick_width(rng);
+            } else {
+                types[j] = VarType::Continuous;
+                lower[j] = -0.5 * pick_width(rng);
+                upper[j] = 0.5 * pick_width(rng);
+            }
+        }
+        const auto problem = columnsOnly(lower, upper, types);
+
+        Cut cut;
+        Real min_act = 0.0;
+        Real max_act = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            const Real a = coef_pool[pick_coef(rng)];
+            cut.indices.push_back(j);
+            cut.values.push_back(a);
+            min_act += std::min(a * lower[j], a * upper[j]);
+            max_act += std::max(a * lower[j], a * upper[j]);
+        }
+        const Real rhs = min_act + unit(rng) * (max_act - min_act);
+        if (trial % 2 == 0) {
+            cut.upper = rhs;
+        } else {
+            cut.lower = rhs;
+        }
+
+        Cut strong = cut;
+        if (strengthenCut(strong, problem) == 0) {
+            continue;
+        }
+        ++strengthened;
+
+        std::vector<Real> x(n);
+        std::vector<int> step(n, 0);
+        while (true) {
+            bool integral = true;
+            for (Index j = 0; j < n; ++j) {
+                x[j] = lower[j] + 0.25 * step[j];
+                if (types[j] != VarType::Continuous && std::abs(x[j] - std::round(x[j])) > 1e-12) {
+                    integral = false;
+                }
+            }
+            INFO("trial " << trial << " lhs " << cutLhs(cut, x) << " strong lhs "
+                          << cutLhs(strong, x));
+            if (integral && cutHolds(cut, x, 0.0)) {
+                CHECK(cutHolds(strong, x, 1e-9));
+            }
+            if (cutHolds(strong, x, 0.0)) {
+                CHECK(cutHolds(cut, x, 1e-9));
+            }
+
+            Index pos = 0;
+            while (pos < n && lower[pos] + 0.25 * (step[pos] + 1) > upper[pos] + 1e-12) {
+                step[pos] = 0;
+                ++pos;
+            }
+            if (pos == n) {
+                break;
+            }
+            ++step[pos];
+        }
+    }
+    // Not vacuous: a good share of the random cuts had something to tighten.
+    CHECK(strengthened > kCuts / 10);
+}
+
+TEST_CASE("SeparatorManager: strengthened cuts keep every integer-feasible point",
+          "[cuts][strengthen]") {
+    // Every family, on every all-integer model the [cuts] tests enumerate: each
+    // cut pooled with strengthening on must keep every feasible integer point.
+    struct Model {
+        const char* name;
+        LpProblem problem;
+        Index limit;
+    };
+    const std::vector<Model> models = {
+        {"cut_test", buildCutTestMip(), 6},
+        {"fractional", buildFractionalMip(), 6},
+        {"triangle_clique", buildTriangleCliqueMip(), 1},
+        {"binary_conflict", buildBinaryConflictMip(), 1},
+        {"mir_test", buildMirTestMip(), 6},
+        {"bigm", buildBigMMip(), 2},
+        {"divisible_row", buildDivisibleRowMip("divisible_row", 2.0, 3.0), 1},
+    };
+
+    Int pooled = 0;
+    Int strengthened = 0;
+    for (const auto& model : models) {
+        for (std::size_t fi = 0; fi < static_cast<std::size_t>(CutFamily::Count); ++fi) {
+            const auto family = static_cast<CutFamily>(fi);
+            if (family == CutFamily::Unknown) {
+                continue;
+            }
+            CutSeparationStats stats;
+            const CutPool pool = separateOneFamily(model.problem, family, true, stats);
+            strengthened += stats.at(family).strengthened;
+            if (pool.size() == 0) {
+                continue;
+            }
+            pooled += pool.size();
+            INFO("model " << model.name << " family " << cutFamilyName(family));
+            checkCutsKeepAllFeasiblePoints(model.problem, pool, model.limit);
+        }
+    }
+    CHECK(pooled > 0);
+    CHECK(strengthened > 0);
+}
+
+TEST_CASE("SeparatorManager: strengthening tightens a big-M MIR cut and reports it",
+          "[cuts][strengthen]") {
+    const auto problem = buildBigMMip();
+
+    // MIR rounds R1 to 7 x0 + 2 x1 + 2 x2 + y <= 8. With x0 = 0 the other terms
+    // reach at most 6, so x0's coefficient and the rhs drop by 2.
+    auto findBigM = [](const CutPool& pool) -> const Cut* {
+        for (Index c = 0; c < pool.size(); ++c) {
+            if (cutCoef(pool[c], 0) != 0.0) {
+                return &pool[c];
+            }
+        }
+        return nullptr;
+    };
+
+    CutSeparationStats off_stats;
+    const CutPool off = separateOneFamily(problem, CutFamily::Mir, false, off_stats);
+    CutSeparationStats on_stats;
+    const CutPool on = separateOneFamily(problem, CutFamily::Mir, true, on_stats);
+
+    const Cut* off_cut = findBigM(off);
+    const Cut* on_cut = findBigM(on);
+    REQUIRE(off_cut != nullptr);
+    REQUIRE(on_cut != nullptr);
+    CHECK_THAT(cutCoef(*off_cut, 0), WithinAbs(7.0, 1e-9));
+    CHECK_THAT(off_cut->upper, WithinAbs(8.0, 1e-9));
+    CHECK_THAT(cutCoef(*on_cut, 0), WithinAbs(5.0, 1e-7));
+    CHECK_THAT(on_cut->upper, WithinAbs(6.0, 1e-7));
+    CHECK(on_cut->efficacy > 3.0 * off_cut->efficacy);
+
+    const auto& off_mir = off_stats.at(CutFamily::Mir);
+    const auto& on_mir = on_stats.at(CutFamily::Mir);
+    CHECK(off_mir.strengthened == 0);
+    CHECK(off_mir.strengthened_coefs == 0);
+    CHECK(off_mir.strengthen_efficacy_gain == 0.0);
+    CHECK(on_mir.strengthened == 1);
+    CHECK(on_mir.strengthened_coefs == 1);
+    CHECK_THAT(on_mir.strengthen_efficacy_gain,
+               WithinAbs(on_cut->efficacy - off_cut->efficacy, 1e-7));
+    checkCutsKeepAllFeasiblePoints(problem, on, 2);
+}
+
+TEST_CASE("SeparatorManager: strengthened cuts keep the mixed-integer optimum",
+          "[cuts][strengthen]") {
+    // Models with continuous columns cannot be enumerated, so every family's
+    // cuts are checked against a known integer-feasible optimum instead.
+    const auto bigm = buildBigMMip(true);
+    const std::vector<Real> bigm_optimum = {1.0, 0.0, 0.0, 1.5};
+    const auto cmir = buildCmirValidityMip();
+
+    Index checked = 0;
+    for (std::size_t fi = 0; fi < static_cast<std::size_t>(CutFamily::Count); ++fi) {
+        const auto family = static_cast<CutFamily>(fi);
+        if (family == CutFamily::Unknown) {
+            continue;
+        }
+        INFO("family " << cutFamilyName(family));
+        checked += separateAndCheckCutsKeep(bigm, bigm_optimum, onlyFamilyConfig(family), true);
+        checked +=
+            separateAndCheckCutsKeep(cmir, cmirValidityOptimum(), onlyFamilyConfig(family), true);
+    }
+    CHECK(checked > 0);
+}
+
+TEST_CASE("SeparatorManager: strengthening keeps the near-integer optimum", "[cuts][strengthen]") {
+    // The #195 models: a coefficient of 1 - 1e-9 next to an rhs just under an
+    // integer, where rounding the wrong way removes x = 100001.
+    const std::vector<Real> optimum = {kNearIntegerOptimum, 0.0};
+    struct Case {
+        const char* name;
+        LpProblem problem;
+        CutFamilyConfig config;
+    };
+    const std::vector<Case> cases = {
+        {"strong_cg", buildStrongCgNearIntegerMip(), onlyStrongCgConfig()},
+        {"mir", buildNearIntegerMip("mir_near_integer", 1.0, 1.0, 0.5), onlyMirConfig()},
+        {"zero_half", buildNearIntegerMip("zerohalf_near_integer", 2.0, 3.0, 1.0),
+         onlyZeroHalfConfig()},
+        {"mixing", buildNearIntegerMip("mixing_near_integer", 3.0, 4.0, 1.0), onlyMixingConfig()},
+        {"mod_k", buildNearIntegerMip("modk_near_integer", 2.0, 3.0, 1.0), onlyModKConfig()},
+        {"gomory", buildNearIntegerMip("gomory_near_integer", 1.0, 1.0, 0.5),
+         onlyFamilyConfig(CutFamily::Gomory)},
+    };
+    for (const auto& c : cases) {
+        INFO("family " << c.name);
+        separateAndCheckCutsKeep(c.problem, optimum, c.config, true);
+        checkNearIntegerOptimum(c.problem, c.config, true);
+    }
+}
+
+TEST_CASE("MipSolver: cut strengthening defaults off and keeps optima when on",
+          "[cuts][strengthen][integration]") {
+    CHECK_FALSE(MipSolver{}.getCutStrengthening());
+
+    auto solveBoth = [](const LpProblem& problem) {
+        CutFamilyConfig all;
+        const auto off = solveWithCutFamilies(problem, all, false);
+        const auto on = solveWithCutFamilies(problem, all, true);
+        REQUIRE(off.status == Status::Optimal);
+        REQUIRE(on.status == Status::Optimal);
+        CHECK_THAT(on.objective, WithinAbs(off.objective, 1e-6));
+    };
+    solveBoth(buildBigMMip());
+    solveBoth(buildBigMMip(true));
+    solveBoth(buildCutTestMip());
+    solveBoth(buildFractionalMip());
+    solveBoth(buildCmirValidityMip());
+    solveBoth(buildStrongCgKnapsackMip());
 }

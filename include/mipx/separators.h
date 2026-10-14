@@ -24,6 +24,12 @@ struct CutFamilyStats {
     Real efficacy_sum = 0.0;
     Real lp_delta = 0.0;
     double time_seconds = 0.0;
+    // Coefficient strengthening (SeparatorManager::setStrengthenCuts): accepted
+    // cuts with at least one coefficient tightened, the coefficients tightened,
+    // and the efficacy those cuts gained over their unstrengthened form, summed.
+    Int strengthened = 0;
+    Int strengthened_coefs = 0;
+    Real strengthen_efficacy_gain = 0.0;
 };
 
 struct CutSeparationStats {
@@ -63,6 +69,11 @@ public:
     void setMaxCutsPerFamily(Int value) { max_cuts_per_family_ = std::max<Int>(1, value); }
     void setMinViolation(Real value) { min_violation_ = std::max<Real>(1e-8, value); }
     void setVariableBoundStore(const VariableBoundStore* store) { vb_store_ = store; }
+    /// Tighten each separated cut's coefficients with strengthenCut before it
+    /// is scored and pooled, against the column bounds of the LpProblem passed
+    /// to separate(), which must therefore hold wherever the cut is used.
+    /// Applies to every family. Off by default until benchmarked.
+    void setStrengthenCuts(bool enabled) { strengthen_cuts_ = enabled; }
     /// Attach a persistent clique table. When set, the clique family also
     /// separates maximal-clique inequalities from the table in addition to the
     /// pairwise row scan. The table must outlive the manager.
@@ -128,6 +139,17 @@ private:
     /// efficacy of a cut the pool would reject.
     bool addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
                         CutFamilyStats& stats) const;
+    /// What maybeStrengthen did to one cut, recorded only once the pool
+    /// takes it, so the statistics describe pooled cuts.
+    struct Strengthening {
+        Int coefs = 0;
+        Real efficacy_gain = 0.0;
+        void record(CutFamilyStats& stats) const;
+    };
+    /// Strengthen @p cut in place when strengthening is on, keeping the
+    /// original if the result fails the numerical-safety screen. Expects a cut
+    /// that already passed the screen.
+    Strengthening maybeStrengthen(Cut& cut, std::span<const Real> primals) const;
 
     CutFamilyConfig config_{};
     GomorySeparator gomory_{};
@@ -137,6 +159,8 @@ private:
     std::vector<Index> local_rows_;  // sorted
     const VariableBoundStore* vb_store_ = nullptr;
     const CliqueTable* clique_table_ = nullptr;
+    bool strengthen_cuts_ = false;
+    const LpProblem* problem_ = nullptr;  // set by separate() for maybeStrengthen
 };
 
 }  // namespace mipx

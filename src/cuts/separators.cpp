@@ -1,6 +1,7 @@
 #include "mipx/separators.h"
 
 #include "mipx/clique_table.h"
+#include "mipx/cut_strengthening.h"
 #include "mipx/variable_bounds.h"
 
 #include <algorithm>
@@ -38,7 +39,40 @@ Real computeViolation(const Cut& cut, std::span<const Real> primals) {
     return violation;
 }
 
+Real computeEfficacy(const Cut& cut, std::span<const Real> primals) {
+    Real norm_sq = 0.0;
+    for (Real v : cut.values) {
+        norm_sq += v * v;
+    }
+    return computeViolation(cut, primals) / std::sqrt(norm_sq);
+}
+
 }  // namespace
+
+SeparatorManager::Strengthening SeparatorManager::maybeStrengthen(
+    Cut& cut, std::span<const Real> primals) const {
+    if (!strengthen_cuts_ || problem_ == nullptr) {
+        return {};
+    }
+    Cut strengthened = cut;
+    const Int changed = strengthenCut(strengthened, *problem_);
+    // A coefficient driven near zero can fail the dynamic-range screen; the
+    // unstrengthened cut is still valid, so keep it rather than lose the cut.
+    if (changed == 0 || !isNumericallySafeCut(strengthened)) {
+        return {};
+    }
+    const Real gain = computeEfficacy(strengthened, primals) - computeEfficacy(cut, primals);
+    cut = std::move(strengthened);
+    return {changed, gain};
+}
+
+void SeparatorManager::Strengthening::record(CutFamilyStats& stats) const {
+    if (coefs > 0) {
+        ++stats.strengthened;
+        stats.strengthened_coefs += coefs;
+        stats.strengthen_efficacy_gain += efficacy_gain;
+    }
+}
 
 bool SeparatorManager::addViolatedCut(Cut cut, std::span<const Real> primals, CutPool& pool,
                                       CutFamilyStats& stats) const {
@@ -46,6 +80,8 @@ bool SeparatorManager::addViolatedCut(Cut cut, std::span<const Real> primals, Cu
     if (!isNumericallySafeCut(cut)) {
         return false;
     }
+    // Before the violation threshold: strengthening only raises violation.
+    const Strengthening strengthening = maybeStrengthen(cut, primals);
 
     const Real violation = computeViolation(cut, primals);
     if (violation < min_violation_) {
@@ -67,6 +103,7 @@ bool SeparatorManager::addViolatedCut(Cut cut, std::span<const Real> primals, Cu
     }
     ++stats.accepted;
     stats.efficacy_sum += efficacy;
+    strengthening.record(stats);
     return true;
 }
 
@@ -108,6 +145,7 @@ bool SeparatorManager::isEnabled(CutFamily family) const {
 Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
                                std::span<const Real> primals, CutPool& pool,
                                CutSeparationStats& stats) {
+    problem_ = &problem;
     Int total_added = 0;
 
     auto runFamily = [&](CutFamily family, auto&& fn) {
@@ -157,16 +195,39 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& pro
     gomory_.setMaxCuts(max_cuts_per_family_);
     gomory_.setMinViolation(min_violation_);
     gomory_.setGlobalRowCount(global_row_count_);
-    const Int accepted = gomory_.separate(lp, problem, primals, pool);
     // Same meaning as the families that go through addViolatedCut: attempted
     // counts the rows tried, generated the cuts built and offered onward, and
     // generated - accepted the ones the screen, the violation threshold or the
     // pool turned away.
     const GomoryStats& gs = gomory_.stats();
+    if (!strengthen_cuts_) {
+        const Int accepted = gomory_.separate(lp, problem, primals, pool);
+        stats.attempted += gs.candidate_rows;
+        stats.generated += gs.cuts_built;
+        stats.accepted += gs.accepted;
+        stats.efficacy_sum += gs.efficacy_sum;
+        return accepted;
+    }
+
+    // GomorySeparator pools its own cuts, so to strengthen them it separates
+    // into a scratch pool whose cuts are strengthened and re-offered here.
+    CutPool scratch;
+    gomory_.separate(lp, problem, primals, scratch);
     stats.attempted += gs.candidate_rows;
     stats.generated += gs.cuts_built;
-    stats.accepted += gs.accepted;
-    stats.efficacy_sum += gs.efficacy_sum;
+    Int accepted = 0;
+    for (Index k = 0; k < scratch.size(); ++k) {
+        Cut cut = scratch[k];
+        const Strengthening strengthening = maybeStrengthen(cut, primals);
+        cut.efficacy = computeEfficacy(cut, primals);
+        const Real efficacy = cut.efficacy;
+        if (pool.addCut(std::move(cut))) {
+            ++accepted;
+            ++stats.accepted;
+            stats.efficacy_sum += efficacy;
+            strengthening.record(stats);
+        }
+    }
     return accepted;
 }
 
