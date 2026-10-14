@@ -54,6 +54,7 @@ add_library(mipx STATIC
     presolve/presolve.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp
+    cuts/tableau_cut.cpp
     cuts/cut_manager.cpp
     cuts/separators.cpp
     cuts/cmir.cpp

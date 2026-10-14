@@ -1,7 +1,7 @@
 #include "mipx/gomory.h"
 
-#include "mipx/branching.h"
 #include "mipx/lp_problem.h"
+#include "tableau_cut.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,29 +12,15 @@ namespace mipx {
 
 namespace {
 
-/// Tolerance for calling model data (a bound, a matrix entry) integral.
-/// Tighter than the integrality tolerance used on solution values: this
-/// decides whether a deviation variable may be treated as integer in the GMI
-/// formula, and a wrong answer there produces an invalid cut.
-constexpr Real kDataIntTol = 1e-9;
-
-/// Relative size, against the magnitude of the terms summed into it, below
-/// which a cut coefficient is cancellation round-off (a few thousand ulps).
-constexpr Real kCancellationTol = 1e-12;
-
-bool isIntegralValue(Real v, Real tol) {
-    return std::abs(v - std::round(v)) <= tol;
-}
-
-/// True when a column is constrained to integer values. Continuous is the
-/// obvious exclusion; SemiContinuous is the trap, because it is not
-/// VarType::Continuous yet ranges over {0} U [l, u]. Treating it as integral
-/// would let a basic semi-continuous value at 2.7 open a Gomory row and give a
-/// nonbasic one the integer coefficient formula, both invalid. MipSolver
-/// linearizes these away before separation, but the separator is public API.
-bool isIntegerValued(VarType t) {
-    return t == VarType::Integer || t == VarType::Binary || t == VarType::SemiInteger;
-}
+using tableau_detail::accumulateTerms;
+using tableau_detail::collectCandidates;
+using tableau_detail::ColumnBox;
+using tableau_detail::CutBuilder;
+using tableau_detail::finalizeCut;
+using tableau_detail::makeColumnBox;
+using tableau_detail::makeRowProvenance;
+using tableau_detail::RowProvenance;
+using tableau_detail::RowScratch;
 
 /// GMI coefficient of a deviation variable.
 ///
@@ -64,278 +50,6 @@ Real gmiCoefficient(Real t, bool integral, Real f0) {
         return t / f0;
     }
     return -t / (1.0 - f0);
-}
-
-/// True when an LP bound is strictly tighter than the corresponding global
-/// bound, i.e. the deviation measured from it is only valid in this subtree.
-///
-/// The comparison is exact, deliberately. A tolerance here would have to be
-/// scaled against something, and the only safe scale is not the bound: getting
-/// this wrong marks a locally-derived cut global, and the resulting rhs error
-/// is the bound difference times the emitted coefficient, which the safety
-/// screen caps at 1e6 rather than at anything proportional to the bound. A
-/// bound-magnitude tolerance therefore admits an unsound promotion on exactly
-/// the columns where it costs most: a continuous column with a global upper of
-/// 1e6 tightened by node propagation to 1e6 - 1e-4 reads as "not local" under
-/// a relative 1e-9, and a cut coefficient of that order puts the rhs out by
-/// ~1e2. Comparing exactly can only err the other way, marking an untightened
-/// bound local, which loses a cut and never validity.
-bool boundIsLocal(Real bound, Real global_bound, Real sign) {
-    if (!std::isfinite(global_bound)) {
-        return true;
-    }
-    return (sign > 0.0) ? (bound > global_bound) : (bound < global_bound);
-}
-
-/// Scratch buffers for the row of a substituted logical, reused across rows.
-struct RowScratch {
-    std::vector<Index> indices;
-    std::vector<Real> values;
-};
-
-/// Which LP rows a cut may lean on and stay valid tree-wide.
-struct RowProvenance {
-    Index global_rows = 0;                   // rows at or past this are local
-    std::span<const Index> local_rows = {};  // sorted; local inside the prefix
-
-    [[nodiscard]] bool isLocal(Index row) const {
-        return row >= global_rows || std::binary_search(local_rows.begin(), local_rows.end(), row);
-    }
-};
-
-/// True when the activity a^T x of the given row is integer at every
-/// integer-feasible point: integer coefficients on integer columns only.
-bool rowActivityIsIntegral(const LpProblem& problem, const RowScratch& row) {
-    for (std::size_t p = 0; p < row.indices.size(); ++p) {
-        const Index j = row.indices[p];
-        if (j < 0 || j >= problem.num_cols) {
-            return false;
-        }
-        if (!isIntegerValued(problem.col_type[j])) {
-            return false;
-        }
-        if (!isIntegralValue(row.values[p], kDataIntTol)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Column bounds a dropped coefficient is paid for over.
-struct ColumnBox {
-    std::span<const Real> global_lower;
-    std::span<const Real> global_upper;
-    std::vector<Real> lp_lower;
-    std::vector<Real> lp_upper;
-};
-
-/// One GMI term under construction: the cut being accumulated in the form
-/// sum_j cut_coeff[j] * x_j >= cut_rhs, plus whether it stayed global.
-struct CutBuilder {
-    std::vector<Real> coeff;
-    std::vector<Real> magnitude;  // sum of |term| that went into each coeff
-    Real rhs = 1.0;
-    bool local = false;
-
-    void add(Index j, Real term) {
-        coeff[static_cast<std::size_t>(j)] += term;
-        magnitude[static_cast<std::size_t>(j)] += std::abs(term);
-    }
-};
-
-/// Add the term of nonbasic structural column `k` to the cut.
-///
-/// The deviation is delta = x_k - l_k when the column sits at its lower bound
-/// and delta = u_k - x_k when it sits at its upper bound, so the tableau
-/// coefficient in deviation form is t = alpha for the former and t = -alpha
-/// for the latter. Substituting delta back is the same expression with the
-/// sign carried through. Returns false when delta_k has no finite reference
-/// bound, which makes the whole row unusable.
-bool addStructuralTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index k,
-                       BasisStatus status, Real alpha, Real f0, CutBuilder& builder) {
-    Real lp_lower = 0.0;
-    Real lp_upper = 0.0;
-    lp.getColBounds(k, lp_lower, lp_upper);
-
-    Real sign = 1.0;
-    Real bound = lp_lower;
-    Real global_bound = problem.col_lower[k];
-    if (status == BasisStatus::AtUpper) {
-        sign = -1.0;
-        bound = lp_upper;
-        global_bound = problem.col_upper[k];
-    } else if (status != BasisStatus::AtLower && status != BasisStatus::Fixed) {
-        return false;  // nonbasic free: delta is not sign-constrained
-    }
-    if (!std::isfinite(bound)) {
-        return false;
-    }
-
-    // The derivation needs delta_k >= 0 for every column in the row, whatever
-    // coefficient it ends up with, so the bound decides locality here.
-    if (boundIsLocal(bound, global_bound, sign)) {
-        builder.local = true;
-    }
-
-    // A negligible coefficient is not dropped here: dropping a term of a >= cut
-    // strengthens it, so it goes into the cut and finalizeCut drops it there
-    // against the column's range, relaxing the right-hand side to match.
-    const Real t = sign * alpha;
-    const bool integral =
-        isIntegerValued(problem.col_type[k]) && isIntegralValue(bound, kDataIntTol);
-    const Real coeff = gmiCoefficient(t, integral, f0);
-
-    builder.add(k, sign * coeff);
-    builder.rhs += sign * coeff * bound;
-    return true;
-}
-
-/// Add the term of the nonbasic logical of row `row` to the cut.
-///
-/// The logical is the row activity s = a^T x bounded by the row's own bounds,
-/// so the deviation is s - lower when it sits at the row's lower bound and
-/// upper - s when it sits at the row's upper bound. That covers <= rows (only
-/// an upper bound, so the logical can only sit there), >= rows, ranged rows
-/// (either bound) and equality rows (Fixed, handled as the lower bound, which
-/// equals the upper one). Substituting spreads the term over the row's
-/// structural columns, which is what makes the cut expressible in x.
-/// Returns false when the row cannot be substituted.
-bool addLogicalTerm(const LpProblem& problem, const DualSimplexSolver& lp, Index row,
-                    BasisStatus status, Real alpha, Real f0, const RowProvenance& provenance,
-                    RowScratch& scratch, CutBuilder& builder) {
-    // As for a structural column: delta >= 0 rests on the row holding, so a row
-    // the caller has not vouched for makes the cut local whatever coefficient
-    // comes out.
-    if (provenance.isLocal(row)) {
-        builder.local = true;
-    }
-
-    Real row_lower = 0.0;
-    Real row_upper = 0.0;
-    lp.getRowExternal(row, scratch.indices, scratch.values, row_lower, row_upper);
-
-    Real sign = 1.0;
-    Real bound = row_lower;
-    if (status == BasisStatus::AtUpper) {
-        sign = -1.0;
-        bound = row_upper;
-    } else if (status != BasisStatus::AtLower && status != BasisStatus::Fixed) {
-        return false;  // free row logical: delta is not sign-constrained
-    }
-    if (!std::isfinite(bound)) {
-        return false;
-    }
-
-    const Real t = sign * alpha;
-    const bool integral =
-        isIntegralValue(bound, kDataIntTol) && rowActivityIsIntegral(problem, scratch);
-    const Real coeff = gmiCoefficient(t, integral, f0);
-    if (coeff == 0.0) {
-        return true;
-    }
-
-    for (std::size_t p = 0; p < scratch.indices.size(); ++p) {
-        const Index j = scratch.indices[p];
-        if (j < 0 || j >= problem.num_cols) {
-            return false;
-        }
-        builder.add(j, sign * coeff * scratch.values[p]);
-    }
-    builder.rhs += sign * coeff * bound;
-    return true;
-}
-
-/// A basic integer variable sitting at a fractional value: one candidate row.
-struct Candidate {
-    Index basis_pos;
-    Index col;
-    Real frac;
-};
-
-/// Basic integer variables with a fractional value, most fractional first.
-/// Ordering by distance from 0.5 puts the rows with the strongest cuts (the
-/// largest f0-driven violation) at the front of the budget.
-std::vector<Candidate> collectCandidates(const DualSimplexSolver& lp, const LpProblem& problem,
-                                         std::span<const Real> primals, Real int_tol) {
-    std::vector<Candidate> candidates;
-    for (Index j = 0; j < problem.num_cols; ++j) {
-        if (!isIntegerValued(problem.col_type[j])) {
-            continue;
-        }
-        const Index bpos = lp.basisPosition(j);
-        if (bpos < 0) {
-            continue;
-        }
-        const Real frac = fractionality(primals[j]);
-        if (frac > int_tol && frac < 1.0 - int_tol) {
-            candidates.push_back({bpos, j, frac});
-        }
-    }
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        return std::abs(a.frac - 0.5) < std::abs(b.frac - 0.5);
-    });
-    return candidates;
-}
-
-/// Accumulate the GMI term of every nonbasic variable of one tableau row.
-/// Returns false when a term cannot be formed, which makes the row unusable.
-bool accumulateTerms(const LpProblem& problem, const DualSimplexSolver& lp,
-                     std::span<const BasisStatus> basis, std::span<const Real> tab_row, Real f0,
-                     const RowProvenance& provenance, RowScratch& scratch, CutBuilder& builder) {
-    const Index num_cols = problem.num_cols;
-    const auto total_vars = static_cast<Index>(tab_row.size());
-    for (Index k = 0; k < total_vars; ++k) {
-        if (basis[k] == BasisStatus::Basic) {
-            continue;
-        }
-        // Only an exactly-zero entry means the variable is absent from the row.
-        // A tiny one still leans on delta_k >= 0 and still carries a
-        // coefficient, which finalizeCut pays for if it drops it.
-        const Real alpha = tab_row[k];
-        if (alpha == 0.0) {
-            continue;
-        }
-        const bool ok = (k < num_cols)
-                            ? addStructuralTerm(problem, lp, k, basis[k], alpha, f0, builder)
-                            : addLogicalTerm(problem, lp, k - num_cols, basis[k], alpha, f0,
-                                             provenance, scratch, builder);
-        if (!ok) {
-            return false;
-        }
-    }
-    return std::isfinite(builder.rhs);
-}
-
-/// Turn the accumulated coefficients into a sparse cut. Entries at or below
-/// the coefficient tolerance are dropped and paid for in the right-hand side
-/// over the column box the cut is valid in: the model's bounds for a global
-/// cut, the LP's (node) bounds for a local one, which are never looser.
-/// Returns false when nothing of substance is left.
-bool finalizeCut(CutBuilder& builder, const ColumnBox& box, Real coeff_tol, Cut& cut, Real& norm_sq,
-                 Int& relaxed_terms) {
-    const auto num_cols = static_cast<Index>(builder.coeff.size());
-    const auto lower = builder.local ? std::span<const Real>(box.lp_lower) : box.global_lower;
-    const auto upper = builder.local ? std::span<const Real>(box.lp_upper) : box.global_upper;
-    // A column reached both directly and through a substituted logical can
-    // cancel to zero in exact arithmetic and leave float round-off behind.
-    // Where the column is bounded that residue is paid for like any other
-    // small term; where it is not, it is zeroed as the round-off it is, since
-    // keeping it would sink the cut at the max/min ratio screen.
-    Int dropped = 0;
-    builder.rhs = dropAndRelax(builder.coeff, builder.rhs, lower, upper, coeff_tol, &dropped,
-                               builder.magnitude, kCancellationTol);
-    relaxed_terms += dropped;
-
-    norm_sq = 0.0;
-    for (Index j = 0; j < num_cols; ++j) {
-        const Real value = builder.coeff[static_cast<std::size_t>(j)];
-        if (value != 0.0) {
-            cut.indices.push_back(j);
-            cut.values.push_back(value);
-            norm_sq += value * value;
-        }
-    }
-    return !cut.indices.empty() && norm_sq >= coeff_tol && std::isfinite(builder.rhs);
 }
 
 }  // namespace
@@ -419,17 +133,8 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
 
     // Rows the caller has not vouched for are treated as node-local: a cut
     // that substitutes their logical is only valid where they are.
-    // Both readings are clamped to the rows the LP holds: a problem carrying
-    // more rows than that would otherwise make every logical look global.
-    const Index declared_rows = (global_row_count_ < 0) ? problem.num_rows : global_row_count_;
-    const RowProvenance provenance{std::min(declared_rows, num_rows), local_rows_};
-
-    ColumnBox box{problem.col_lower, problem.col_upper, {}, {}};
-    box.lp_lower.resize(static_cast<std::size_t>(num_cols));
-    box.lp_upper.resize(static_cast<std::size_t>(num_cols));
-    for (Index j = 0; j < num_cols; ++j) {
-        lp.getColBounds(j, box.lp_lower[j], box.lp_upper[j]);
-    }
+    const RowProvenance provenance = makeRowProvenance(lp, problem, global_row_count_, local_rows_);
+    const ColumnBox box = makeColumnBox(lp, problem);
 
     auto basis = lp.getBasis();
     const auto candidates = collectCandidates(lp, problem, primals, kIntTol);
@@ -451,11 +156,16 @@ Int GomorySeparator::separate(DualSimplexSolver& lp, const LpProblem& problem,
         // The external (unscaled) tableau row of this basic variable.
         lp.getTableauRow(candidates[ci].basis_pos, tab_row);
 
-        builder.coeff.assign(static_cast<std::size_t>(num_cols), 0.0);
-        builder.magnitude.assign(static_cast<std::size_t>(num_cols), 0.0);
-        builder.rhs = 1.0;
-        builder.local = false;
-        if (!accumulateTerms(problem, lp, basis, tab_row, f0, provenance, scratch, builder)) {
+        // Only an exactly-zero entry means the variable is absent from the row.
+        // A tiny one still leans on delta_k >= 0 and still carries a
+        // coefficient, which finalizeCut pays for if it drops it.
+        const auto present = [&](Index k) { return tab_row[k] != 0.0; };
+        const auto coefficient = [&](Index k, Real sign, bool integral) {
+            return gmiCoefficient(sign * tab_row[k], integral, f0);
+        };
+        builder.reset(num_cols);
+        if (!accumulateTerms(problem, lp, basis, present, coefficient, provenance, scratch,
+                             builder)) {
             ++stats_.rows_skipped;
             continue;
         }

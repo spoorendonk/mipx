@@ -6,6 +6,7 @@
 #include "mipx/gomory.h"
 #include "mipx/lp_problem.h"
 
+#include <algorithm>
 #include <array>
 #include <span>
 #include <utility>
@@ -48,8 +49,11 @@ struct CutFamilyConfig {
     bool strong_cg = true;
     bool lifted_cover = true;
     bool mod_k = true;
-    bool intersection_cut = true;
-    bool multi_row = true;
+    // Off until benchmarked: before #219 these two families never built a
+    // cut, so turning them on changes the default search. Both are dominated
+    // by single-row cuts (see intersection_cut.cpp); #221 decides.
+    bool intersection_cut = false;
+    bool multi_row = false;
 };
 
 class SeparatorManager {
@@ -69,8 +73,12 @@ public:
     /// the LpProblem passed to separate()".
     void setGlobalRowCount(Index n) { global_row_count_ = n; }
     /// Declare rows inside that prefix as node-local; see
-    /// GomorySeparator::setLocalRows.
-    void setLocalRows(std::vector<Index> rows) { gomory_.setLocalRows(std::move(rows)); }
+    /// GomorySeparator::setLocalRows. Applies to every tableau family.
+    void setLocalRows(std::vector<Index> rows) {
+        std::ranges::sort(rows);
+        gomory_.setLocalRows(rows);
+        local_rows_ = std::move(rows);
+    }
 
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
                  CutPool& pool, CutSeparationStats& stats);
@@ -126,6 +134,7 @@ private:
     Int max_cuts_per_family_ = 50;
     Real min_violation_ = 1e-5;
     Index global_row_count_ = -1;
+    std::vector<Index> local_rows_;  // sorted
     const VariableBoundStore* vb_store_ = nullptr;
     const CliqueTable* clique_table_ = nullptr;
 };

@@ -2091,3 +2091,236 @@ TEST_CASE("Gomory: a dropped term is paid over the box the cut is valid in", "[c
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Intersection and multi-row cuts (issue #219)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Separate one tableau family through the manager. A negative global row
+/// count leaves the manager's default, which vouches for the model's rows.
+CutPool separateTableauFamily(CutFamily family, DualSimplexSolver& lp, const LpProblem& problem,
+                              Index global_rows = -1, std::vector<Index> local_rows = {}) {
+    CutFamilyConfig config = allCutFamilies(false);
+    if (family == CutFamily::IntersectionCut) {
+        config.intersection_cut = true;
+    } else {
+        REQUIRE(family == CutFamily::MultiRow);
+        config.multi_row = true;
+    }
+    SeparatorManager manager;
+    manager.setConfig(config);
+    if (global_rows >= 0) {
+        manager.setGlobalRowCount(global_rows);
+    }
+    manager.setLocalRows(std::move(local_rows));
+
+    const auto primals = lp.getPrimalValues();
+    CutPool pool;
+    CutSeparationStats stats;
+    const Int added = manager.separate(lp, problem, primals, pool, stats);
+    CHECK(added == pool.size());
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        CHECK(pool[ci].family == family);
+        CHECK(isNumericallySafeCut(pool[ci]));
+    }
+    return pool;
+}
+
+Real cutActivity(const Cut& cut, std::span<const Real> point) {
+    Real lhs = 0.0;
+    for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+        lhs += cut.values[k] * point[cut.indices[k]];
+    }
+    return lhs;
+}
+
+}  // namespace
+
+TEST_CASE("CutFamilyConfig defaults leave intersection and multi-row cuts off",
+          "[cuts][intersection]") {
+    // Before #219 neither family ever built a cut, so on by default they were
+    // inert; off keeps the default search what it was until a benchmark says
+    // otherwise.
+    const CutFamilyConfig config{};
+    CHECK_FALSE(config.intersection_cut);
+    CHECK_FALSE(config.multi_row);
+}
+
+TEST_CASE("Intersection: root cuts off global rows are global and keep every feasible point",
+          "[cuts][intersection]") {
+    // A basic structural's tableau row always carries a nonbasic logical, so a
+    // separator that cannot substitute logicals builds nothing at all.
+    for (const auto& problem : {buildFractionalMip(), buildMixedSenseMip()}) {
+        INFO(problem.name);
+        DualSimplexSolver lp;
+        lp.load(problem);
+        REQUIRE(lp.solve().status == Status::Optimal);
+
+        const CutPool pool = separateTableauFamily(CutFamily::IntersectionCut, lp, problem);
+        REQUIRE(pool.size() >= 1);
+        for (Index ci = 0; ci < pool.size(); ++ci) {
+            CHECK_FALSE(pool[ci].local);
+        }
+        checkCutsKeepAllFeasiblePoints(problem, pool, 6);
+    }
+}
+
+TEST_CASE("Intersection: a cut off a tightened bound is marked local", "[cuts][intersection]") {
+    // Branch y <= 2 on max 10x + 20y s.t. x + y <= 5.5: the node LP sits at
+    // x = 3.5, y = 2, and the split on x gives x + 2y <= 7, measured from y's
+    // node bound. That cut is valid in the subtree and cuts off x = 0, y = 5,
+    // the global optimum, outside it. Promoted to a global row it would remove
+    // that point from the whole search.
+    auto problem = buildFractionalMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    lp.setColBounds(1, 0.0, 2.0);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    const auto primals = lp.getPrimalValues();
+    REQUIRE(std::abs(primals[0] - 3.5) < 1e-9);
+    REQUIRE(std::abs(primals[1] - 2.0) < 1e-9);
+
+    const CutPool pool = separateTableauFamily(CutFamily::IntersectionCut, lp, problem);
+    REQUIRE(pool.size() >= 1);
+    bool cuts_off_global_optimum = false;
+    const std::vector<Real> global_opt = {0.0, 5.0};
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        CHECK(pool[ci].local);
+        cuts_off_global_optimum |= cutActivity(pool[ci], global_opt) < pool[ci].lower - 1e-6;
+    }
+    CHECK(cuts_off_global_optimum);
+
+    // Valid where it was derived: the subtree's feasible points all survive.
+    LpProblem node = problem;
+    node.col_upper[1] = 2.0;
+    checkCutsKeepAllFeasiblePoints(node, pool, 6);
+}
+
+TEST_CASE("Intersection: a cut off a node-local row is marked local", "[cuts][intersection]") {
+    // The logical of a row the caller has not vouched for is node-local, so a
+    // cut that substitutes it is too; vouched for, the same cut is global.
+    auto problem = buildMixedSenseMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    // A redundant but globally valid row: 4x + 5y + 3z <= 20.
+    const std::vector<Index> starts = {0};
+    const std::vector<Index> indices = {0, 1, 2};
+    const std::vector<Real> values = {4.0, 5.0, 3.0};
+    const std::vector<Real> lower = {-kInf};
+    const std::vector<Real> upper = {20.0};
+    lp.addRows(starts, indices, values, lower, upper);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    const CutPool vouched =
+        separateTableauFamily(CutFamily::IntersectionCut, lp, problem, lp.numRows());
+    REQUIRE(vouched.size() >= 1);
+    for (Index ci = 0; ci < vouched.size(); ++ci) {
+        CHECK_FALSE(vouched[ci].local);
+    }
+    checkCutsKeepAllFeasiblePoints(problem, vouched, 3);
+
+    // Every cut leans on some nonbasic logical, so naming every row local
+    // makes every cut so.
+    std::vector<Index> all_rows(static_cast<std::size_t>(lp.numRows()));
+    for (Index r = 0; r < lp.numRows(); ++r) {
+        all_rows[static_cast<std::size_t>(r)] = r;
+    }
+    const CutPool listed =
+        separateTableauFamily(CutFamily::IntersectionCut, lp, problem, lp.numRows(), all_rows);
+    REQUIRE(listed.size() == vouched.size());
+    for (Index ci = 0; ci < listed.size(); ++ci) {
+        CHECK(listed[ci].local);
+    }
+}
+
+namespace {
+
+// Two copies of buildFractionalMip: min -10x1 - 20y1 - 10x2 - 20y2 with
+// x1 + y1 <= 5.5 and x2 + y2 <= 5.5, all integer and nonnegative. The root
+// LP has two fractional basic integers, y1 = y2 = 5.5, which a multi-row cut
+// needs.
+LpProblem buildTwinFractionalMip() {
+    LpProblem lp;
+    lp.name = "twin_fractional_mip";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-10.0, -20.0, -10.0, -20.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, kInf, kInf};
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Integer, VarType::Integer};
+    lp.col_names = {"x1", "y1", "x2", "y2"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {5.5, 5.5};
+    lp.row_names = {"cap1", "cap2"};
+
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}, {1, 2, 1.0}, {1, 3, 1.0}};
+    lp.matrix = SparseMatrix(2, 4, std::move(trips));
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("MultiRow: root cuts off global rows are global and keep every feasible point",
+          "[cuts][intersection]") {
+    auto problem = buildTwinFractionalMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    const CutPool pool = separateTableauFamily(CutFamily::MultiRow, lp, problem);
+    REQUIRE(pool.size() >= 1);
+    for (Index ci = 0; ci < pool.size(); ++ci) {
+        CHECK_FALSE(pool[ci].local);
+    }
+    checkCutsKeepAllFeasiblePoints(problem, pool, 6);
+}
+
+TEST_CASE("MultiRow: a cut off a tightened bound or a node-local row is marked local",
+          "[cuts][intersection]") {
+    auto problem = buildTwinFractionalMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    SECTION("tightened bound") {
+        // Branch y1 <= 2: x1 = 3.5 and y2 = 5.5 are the fractional pair, and
+        // the cut leans on y1's node bound.
+        lp.setColBounds(1, 0.0, 2.0);
+        REQUIRE(lp.solve().status == Status::Optimal);
+
+        const CutPool pool = separateTableauFamily(CutFamily::MultiRow, lp, problem);
+        REQUIRE(pool.size() >= 1);
+        bool cuts_off_global_point = false;
+        // Feasible in the model, outside the y1 <= 2 subtree.
+        const std::vector<Real> outside = {0.0, 5.0, 0.0, 5.0};
+        for (Index ci = 0; ci < pool.size(); ++ci) {
+            CHECK(pool[ci].local);
+            cuts_off_global_point |= cutActivity(pool[ci], outside) < pool[ci].lower - 1e-6;
+        }
+        CHECK(cuts_off_global_point);
+
+        LpProblem node = problem;
+        node.col_upper[1] = 2.0;
+        checkCutsKeepAllFeasiblePoints(node, pool, 6);
+    }
+
+    SECTION("node-local row") {
+        const CutPool pool =
+            separateTableauFamily(CutFamily::MultiRow, lp, problem, lp.numRows(), {0, 1});
+        REQUIRE(pool.size() >= 1);
+        for (Index ci = 0; ci < pool.size(); ++ci) {
+            CHECK(pool[ci].local);
+        }
+    }
+}

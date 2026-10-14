@@ -1,17 +1,68 @@
-#include "mipx/branching.h"
 #include "mipx/lp_problem.h"
 #include "mipx/separators.h"
+#include "tableau_cut.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace mipx {
 
 namespace {
 
+using tableau_detail::accumulateTerms;
+using tableau_detail::Candidate;
+using tableau_detail::collectCandidates;
+using tableau_detail::ColumnBox;
+using tableau_detail::CutBuilder;
+using tableau_detail::finalizeCut;
+using tableau_detail::makeColumnBox;
+using tableau_detail::makeRowProvenance;
+using tableau_detail::RowProvenance;
+using tableau_detail::RowScratch;
+
 constexpr Real kIntTol = 1e-6;
 constexpr Real kCoeffTol = 1e-10;
+constexpr Real kRejectRow = std::numeric_limits<Real>::quiet_NaN();
+
+/// Coefficient of a ray, the reciprocal of its step to the boundary of the
+/// lattice-free set, or a rejection when that step is within kCoeffTol of
+/// zero: the coefficient would blow up. Working with the reciprocal keeps a
+/// ray that barely moves the basic variable at a tiny coefficient, which
+/// finalizeCut pays for, rather than an overflowing step.
+Real rayCoefficient(Real alpha) {
+    if (!(alpha < 1.0 / kCoeffTol)) {
+        return kRejectRow;
+    }
+    return alpha;
+}
+
+/// Everything a tableau family needs from the LP to turn a row into a cut.
+struct TableauContext {
+    std::vector<BasisStatus> basis;
+    RowProvenance provenance;
+    ColumnBox box;
+    RowScratch scratch;
+    CutBuilder builder;
+};
+
+/// Finish the accumulated cut and hand it to the pool. Returns true when the
+/// pool took it.
+template <class Offer>
+bool emitCut(CutFamily family, TableauContext& ctx, Offer&& offer) {
+    Cut cut;
+    Real norm_sq = 0.0;
+    Int relaxed_terms = 0;
+    if (!finalizeCut(ctx.builder, ctx.box, kCoeffTol, cut, norm_sq, relaxed_terms)) {
+        return false;
+    }
+    cut.family = family;
+    cut.lower = ctx.builder.rhs;
+    cut.upper = kInf;
+    cut.local = ctx.builder.local;
+    return offer(std::move(cut));
+}
 
 }  // namespace
 
@@ -27,49 +78,42 @@ constexpr Real kCoeffTol = 1e-10;
 ///
 /// Cut: sum_j alpha_j * delta_j >= 1
 /// where delta_j is the deviation of nonbasic j from its bound,
-/// and alpha_j = 1 / max(t_j / f0, -t_j / (1-f0)) for the split on x_i.
+/// and alpha_j = max(t_j / f0, -t_j / (1-f0)) for the split on x_i.
+///
+/// This is the GMI formula with every deviation treated as continuous, so it
+/// is never stronger than the Gomory cut from the same row.
+///
+/// The deviations are those of GomorySeparator::separate: the nonbasic row
+/// logicals are substituted back into structural columns, every deviation is
+/// measured from the bound the LP holds, and a cut leaning on a node-tightened
+/// bound or a node-local row is marked local (issue #219).
 Int SeparatorManager::separateIntersectionCut(DualSimplexSolver& lp, const LpProblem& problem,
                                               std::span<const Real> primals, CutPool& pool,
                                               CutFamilyStats& stats) {
-    Int accepted = 0;
     const Index num_cols = problem.num_cols;
-    const Index num_rows = lp.numRows();
-    const Index total_vars = num_cols + num_rows;
-
-    auto basis = lp.getBasis();
-
-    // Find fractional basic integer variables.
-    struct Candidate {
-        Index basis_pos;
-        Index col;
-        Real frac;
-    };
-    std::vector<Candidate> candidates;
-
-    for (Index j = 0; j < num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous)
-            continue;
-        Index bp = lp.basisPosition(j);
-        if (bp < 0)
-            continue;
-        Real val = primals[j];
-        Real frac = fractionality(val);
-        if (frac > kIntTol && frac < 1.0 - kIntTol) {
-            candidates.push_back({bp, j, frac});
-        }
+    // The tableau is indexed by the LP's own columns.
+    if (lp.numCols() != num_cols || static_cast<Index>(primals.size()) < num_cols) {
+        return 0;
     }
+    const Index total_vars = num_cols + lp.numRows();
 
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        return std::abs(a.frac - 0.5) < std::abs(b.frac - 0.5);
-    });
-
+    TableauContext ctx{lp.getBasis(),
+                       makeRowProvenance(lp, problem, global_row_count_, local_rows_),
+                       makeColumnBox(lp, problem),
+                       {},
+                       {}};
+    const auto candidates = collectCandidates(lp, problem, primals, kIntTol);
     const Index max_try = std::min(static_cast<Index>(candidates.size()),
                                    static_cast<Index>(max_cuts_per_family_ * 2));
 
     std::vector<Real> tab_row(static_cast<std::size_t>(total_vars));
+    const auto offer = [&](Cut cut) {
+        return addViolatedCut(std::move(cut), primals, pool, stats);
+    };
 
+    Int accepted = 0;
     for (Index ci = 0; ci < max_try && accepted < max_cuts_per_family_; ++ci) {
-        const auto& cand = candidates[ci];
+        const Candidate& cand = candidates[ci];
         ++stats.attempted;
 
         lp.getTableauRow(cand.basis_pos, tab_row);
@@ -79,116 +123,23 @@ Int SeparatorManager::separateIntersectionCut(DualSimplexSolver& lp, const LpPro
         if (f0 < kIntTol || f0 > 1.0 - kIntTol)
             continue;
 
-        // Only use structural nonbasics at finite bounds.
-        bool supported = true;
-        for (Index k = 0; k < total_vars; ++k) {
-            if (basis[k] == BasisStatus::Basic)
-                continue;
-            if (std::abs(tab_row[k]) < kCoeffTol)
-                continue;
-            if (k >= num_cols) {
-                supported = false;
-                break;
-            }
-            const BasisStatus st = basis[k];
-            if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
-                if (!std::isfinite(problem.col_lower[k])) {
-                    supported = false;
-                    break;
-                }
-            } else if (st == BasisStatus::AtUpper) {
-                if (!std::isfinite(problem.col_upper[k])) {
-                    supported = false;
-                    break;
-                }
-            } else {
-                supported = false;
-                break;
-            }
-        }
-        if (!supported)
-            continue;
-
-        // Compute intersection cut coefficients.
         // For the split disjunction x_i <= floor(b) OR x_i >= ceil(b):
         // Ray from basis along nonbasic j: point + lambda * ray_j
         // Intersection with x_i = floor(b): lambda_lo = f0 / t_j  (if t_j > 0)
         // Intersection with x_i = ceil(b):  lambda_hi = -(1-f0) / t_j  (if t_j < 0)
-        // Take the closer intersection: alpha_j = 1 / min_positive_lambda
-        std::vector<Real> cut_coeff(static_cast<std::size_t>(num_cols), 0.0);
-        Real cut_rhs = 1.0;
-        bool valid = true;
-
-        for (Index k = 0; k < num_cols; ++k) {
-            if (basis[k] == BasisStatus::Basic)
-                continue;
-            const Real t = tab_row[k];
-            if (std::abs(t) < kCoeffTol)
-                continue;
-
-            const BasisStatus st = basis[k];
-
+        // Take the closer intersection: alpha_j = 1 / lambda
+        const auto present = [&](Index k) { return tab_row[k] != 0.0; };
+        const auto coefficient = [&](Index k, Real sign, bool /*integral*/) {
             // Deviation direction: at lower => positive, at upper => negative.
-            Real t_dev = t;
-            if (st == BasisStatus::AtUpper)
-                t_dev = -t;
-
-            // Compute the step along the ray to reach the split boundary.
-            Real step = 0.0;
-            if (t_dev > kCoeffTol) {
-                // Ray goes toward floor(b): step to floor = f0 / t_dev.
-                step = f0 / t_dev;
-            } else if (t_dev < -kCoeffTol) {
-                // Ray goes toward ceil(b): step to ceil = (1 - f0) / (-t_dev).
-                step = (1.0 - f0) / (-t_dev);
-            } else {
-                continue;
-            }
-
-            if (step < kCoeffTol || !std::isfinite(step)) {
-                valid = false;
-                break;
-            }
-
-            const Real alpha = 1.0 / step;
-
-            // Convert from deviation space to original variable space.
-            if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
-                cut_coeff[k] += alpha;
-                const Real lb = problem.col_lower[k];
-                if (lb > -kInf)
-                    cut_rhs += alpha * lb;
-            } else if (st == BasisStatus::AtUpper) {
-                cut_coeff[k] -= alpha;
-                const Real ub = problem.col_upper[k];
-                if (ub < kInf)
-                    cut_rhs -= alpha * ub;
-            }
-        }
-
-        if (!valid || !std::isfinite(cut_rhs))
+            const Real t_dev = sign * tab_row[k];
+            return rayCoefficient((t_dev > 0.0) ? t_dev / f0 : -t_dev / (1.0 - f0));
+        };
+        ctx.builder.reset(num_cols);
+        if (!accumulateTerms(problem, lp, ctx.basis, present, coefficient, ctx.provenance,
+                             ctx.scratch, ctx.builder)) {
             continue;
-
-        // Build sparse cut.
-        Cut cut;
-        cut.family = CutFamily::IntersectionCut;
-        Real norm_sq = 0.0;
-
-        for (Index j = 0; j < num_cols; ++j) {
-            if (std::abs(cut_coeff[j]) > kCoeffTol) {
-                cut.indices.push_back(j);
-                cut.values.push_back(cut_coeff[j]);
-                norm_sq += cut_coeff[j] * cut_coeff[j];
-            }
         }
-
-        if (cut.indices.empty() || norm_sq < kCoeffTol)
-            continue;
-
-        cut.lower = cut_rhs;
-        cut.upper = kInf;
-
-        if (addViolatedCut(std::move(cut), primals, pool, stats)) {
+        if (emitCut(CutFamily::IntersectionCut, ctx, offer)) {
             ++accepted;
         }
     }
@@ -196,199 +147,107 @@ Int SeparatorManager::separateIntersectionCut(DualSimplexSolver& lp, const LpPro
     return accepted;
 }
 
-/// Multi-row cuts: lattice-based relaxation using pairs of tableau rows.
+/// Multi-row cuts from pairs of tableau rows.
 ///
-/// For two basic integer variables x_i, x_k with fractional values,
-/// we use their combined tableau rows to derive a stronger cut than
-/// single-row cuts. The approach uses the 2D lattice-free set
-/// (specifically, a triangle or cross-polytope) to generate the cut.
+/// For two basic integer variables x_i, x_k with fractional parts f1, f2,
+/// the coefficient of nonbasic j is the reciprocal of the step along its ray
+/// to the boundary of the set
 ///
-/// For simplicity, we use the "triangle closure" approach:
-/// Given two fractional basic vars with fractionalities f1, f2,
-/// the combined cut coefficients for nonbasic j are:
-///   alpha_j = max over the two individual GMI coefficients,
-///   strengthened by the lattice structure.
+///   { y : 0 <= y1 <= 1, 0 <= y2 <= 1,
+///         (f1 - y1)/(1 - f1) + (f2 - y2)/(1 - f2) <= 1 }
+///
+/// in the space of the two basic variables' fractional parts: the unit square
+/// around (f1, f2) cut by one half-space. Its interior holds no integer point
+/// and contains (f1, f2), so the cut is valid. The set lies inside each row's
+/// split strip, so every coefficient is at least that row's split
+/// coefficient: the cut is dominated by the intersection cut of either row
+/// alone. A stronger lattice-free set (a true triangle) would be a separate
+/// change; this keeps the existing rule.
+///
+/// Deviations, substitution and locality are those of the intersection cut.
 Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp, const LpProblem& problem,
                                        std::span<const Real> primals, CutPool& pool,
                                        CutFamilyStats& stats) {
-    Int accepted = 0;
     const Index num_cols = problem.num_cols;
-    const Index num_rows = lp.numRows();
-    const Index total_vars = num_cols + num_rows;
-
-    auto basis = lp.getBasis();
-
-    // Find fractional basic integer variables.
-    struct Candidate {
-        Index basis_pos;
-        Index col;
-        Real value;
-        Real frac;
-    };
-    std::vector<Candidate> candidates;
-
-    for (Index j = 0; j < num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Continuous)
-            continue;
-        Index bp = lp.basisPosition(j);
-        if (bp < 0)
-            continue;
-        Real val = primals[j];
-        Real frac = fractionality(val);
-        if (frac > kIntTol && frac < 1.0 - kIntTol) {
-            candidates.push_back({bp, j, val, frac});
-        }
+    if (lp.numCols() != num_cols || static_cast<Index>(primals.size()) < num_cols) {
+        return 0;
     }
+    const Index total_vars = num_cols + lp.numRows();
 
+    const auto candidates = collectCandidates(lp, problem, primals, kIntTol);
     if (candidates.size() < 2)
         return 0;
 
-    // Sort by fractionality closest to 0.5.
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        return std::abs(a.frac - 0.5) < std::abs(b.frac - 0.5);
-    });
+    TableauContext ctx{lp.getBasis(),
+                       makeRowProvenance(lp, problem, global_row_count_, local_rows_),
+                       makeColumnBox(lp, problem),
+                       {},
+                       {}};
 
     // Limit pairs to avoid combinatorial explosion.
     const Index max_cands = std::min(static_cast<Index>(candidates.size()), Index{8});
     std::vector<Real> tab_row1(static_cast<std::size_t>(total_vars));
     std::vector<Real> tab_row2(static_cast<std::size_t>(total_vars));
+    const auto offer = [&](Cut cut) {
+        return addViolatedCut(std::move(cut), primals, pool, stats);
+    };
 
+    Int accepted = 0;
     for (Index c1 = 0; c1 < max_cands && accepted < max_cuts_per_family_; ++c1) {
         for (Index c2 = c1 + 1; c2 < max_cands && accepted < max_cuts_per_family_; ++c2) {
             ++stats.attempted;
 
-            const auto& cand1 = candidates[c1];
-            const auto& cand2 = candidates[c2];
+            const Candidate& cand1 = candidates[c1];
+            const Candidate& cand2 = candidates[c2];
 
             lp.getTableauRow(cand1.basis_pos, tab_row1);
             lp.getTableauRow(cand2.basis_pos, tab_row2);
 
-            const Real f1 = cand1.value - std::floor(cand1.value);
-            const Real f2 = cand2.value - std::floor(cand2.value);
+            const Real v1 = primals[cand1.col];
+            const Real v2 = primals[cand2.col];
+            const Real f1 = v1 - std::floor(v1);
+            const Real f2 = v2 - std::floor(v2);
             if (f1 < kIntTol || f1 > 1.0 - kIntTol)
                 continue;
             if (f2 < kIntTol || f2 > 1.0 - kIntTol)
                 continue;
 
-            // Check support: only structural nonbasics at finite bounds.
-            bool supported = true;
-            for (Index k = 0; k < total_vars; ++k) {
-                if (basis[k] == BasisStatus::Basic)
-                    continue;
-                if (std::abs(tab_row1[k]) < kCoeffTol && std::abs(tab_row2[k]) < kCoeffTol)
-                    continue;
-                if (k >= num_cols) {
-                    supported = false;
-                    break;
-                }
-                const BasisStatus st = basis[k];
-                if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
-                    if (!std::isfinite(problem.col_lower[k])) {
-                        supported = false;
-                        break;
-                    }
-                } else if (st == BasisStatus::AtUpper) {
-                    if (!std::isfinite(problem.col_upper[k])) {
-                        supported = false;
-                        break;
-                    }
-                } else {
-                    supported = false;
-                    break;
-                }
-            }
-            if (!supported)
-                continue;
-
-            // Build multi-row cut using the maximal lattice-free triangle.
-            // For a 2D relaxation with fractional point (f1, f2),
-            // the triangle vertices are: (0,0), (1/f1, 0), (0, 1/f2).
             // For nonbasic j with tableau entries (t1_j, t2_j) in deviation form,
-            // the cut coefficient is:
-            //   alpha_j = 1 / max(t1_j/f1, t2_j/f2, 1 - t1_j/(1-f1) - t2_j/(1-f2))
-            // (choosing the tightest among the three facets).
-            std::vector<Real> cut_coeff(static_cast<std::size_t>(num_cols), 0.0);
-            Real cut_rhs = 1.0;
-            bool valid = true;
+            // the cut coefficient over the set above is:
+            //   alpha_j = max(t1_j/f1, t2_j/f2, t1_j/(1-f1) + t2_j/(1-f2),
+            //                 -t1_j/(1-f1), -t2_j/(1-f2))
+            // (the first facet the ray reaches).
+            const auto present = [&](Index k) { return tab_row1[k] != 0.0 || tab_row2[k] != 0.0; };
+            const auto coefficient = [&](Index k, Real sign, bool /*integral*/) {
+                const Real t1 = sign * tab_row1[k];
+                const Real t2 = sign * tab_row2[k];
 
-            for (Index k = 0; k < num_cols; ++k) {
-                if (basis[k] == BasisStatus::Basic)
-                    continue;
-                Real t1 = tab_row1[k];
-                Real t2 = tab_row2[k];
-                if (std::abs(t1) < kCoeffTol && std::abs(t2) < kCoeffTol)
-                    continue;
-
-                const BasisStatus st = basis[k];
-                if (st == BasisStatus::AtUpper) {
-                    t1 = -t1;
-                    t2 = -t2;
+                // The closest facet the ray reaches: the largest reciprocal step.
+                Real alpha = 0.0;
+                if (t1 > 0.0) {
+                    alpha = std::max(alpha, t1 / f1);
                 }
-
-                // Compute step to each facet of the triangle.
-                Real min_step = kInf;
-
-                if (t1 > kCoeffTol) {
-                    min_step = std::min(min_step, f1 / t1);
+                if (t2 > 0.0) {
+                    alpha = std::max(alpha, t2 / f2);
                 }
-                if (t2 > kCoeffTol) {
-                    min_step = std::min(min_step, f2 / t2);
-                }
-
                 const Real denom3 = t1 / (1.0 - f1) + t2 / (1.0 - f2);
-                if (denom3 > kCoeffTol) {
-                    min_step = std::min(min_step, 1.0 / denom3);
+                if (denom3 > 0.0) {
+                    alpha = std::max(alpha, denom3);
                 }
-
-                if (t1 < -kCoeffTol) {
-                    min_step = std::min(min_step, (1.0 - f1) / (-t1));
+                if (t1 < 0.0) {
+                    alpha = std::max(alpha, -t1 / (1.0 - f1));
                 }
-                if (t2 < -kCoeffTol) {
-                    min_step = std::min(min_step, (1.0 - f2) / (-t2));
+                if (t2 < 0.0) {
+                    alpha = std::max(alpha, -t2 / (1.0 - f2));
                 }
-
-                if (min_step <= kCoeffTol || min_step >= kInf || !std::isfinite(min_step)) {
-                    valid = false;
-                    break;
-                }
-
-                const Real alpha = 1.0 / min_step;
-
-                if (st == BasisStatus::AtLower || st == BasisStatus::Fixed) {
-                    cut_coeff[k] += alpha;
-                    const Real lb = problem.col_lower[k];
-                    if (lb > -kInf)
-                        cut_rhs += alpha * lb;
-                } else if (st == BasisStatus::AtUpper) {
-                    cut_coeff[k] -= alpha;
-                    const Real ub = problem.col_upper[k];
-                    if (ub < kInf)
-                        cut_rhs -= alpha * ub;
-                }
-            }
-
-            if (!valid || !std::isfinite(cut_rhs))
+                return rayCoefficient(alpha);
+            };
+            ctx.builder.reset(num_cols);
+            if (!accumulateTerms(problem, lp, ctx.basis, present, coefficient, ctx.provenance,
+                                 ctx.scratch, ctx.builder)) {
                 continue;
-
-            // Build sparse cut.
-            Cut cut;
-            cut.family = CutFamily::MultiRow;
-            Real norm_sq = 0.0;
-            for (Index j = 0; j < num_cols; ++j) {
-                if (std::abs(cut_coeff[j]) > kCoeffTol) {
-                    cut.indices.push_back(j);
-                    cut.values.push_back(cut_coeff[j]);
-                    norm_sq += cut_coeff[j] * cut_coeff[j];
-                }
             }
-
-            if (cut.indices.empty() || norm_sq < kCoeffTol)
-                continue;
-
-            cut.lower = cut_rhs;
-            cut.upper = kInf;
-
-            if (addViolatedCut(std::move(cut), primals, pool, stats)) {
+            if (emitCut(CutFamily::MultiRow, ctx, offer)) {
                 ++accepted;
             }
         }
