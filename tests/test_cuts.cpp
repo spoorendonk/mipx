@@ -2527,6 +2527,18 @@ TEST_CASE("strengthenCut: a general integer is tightened against its upper bound
     CHECK_THAT(cut.upper, WithinAbs(13.0, 1e-6));
 }
 
+TEST_CASE("strengthenCut: an integer column's fractional bound is rounded in first",
+          "[cuts][strengthen]") {
+    // x integer in [0, 2.5], cut x <= 2. On the raw bound the argument would
+    // give d = 0.5 and 0.5 x <= 0.75, which removes x = 2; on the rounded
+    // bound [0, 2] the cut is already satisfied and is left alone.
+    const auto problem = columnsOnly({0}, {2.5}, {VarType::Integer});
+    Cut cut = upperCut({0}, {1.0}, 2.0);
+    CHECK(strengthenCut(cut, problem) == 0);
+    CHECK(cut.values == std::vector<Real>{1.0});
+    CHECK(cut.upper == 2.0);
+}
+
 TEST_CASE("strengthenCut: leaves alone what it cannot tighten", "[cuts][strengthen]") {
     SECTION("an already tight cover") {
         const auto problem =
@@ -2575,9 +2587,10 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
     // Each random one-sided cut over a few bounded columns is checked on a grid
     // with step 1/4 over the box. At every point integral on the integer
     // columns that satisfies the cut, the strengthened cut must hold too
-    // (validity); at every grid point that satisfies the strengthened cut, the
-    // original must hold (it is never weaker inside the bounds). The near-
-    // integer coefficients are the #195 shape.
+    // (validity); at every grid point inside the integer columns' rounded-in
+    // bounds that satisfies the strengthened cut, the original must hold (it
+    // is never weaker there). Some integer columns carry a fractional bound,
+    // and the near-integer coefficients are the #195 shape.
     std::mt19937 rng(201);
     const std::vector<Real> coef_pool = {1.0,  2.0,        3.0,           5.0,       7.0,
                                          -1.0, -2.0,       -4.0,          -6.0,      0.5,
@@ -2605,6 +2618,13 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
                 types[j] = VarType::Integer;
                 lower[j] = pick_lb(rng);
                 upper[j] = lower[j] + pick_width(rng);
+                // Some integer columns get a fractional bound, which the
+                // argument must round in before using.
+                if (trial % 5 == 0) {
+                    upper[j] += 0.5;
+                } else if (trial % 7 == 0) {
+                    lower[j] -= 0.25;
+                }
             } else {
                 types[j] = VarType::Continuous;
                 lower[j] = -0.5 * pick_width(rng);
@@ -2640,10 +2660,15 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
         std::vector<int> step(n, 0);
         while (true) {
             bool integral = true;
+            // Inside the integer columns' rounded-in bounds, where the
+            // strengthened cut is never weaker; beyond them it may be.
+            bool in_hull_box = true;
             for (Index j = 0; j < n; ++j) {
                 x[j] = lower[j] + 0.25 * step[j];
-                if (types[j] != VarType::Continuous && std::abs(x[j] - std::round(x[j])) > 1e-12) {
-                    integral = false;
+                if (types[j] != VarType::Continuous) {
+                    integral = integral && std::abs(x[j] - std::round(x[j])) <= 1e-12;
+                    in_hull_box =
+                        in_hull_box && x[j] >= std::ceil(lower[j]) && x[j] <= std::floor(upper[j]);
                 }
             }
             INFO("trial " << trial << " lhs " << cutLhs(cut, x) << " strong lhs "
@@ -2651,7 +2676,7 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
             if (integral && cutHolds(cut, x, 0.0)) {
                 CHECK(cutHolds(strong, x, 1e-9));
             }
-            if (cutHolds(strong, x, 0.0)) {
+            if (in_hull_box && cutHolds(strong, x, 0.0)) {
                 CHECK(cutHolds(cut, x, 1e-9));
             }
 

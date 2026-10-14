@@ -19,11 +19,11 @@ class LpProblem;
 /// the cut, so the LP relaxation only gets tighter.
 ///
 /// The bounds must hold wherever the cut is used: pass the global bounds for
-/// a global cut. Two-sided cuts, cuts touching an unbounded column, cuts with
-/// an index outside @p problem and cuts the bounds already satisfy are left
-/// alone. d is shrunk by a margin that covers the rounding in the activity
-/// sums, which can only weaken the result. Returns the number of coefficients
-/// changed; the cut keeps its support.
+/// a global cut. An integer column's bounds are first rounded in to integers. Two-sided cuts, cuts
+/// touching an unbounded column, cuts with an index outside @p problem and cuts the bounds already
+/// satisfy are left alone. d is shrunk by a margin that covers the rounding in the activity sums,
+/// which can only weaken the result. Returns the number of coefficients changed; the cut keeps its
+/// support.
 Int strengthenCut(Cut& cut, const LpProblem& problem);
 
 }  // namespace mipx

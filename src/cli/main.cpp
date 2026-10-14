@@ -581,7 +581,8 @@ int main(int argc, char* argv[]) {
             // MipResult::objective defaults to 0, so a run that ends without an
             // incumbent (a limit hit first, or infeasibility) would print a
             // plausible-looking 0 (#224). Report it only with a solution.
-            if (!result.solution.empty()) {
+            // An empty model solves to Optimal with no columns to report.
+            if (!result.solution.empty() || result.status == mipx::Status::Optimal) {
                 log.log("Objective: %.10e\n", result.objective);
             } else {
                 log.log("Objective: none\n");

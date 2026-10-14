@@ -15,6 +15,22 @@ constexpr Real kMarginRel = 1e-9;
 constexpr Real kMarginAbs = 1e-9;
 // A reduction smaller than this fraction of the coefficient is noise.
 constexpr Real kMinReductionRel = 1e-6;
+// Slack when rounding an integer column's bounds to the integers inside them.
+constexpr Real kIntBoundTol = 1e-9;
+
+// The bounds the argument below runs on. It splits an integer column into
+// x_j = u_j or x_j <= u_j - 1, which needs integral bounds; an integer column
+// can carry a fractional one (unpresolved input, reduced-cost fixing), and
+// its integer points lie within the rounded-in bounds anyway.
+Real lowerOf(const LpProblem& problem, Index j) {
+    const Real lb = problem.col_lower[j];
+    return problem.col_type[j] == VarType::Continuous ? lb : std::ceil(lb - kIntBoundTol);
+}
+
+Real upperOf(const LpProblem& problem, Index j) {
+    const Real ub = problem.col_upper[j];
+    return problem.col_type[j] == VarType::Continuous ? ub : std::floor(ub + kIntBoundTol);
+}
 
 }  // namespace
 
@@ -41,7 +57,7 @@ Int strengthenCut(Cut& cut, const LpProblem& problem) {
             return 0;
         }
         const Real a = sign * cut.values[k];
-        const Real contrib = (a > 0.0) ? a * problem.col_upper[j] : a * problem.col_lower[j];
+        const Real contrib = (a > 0.0) ? a * upperOf(problem, j) : a * lowerOf(problem, j);
         if (!std::isfinite(contrib)) {
             return 0;
         }
@@ -64,8 +80,8 @@ Int strengthenCut(Cut& cut, const LpProblem& problem) {
         if (problem.col_type[j] == VarType::Continuous) {
             continue;
         }
-        const Real lb = problem.col_lower[j];
-        const Real ub = problem.col_upper[j];
+        const Real lb = lowerOf(problem, j);
+        const Real ub = upperOf(problem, j);
         if (ub - lb < 0.5) {
             continue;  // fixed: no x_j strictly inside the bounds to relax
         }

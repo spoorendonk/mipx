@@ -211,6 +211,10 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& pro
 
     // GomorySeparator pools its own cuts, so to strengthen them it separates
     // into a scratch pool whose cuts are strengthened and re-offered here.
+    // The scratch pool starts empty, so Gomory fills its budget there with
+    // cuts the real pool may still reject as parallel to earlier rounds'; on,
+    // fewer Gomory cuts can land than off, and GomoryStats describe the
+    // scratch pool.
     CutPool scratch;
     gomory_.separate(lp, problem, primals, scratch);
     stats.attempted += gs.candidate_rows;

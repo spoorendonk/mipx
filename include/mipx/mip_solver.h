@@ -410,6 +410,8 @@ public:
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
     /// Tighten separated cuts' coefficients against the global bounds before
     /// they are scored and pooled (SeparatorManager::setStrengthenCuts).
+    /// "Global" includes root reduced-cost fixings, which hold relative to the
+    /// incumbent, as they do for everything else that reads problem_.
     void setCutStrengthening(bool enabled) { cut_strengthening_ = enabled; }
     [[nodiscard]] bool getCutStrengthening() const { return cut_strengthening_; }
     void setTreePresolveControls(Int max_depth, Int min_frac, Int depth_frequency) {
