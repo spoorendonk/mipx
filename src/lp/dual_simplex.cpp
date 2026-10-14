@@ -72,6 +72,7 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::load(const LpProblem& problem) {
+    dual_ray_.clear();
     num_cols_ = problem.num_cols;
     num_rows_ = problem.num_rows;
     sense_ = problem.sense;
@@ -764,6 +765,7 @@ void DualSimplexSolver::refactorize() {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
+    dual_ray_.clear();
     if (!loaded_) {
         return {Status::Error, 0.0, 0};
     }
@@ -2571,6 +2573,7 @@ LpResult DualSimplexSolver::solve() {
             }
             if (!any_primal_violation) {
                 status_ = Status::Infeasible;
+                storeDualRay(btran_work.dense(), sigma);
                 break;
             }
             bool dual_feasible = true;
@@ -2587,6 +2590,7 @@ LpResult DualSimplexSolver::solve() {
             }
             if (dual_feasible) {
                 status_ = Status::Infeasible;
+                storeDualRay(btran_work.dense(), sigma);
                 break;
             }
             if (empty_candidate_retry_streak >= 4) {
@@ -3147,6 +3151,30 @@ std::vector<Real> DualSimplexSolver::getDualValues() const {
     return result;
 }
 
+// The leaving row r gives the identity rho^T [A | -I] z = 0 over all
+// z = (x, s) with s = Ax, i.e. z_B[r] = -sum_{j nonbasic} alpha_j z_j. With
+// no eligible entering variable, no nonbasic move can bring z_B[r] towards
+// its violated bound, so (for sigma = +1, below the lower bound)
+//   min over the bound box of rho^T A x - rho^T s  =  lb_r - max(-sum alpha_j z_j)  >  0,
+// which is the LpSolver::getDualRay() contract for y = rho (and for y = -rho
+// when sigma = -1). Scaling: the scaled matrix is R A C and the scaled
+// slack R s, so the external multiplier is R rho -- the same map as the duals.
+// The objective plays no part, so neither does the sense flip.
+void DualSimplexSolver::storeDualRay(std::span<const Real> rho, Real sigma) {
+    dual_ray_.assign(static_cast<std::size_t>(num_rows_), 0.0);
+    for (Index i = 0; i < num_rows_; ++i) {
+        const auto ui = static_cast<std::size_t>(i);
+        dual_ray_[ui] = sigma * rho[ui] * (scaled_ ? row_scale_[ui] : 1.0);
+    }
+}
+
+std::vector<Real> DualSimplexSolver::getDualRay() const {
+    if (status_ != Status::Infeasible || static_cast<Index>(dual_ray_.size()) != num_rows_) {
+        return {};
+    }
+    return dual_ray_;
+}
+
 std::vector<Real> DualSimplexSolver::getReducedCosts() const {
     // Unscale: rc_external[j] = rc_internal[j] / col_scale[j].
     std::vector<Real> result(num_cols_);
@@ -3336,6 +3364,7 @@ void DualSimplexSolver::setObjective(std::span<const Real> obj) {
 void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const Index> indices,
                                 std::span<const Real> values, std::span<const Real> lower,
                                 std::span<const Real> upper) {
+    dual_ray_.clear();
     if (!loaded_) {
         return;
     }
@@ -3436,6 +3465,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
 }
 
 void DualSimplexSolver::removeRows(std::span<const Index> rows) {
+    dual_ray_.clear();
     if (!loaded_ || rows.empty()) {
         return;
     }

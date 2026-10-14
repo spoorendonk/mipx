@@ -42,6 +42,27 @@ public:
     virtual std::vector<Real> getDualValues() const = 0;
     virtual std::vector<Real> getReducedCosts() const = 0;
 
+    /// Farkas certificate of primal infeasibility (a dual ray), one entry per
+    /// row, in the space of the loaded problem (unscaled, original row order).
+    ///
+    /// Returned when the last solve() ended Status::Infeasible; empty after any
+    /// other status, and from backends that do not produce one (the default).
+    ///
+    /// Contract, for the ray y and d = A^T y:
+    ///   - y_i > 0 only where row_upper_i is finite, y_i < 0 only where
+    ///     row_lower_i is finite (so y_i >= 0 on a <= row, y_i <= 0 on a >= row,
+    ///     either sign on an equality or ranged row);
+    ///   - every feasible x satisfies y^T A x <= beta, with
+    ///       beta = sum_i (y_i > 0 ? y_i * row_upper_i : y_i * row_lower_i);
+    ///   - over the column bounds, d^T x is at least
+    ///       alpha = sum_j (d_j > 0 ? d_j * col_lower_j : d_j * col_upper_j),
+    ///     and alpha > beta, so no x within its bounds meets the rows.
+    /// For x >= 0 this is the textbook form: the sign conditions plus
+    /// beta < 0. The conditions hold up to the solver's tolerances; the ray's
+    /// length is arbitrary, and it does not depend on the objective or its
+    /// sense.
+    virtual std::vector<Real> getDualRay() const { return {}; }
+
     /// Basis operations.
     virtual std::vector<BasisStatus> getBasis() const = 0;
     virtual void setBasis(std::span<const BasisStatus> basis) = 0;

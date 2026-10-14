@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <span>
 #include <vector>
 
 namespace mipx {
@@ -187,6 +188,9 @@ public:
     std::vector<Real> getPrimalValues() const override;
     std::vector<Real> getDualValues() const override;
     std::vector<Real> getReducedCosts() const override;
+    /// See LpSolver::getDualRay(). The ray is the row of B^{-1} for the basic
+    /// variable that the dual ratio test proved cannot reach its bound.
+    std::vector<Real> getDualRay() const override;
 
     std::vector<BasisStatus> getBasis() const override;
     void setBasis(std::span<const BasisStatus> basis) override;
@@ -302,6 +306,11 @@ private:
     void applyScaling();
     void unscaleResults();
 
+    // Record the Farkas ray proven by basis position `row` (rho = B^{-T} e_row,
+    // internal scaled space): sigma = +1 when the basic variable sits below
+    // its lower bound, -1 when above its upper.
+    void storeDualRay(std::span<const Real> rho, Real sigma);
+
     // Variable bounds (structural + slack).
     Real varLower(Index k) const;
     /// Bring one nonbasic variable's status and value in line with its bounds.
@@ -343,6 +352,8 @@ private:
     std::vector<Real> primal_;        // size numVars
     std::vector<Real> dual_;          // size num_rows
     std::vector<Real> reduced_cost_;  // size numVars
+    // Farkas ray in external row space, set when a solve ends Infeasible.
+    std::vector<Real> dual_ray_;
 
     // LU factorization.
     SparseLU lu_;

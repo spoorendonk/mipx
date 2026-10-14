@@ -2,11 +2,13 @@
 #include "mipx/io.h"
 #include "test_paths.hpp"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace mipx;
@@ -1290,4 +1292,174 @@ TEST_CASE("DualSimplex: warm basis with stale Fixed statuses still reaches the o
     REQUIRE(fresh_result.status == Status::Optimal);
     REQUIRE(warm_result.status == fresh_result.status);
     CHECK_THAT(warm_result.objective, WithinAbs(fresh_result.objective, 1e-9));
+}
+
+// ---------------------------------------------------------------------------
+// Farkas certificate (getDualRay, issue #202)
+// ---------------------------------------------------------------------------
+namespace {
+
+struct FarkasCheck {
+    bool signs_ok = true;      // y_i's sign is allowed by row i's finite bounds
+    bool finite = true;        // alpha and beta are finite
+    long double alpha = 0.0L;  // min of (A^T y)^T x over the column bounds
+    long double beta = 0.0L;   // max of y^T s over the row bounds
+};
+
+/// Check the LpSolver::getDualRay() contract on `lp` in long double. Entries
+/// below `tol` (relative to the ray's largest entry) count as zero.
+FarkasCheck checkFarkas(const LpProblem& lp, const std::vector<Real>& y, Real tol = 1e-9) {
+    FarkasCheck out;
+    long double ymax = 0.0L;
+    for (Real v : y) {
+        ymax = std::max(ymax, std::abs(static_cast<long double>(v)));
+    }
+    const long double eps = static_cast<long double>(tol) * ymax;
+
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const long double yi = y[static_cast<std::size_t>(i)];
+        const Real rl = lp.row_lower[i];
+        const Real ru = lp.row_upper[i];
+        if (yi > eps) {
+            out.signs_ok = out.signs_ok && ru != kInf;
+            out.beta += yi * ru;
+        } else if (yi < -eps) {
+            out.signs_ok = out.signs_ok && rl != -kInf;
+            out.beta += yi * rl;
+        }
+    }
+
+    std::vector<long double> d(static_cast<std::size_t>(lp.num_cols), 0.0L);
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const auto row = lp.matrix.row(i);
+        for (Index p = 0; p < row.size(); ++p) {
+            d[static_cast<std::size_t>(row.indices[p])] +=
+                static_cast<long double>(row.values[p]) * y[static_cast<std::size_t>(i)];
+        }
+    }
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const long double dj = d[static_cast<std::size_t>(j)];
+        if (dj > eps) {
+            out.alpha += dj * lp.col_lower[j];
+        } else if (dj < -eps) {
+            out.alpha += dj * lp.col_upper[j];
+        }
+    }
+    out.finite = std::isfinite(out.alpha) && std::isfinite(out.beta);
+    return out;
+}
+
+LpProblem buildLp(Sense sense, std::vector<Real> obj, std::vector<Real> col_lower,
+                  std::vector<Real> col_upper, std::vector<Real> row_lower,
+                  std::vector<Real> row_upper, std::vector<Triplet> entries) {
+    LpProblem lp;
+    lp.sense = sense;
+    lp.num_cols = static_cast<Index>(obj.size());
+    lp.num_rows = static_cast<Index>(row_lower.size());
+    lp.obj = std::move(obj);
+    lp.col_lower = std::move(col_lower);
+    lp.col_upper = std::move(col_upper);
+    lp.col_type.assign(static_cast<std::size_t>(lp.num_cols), VarType::Continuous);
+    lp.row_lower = std::move(row_lower);
+    lp.row_upper = std::move(row_upper);
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(entries));
+    return lp;
+}
+
+/// Solve `lp`, require Infeasible, and check the ray it returns.
+void requireValidRay(const LpProblem& lp) {
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::Infeasible);
+
+    const auto y = solver.getDualRay();
+    REQUIRE(static_cast<Index>(y.size()) == lp.num_rows);
+    const auto check = checkFarkas(lp, y);
+    CAPTURE(y, static_cast<double>(check.alpha), static_cast<double>(check.beta));
+    CHECK(check.signs_ok);
+    REQUIRE(check.finite);
+    // Scale-free margin: the ray's length is arbitrary.
+    long double ynorm = 0.0L;
+    for (Real v : y) {
+        ynorm += std::abs(static_cast<long double>(v));
+    }
+    CHECK(check.alpha - check.beta > 1e-9L * ynorm);
+}
+
+}  // namespace
+
+TEST_CASE("DualSimplex: dual ray certifies x >= 1, x <= 0", "[dual_simplex][farkas]") {
+    // x is free, so the rows alone must carry the proof.
+    requireValidRay(buildLp(Sense::Minimize, {1.0}, {-kInf}, {kInf}, {1.0, -kInf}, {kInf, 0.0},
+                            {{0, 0, 1.0}, {1, 0, 1.0}}));
+    // The same with x >= 0, as in the existing infeasible test.
+    requireValidRay(buildLp(Sense::Minimize, {1.0}, {0.0}, {kInf}, {5.0, -kInf}, {kInf, 3.0},
+                            {{0, 0, 1.0}, {1, 0, 1.0}}));
+}
+
+TEST_CASE("DualSimplex: dual ray certifies infeasible equality rows", "[dual_simplex][farkas]") {
+    // x + y = 5 and 2x + 2y = 4, x and y free: only equalities, so the ray's
+    // signs are unrestricted and only beta < alpha = 0 can fail.
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {-kInf, -kInf}, {kInf, kInf}, {5.0, 4.0},
+                            {5.0, 4.0}, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 2.0}}));
+    // x + y = 5 with x, y in [0, 2]: the column bounds carry half the proof.
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
+                            {{0, 0, 1.0}, {0, 1, 1.0}}));
+    // Violated from the other side: x + y = -1 with x, y >= 0.
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {kInf, kInf}, {-1.0}, {-1.0},
+                            {{0, 0, 1.0}, {0, 1, 1.0}}));
+}
+
+TEST_CASE("DualSimplex: dual ray certifies infeasible ranged rows", "[dual_simplex][farkas]") {
+    // 3 <= x + 2y <= 4 against x + y <= 1, x, y >= 0: the range's lower side
+    // is the one that cannot be met.
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {kInf, kInf}, {3.0, -kInf},
+                            {4.0, 1.0}, {{0, 0, 1.0}, {0, 1, 2.0}, {1, 0, 1.0}, {1, 1, 1.0}}));
+    // -4 <= -x - 2y <= -3, the same row negated: now its upper side binds.
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {kInf, kInf}, {-4.0, -kInf},
+                            {-3.0, 1.0}, {{0, 0, -1.0}, {0, 1, -2.0}, {1, 0, 1.0}, {1, 1, 1.0}}));
+}
+
+TEST_CASE("DualSimplex: dual ray is independent of sense and survives scaling",
+          "[dual_simplex][farkas]") {
+    // Badly scaled on purpose so the solver's scaling is exercised, and
+    // maximized, which flips the internal objective but must not flip the ray:
+    // 1000 x + 0.001 y >= 5000 with x <= 2, y <= 1000.
+    requireValidRay(buildLp(Sense::Maximize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 1000.0}, {5000.0},
+                            {kInf}, {{0, 0, 1000.0}, {0, 1, 0.001}}));
+}
+
+TEST_CASE("DualSimplex: dual ray is empty unless the solve was infeasible",
+          "[dual_simplex][farkas]") {
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+
+    SECTION("optimal") {
+        solver.load(buildTrivialLP());
+        REQUIRE(solver.solve().status == Status::Optimal);
+        CHECK(solver.getDualRay().empty());
+    }
+
+    SECTION("unbounded") {
+        solver.load(buildLp(Sense::Minimize, {-1.0}, {0.0}, {kInf}, {-1.0}, {kInf}, {{0, 0, 1.0}}));
+        REQUIRE(solver.solve().status == Status::Unbounded);
+        CHECK(solver.getDualRay().empty());
+    }
+
+    SECTION("optimal after an infeasible solve") {
+        // x + y = 5 with x, y in [0, 2], then x's upper bound relaxed.
+        solver.load(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
+                            {{0, 0, 1.0}, {0, 1, 1.0}}));
+        REQUIRE(solver.solve().status == Status::Infeasible);
+        REQUIRE_FALSE(solver.getDualRay().empty());
+        solver.setColBounds(0, 0.0, 10.0);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        CHECK(solver.getDualRay().empty());
+    }
+
+    SECTION("before any solve") {
+        solver.load(buildTrivialLP());
+        CHECK(solver.getDualRay().empty());
+    }
 }
