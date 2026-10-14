@@ -2602,6 +2602,7 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
     std::uniform_real_distribution<Real> unit(0.0, 1.0);
 
     Int strengthened = 0;
+    Int strengthened_fractional = 0;
     const int kCuts = 400;
     for (int trial = 0; trial < kCuts; ++trial) {
         const Index n = 2 + trial % 3;
@@ -2655,6 +2656,13 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
             continue;
         }
         ++strengthened;
+        for (Index j = 0; j < n; ++j) {
+            if (types[j] == VarType::Integer &&
+                (lower[j] != std::round(lower[j]) || upper[j] != std::round(upper[j]))) {
+                ++strengthened_fractional;
+                break;
+            }
+        }
 
         std::vector<Real> x(n);
         std::vector<int> step(n, 0);
@@ -2693,6 +2701,8 @@ TEST_CASE("strengthenCut: random cuts keep every integer point and imply the ori
     }
     // Not vacuous: a good share of the random cuts had something to tighten.
     CHECK(strengthened > kCuts / 10);
+    // Including cuts over an integer column with a fractional bound.
+    CHECK(strengthened_fractional > 0);
 }
 
 TEST_CASE("SeparatorManager: strengthened cuts keep every integer-feasible point",

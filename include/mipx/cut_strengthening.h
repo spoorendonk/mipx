@@ -15,8 +15,9 @@ class LpProblem;
 /// activity the other terms reach within their bounds, has its coefficient
 /// lowered to a_j - d and the right-hand side to b - d u_j (symmetrically at
 /// l_j for a_j < 0). Every integer point inside the bounds that satisfies the
-/// cut still satisfies the result, and inside the bounds the result implies
-/// the cut, so the LP relaxation only gets tighter.
+/// cut still satisfies the result, and inside the bounds (an integer
+/// column's rounded in to integers) the result implies the cut, so there the
+/// LP relaxation only gets tighter.
 ///
 /// The bounds must hold wherever the cut is used: pass the global bounds for
 /// a global cut. An integer column's bounds are first rounded in to integers. Two-sided cuts, cuts

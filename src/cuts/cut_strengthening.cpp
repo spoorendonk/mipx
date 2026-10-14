@@ -15,8 +15,10 @@ constexpr Real kMarginRel = 1e-9;
 constexpr Real kMarginAbs = 1e-9;
 // A reduction smaller than this fraction of the coefficient is noise.
 constexpr Real kMinReductionRel = 1e-6;
-// Slack when rounding an integer column's bounds to the integers inside them.
-constexpr Real kIntBoundTol = 1e-9;
+// Slack when rounding an integer column's bounds to the integers inside them:
+// the integrality tolerance, so a bound the solver treats as integral is.
+// Rounding outward with more slack only weakens the result.
+constexpr Real kIntBoundTol = 1e-6;
 
 // The bounds the argument below runs on. It splits an integer column into
 // x_j = u_j or x_j <= u_j - 1, which needs integral bounds; an integer column
