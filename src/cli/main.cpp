@@ -502,7 +502,12 @@ int main(int argc, char* argv[]) {
             if (presolve) {
                 working = presolver.presolve(lp);
                 const auto& stats = presolver.stats();
-                if (stats.vars_removed > 0 || stats.rows_removed > 0) {
+                // A presolve that stopped on infeasibility leaves a half-reduced
+                // model with no postsolve to match. Solve the original instead,
+                // so the verdict comes from the LP solver on the real model.
+                if (presolver.isInfeasible()) {
+                    working = lp;
+                } else if (stats.vars_removed > 0 || stats.rows_removed > 0) {
                     did_presolve = true;
                 } else {
                     working = lp;

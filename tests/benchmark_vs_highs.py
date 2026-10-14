@@ -91,7 +91,8 @@ def solve_mipx(filepath: str, timeout_s: float, disable_presolve: bool) -> dict:
         result["time"] = elapsed
 
         for line in output.splitlines():
-            m = re.match(r"Objective:\s*(.+)", line)
+            # Non-optimal runs print "Objective: none"; leave obj unset.
+            m = re.match(r"Objective:\s*([\-+0-9.eE]+)\s*$", line)
             if m:
                 result["obj"] = float(m.group(1))
             m = re.match(r"Iterations:\s*(\d+)", line)
