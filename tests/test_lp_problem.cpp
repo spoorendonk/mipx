@@ -174,6 +174,38 @@ TEST_CASE("MPS reader: an objective-row RHS is the negated constant", "[io][mps]
     CHECK(reread.obj_offset == 2.0);
 }
 
+TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][mps]") {
+    // Two things a round trip used to lose: digits past the sixth (the stream
+    // default precision), and the objective when a constraint is itself named
+    // "obj" -- the reader took the constraint's entries for the objective's.
+    LpProblem lp;
+    lp.num_cols = 1;
+    lp.obj = {0.1234567890123};
+    lp.obj_offset = 11.638929066;
+    lp.col_lower = {0.0};
+    lp.col_upper = {1.0 / 3.0};
+    lp.col_type = {VarType::Continuous};
+    lp.col_names = {"x"};
+    lp.num_rows = 1;
+    lp.row_lower = {1.0 / 7.0};
+    lp.row_upper = {kInf};
+    lp.row_names = {"obj"};
+    lp.matrix = SparseMatrix(1, 1, std::vector<Triplet>{{0, 0, 2.0}});
+
+    const std::string path = testDataDir() + "/precision_roundtrip.mps";
+    writeMps(path, lp);
+    auto reread = readMps(path);
+    std::filesystem::remove(path);
+
+    CHECK(reread.obj_offset == lp.obj_offset);
+    REQUIRE(reread.num_cols == 1);
+    CHECK(reread.obj[0] == lp.obj[0]);
+    CHECK(reread.col_upper[0] == lp.col_upper[0]);
+    REQUIRE(reread.num_rows == 1);
+    CHECK(reread.row_lower[0] == lp.row_lower[0]);
+    CHECK(reread.row_names[0] == "obj");
+}
+
 TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
     auto prob = readLp(testDataDir() + "/tiny.lp");
 

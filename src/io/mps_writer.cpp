@@ -3,7 +3,10 @@
 #include <cmath>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
 
 namespace mipx {
 
@@ -19,11 +22,29 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         throw std::runtime_error("Cannot open file for writing: " + filename);
     }
 
+    // Every value written back with all of its digits, so a round trip is
+    // exact: the stream default of 6 significant digits turned an objective
+    // constant of 11.638929066 into 11.6389.
+    out.precision(std::numeric_limits<Real>::max_digits10);
+
+    // The objective row needs a name no constraint has: the reader maps names
+    // to rows, and a constraint called "obj" would otherwise swallow the
+    // objective's coefficients and its constant.
+    std::string obj_name = "obj";
+    {
+        const std::unordered_set<std::string> taken(problem->row_names.begin(),
+                                                    problem->row_names.end());
+        // Unnamed rows are written as R<i>, which never starts with "obj".
+        while (taken.contains(obj_name)) {
+            obj_name += '_';
+        }
+    }
+
     out << "NAME          " << problem->name << '\n';
 
     // ROWS section.
     out << "ROWS\n";
-    out << " N  obj\n";
+    out << " N  " << obj_name << '\n';
     for (Index i = 0; i < problem->num_rows; ++i) {
         Real lo = problem->row_lower[i];
         Real up = problem->row_upper[i];
@@ -66,7 +87,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
 
         // Objective coefficient.
         if (j < static_cast<Index>(problem->obj.size()) && problem->obj[j] != 0.0) {
-            out << "    " << col_name << "  obj  " << problem->obj[j] << '\n';
+            out << "    " << col_name << "  " << obj_name << "  " << problem->obj[j] << '\n';
         }
 
         // Matrix coefficients for this column.
@@ -89,7 +110,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
     // the convention mps_reader.cpp reads it with (issue #207).
     out << "RHS\n";
     if (problem->obj_offset != 0.0) {
-        out << "    rhs  obj  " << -problem->obj_offset << '\n';
+        out << "    rhs  " << obj_name << "  " << -problem->obj_offset << '\n';
     }
     for (Index i = 0; i < problem->num_rows; ++i) {
         Real lo = problem->row_lower[i];
