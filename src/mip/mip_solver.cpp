@@ -1892,8 +1892,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                             double& node_work_out, std::vector<Real>& current_lower,
                             std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                             NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
-                            Int strong_branch_budget_override) {
+                            Int strong_branch_budget_override,
+                            std::optional<TreePseudocostSample>* deferred_pseudocost) {
     children_out.clear();
+    if (deferred_pseudocost != nullptr) {
+        deferred_pseudocost->reset();
+    }
     node_iters_out = 0;
     node_work_out = 0.0;
     int_inf_out = -1;
@@ -2089,6 +2093,22 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     node_iters_out = node_result.iterations;
     node_work_out += node_result.work_units;
+
+    // The gain this LP shows over its parent is the pseudocost signal for the
+    // branching that created the node; recording it is what lets variables
+    // become reliable without being strong-branched over and over (#199).
+    // It is taken before any pruning below: a child cut off by the incumbent
+    // still solved to optimality and still measured a real gain. A caller
+    // that runs nodes concurrently but must stay deterministic collects the
+    // sample instead and applies it in a fixed order.
+    const auto sample =
+        TreePseudocostSample::fromChild(node, node_result.status, node_result.objective);
+    if (deferred_pseudocost != nullptr) {
+        *deferred_pseudocost = sample;
+    } else {
+        std::lock_guard<std::mutex> lock(branching_mutex_);
+        branching_rule_.updateFromChild(sample, branching_stats_);
+    }
 
     if (node_result.status == Status::Infeasible) {
         if (use_conflicts) {
@@ -3115,6 +3135,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             Int node_iters = 0;
             double node_work = 0.0;
             Int node_int_inf = -1;
+            std::optional<TreePseudocostSample> pseudocost_sample;
         };
 
         if (verbose_) {
@@ -3223,12 +3244,20 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                     worker_ctx.lp, task.node, batch_incumbent, task.children, task.node_obj,
                     task.node_primals, task.node_iters, task.node_work, worker_ctx.current_lower,
                     worker_ctx.current_upper, worker_ctx.touched_vars, worker_ctx.node_scratch,
-                    worker_ctx.node_stats, task.node_int_inf, task.strong_branch_budget);
+                    worker_ctx.node_stats, task.node_int_inf, task.strong_branch_budget,
+                    &task.pseudocost_sample);
             });
 
             for (Int i = 0; i < batch_size; ++i) {
                 auto& task = tasks[static_cast<std::size_t>(i)];
                 auto& worker_ctx = workers[static_cast<std::size_t>(task.worker_id)];
+                // Tree pseudocost samples are applied here, in task order, so the
+                // pseudocosts the next batch branches on do not depend on which
+                // worker finished first.
+                if (task.pseudocost_sample.has_value()) {
+                    std::lock_guard<std::mutex> lock(branching_mutex_);
+                    branching_rule_.updateFromChild(*task.pseudocost_sample, branching_stats_);
+                }
                 total_lp_iters += task.node_iters;
                 total_work += task.node_work;
 
@@ -5506,10 +5535,12 @@ MipResult MipSolver::solve() {
                     : 0.0;
             log_.log(
                 "Branching: strong_calls=%d probes=%d avg_probe_lp_it=%.1f "
-                "avg_probe_work=%.2f pseudocost_uses=%d hit_rate=%.1f%%\n",
+                "avg_probe_work=%.2f pseudocost_uses=%d hit_rate=%.1f%% "
+                "pc_updates_strong=%d pc_updates_tree=%d pc_tree_skipped=%d\n",
                 branching_stats_.strong_branch_calls, branching_stats_.strong_branch_probes,
                 avg_probe_iters, avg_probe_work, branching_stats_.pseudocost_uses,
-                pseudocost_hit_rate);
+                pseudocost_hit_rate, branching_stats_.pseudocost_updates_strong,
+                branching_stats_.pseudocost_updates_tree, branching_stats_.pseudocost_tree_skipped);
         }
         if (cut_stats_.root_rounds > 0 || cut_stats_.tree_rounds > 0) {
             log_.log(

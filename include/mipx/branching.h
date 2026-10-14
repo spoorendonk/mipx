@@ -65,6 +65,29 @@ struct BranchingTelemetry {
     double strong_branch_probe_work_units = 0.0;
     Int pseudocost_uses = 0;
     Int pseudocost_hits = 0;
+    /// Pseudocost samples recorded from strong-branch probes.
+    Int pseudocost_updates_strong = 0;
+    /// Pseudocost samples recorded from solved child nodes in the tree.
+    Int pseudocost_updates_tree = 0;
+    /// Child nodes whose LP ended infeasible or without an optimum, so gave
+    /// no gain to record.
+    Int pseudocost_tree_skipped = 0;
+};
+
+/// What a solved child node's LP says about the branching that created it:
+/// the branching decision, the parent's LP value of the variable and LP
+/// objective, and the child's LP outcome (#199).
+struct TreePseudocostSample {
+    BranchDecision branch;
+    Real branch_value = 0.0;
+    Real parent_objective = -kInf;
+    Status status = Status::Error;
+    Real objective = 0.0;
+
+    [[nodiscard]] static TreePseudocostSample fromChild(const BnbNode& child, Status status,
+                                                        Real objective) {
+        return {child.branch, child.branch_value, child.parent_objective, status, objective};
+    }
 };
 
 class ReliabilityBranching {
@@ -93,6 +116,13 @@ public:
     [[nodiscard]] Int downReliability(Index var) const;
 
     void updatePseudoCost(Index var, bool up_direction, Real gain_per_unit);
+
+    /// Record the pseudocost sample a solved child node yields: the gain of
+    /// its LP objective over the parent's, per unit of branching distance.
+    /// Only an optimal child LP carries a gain; an infeasible child, or one
+    /// whose LP stopped early, is counted as skipped and records nothing.
+    /// Returns true when a sample was recorded.
+    bool updateFromChild(const TreePseudocostSample& sample, BranchingTelemetry& telemetry);
 
     BranchingSelection select(DualSimplexSolver& lp, const LpProblem& problem,
                               std::span<const Real> primal_values, std::span<const Real> col_lower,

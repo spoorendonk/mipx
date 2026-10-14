@@ -31,6 +31,14 @@ struct BnbNode {
     /// Branching decision that created this node (from parent).
     BranchDecision branch;
 
+    /// The parent's LP value of branch.variable and the parent's LP
+    /// objective. When this node's LP is solved, the objective gain over
+    /// parent_objective, divided by the distance from branch_value to
+    /// branch.bound, is a tree-observed pseudocost sample for that variable
+    /// and direction (#199).
+    Real branch_value = 0.0;
+    Real parent_objective = -kInf;
+
     /// Basis snapshot for warm-starting LP.
     std::vector<BasisStatus> basis;
     Index basis_rows = 0;

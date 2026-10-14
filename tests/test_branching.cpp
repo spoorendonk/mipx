@@ -175,6 +175,62 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
 }
 
+TEST_CASE("ReliabilityBranching learns pseudocosts from solved children", "[branching]") {
+    // Issue #199: a child's LP gain over its parent is a pseudocost sample.
+    // No strong branching happens here at all, so any change in the
+    // pseudocosts comes from the tree update alone.
+    ReliabilityBranching branching;
+    branching.reset(3);
+    BranchingTelemetry telemetry;
+
+    BnbNode parent;
+    parent.id = 7;
+    parent.lp_bound = 10.0;
+    auto [down, up] = createChildren(std::move(parent), 1, 2.25);
+    REQUIRE(down.branch.is_upper);
+    CHECK(down.parent_objective == 10.0);
+    CHECK(down.branch_value == 2.25);
+
+    // Down child: x1 <= 2, distance 0.25, gain 0.5 -> 2 per unit.
+    CHECK(branching.updateFromChild(TreePseudocostSample::fromChild(down, Status::Optimal, 10.5),
+                                    telemetry));
+    // Up child: x1 >= 3, distance 0.75, gain 3 -> 4 per unit.
+    CHECK(branching.updateFromChild(TreePseudocostSample::fromChild(up, Status::Optimal, 13.0),
+                                    telemetry));
+
+    CHECK(branching.downReliability(1) == 1);
+    CHECK(branching.upReliability(1) == 1);
+    CHECK_THAT(branching.downPseudoCost(1), Catch::Matchers::WithinAbs(2.0, 1e-12));
+    CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
+    CHECK(telemetry.pseudocost_updates_tree == 2);
+    CHECK(telemetry.pseudocost_updates_strong == 0);
+    CHECK(telemetry.pseudocost_tree_skipped == 0);
+}
+
+TEST_CASE("ReliabilityBranching records nothing from children without a gain", "[branching]") {
+    ReliabilityBranching branching;
+    branching.reset(3);
+    BranchingTelemetry telemetry;
+
+    BnbNode parent;
+    parent.lp_bound = 10.0;
+    auto [down, up] = createChildren(std::move(parent), 1, 2.25);
+
+    // An infeasible child and one whose LP stopped early carry no gain.
+    CHECK_FALSE(branching.updateFromChild(
+        TreePseudocostSample::fromChild(down, Status::Infeasible, 0.0), telemetry));
+    CHECK_FALSE(branching.updateFromChild(
+        TreePseudocostSample::fromChild(up, Status::IterLimit, 11.0), telemetry));
+    // The root has no parent and no branching to credit.
+    CHECK_FALSE(branching.updateFromChild(
+        TreePseudocostSample::fromChild(BnbNode{}, Status::Optimal, 11.0), telemetry));
+
+    CHECK(branching.downReliability(1) == 0);
+    CHECK(branching.upReliability(1) == 0);
+    CHECK(telemetry.pseudocost_updates_tree == 0);
+    CHECK(telemetry.pseudocost_tree_skipped == 2);
+}
+
 TEST_CASE("SymmetryManager adds canonical symmetry cuts", "[symmetry]") {
     LpProblem lp;
     lp.name = "symmetry";

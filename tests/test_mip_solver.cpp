@@ -651,6 +651,25 @@ TEST_CASE("MipSolver: reliability branching collects strong-branch telemetry", "
     CHECK(stats.strong_branch_probe_work_units >= 0.0);
 }
 
+TEST_CASE("MipSolver: the tree feeds pseudocosts from solved children", "[mip][branching]") {
+    // Issue #199: before, only strong-branch probes updated pseudocosts.
+    auto lp = buildRcFixingKnapsackMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(rcKnapsackOptimum(), 1e-6));
+    REQUIRE(result.nodes > 5);
+    const auto& stats = solver.getBranchingStats();
+    CHECK(stats.pseudocost_updates_tree > 0);
+    CHECK(stats.pseudocost_updates_strong > 0);
+}
+
 TEST_CASE("MipSolver: infeasible", "[mip]") {
     auto lp = buildInfeasibleMip();
 

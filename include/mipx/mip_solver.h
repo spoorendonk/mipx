@@ -523,13 +523,19 @@ private:
                      double elapsed, bool new_incumbent = false, Int int_inf = -1) const;
 
     /// Process a single node. Returns true if children were created.
+    ///
+    /// The node's LP outcome is a pseudocost sample for the branching that
+    /// created it. By default it is recorded at once; with deferred_pseudocost
+    /// set it is stored there instead (nullopt when the LP was not solved), for
+    /// a caller that must apply samples in a deterministic order.
     bool processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent_snapshot,
                      std::vector<BnbNode>& children_out, Real& node_obj_out,
                      std::vector<Real>& node_primals_out, Int& node_iters_out,
                      double& node_work_out, std::vector<Real>& current_lower,
                      std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                      NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
-                     Int strong_branch_budget_override = -1);
+                     Int strong_branch_budget_override = -1,
+                     std::optional<TreePseudocostSample>* deferred_pseudocost = nullptr);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);

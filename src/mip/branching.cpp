@@ -118,6 +118,29 @@ void ReliabilityBranching::updatePseudoCost(Index var, bool up_direction, Real g
     }
 }
 
+bool ReliabilityBranching::updateFromChild(const TreePseudocostSample& sample,
+                                           BranchingTelemetry& telemetry) {
+    const Index var = sample.branch.variable;
+    if (!inRange(var) || !std::isfinite(sample.parent_objective)) {
+        return false;  // Root, or a node not made by createChildren().
+    }
+    if (sample.status != Status::Optimal || !std::isfinite(sample.objective)) {
+        ++telemetry.pseudocost_tree_skipped;
+        return false;
+    }
+    // is_upper means the child tightened x_j's upper bound: the down branch.
+    const bool up_direction = !sample.branch.is_upper;
+    const Real dist = up_direction ? sample.branch.bound - sample.branch_value
+                                   : sample.branch_value - sample.branch.bound;
+    if (!(dist > 1e-8)) {
+        return false;
+    }
+    updatePseudoCost(var, up_direction,
+                     std::max<Real>(0.0, sample.objective - sample.parent_objective) / dist);
+    ++telemetry.pseudocost_updates_tree;
+    return true;
+}
+
 Real ReliabilityBranching::safeUpCost(Index var) const {
     return upPseudoCost(var);
 }
@@ -258,6 +281,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
             }
             if (c.down_dist > 1e-8) {
                 updatePseudoCost(c.var, false, down_gain / c.down_dist);
+                ++telemetry.pseudocost_updates_strong;
             }
             --probe_budget;
 
@@ -282,6 +306,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
             }
             if (c.up_dist > 1e-8) {
                 updatePseudoCost(c.var, true, up_gain / c.up_dist);
+                ++telemetry.pseudocost_updates_strong;
             }
             --probe_budget;
 
@@ -369,6 +394,8 @@ std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Rea
     left.estimate = parent.estimate;
     left.basis_rows = parent.basis_rows;
     left.branch = {branch_var, floor_val, true};  // x_j <= floor(v)
+    left.branch_value = branch_val;
+    left.parent_objective = parent.lp_bound;
     left.bound_changes = parent.bound_changes;
     left.bound_changes.push_back(left.branch);
     left.local_cuts = parent.local_cuts;
@@ -380,6 +407,8 @@ std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Rea
     right.estimate = parent.estimate;
     right.basis_rows = parent.basis_rows;
     right.branch = {branch_var, ceil_val, false};  // x_j >= ceil(v)
+    right.branch_value = branch_val;
+    right.parent_objective = parent.lp_bound;
     right.bound_changes = std::move(parent.bound_changes);
     right.bound_changes.push_back(right.branch);
     right.local_cuts = std::move(parent.local_cuts);
