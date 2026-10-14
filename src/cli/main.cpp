@@ -644,7 +644,15 @@ int main(int argc, char* argv[]) {
             }
             // Stable summary lines consumed by benchmark scripts.
             log.log("Status: %s\n", status_text);
-            log.log("Objective: %.10e\n", obj);
+            // Only an optimal result carries a primal point to report. On any
+            // other exit result.objective is the solver's working value (for
+            // the dual simplex, a dual objective in presolved space), which
+            // reads like a result and is not one (#206).
+            if (result.status == mipx::Status::Optimal) {
+                log.log("Objective: %.10e\n", obj);
+            } else {
+                log.log("Objective: none\n");
+            }
             log.log("Iterations: %d\n", result.iterations);
             log.log("Work units: %.2f\n", result.work_units);
             log.log("Time: %.2fs\n", solve_seconds);

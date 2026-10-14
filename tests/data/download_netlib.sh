@@ -151,8 +151,9 @@ fi
 
 mkdir -p "${DEST_DIR}"
 
-# Copy the .solu file from tests/data if present.
-if [[ -f "${SCRIPT_DIR}/netlib.solu" && ! -f "${DEST_DIR}/netlib.solu" ]]; then
+# Copy the .solu file from tests/data if present. Refresh a stale copy too:
+# the tracked file is the reference, and corrections to it must reach here.
+if [[ -f "${SCRIPT_DIR}/netlib.solu" ]] && ! cmp -s "${SCRIPT_DIR}/netlib.solu" "${DEST_DIR}/netlib.solu"; then
     cp "${SCRIPT_DIR}/netlib.solu" "${DEST_DIR}/netlib.solu"
 fi
 

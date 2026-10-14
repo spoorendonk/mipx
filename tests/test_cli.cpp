@@ -123,6 +123,18 @@ TEST_CASE("CLI: a valid MPS instance is unaffected", "[cli][io]") {
     CHECK_FALSE(run.mentions("Error:"));
 }
 
+TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]") {
+    // Issue #206: time-limited LP runs printed the dual simplex's working
+    // objective (1.4e14 on greenbeb) as though it were a result. Every
+    // non-optimal exit shares the one reporting path; infeasibility reaches it
+    // deterministically, where a time limit would not.
+    const auto run = runSolver("'" + testDataDir() + "/infeasible_lp.lp' --dual --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Infeasible"));
+    CHECK(run.mentions("Objective: none"));
+}
+
 TEST_CASE("CLI: --format lp forces the LP reader", "[cli][io]") {
     // The override has to work in both directions, not just as a rejection.
     const auto run = runSolver("'" + testDataDir() + "/lp_format.lp' --format lp");

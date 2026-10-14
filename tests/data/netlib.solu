@@ -27,9 +27,9 @@
 =opt= d6cube 3.1549166667e+02
 =opt= degen2 -1.4351780000e+03
 =opt= degen3 -9.8729400000e+02
-=opt= e226 -1.8751929066e+01
-=opt= etamacro -7.5571521774e+02
-=opt= fffff800 5.5567961165e+05
+=opt= e226 -1.1638929066e+01
+=opt= etamacro -7.5571523330e+02
+=opt= fffff800 5.5567956482e+05
 =opt= finnis 1.7279106560e+05
 =opt= fit1d -9.1463780924e+03
 =opt= fit1p 9.1463780924e+03
@@ -49,8 +49,8 @@
 =opt= maros-r7 1.4971851665e+06
 =opt= modszk1 3.2061972906e+02
 =opt= nesm 1.4076036488e+07
-=opt= perold -9.3807580773e+03
-=opt= pilot -5.5740430007e+02
+=opt= perold -9.3807552782e+03
+=opt= pilot -5.5748972927e+02
 =opt= pilot4 -2.5811392589e+03
 =opt= pilot87 3.0171034733e+02
 =opt= pilot-ja -6.1131364656e+03
@@ -82,7 +82,7 @@
 =opt= standata 1.2576995000e+03
 =opt= standmps 1.4060175000e+03
 =opt= stocfor2 -3.9024408538e+04
-=opt= stocfor3 -3.9976661576e+04
+=opt= stocfor3 -3.9976783944e+04
 =opt= truss 4.5881584719e+05
 =opt= tuff 2.9214776509e-01
 =opt= vtp-base 1.2983146246e+05

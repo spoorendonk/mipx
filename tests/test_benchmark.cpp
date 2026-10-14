@@ -2,8 +2,10 @@
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
+#include "mipx/presolve.h"
 #include "test_paths.hpp"
 
+#include <algorithm>
 #include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -343,6 +345,54 @@ TEST_CASE("Netlib: LP solve objectives match .solu on curated set", "[benchmark]
     if (!ran_any) {
         SKIP("No curated Netlib LP instances available locally for objective check");
     }
+}
+
+TEST_CASE("Netlib: pilot solves to its verified optimum through presolve",
+          "[benchmark][netlib][solve]") {
+    // Issue #206 reported pilot as solving below its optimum. It does not:
+    // the reference was the stale Netlib README value -557.40430007, and
+    // HiGHS and Koch's exact recomputation both give -557.48972927, which is
+    // what the dual simplex returns. This pins the answer on the path the
+    // report used (default presolve, dual simplex, postsolve), and checks the
+    // postsolved point against the original rows, so a genuine regression to
+    // an infeasible point below the optimum still fails here.
+    const std::string netlib_dir = testDataDir() + "/netlib";
+    const std::string path = netlib_dir + "/pilot.mps.gz";
+    const std::string solu_file = netlib_dir + "/netlib.solu";
+    if (!fs::exists(path) || !fs::exists(solu_file)) {
+        SKIP("pilot or netlib.solu not available");
+    }
+    const auto solu_entries = readSolu(solu_file);
+    const auto* entry = findSoluEntry(solu_entries, "pilot");
+    REQUIRE(entry != nullptr);
+
+    const auto original = readMps(path);
+    Presolver presolver;
+    const auto reduced = presolver.presolve(original);
+
+    DualSimplexSolver solver;
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    const auto x = presolver.postsolve(solver.getPrimalValues());
+    REQUIRE(static_cast<Index>(x.size()) == original.num_cols);
+    Real objective = original.obj_offset;
+    Real max_violation = 0.0;
+    for (Index j = 0; j < original.num_cols; ++j) {
+        objective += original.obj[j] * x[j];
+        max_violation =
+            std::max({max_violation, original.col_lower[j] - x[j], x[j] - original.col_upper[j]});
+    }
+    std::vector<Real> activity(original.num_rows, 0.0);
+    original.matrix.multiply(x, activity);
+    for (Index i = 0; i < original.num_rows; ++i) {
+        max_violation = std::max({max_violation, original.row_lower[i] - activity[i],
+                                  activity[i] - original.row_upper[i]});
+    }
+
+    CHECK(max_violation <= 1e-6);
+    CHECK_THAT(objective, WithinAbs(entry->value, objectiveTol(entry->value)));
 }
 
 TEST_CASE("MIPLIB: p0201 objective matches .solu", "[benchmark][miplib][solve]") {
