@@ -58,9 +58,16 @@ public:
     ///       alpha = sum_j (d_j > 0 ? d_j * col_lower_j : d_j * col_upper_j),
     ///     and alpha > beta, so no x within its bounds meets the rows.
     /// For x >= 0 this is the textbook form: the sign conditions plus
-    /// beta < 0. The conditions hold up to the solver's tolerances; the ray's
-    /// length is arbitrary, and it does not depend on the objective or its
-    /// sense.
+    /// beta < 0. The ray's length is arbitrary, and it does not depend on the
+    /// objective or its sense.
+    ///
+    /// Floating point: the row sign conditions hold exactly, but d is only
+    /// right up to the solver's tolerances -- treat |d_j| below a tolerance
+    /// (relative to |y|) as zero before using an infinite column bound. The
+    /// dual simplex may prove infeasibility against bounds its internal
+    /// perturbation has tightened by a small epsilon, so alpha - beta can fall
+    /// short against the original bounds by about that much. A consumer that
+    /// needs a rigorous proof recomputes alpha and beta itself.
     virtual std::vector<Real> getDualRay() const { return {}; }
 
     /// Basis operations.

@@ -1306,8 +1306,9 @@ struct FarkasCheck {
     long double beta = 0.0L;   // max of y^T s over the row bounds
 };
 
-/// Check the LpSolver::getDualRay() contract on `lp` in long double. Entries
-/// below `tol` (relative to the ray's largest entry) count as zero.
+/// Check the LpSolver::getDualRay() contract on `lp` in long double. The row
+/// signs are checked exactly, as promised; entries of d = A^T y below `tol`
+/// (relative to the ray's largest entry) count as zero.
 FarkasCheck checkFarkas(const LpProblem& lp, const std::vector<Real>& y, Real tol = 1e-9) {
     FarkasCheck out;
     long double ymax = 0.0L;
@@ -1320,10 +1321,10 @@ FarkasCheck checkFarkas(const LpProblem& lp, const std::vector<Real>& y, Real to
         const long double yi = y[static_cast<std::size_t>(i)];
         const Real rl = lp.row_lower[i];
         const Real ru = lp.row_upper[i];
-        if (yi > eps) {
+        if (yi > 0.0L) {
             out.signs_ok = out.signs_ok && ru != kInf;
             out.beta += yi * ru;
-        } else if (yi < -eps) {
+        } else if (yi < 0.0L) {
             out.signs_ok = out.signs_ok && rl != -kInf;
             out.beta += yi * rl;
         }
@@ -1428,6 +1429,40 @@ TEST_CASE("DualSimplex: dual ray is independent of sense and survives scaling",
     // 1000 x + 0.001 y >= 5000 with x <= 2, y <= 1000.
     requireValidRay(buildLp(Sense::Maximize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 1000.0}, {5000.0},
                             {kInf}, {{0, 0, 1000.0}, {0, 1, 0.001}}));
+}
+
+TEST_CASE("DualSimplex: dual ray carries the row scaling back", "[dual_simplex][farkas]") {
+    // Several rows with scales far apart, so equilibration gives each row its
+    // own factor: a ray left in scaled space would mix them up.
+    //   r0: 1000 x + 1000 y >= 3000   (needs x + y >= 3)
+    //   r1: 0.001 x          <= 0.001 (x <= 1)
+    //   r2:          0.01 y  <= 0.01  (y <= 1)
+    //   r3: 50 x - 0.02 y    in [-100, 100] (slack, never binding)
+    requireValidRay(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {kInf, kInf},
+                            {3000.0, -kInf, -kInf, -100.0}, {kInf, 0.001, 0.01, 100.0},
+                            {{0, 0, 1000.0},
+                             {0, 1, 1000.0},
+                             {1, 0, 0.001},
+                             {2, 1, 0.01},
+                             {3, 0, 50.0},
+                             {3, 1, -0.02}}));
+}
+
+TEST_CASE("DualSimplex: a re-solve does not inherit an Infeasible verdict",
+          "[dual_simplex][farkas]") {
+    // x + y = 5 with x, y in [0, 2] is infeasible; with x <= 10 it is not.
+    // Re-solved with no iterations allowed, the answer is "ran out", never the
+    // previous solve's Infeasible.
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
+                        {{0, 0, 1.0}, {0, 1, 1.0}}));
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    solver.setColBounds(0, 0.0, 10.0);
+    solver.setIterationLimit(0);
+    const auto status = solver.solve().status;
+    CHECK(status != Status::Infeasible);
+    CHECK(solver.getDualRay().empty());
 }
 
 TEST_CASE("DualSimplex: dual ray is empty unless the solve was infeasible",

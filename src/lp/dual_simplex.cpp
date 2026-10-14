@@ -769,6 +769,10 @@ LpResult DualSimplexSolver::solve() {
     if (!loaded_) {
         return {Status::Error, 0.0, 0};
     }
+    // Forget the previous verdict. The iteration-limit fix-up after the loop
+    // keeps an Infeasible status it finds, so a stale one from the last solve
+    // would turn an iteration-limited re-solve into a false Infeasible.
+    status_ = Status::Error;
 
     // Rebuild augmented matrix as [A | -I] for correct basis representation.
     {
@@ -3160,11 +3164,22 @@ std::vector<Real> DualSimplexSolver::getDualValues() const {
 // when sigma = -1). Scaling: the scaled matrix is R A C and the scaled
 // slack R s, so the external multiplier is R rho -- the same map as the duals.
 // The objective plays no part, so neither does the sense flip.
+//
+// Entries the ratio test never looked at are dropped: |rho_i| below kZeroTol
+// (skipped when the pivot row is assembled), and a sign the row cannot carry
+// because the bound it needs is infinite. The latter can only be a slack whose
+// alpha = -rho_i fell under the pivot tolerance, i.e. round-off; left in, it
+// would make the certificate's row bound sum infinite.
 void DualSimplexSolver::storeDualRay(std::span<const Real> rho, Real sigma) {
     dual_ray_.assign(static_cast<std::size_t>(num_rows_), 0.0);
     for (Index i = 0; i < num_rows_; ++i) {
         const auto ui = static_cast<std::size_t>(i);
-        dual_ray_[ui] = sigma * rho[ui] * (scaled_ ? row_scale_[ui] : 1.0);
+        const Real yi = sigma * rho[ui];
+        if (std::abs(yi) < kZeroTol || (yi > 0.0 && row_upper_[ui] == kInf) ||
+            (yi < 0.0 && row_lower_[ui] == -kInf)) {
+            continue;
+        }
+        dual_ray_[ui] = yi * (scaled_ ? row_scale_[ui] : 1.0);
     }
 }
 
