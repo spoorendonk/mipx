@@ -690,6 +690,13 @@ TEST_CASE("MipSolver: without strong branching, pseudocosts come from the tree a
     CHECK(stats.strong_branch_probes == 0);
     CHECK(stats.pseudocost_updates_strong == 0);
     CHECK(stats.pseudocost_updates_tree > 0);
+
+    // Turning it back on takes effect on the next solve.
+    solver.setStrongBranchingEnabled(true);
+    solver.load(lp);
+    const auto again = solver.solve();
+    REQUIRE(again.status == Status::Optimal);
+    CHECK(solver.getBranchingStats().strong_branch_probes > 0);
 }
 
 TEST_CASE("MipSolver: infeasible", "[mip]") {

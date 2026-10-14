@@ -2132,6 +2132,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // node_obj_out: tree presolve and reduced-cost fixing below tighten bounds
     // only in this node's working domain, which the children do not inherit,
     // so a refreshed objective could sit above what a child can reach (#199).
+    // The branching value comes from the final LP, and tree cut rounds below
+    // can raise the objective with cuts the children do inherit, so a sample
+    // after such rounds overstates the gain a little; that is preferred to
+    // understating it as zero, which would still count toward reliability.
     const Real children_reference_objective = node_result.objective;
     node_primals_out = lp.getPrimalValues();
 
@@ -4058,9 +4062,9 @@ MipResult MipSolver::solve() {
     }
 
     branching_rule_.reset(problem_.num_cols);
-    if (!strong_branching_enabled_) {
-        branching_rule_.setStrongBranchProbeBudget(0);
-    }
+    // Set every solve, so turning strong branching back on takes effect.
+    branching_rule_.setStrongBranchProbeBudget(
+        strong_branching_enabled_ ? ReliabilityBranching::kDefaultStrongBranchProbeBudget : 0);
     branching_stats_ = {};
     Real incumbent = kInf;
     std::vector<Real> best_solution;

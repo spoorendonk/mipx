@@ -96,6 +96,8 @@ struct TreePseudocostSample {
 
 class ReliabilityBranching {
 public:
+    static constexpr Int kDefaultStrongBranchProbeBudget = 8;
+
     ReliabilityBranching() = default;
 
     void reset(Index num_cols);
@@ -178,7 +180,7 @@ private:
     std::vector<PseudoCost> pseudocosts_;
     Int reliability_threshold_ = 4;
     Int strong_branch_max_candidates_ = 8;
-    Int strong_branch_probe_budget_ = 8;  // Directional probes.
+    Int strong_branch_probe_budget_ = kDefaultStrongBranchProbeBudget;  // Directional probes.
     Int strong_branch_iter_limit_ = 60;
     Real pseudocost_fallback_ = 1.0;
     static constexpr Real kStrongInfeasibleGain = 1e4;

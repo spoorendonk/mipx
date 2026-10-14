@@ -234,7 +234,8 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
         }
     }
 
-    const bool run_strong_branch = force_strong_branch || best_reliable < 0;
+    const bool run_strong_branch =
+        (force_strong_branch || best_reliable < 0) && strong_branch_probe_budget_ >= 2;
     Index best_strong = -1;
     Real best_strong_score = -std::numeric_limits<Real>::infinity();
 
