@@ -47,9 +47,9 @@ struct GomoryStats {
 /// strengthens it, and on a wide-range column cuts off feasible points.
 ///
 /// A negligible term whose bound in the needed direction is infinite cannot be
-/// paid for. It is kept, unless it is within `cancel_tol * magnitude[j]`: then
-/// it is cancellation round-off of the sum, of the same order as the error on
-/// every other coefficient, and is zeroed. `dropped`, when given, counts the
+/// paid for. It is kept, unless it is within both `cancel_tol * magnitude[j]`
+/// and `drop_tol`: then it is cancellation round-off of the sum, of the same
+/// order as the error on every other coefficient, and is zeroed. `dropped`, when given, counts the
 /// terms paid for.
 [[nodiscard]] Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
                                 std::span<const Real> upper, Real drop_tol, Int* dropped = nullptr,

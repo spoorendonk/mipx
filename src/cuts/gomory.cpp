@@ -361,8 +361,11 @@ Real dropAndRelax(std::span<Real> coeff, Real rhs, std::span<const Real> lower,
             if (dropped != nullptr) {
                 ++*dropped;
             }
-        } else if (std::abs(value) <= cancellation) {
-            coeff[j] = 0.0;  // round-off of the sum, not cut mass
+        } else if (std::abs(value) <= std::min(drop_tol, cancellation)) {
+            // Round-off of the sum, not cut mass. Capped at drop_tol as well:
+            // a sum of 1e13-sized terms (f0 near kIntTol) leaves a relative
+            // residue large enough to matter, and that one is kept.
+            coeff[j] = 0.0;
         }
     }
     return rhs;

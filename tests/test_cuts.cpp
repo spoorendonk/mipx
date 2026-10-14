@@ -582,8 +582,8 @@ TEST_CASE("Gomory: blow-up row is never pooled", "[cuts][gomory]") {
     // What turns it away changed with #216. The 1e7 on y from y's own
     // deviation and the 1e7 from substituting the row logical cancel exactly;
     // the float residual of that sum (~4e-9) used to stay in the cut and trip
-    // the max/min ratio screen. It is now recognised as cancellation round-off
-    // and zeroed, which leaves the true GMI cut -5e5 x >= rhs, i.e. x <= 202:
+    // the max/min ratio screen. It is now dropped and paid for over y's range
+    // [0, 10], which leaves the true GMI cut -5e5 x >= rhs, i.e. x <= 202:
     // under every screen limit, and with an efficacy of ~2e-6 the pool refuses
     // it.
     CHECK(stats.rejected_screen == 0);
@@ -837,23 +837,26 @@ TEST_CASE("Gomory: a tiny coefficient on an unbounded column is kept", "[cuts][g
 
 TEST_CASE("Gomory: cancellation residue is paid where bounded, zeroed where not",
           "[cuts][gomory]") {
-    // Each coefficient here is what is left of terms summing to magnitude 1e8.
-    // 1e-5 is well above the absolute drop tolerance but within 1e-12 * 1e8,
-    // so it is round-off of the sum: paid for over a bounded column, zeroed on
-    // an unbounded one. A residue the same size on a column whose own terms
-    // were tiny is genuine and, unbounded, has to stay.
-    std::vector<Real> coeff = {1.0, 1e-5, 1e-5, 1e-5};
-    const std::vector<Real> magnitude = {1.0, 1e8, 1e8, 1e-5};
-    const std::vector<Real> lower = {0.0, 0.0, 0.0, 0.0};
-    const std::vector<Real> upper = {1.0, 10.0, kInf, kInf};
+    // Each coefficient here but the first is what is left of terms summing to
+    // the given magnitude. Within 1e-12 of that magnitude it counts as
+    // round-off of the sum: paid for over a bounded column like any small
+    // term, and zeroed unpaid on an unbounded one -- but only while it is also
+    // under the absolute drop tolerance, since a relative residue of a huge
+    // sum can be large enough to matter. A residue the same size on a column
+    // whose own terms were tiny is genuine and, unbounded, has to stay.
+    std::vector<Real> coeff = {1.0, 1e-5, 1e-5, 5e-11, 5e-11};
+    const std::vector<Real> magnitude = {1.0, 1e8, 1e8, 1e8, 5e-11};
+    const std::vector<Real> lower = {0.0, 0.0, 0.0, 0.0, 0.0};
+    const std::vector<Real> upper = {1.0, 10.0, kInf, kInf, kInf};
 
     Int dropped = 0;
     const Real relaxed = dropAndRelax(coeff, 1.0, lower, upper, 1e-10, &dropped, magnitude, 1e-12);
     CHECK(dropped == 1);
     CHECK_THAT(relaxed, WithinAbs(1.0 - 1e-4, 1e-15));
-    CHECK(coeff[1] == 0.0);
-    CHECK(coeff[2] == 0.0);
-    CHECK(coeff[3] == 1e-5);
+    CHECK(coeff[1] == 0.0);    // bounded: paid
+    CHECK(coeff[2] == 1e-5);   // unbounded, above drop_tol: kept
+    CHECK(coeff[3] == 0.0);    // unbounded round-off under drop_tol: zeroed
+    CHECK(coeff[4] == 5e-11);  // unbounded and genuine: kept
 }
 
 TEST_CASE("SeparatorManager: Gomory family stats carry the separator's counts", "[cuts][gomory]") {
@@ -2027,56 +2030,64 @@ TEST_CASE("MipSolver: one cut family at a time silences all the others",
 }
 
 TEST_CASE("Gomory: a dropped term is paid over the box the cut is valid in", "[cuts][gomory]") {
-    // min -x - 1e-10 z  s.t.  x + 1e-11 z <= 2.2,  x in [0, 10] integer,
-    // z in [0, 1e9] continuous. z sits at its upper bound and its GMI term
-    // survives the logical substitution as a coefficient below kCoeffTol, so
-    // finalizeCut drops it -- and has to pay for it over z's range.
+    // min -x + 1e-10 z  s.t.  x - 1e-11 z <= 2.2,  x in [0, 10] integer,
+    // z in [0, 1e9] continuous. z sits at its lower bound with t_z < 0, so
+    // its own GMI term (1e-11 / (1 - f0)) and the one the row logical spreads
+    // onto it (1e-11 / f0) add up instead of cancelling: a positive x-space
+    // coefficient of ~6e-11, below kCoeffTol, which finalizeCut drops and pays
+    // for at z's upper bound.
     LpProblem problem;
     problem.sense = Sense::Minimize;
     problem.num_cols = 2;
-    problem.obj = {-1.0, -1e-10};
+    problem.obj = {-1.0, 1e-10};
     problem.col_lower = {0.0, 0.0};
     problem.col_upper = {10.0, 1e9};
     problem.col_type = {VarType::Integer, VarType::Continuous};
     problem.num_rows = 1;
     problem.row_lower = {-kInf};
     problem.row_upper = {2.2};
-    problem.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1e-11}});
+    problem.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, -1e-11}});
 
-    // Returns the x limit the single-column cut -a x >= -b states (x <= b/a).
-    auto separateOne = [&](Real z_upper, bool expect_local, const std::vector<Real>& z_points) {
+    auto separateWithZ = [&](Real z_lower, Real z_upper, bool expect_local) {
         DualSimplexSolver lp;
         lp.load(problem);
-        lp.setColBounds(1, 0.0, z_upper);
+        lp.setColBounds(1, z_lower, z_upper);
         REQUIRE(lp.solve().status == Status::Optimal);
         auto primals = lp.getPrimalValues();
-        REQUIRE(primals[1] == z_upper);
+        REQUIRE(primals[1] == z_lower);
 
         CutPool pool;
         GomorySeparator gomory;
         REQUIRE(gomory.separate(lp, problem, primals, pool) == 1);
         CHECK(gomory.stats().relaxed_terms == 1);
-        const auto& cut = pool[0];
+        Cut cut = pool[0];
         CHECK(cut.local == expect_local);
         REQUIRE(cut.indices == std::vector<Index>{0});  // z dropped
-
-        // Every feasible point of the cut's box survives it: x <= 2 at any z
-        // there, since x + 1e-11 z <= 2.2 holds for z up to 2e10.
-        for (Real x = 0.0; x <= 2.0; x += 1.0) {
-            for (Real z : z_points) {
-                REQUIRE(x + 1e-11 * z <= 2.2);
-                CHECK(cut.values[0] * x >= cut.lower - 1e-9);
-            }
-        }
-        return cut.lower / cut.values[0];
+        return cut;
     };
 
-    // Global cut: paid over the model's z range [0, 1e9].
-    const Real global_limit = separateOne(1e9, false, {0.0, 1e6, 1e9});
-    // Node-tightened z <= 1e6: the cut is local and pays over the node range.
-    // Paying over the model range instead would relax it about as much as
-    // the global cut, three orders of magnitude more than needed.
-    const Real local_limit = separateOne(1e6, true, {0.0, 1e6});
-    CHECK(global_limit > 2.01);
-    CHECK(local_limit < 2.001);
+    // Global: z sits at its model bound, so a node-tightened upper bound does
+    // not make the cut local -- and must not change what the drop is paid
+    // over. Paying over the node's 1e6 would under-pay for every node where
+    // z can reach 1e9.
+    const Cut root = separateWithZ(0.0, 1e9, false);
+    const Cut node = separateWithZ(0.0, 1e6, false);
+    CHECK(node.values[0] == root.values[0]);
+    CHECK(node.lower == root.lower);
+
+    // Local: z's lower bound is tightened to 1, so the cut is local, and the
+    // drop is paid over the node's range. A tighter node upper bound pays
+    // less, giving a strictly stronger cut.
+    const Cut wide = separateWithZ(1.0, 1e9, true);
+    const Cut narrow = separateWithZ(1.0, 1e6, true);
+    CHECK(narrow.values[0] == wide.values[0]);
+    CHECK(narrow.lower > wide.lower);
+
+    // And every point of the global cut's box survives it.
+    for (Real x = 0.0; x <= 2.0; x += 1.0) {
+        for (Real z : {0.0, 1e6, 1e9}) {
+            REQUIRE(x - 1e-11 * z <= 2.2);
+            CHECK(root.values[0] * x >= root.lower - 1e-9);
+        }
+    }
 }
