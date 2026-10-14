@@ -57,6 +57,11 @@ void writeMps(const std::string& filename, const LpProblem& input) {
 
     out << "NAME          " << problem->name << '\n';
 
+    // Two-line form, which fixed- and free-format readers both accept.
+    if (problem->sense == Sense::Maximize) {
+        out << "OBJSENSE\n    MAX\n";
+    }
+
     // ROWS section.
     out << "ROWS\n";
     out << " N  " << obj_name << '\n';

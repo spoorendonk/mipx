@@ -215,6 +215,116 @@ TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][
     }
 }
 
+TEST_CASE("MPS reader: OBJSENSE on its own line or on the section line", "[io][mps]") {
+    // max x with x <= 4, its sense given in each spelling the readers in use
+    // accept (issue #220).
+    const auto readWithSense = [](const std::string& sense_lines) {
+        const std::string path = testDataDir() + "/objsense.mps";
+        {
+            std::ofstream out(path);
+            out << "NAME          OBJSENSE\n"
+                << sense_lines
+                << "ROWS\n"
+                   " N  COST\n"
+                   " L  R1\n"
+                   "COLUMNS\n"
+                   "    X         COST      1.0          R1        1.0\n"
+                   "RHS\n"
+                   "    RHS       R1        4.0\n"
+                   "ENDATA\n";
+        }
+        // Removed on every exit, the throwing read included.
+        struct RemoveOnExit {
+            std::string path;
+            ~RemoveOnExit() { std::filesystem::remove(path); }
+        } cleanup{path};
+        return readMps(path);
+    };
+
+    CHECK(readWithSense("").sense == Sense::Minimize);
+    CHECK(readWithSense("OBJSENSE\n    MAX\n").sense == Sense::Maximize);
+    CHECK(readWithSense("OBJSENSE\n    MAXIMIZE\n").sense == Sense::Maximize);
+    CHECK(readWithSense("OBJSENSE MAX\n").sense == Sense::Maximize);
+    CHECK(readWithSense("OBJSENSE    MAXIMIZE\n").sense == Sense::Maximize);
+    CHECK(readWithSense("OBJSENSE\n    MIN\n").sense == Sense::Minimize);
+    CHECK(readWithSense("OBJSENSE MINIMIZE\n").sense == Sense::Minimize);
+    CHECK_THROWS_AS(readWithSense("OBJSENSE\n    SIDEWAYS\n"), std::runtime_error);
+
+    // The sense is the model's, not a label: max x over x <= 4 is 4.
+    const auto result = solveFeatureModel(readWithSense("OBJSENSE\n    MAX\n"));
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-9));
+}
+
+TEST_CASE("MPS writer: round trip keeps a maximisation", "[io][mps]") {
+    LpProblem lp;
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 2;
+    lp.obj = {3.0, -1.5};
+    lp.obj_offset = 2.25;
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {4.0, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Integer};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {6.0};
+    lp.row_names = {"cap"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+
+    const std::string path = testDataDir() + "/maximize_roundtrip.mps";
+    writeMps(path, lp);
+    auto reread = readMps(path);
+    std::filesystem::remove(path);
+
+    CHECK(reread.sense == Sense::Maximize);
+    CHECK(reread.obj == lp.obj);
+    CHECK(reread.obj_offset == lp.obj_offset);
+    CHECK(reread.col_type == lp.col_type);
+
+    // A minimisation writes no OBJSENSE and still reads back as one.
+    lp.sense = Sense::Minimize;
+    writeMps(path, lp);
+    reread = readMps(path);
+    std::filesystem::remove(path);
+    CHECK(reread.sense == Sense::Minimize);
+    CHECK(reread.obj == lp.obj);
+}
+
+TEST_CASE("MPS reader: only the first N row is the objective", "[io][mps]") {
+    // A second free row is dropped with its coefficients and RHS; before #220
+    // it overwrote the objective and its constant.
+    const std::string path = testDataDir() + "/two_free_rows.mps";
+    {
+        std::ofstream out(path);
+        out << "NAME          TWOFREE\n"
+               "ROWS\n"
+               " N  COST\n"
+               " G  R1\n"
+               " N  OTHER\n"
+               "COLUMNS\n"
+               "    X         COST      1.0          R1        1.0\n"
+               "    X         OTHER     7.0\n"
+               "    Y         OTHER     5.0          R1        1.0\n"
+               "RHS\n"
+               "    RHS       COST      -2.0         R1        1.0\n"
+               "    RHS       OTHER     9.0\n"
+               "RANGES\n"
+               "    RNG       OTHER     3.0\n"
+               "ENDATA\n";
+    }
+    auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    REQUIRE(lp.num_cols == 2);
+    CHECK(lp.obj == std::vector<Real>{1.0, 0.0});
+    CHECK(lp.obj_offset == 2.0);
+    REQUIRE(lp.num_rows == 1);
+    CHECK(lp.row_names[0] == "R1");
+    CHECK(lp.row_lower[0] == 1.0);
+    CHECK(lp.matrix.numNonzeros() == 2);
+}
+
 TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
     auto prob = readLp(testDataDir() + "/tiny.lp");
 

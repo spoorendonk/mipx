@@ -456,7 +456,7 @@ bool isSection(std::string_view line) {
     return !std::isspace(static_cast<unsigned char>(line[0]));
 }
 
-enum class Section { None, Name, Rows, Columns, Rhs, Ranges, Bounds, Endata };
+enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, Endata };
 
 Section parseSection(std::string_view line) {
     auto tokens = tokenize(line);
@@ -466,6 +466,9 @@ Section parseSection(std::string_view line) {
     auto s = tokens[0];
     if (s == "NAME") {
         return Section::Name;
+    }
+    if (s == "OBJSENSE") {
+        return Section::ObjSense;
     }
     if (s == "ROWS") {
         return Section::Rows;
@@ -505,6 +508,23 @@ struct StringEqual {
 };
 
 using StringMap = std::unordered_map<std::string, Index, StringHash, StringEqual>;
+
+/// The objective sense an OBJSENSE value names: MAX/MAXIMIZE or MIN/MINIMIZE.
+Sense parseObjSense(std::string_view value) {
+    if (value == "MAX" || value == "MAXIMIZE") {
+        return Sense::Maximize;
+    }
+    if (value == "MIN" || value == "MINIMIZE") {
+        return Sense::Minimize;
+    }
+    throw std::runtime_error("MPS: unknown OBJSENSE '" + std::string(value) + "'");
+}
+
+/// Row-map entries for free (N) rows, which are not constraints. Only the
+/// first N row is the objective; any later one is dropped with everything
+/// written on it, the convention CPLEX and HiGHS follow.
+constexpr Index kObjectiveRow = -1;
+constexpr Index kDroppedFreeRow = -2;
 
 }  // namespace
 
@@ -559,6 +579,7 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
     }
 
     bool in_integer_section = false;
+    bool have_objective_row = false;
     Section section = Section::None;
 
     // Column name cache: MPS groups columns contiguously, so the same
@@ -629,6 +650,13 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                     prob.name = std::string(tokens[1]);
                 }
             }
+            // Free MPS may put the sense on the section line itself.
+            if (section == Section::ObjSense) {
+                auto tokens = tokenize(line);
+                if (tokens.n >= 2) {
+                    prob.sense = parseObjSense(tokens[1]);
+                }
+            }
             if (section == Section::Endata) {
                 break;
             }
@@ -641,6 +669,11 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
         }
 
         switch (section) {
+            case Section::ObjSense: {
+                prob.sense = parseObjSense(tokens[0]);
+                break;
+            }
+
             case Section::Rows: {
                 if (tokens.n < 2) {
                     break;
@@ -648,8 +681,9 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                 char sense = tokens[0][0];
                 auto name = tokens[1];
                 if (sense == 'N') {
-                    // Objective row.
-                    row_map.emplace(std::string(name), -1);
+                    row_map.emplace(std::string(name),
+                                    have_objective_row ? kDroppedFreeRow : kObjectiveRow);
+                    have_objective_row = true;
                 } else {
                     Index idx = prob.num_rows++;
                     row_map.emplace(std::string(name), idx);
@@ -690,9 +724,10 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                         throw std::runtime_error("MPS: unknown row '" + std::string(row_name) +
                                                  "'");
                     }
-                    if (it->second == -1) {
-                        // Objective row.
+                    if (it->second == kObjectiveRow) {
                         prob.obj[col_idx] = val;
+                    } else if (it->second == kDroppedFreeRow) {
+                        continue;
                     } else {
                         entry_rows.push_back(it->second);
                         entry_cols.push_back(col_idx);
@@ -714,7 +749,10 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                     if (it == row_map.end()) {
                         continue;
                     }
-                    if (it->second == -1) {
+                    if (it->second == kDroppedFreeRow) {
+                        continue;
+                    }
+                    if (it->second == kObjectiveRow) {
                         // An RHS on the objective row is the negated objective
                         // constant: obj_offset = -RHS, so the model reads as
                         // c'x - RHS. Same convention as HiGHS and CPLEX, and the
@@ -741,7 +779,7 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                     auto row_name = tokens[i];
                     Real val = parseReal(tokens[i + 1]);
                     auto it = row_map.find(row_name);
-                    if (it == row_map.end() || it->second == -1) {
+                    if (it == row_map.end() || it->second < 0) {
                         continue;
                     }
                     Index idx = it->second;
