@@ -124,7 +124,7 @@ bool ReliabilityBranching::updateFromChild(const TreePseudocostSample& sample,
     if (!inRange(var) || !std::isfinite(sample.parent_objective)) {
         return false;  // Root, or a node not made by createChildren().
     }
-    if (sample.status != Status::Optimal || !std::isfinite(sample.objective)) {
+    if (sample.status != Status::Optimal || !std::isfinite(sample.objective) || sample.cutoff) {
         ++telemetry.pseudocost_tree_skipped;
         return false;
     }

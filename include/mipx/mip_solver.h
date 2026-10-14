@@ -378,6 +378,9 @@ public:
         exact_refinement_rational_scale_ = std::max<Real>(1.0, scale);
     }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    /// Turn strong branching off: branching then rests on pseudocosts alone,
+    /// learned from the tree. Mainly for tests and experiments.
+    void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
     void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
@@ -613,6 +616,7 @@ private:
     bool pre_root_lp_light_enabled_ = false;
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
+    bool strong_branching_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;

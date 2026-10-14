@@ -221,6 +221,9 @@ TEST_CASE("ReliabilityBranching records nothing from children without a gain", "
         TreePseudocostSample::fromChild(down, Status::Infeasible, 0.0), telemetry));
     CHECK_FALSE(branching.updateFromChild(
         TreePseudocostSample::fromChild(up, Status::IterLimit, 11.0), telemetry));
+    // A child the incumbent cuts off measures the cutoff, not the branching.
+    CHECK_FALSE(branching.updateFromChild(
+        TreePseudocostSample::fromChild(up, Status::Optimal, 50.0, true), telemetry));
     // The root has no parent and no branching to credit.
     CHECK_FALSE(branching.updateFromChild(
         TreePseudocostSample::fromChild(BnbNode{}, Status::Optimal, 11.0), telemetry));
@@ -228,7 +231,7 @@ TEST_CASE("ReliabilityBranching records nothing from children without a gain", "
     CHECK(branching.downReliability(1) == 0);
     CHECK(branching.upReliability(1) == 0);
     CHECK(telemetry.pseudocost_updates_tree == 0);
-    CHECK(telemetry.pseudocost_tree_skipped == 2);
+    CHECK(telemetry.pseudocost_tree_skipped == 3);
 }
 
 TEST_CASE("SymmetryManager adds canonical symmetry cuts", "[symmetry]") {

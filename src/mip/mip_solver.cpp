@@ -2097,12 +2097,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // The gain this LP shows over its parent is the pseudocost signal for the
     // branching that created the node; recording it is what lets variables
     // become reliable without being strong-branched over and over (#199).
-    // It is taken before any pruning below: a child cut off by the incumbent
-    // still solved to optimality and still measured a real gain. A caller
-    // that runs nodes concurrently but must stay deterministic collects the
-    // sample instead and applies it in a fixed order.
+    // A child the incumbent cuts off is not recorded: its LP stops mattering
+    // at the cutoff, so the gain says more about the incumbent than about
+    // the branching. A caller that runs nodes concurrently but must stay
+    // deterministic collects the sample instead and applies it in batch order.
+    const bool cutoff = node_result.status == Status::Optimal && incumbent_snapshot < kInf &&
+                        node_result.objective >= incumbent_snapshot - 1e-6;
     const auto sample =
-        TreePseudocostSample::fromChild(node, node_result.status, node_result.objective);
+        TreePseudocostSample::fromChild(node, node_result.status, node_result.objective, cutoff);
     if (deferred_pseudocost != nullptr) {
         *deferred_pseudocost = sample;
     } else {
@@ -2126,6 +2128,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     node_obj_out = node_result.objective;
+    // The children measure their gain against this objective, not the final
+    // node_obj_out: tree presolve and reduced-cost fixing below tighten bounds
+    // only in this node's working domain, which the children do not inherit,
+    // so a refreshed objective could sit above what a child can reach (#199).
+    const Real children_reference_objective = node_result.objective;
     node_primals_out = lp.getPrimalValues();
 
     // Count integer infeasibilities (fractional integer variables).
@@ -2702,14 +2709,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         {
             std::lock_guard<std::mutex> lock(branching_mutex_);
             const Int saved_budget = branching_rule_.strongBranchProbeBudget();
-            if (strong_branch_budget_override >= 2 &&
+            if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(strong_branch_budget_override);
             }
             auto selection =
                 branching_rule_.select(lp, problem_, node_primals_out, current_lower, current_upper,
                                        node_result.objective, false, branching_stats_);
-            if (strong_branch_budget_override >= 2 &&
+            if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(saved_budget);
             }
@@ -2743,6 +2750,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         createChildren(std::move(solved_node), branch_var, node_primals_out[branch_var]);
     left.lp_bound = node_obj_out;
     right.lp_bound = node_obj_out;
+    left.parent_objective = children_reference_objective;
+    right.parent_objective = children_reference_objective;
     left.estimate = solved_node.estimate;
     right.estimate = solved_node.estimate;
 
@@ -3251,9 +3260,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             for (Int i = 0; i < batch_size; ++i) {
                 auto& task = tasks[static_cast<std::size_t>(i)];
                 auto& worker_ctx = workers[static_cast<std::size_t>(task.worker_id)];
-                // Tree pseudocost samples are applied here, in task order, so the
-                // pseudocosts the next batch branches on do not depend on which
-                // worker finished first.
+                // Tree pseudocost samples are applied here, in task order, so they
+                // add no worker-order dependence. Strong-branch probes inside
+                // select() still update pseudocosts concurrently during the batch,
+                // as they did before tree samples existed.
                 if (task.pseudocost_sample.has_value()) {
                     std::lock_guard<std::mutex> lock(branching_mutex_);
                     branching_rule_.updateFromChild(*task.pseudocost_sample, branching_stats_);
@@ -4048,6 +4058,9 @@ MipResult MipSolver::solve() {
     }
 
     branching_rule_.reset(problem_.num_cols);
+    if (!strong_branching_enabled_) {
+        branching_rule_.setStrongBranchProbeBudget(0);
+    }
     branching_stats_ = {};
     Real incumbent = kInf;
     std::vector<Real> best_solution;

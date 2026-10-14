@@ -533,7 +533,13 @@ TEST_CASE("MIPLIB: gen objective matches .solu without mixed tree presolve",
     const auto result = solver.solve();
 
     REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(entry->value, objectiveTol(entry->value)));
+    // "Optimal" here means within the 1e-4 gap set above, so the incumbent
+    // may sit up to that far above the optimum; which one is found depends
+    // on search order (tree pseudocosts, #199, moved it by 5.8e-5). It must
+    // never be below the optimum.
+    CHECK(result.objective >= entry->value - objectiveTol(entry->value));
+    CHECK(result.objective <=
+          entry->value + 1e-4 * std::abs(entry->value) + objectiveTol(entry->value));
     CHECK(solver.getTreePresolveStats().attempts == 0);
 }
 

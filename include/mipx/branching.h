@@ -69,8 +69,8 @@ struct BranchingTelemetry {
     Int pseudocost_updates_strong = 0;
     /// Pseudocost samples recorded from solved child nodes in the tree.
     Int pseudocost_updates_tree = 0;
-    /// Child nodes whose LP ended infeasible or without an optimum, so gave
-    /// no gain to record.
+    /// Child nodes whose LP ended infeasible, cut off or without an optimum,
+    /// so gave no gain to record.
     Int pseudocost_tree_skipped = 0;
 };
 
@@ -83,10 +83,14 @@ struct TreePseudocostSample {
     Real parent_objective = -kInf;
     Status status = Status::Error;
     Real objective = 0.0;
+    /// The child's LP reached the incumbent's objective, so the node is cut
+    /// off; its gain is bounded by the cutoff, not measured by the branching.
+    bool cutoff = false;
 
     [[nodiscard]] static TreePseudocostSample fromChild(const BnbNode& child, Status status,
-                                                        Real objective) {
-        return {child.branch, child.branch_value, child.parent_objective, status, objective};
+                                                        Real objective, bool cutoff = false) {
+        return {child.branch, child.branch_value, child.parent_objective,
+                status,       objective,          cutoff};
     }
 };
 
@@ -99,7 +103,9 @@ public:
     void setStrongBranchMaxCandidates(Int c) {
         strong_branch_max_candidates_ = std::max<Int>(1, c);
     }
-    void setStrongBranchProbeBudget(Int b) { strong_branch_probe_budget_ = std::max<Int>(2, b); }
+    /// Directional probes per strong-branch call. A pair is the smallest
+    /// useful budget; below 2 no probe runs, which disables strong branching.
+    void setStrongBranchProbeBudget(Int b) { strong_branch_probe_budget_ = std::max<Int>(0, b); }
     [[nodiscard]] Int strongBranchProbeBudget() const { return strong_branch_probe_budget_; }
     void setStrongBranchIterLimit(Int iters) {
         strong_branch_iter_limit_ = std::max<Int>(1, iters);
@@ -119,8 +125,9 @@ public:
 
     /// Record the pseudocost sample a solved child node yields: the gain of
     /// its LP objective over the parent's, per unit of branching distance.
-    /// Only an optimal child LP carries a gain; an infeasible child, or one
-    /// whose LP stopped early, is counted as skipped and records nothing.
+    /// Only an optimal child LP that is not cut off carries a gain; an
+    /// infeasible or cut-off child, or one whose LP stopped early, is counted
+    /// as skipped and records nothing.
     /// Returns true when a sample was recorded.
     bool updateFromChild(const TreePseudocostSample& sample, BranchingTelemetry& telemetry);
 
