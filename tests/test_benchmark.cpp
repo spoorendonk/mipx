@@ -358,7 +358,9 @@ TEST_CASE("Netlib: pilot solves to its verified optimum through presolve",
     // an infeasible point below the optimum still fails here.
     const std::string netlib_dir = testDataDir() + "/netlib";
     const std::string path = netlib_dir + "/pilot.mps.gz";
-    const std::string solu_file = netlib_dir + "/netlib.solu";
+    // The tracked reference, not the copy in the data dir: a copy made before
+    // the pilot correction still holds the stale value.
+    const std::string solu_file = testDataDir() + "/netlib.solu";
     if (!fs::exists(path) || !fs::exists(solu_file)) {
         SKIP("pilot or netlib.solu not available");
     }
