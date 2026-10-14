@@ -1,0 +1,1221 @@
+// Validity audit by integer-point enumeration (#227).
+//
+// Every presolve reduction and node propagator is run on small random and
+// hand-built models whose feasible sets can be listed in full. A reduction
+// passes when no feasible point of the original is lost (or, for a dual
+// reduction, when postsolve maps the reduced model's points back to feasible
+// points of equal objective and the optimum is unchanged); a propagator passes
+// when every feasible point inside the node's box stays inside the box it
+// tightens to.
+//
+// A model has integral columns plus at most one continuous column. For each
+// integral assignment the continuous column's feasible values form a union of
+// intervals, computed exactly from the rows, so mixed models are enumerated
+// too: free, half-bounded and semi-continuous columns included.
+
+#include "mipx/clique_table.h"
+#include "mipx/conflict_graph.h"
+#include "mipx/domain.h"
+#include "mipx/dual_simplex.h"
+#include "mipx/implication_graph.h"
+#include "mipx/mip_solver.h"
+#include "mipx/presolve.h"
+#include "mipx/probing.h"
+#include "mipx/reduced_cost_fixer.h"
+#include "mipx/variable_bounds.h"
+
+#include <algorithm>
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cmath>
+#include <functional>
+#include <random>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace mipx;
+using Catch::Matchers::WithinAbs;
+
+namespace {
+
+constexpr Real kFeasTol = 1e-6;
+constexpr Real kObjTol = 1e-6;
+
+struct Interval {
+    Real lo;
+    Real hi;
+};
+
+bool isIntegral(VarType t) {
+    return t == VarType::Integer || t == VarType::Binary || t == VarType::SemiInteger;
+}
+
+bool isSemi(VarType t) {
+    return t == VarType::SemiContinuous || t == VarType::SemiInteger;
+}
+
+// The values column j may take, ignoring integrality: one interval, or
+// {0} and [L, U] for a semi-continuous or semi-integer column.
+std::vector<Interval> columnDomain(const LpProblem& lp, Index j) {
+    if (isSemi(lp.col_type[j])) {
+        const Real semi_lower = !lp.col_semi_lower.empty() && lp.col_semi_lower[j] > 0.0
+                                    ? lp.col_semi_lower[j]
+                                    : std::max<Real>(0.0, lp.col_lower[j]);
+        return {{0.0, 0.0}, {semi_lower, lp.col_upper[j]}};
+    }
+    return {{lp.col_lower[j], lp.col_upper[j]}};
+}
+
+std::vector<Real> integerValues(const std::vector<Interval>& domain) {
+    std::vector<Real> values;
+    for (const auto& iv : domain) {
+        for (Real v = std::ceil(iv.lo - 1e-9); v <= iv.hi + 1e-9; v += 1.0) {
+            values.push_back(v);
+        }
+    }
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return values;
+}
+
+Real objective(const LpProblem& lp, const std::vector<Real>& x) {
+    Real value = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        value += lp.obj[j] * x[j];
+    }
+    return value;
+}
+
+// Objective in minimization terms, so smaller is always better.
+Real minTerms(const LpProblem& lp, Real value) {
+    return lp.sense == Sense::Maximize ? -value : value;
+}
+
+bool pointFeasible(const LpProblem& lp, const std::vector<Real>& x, Real tol) {
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        bool in_domain = false;
+        for (const auto& iv : columnDomain(lp, j)) {
+            in_domain = in_domain || (x[j] >= iv.lo - tol && x[j] <= iv.hi + tol);
+        }
+        if (!in_domain) {
+            return false;
+        }
+        if (isIntegral(lp.col_type[j]) && std::abs(x[j] - std::round(x[j])) > tol) {
+            return false;
+        }
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        auto rv = lp.matrix.row(i);
+        Real act = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            act += rv.values[k] * x[rv.indices[k]];
+        }
+        if (act < lp.row_lower[i] - tol || act > lp.row_upper[i] + tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string describe(const std::vector<Real>& x) {
+    std::ostringstream os;
+    for (Real v : x) {
+        os << " " << v;
+    }
+    return os.str();
+}
+
+std::string describe(const LpProblem& lp) {
+    std::ostringstream os;
+    os << (lp.sense == Sense::Maximize ? "max" : "min");
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        os << " " << lp.obj[j] << "*x" << j;
+    }
+    os << " + " << lp.obj_offset << "\n";
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        auto rv = lp.matrix.row(i);
+        os << "  " << lp.row_lower[i] << " <=";
+        for (Index k = 0; k < rv.size(); ++k) {
+            os << " " << rv.values[k] << "*x" << rv.indices[k];
+        }
+        os << " <= " << lp.row_upper[i] << "\n";
+    }
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const char* type = "C";
+        switch (lp.col_type[j]) {
+            case VarType::Integer:
+                type = "I";
+                break;
+            case VarType::Binary:
+                type = "B";
+                break;
+            case VarType::SemiContinuous:
+                type = "SC";
+                break;
+            case VarType::SemiInteger:
+                type = "SI";
+                break;
+            default:
+                break;
+        }
+        os << "  x" << j << " " << type << " [" << lp.col_lower[j] << ", " << lp.col_upper[j]
+           << "]\n";
+    }
+    return os.str();
+}
+
+// One integral assignment with the feasible values of the continuous column
+// (`cont` < 0 when there is none, and then `cont_set` is empty).
+struct Slice {
+    std::vector<Real> x;
+    Index cont = -1;
+    std::vector<Interval> cont_set;
+};
+
+// Calls `fn` for every integral assignment that has a feasible completion.
+void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)>& fn) {
+    Index cont = -1;
+    std::vector<std::vector<Real>> values(lp.num_cols);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (isIntegral(lp.col_type[j])) {
+            values[j] = integerValues(columnDomain(lp, j));
+            if (values[j].empty()) {
+                return;
+            }
+        } else {
+            REQUIRE(cont < 0);  // The enumeration handles one continuous column.
+            cont = j;
+            values[j] = {0.0};
+        }
+    }
+
+    Slice slice;
+    slice.cont = cont;
+    slice.x.assign(lp.num_cols, 0.0);
+    std::vector<std::size_t> pos(lp.num_cols, 0);
+    while (true) {
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            slice.x[j] = values[j][pos[j]];
+        }
+        bool feasible = true;
+        slice.cont_set = cont >= 0 ? columnDomain(lp, cont) : std::vector<Interval>{};
+        for (Index i = 0; i < lp.num_rows && feasible; ++i) {
+            auto rv = lp.matrix.row(i);
+            Real act = 0.0;
+            Real c = 0.0;
+            for (Index k = 0; k < rv.size(); ++k) {
+                if (rv.indices[k] == cont) {
+                    c += rv.values[k];
+                } else {
+                    act += rv.values[k] * slice.x[rv.indices[k]];
+                }
+            }
+            if (c == 0.0) {
+                feasible = act >= lp.row_lower[i] - 1e-9 && act <= lp.row_upper[i] + 1e-9;
+                continue;
+            }
+            Real lo = (lp.row_lower[i] - act) / c;
+            Real hi = (lp.row_upper[i] - act) / c;
+            if (c < 0.0) {
+                std::swap(lo, hi);
+            }
+            std::vector<Interval> kept;
+            for (const auto& iv : slice.cont_set) {
+                const Interval cut{std::max(iv.lo, lo), std::min(iv.hi, hi)};
+                if (cut.lo <= cut.hi + 1e-9) {
+                    kept.push_back({cut.lo, std::max(cut.lo, cut.hi)});
+                }
+            }
+            slice.cont_set = std::move(kept);
+            feasible = !slice.cont_set.empty();
+        }
+        if (feasible) {
+            fn(slice);
+        }
+
+        Index j = 0;
+        while (j < lp.num_cols && pos[j] + 1 == values[j].size()) {
+            pos[j] = 0;
+            ++j;
+        }
+        if (j == lp.num_cols) {
+            break;
+        }
+        ++pos[j];
+    }
+}
+
+// Concrete points of a slice: its endpoints, midpoints and a value near zero
+// in each interval, so that checks see interior and boundary values alike.
+std::vector<std::vector<Real>> slicePoints(const Slice& s) {
+    if (s.cont < 0) {
+        return {s.x};
+    }
+    std::vector<std::vector<Real>> points;
+    auto add = [&](Real v) {
+        auto x = s.x;
+        x[s.cont] = v;
+        points.push_back(std::move(x));
+    };
+    for (const auto& iv : s.cont_set) {
+        if (std::isfinite(iv.lo)) {
+            add(iv.lo);
+        }
+        if (std::isfinite(iv.hi)) {
+            add(iv.hi);
+        }
+        if (std::isfinite(iv.lo) && std::isfinite(iv.hi)) {
+            add(0.5 * (iv.lo + iv.hi));
+        }
+        add(std::clamp<Real>(0.0, iv.lo, iv.hi));
+    }
+    return points;
+}
+
+// The best point of a slice; false when the continuous column is unbounded
+// in the improving direction.
+bool bestOfSlice(const LpProblem& lp, const Slice& s, std::vector<Real>& best) {
+    best = s.x;
+    if (s.cont < 0) {
+        return true;
+    }
+    const Real c = minTerms(lp, lp.obj[s.cont]);
+    Real value = c > 0.0 ? kInf : -kInf;
+    for (const auto& iv : s.cont_set) {
+        if (c > 0.0) {
+            value = std::min(value, iv.lo);
+        } else if (c < 0.0) {
+            value = std::max(value, iv.hi);
+        } else {
+            value = std::clamp<Real>(0.0, iv.lo, iv.hi);
+        }
+    }
+    if (!std::isfinite(value)) {
+        return false;
+    }
+    best[s.cont] = value;
+    return true;
+}
+
+struct Enumeration {
+    bool feasible = false;
+    bool unbounded = false;
+    Real best = kInf;  // Objective, in the model's own sense.
+    std::vector<Real> argbest;
+};
+
+Enumeration enumerate(const LpProblem& lp) {
+    Enumeration e;
+    forEachFeasible(lp, [&](const Slice& s) {
+        std::vector<Real> x;
+        if (!bestOfSlice(lp, s, x)) {
+            e.unbounded = true;
+            return;
+        }
+        const Real value = objective(lp, x);
+        if (!e.feasible || minTerms(lp, value) < minTerms(lp, e.best)) {
+            e.best = value;
+            e.argbest = x;
+        }
+        e.feasible = true;
+    });
+    return e;
+}
+
+// ---- Models -----------------------------------------------------------------
+
+struct ModelSpec {
+    int min_int = 2;
+    int max_int = 4;
+    bool continuous = false;  // One continuous column: bounded, free, half-free or semi.
+    bool semi_integer = false;
+    bool objective = true;
+    bool symmetric = false;  // Duplicate a column, so the model has a symmetry.
+};
+
+LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
+    auto uniform = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+    auto chance = [&](double p) { return std::uniform_real_distribution<double>(0, 1)(rng) < p; };
+    const std::vector<Real> int_coefs = {1, 2, 3, 5, 7, -1, -2, -3, -4, -7};
+    const std::vector<Real> cont_coefs = {1, 2, 0.5, 1.5, -1, -2, -0.5, -3};
+
+    LpProblem lp;
+    lp.name = "validity";
+    lp.sense = chance(0.5) ? Sense::Minimize : Sense::Maximize;
+    const int n_int = uniform(spec.min_int, spec.max_int);
+    auto addCol = [&](Real lb, Real ub, VarType type) {
+        lp.col_lower.push_back(lb);
+        lp.col_upper.push_back(ub);
+        lp.col_type.push_back(type);
+        lp.obj.push_back(spec.objective ? uniform(-4, 4) : 0.0);
+        lp.col_names.push_back("x" + std::to_string(lp.num_cols));
+        ++lp.num_cols;
+    };
+    for (int j = 0; j < n_int; ++j) {
+        const int kind = uniform(0, 9);
+        if (kind <= 2) {
+            addCol(0.0, 1.0, VarType::Binary);
+        } else if (kind == 3) {
+            addCol(0.0, 1.0, VarType::Integer);
+        } else if (kind == 4 && spec.semi_integer) {
+            const Real semi_lower = uniform(1, 2);
+            addCol(semi_lower, semi_lower + uniform(1, 2), VarType::SemiInteger);
+        } else {
+            Real lb = uniform(-2, 1);
+            Real ub = lb + uniform(1, 3);
+            // Fractional bounds on integer columns, which every reduction
+            // must round in before it reasons from them.
+            if (chance(0.2)) {
+                lb -= 0.5;
+            }
+            if (chance(0.2)) {
+                ub += 0.3;
+            }
+            addCol(lb, ub, VarType::Integer);
+        }
+    }
+    if (spec.continuous) {
+        switch (uniform(0, 3)) {
+            case 0:
+                addCol(-2.5, 3.5, VarType::Continuous);
+                break;
+            case 1:
+                addCol(-kInf, kInf, VarType::Continuous);
+                break;
+            case 2:
+                addCol(0.0, kInf, VarType::Continuous);
+                break;
+            default:
+                addCol(1.5, 4.0, VarType::SemiContinuous);
+                break;
+        }
+    }
+    Index sym_src = -1;
+    if (spec.symmetric) {
+        sym_src = uniform(0, n_int - 1);
+        addCol(lp.col_lower[sym_src], lp.col_upper[sym_src], lp.col_type[sym_src]);
+        lp.obj.back() = lp.obj[sym_src];
+    }
+
+    // A random point of the box: rows are drawn around its activity, so most
+    // models are feasible but not trivially so.
+    std::vector<Real> anchor(lp.num_cols);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const auto domain = columnDomain(lp, j);
+        const auto& iv = domain[uniform(0, static_cast<int>(domain.size()) - 1)];
+        if (isIntegral(lp.col_type[j])) {
+            const auto values = integerValues({iv});
+            anchor[j] = values.empty() ? integerValues(domain)[0]
+                                       : values[uniform(0, static_cast<int>(values.size()) - 1)];
+        } else {
+            const Real lo = std::isfinite(iv.lo) ? iv.lo : -3.0;
+            const Real hi = std::isfinite(iv.hi) ? iv.hi : 3.0;
+            anchor[j] = lo + (hi - lo) * uniform(0, 4) / 4.0;
+        }
+    }
+
+    const int m = uniform(1, 3);
+    std::vector<Triplet> trips;
+    for (int i = 0; i < m; ++i) {
+        std::vector<std::pair<Index, Real>> row;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            if (chance(0.75)) {
+                const auto& pool = isIntegral(lp.col_type[j]) ? int_coefs : cont_coefs;
+                row.push_back({j, pool[uniform(0, static_cast<int>(pool.size()) - 1)]});
+            }
+        }
+        if (row.empty()) {
+            row.push_back({uniform(0, lp.num_cols - 1), 1.0});
+        }
+        if (sym_src >= 0) {
+            // The copy gets the source's coefficient in every row.
+            const Index copy = lp.num_cols - 1;
+            std::erase_if(row, [&](const auto& t) { return t.first == copy; });
+            for (const auto& [j, a] : std::vector(row)) {
+                if (j == sym_src) {
+                    row.push_back({copy, a});
+                }
+            }
+        }
+        Real act = 0.0;
+        for (const auto& [j, a] : row) {
+            act += a * anchor[j];
+            trips.push_back({static_cast<Index>(i), j, a});
+        }
+        switch (uniform(0, 4)) {
+            case 0:
+                lp.row_lower.push_back(act);
+                lp.row_upper.push_back(act);
+                break;
+            case 1:
+                lp.row_lower.push_back(act - uniform(0, 2));
+                lp.row_upper.push_back(lp.row_lower.back() + uniform(1, 3));
+                break;
+            case 2:
+                lp.row_lower.push_back(act - uniform(-1, 2));
+                lp.row_upper.push_back(kInf);
+                break;
+            default:
+                lp.row_lower.push_back(-kInf);
+                lp.row_upper.push_back(act + uniform(-1, 2));
+                break;
+        }
+        lp.row_names.push_back("r" + std::to_string(i));
+    }
+    lp.num_rows = m;
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
+    if (chance(0.3)) {
+        lp.obj_offset = 1.5;
+    }
+    return lp;
+}
+
+LpProblem makeModel(Sense sense, std::vector<Real> obj, std::vector<Real> lb, std::vector<Real> ub,
+                    std::vector<VarType> type, std::vector<std::vector<Real>> rows,
+                    std::vector<Real> row_lb, std::vector<Real> row_ub) {
+    LpProblem lp;
+    lp.name = "validity_fixture";
+    lp.sense = sense;
+    lp.num_cols = static_cast<Index>(obj.size());
+    lp.obj = std::move(obj);
+    lp.col_lower = std::move(lb);
+    lp.col_upper = std::move(ub);
+    lp.col_type = std::move(type);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        lp.col_names.push_back("x" + std::to_string(j));
+    }
+    lp.num_rows = static_cast<Index>(rows.size());
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            if (rows[i][j] != 0.0) {
+                trips.push_back({i, j, rows[i][j]});
+            }
+        }
+        lp.row_names.push_back("r" + std::to_string(i));
+    }
+    lp.row_lower = std::move(row_lb);
+    lp.row_upper = std::move(row_ub);
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
+    return lp;
+}
+
+// Hand-built models, each aimed at a reduction's edge case.
+std::vector<LpProblem> fixtures() {
+    constexpr auto I = VarType::Integer;
+    constexpr auto B = VarType::Binary;
+    constexpr auto C = VarType::Continuous;
+    std::vector<LpProblem> models;
+    // #226: coefficient tightening against a continuous column.
+    models.push_back(
+        makeModel(Sense::Maximize, {100, 1}, {0, -100}, {1, 2}, {I, C}, {{7, 1}}, {-kInf}, {8}));
+    // Doubleton equality between integers whose ratio is not integral:
+    // 2x - 3y = 1 admits only x = 2, 5 over the box.
+    models.push_back(
+        makeModel(Sense::Minimize, {1, 1}, {0, 0}, {6, 4}, {I, I}, {{2, -3}}, {1}, {1}));
+    // Doubleton equality between an integer and a continuous column.
+    models.push_back(makeModel(Sense::Maximize, {1, 2}, {0, 0}, {3, 10}, {I, C}, {{3, -2}, {1, 1}},
+                               {1, -kInf}, {1, 4.5}));
+    // Free continuous column in a single row (implied free singleton column).
+    models.push_back(makeModel(Sense::Minimize, {2, -1, 1}, {0, 0, -kInf}, {3, 2, kInf}, {I, I, C},
+                               {{1, 1, -1}, {1, -1, 0}}, {0, -kInf}, {kInf, 1}));
+    // Set packing with a knapsack: cliques, implications and forcing rows.
+    models.push_back(makeModel(Sense::Maximize, {3, 2, 2, 1}, {0, 0, 0, 0}, {1, 1, 1, 1},
+                               {B, B, B, B}, {{1, 1, 1, 0}, {3, 0, 2, 4}, {0, 1, 0, -1}},
+                               {-kInf, -kInf, 0}, {1, 5, kInf}));
+    // Fractional bounds on integers with negative coefficients and a ranged row.
+    models.push_back(makeModel(Sense::Minimize, {-1, -2, 1}, {-1.5, -0.7, 0}, {2.5, 1.2, 3},
+                               {I, I, I}, {{-2, 3, 1}, {1, 1, -1}}, {-4, -1}, {3, 1}));
+    // Parallel rows that differ by scale and range.
+    models.push_back(makeModel(Sense::Maximize, {1, 1, 1}, {0, 0, 0}, {3, 3, 3}, {I, I, I},
+                               {{1, 2, 0}, {2, 4, 0}, {0, 1, 1}}, {-kInf, 1, 1}, {4, 7, 1}));
+    // A forcing row: max activity equals the rhs lower bound.
+    models.push_back(makeModel(Sense::Minimize, {1, 1, 1}, {0, 0, -1}, {2, 1, 1}, {I, I, I},
+                               {{1, 2, -1}, {1, 1, 1}}, {5, -kInf}, {kInf, 3}));
+    // Dual fixing: x2 appears only in >= rows with positive coefficients and
+    // has a positive cost; x0 has zero cost.
+    models.push_back(makeModel(Sense::Minimize, {0, 1, 2}, {0, 0, 0}, {2, 3, 2}, {I, I, I},
+                               {{1, 1, 1}, {-1, 2, 1}}, {2, 1}, {kInf, kInf}));
+    // Semi-continuous column bounded by an integer.
+    LpProblem semi = makeModel(Sense::Maximize, {1, 1}, {0, 2}, {3, 5},
+                               {I, VarType::SemiContinuous}, {{-2, 1}}, {-kInf}, {0.5});
+    models.push_back(semi);
+    // Semi-integer column next to a binary.
+    models.push_back(makeModel(Sense::Minimize, {-1, 3}, {2, 0}, {4, 1}, {VarType::SemiInteger, B},
+                               {{1, -4}}, {-kInf}, {0}));
+    return models;
+}
+
+// MipSolver solves the linearized model, so the components behind it are
+// audited on that form: semi columns become a column and a binary.
+LpProblem linearized(const LpProblem& lp) {
+    return hasAdvancedModelFeatures(lp) ? linearizeModelFeatures(lp) : lp;
+}
+
+std::vector<LpProblem> auditModels(int seed, int count, bool allow_continuous) {
+    std::mt19937 rng(seed);
+    std::vector<LpProblem> models = fixtures();
+    for (int t = 0; t < count; ++t) {
+        ModelSpec spec;
+        spec.continuous = allow_continuous && t % 2 == 1;
+        spec.semi_integer = t % 5 == 2;
+        spec.symmetric = t % 7 == 3;
+        models.push_back(randomModel(rng, spec));
+    }
+    return models;
+}
+
+// The model with each integral column's bounds rounded in. Presolve does not
+// round fractional bounds itself yet (#228), so the audits that would trip on
+// that one known bug run on rounded models and the reproducer below tracks it.
+LpProblem roundedIntegerBounds(LpProblem lp) {
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (isIntegral(lp.col_type[j])) {
+            lp.col_lower[j] = std::ceil(lp.col_lower[j] - 1e-9);
+            lp.col_upper[j] = std::floor(lp.col_upper[j] + 1e-9);
+        }
+    }
+    return lp;
+}
+
+// The same model as a minimization, which the solver audit uses until the
+// tree search handles maximization (#230).
+LpProblem minimized(LpProblem lp) {
+    if (lp.sense == Sense::Maximize) {
+        for (auto& c : lp.obj) {
+            c = -c;
+        }
+        lp.obj_offset = -lp.obj_offset;
+        lp.sense = Sense::Minimize;
+    }
+    return lp;
+}
+
+// ---- Presolve ---------------------------------------------------------------
+
+struct PresolveCase {
+    const char* name;
+    PresolveOptions options;
+};
+
+std::vector<PresolveCase> presolveCases() {
+    std::vector<PresolveCase> cases;
+    PresolveOptions o;
+    cases.push_back({"default", o});
+    PresolveOptions core = o;
+    core.enable_forcing_rows = false;
+    core.enable_dual_fixing = false;
+    core.enable_doubleton_aggregation = false;
+    core.enable_parallel_rows = false;
+    cases.push_back({"always-on reductions only", core});
+    PresolveOptions coeff = o;
+    coeff.enable_coefficient_tightening = true;
+    cases.push_back({"coefficient tightening (opt-in)", coeff});
+    PresolveOptions probing = o;
+    probing.enable_probing = true;
+    cases.push_back({"probing (opt-in)", probing});
+    PresolveOptions all = o;
+    all.enable_coefficient_tightening = true;
+    all.enable_probing = true;
+    cases.push_back({"all opt-in", all});
+    return cases;
+}
+
+// Checks one model under one option set. With a zero objective every
+// reduction must keep the projection of each feasible point; with an
+// objective, dual reductions may drop points but never the optimum.
+void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
+    const Enumeration orig = enumerate(lp);
+    if (orig.unbounded) {
+        return;
+    }
+    Presolver presolver;
+    presolver.setOptions(pc.options);
+    const LpProblem reduced = presolver.presolve(lp);
+    INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
+    if (presolver.isInfeasible()) {
+        CHECK_FALSE(orig.feasible);
+        return;
+    }
+    const auto& mapping = presolver.colMapping();
+    INFO("reduced:\n" << describe(reduced));
+
+    const Enumeration red = enumerate(reduced);
+    CHECK(red.feasible == orig.feasible);
+    CHECK_FALSE(red.unbounded);
+    if (red.feasible && orig.feasible) {
+        CHECK_THAT(red.best, WithinAbs(orig.best, kObjTol));
+    }
+
+    // Every point the reduced model admits postsolves to a feasible point of
+    // the original with the same objective.
+    forEachFeasible(reduced, [&](const Slice& s) {
+        for (const auto& xr : slicePoints(s)) {
+            const auto full = presolver.postsolve(xr);
+            INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full));
+            REQUIRE(full.size() == static_cast<std::size_t>(lp.num_cols));
+            CHECK(pointFeasible(lp, full, kFeasTol));
+            CHECK_THAT(objective(lp, full), WithinAbs(objective(reduced, xr), kObjTol));
+        }
+    });
+
+    const bool primal = std::all_of(lp.obj.begin(), lp.obj.end(), [](Real c) { return c == 0.0; });
+    if (!primal) {
+        return;
+    }
+    forEachFeasible(lp, [&](const Slice& s) {
+        for (const auto& x : slicePoints(s)) {
+            std::vector<Real> xr(reduced.num_cols);
+            for (Index jj = 0; jj < reduced.num_cols; ++jj) {
+                xr[jj] = x[mapping[jj]];
+            }
+            INFO("original point" << describe(x));
+            CHECK(pointFeasible(reduced, xr, kFeasTol));
+        }
+    });
+}
+
+LpProblem withoutObjective(LpProblem lp) {
+    std::fill(lp.obj.begin(), lp.obj.end(), 0.0);
+    return lp;
+}
+
+// ---- Node box ---------------------------------------------------------------
+
+// A random node: each integral column narrowed to a random sub-range of its
+// values, each bounded continuous column to a random sub-interval.
+void randomBox(const LpProblem& lp, std::mt19937& rng, std::vector<Real>& lower,
+               std::vector<Real>& upper) {
+    lower = lp.col_lower;
+    upper = lp.col_upper;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (std::uniform_int_distribution<int>(0, 2)(rng) == 0) {
+            continue;  // Some columns stay at their global bounds.
+        }
+        if (isIntegral(lp.col_type[j])) {
+            const auto values = integerValues({{lp.col_lower[j], lp.col_upper[j]}});
+            if (values.empty()) {
+                continue;
+            }
+            std::uniform_int_distribution<int> pick(0, static_cast<int>(values.size()) - 1);
+            int a = pick(rng);
+            int b = pick(rng);
+            lower[j] = values[std::min(a, b)];
+            upper[j] = values[std::max(a, b)];
+        } else if (std::isfinite(lp.col_lower[j]) && std::isfinite(lp.col_upper[j])) {
+            std::uniform_real_distribution<Real> frac(0.0, 0.5);
+            const Real width = lp.col_upper[j] - lp.col_lower[j];
+            lower[j] = lp.col_lower[j] + frac(rng) * width;
+            upper[j] = lp.col_upper[j] - frac(rng) * width;
+        }
+    }
+}
+
+LpProblem withBox(LpProblem lp, const std::vector<Real>& lower, const std::vector<Real>& upper) {
+    lp.col_lower = lower;
+    lp.col_upper = upper;
+    return lp;
+}
+
+// Every feasible point of `lp` (the node) lies inside [lower, upper].
+void checkInside(const LpProblem& lp, const std::vector<Real>& lower,
+                 const std::vector<Real>& upper) {
+    forEachFeasible(lp, [&](const Slice& s) {
+        INFO("feasible point" << describe(s.x));
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            INFO("column " << j << " bounds [" << lower[j] << ", " << upper[j] << "]");
+            if (j == s.cont) {
+                for (const auto& iv : s.cont_set) {
+                    CHECK(iv.lo >= lower[j] - kFeasTol);
+                    CHECK(iv.hi <= upper[j] + kFeasTol);
+                }
+            } else {
+                CHECK(s.x[j] >= lower[j] - kFeasTol);
+                CHECK(s.x[j] <= upper[j] + kFeasTol);
+            }
+        }
+    });
+}
+
+bool anyFeasible(const LpProblem& lp) {
+    bool found = false;
+    forEachFeasible(lp, [&](const Slice&) { found = true; });
+    return found;
+}
+
+// Value of literal `lit` at the integral assignment x.
+bool literalTrue(const std::vector<Real>& x, Literal lit) {
+    const bool one = x[lit.var] > 0.5;
+    return lit.complemented ? !one : one;
+}
+
+}  // namespace
+
+// =============================================================================
+// Presolve
+// =============================================================================
+
+TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum", "[validity]") {
+    const auto models = auditModels(227, 300, true);
+    for (const auto& pc : presolveCases()) {
+        for (std::size_t t = 0; t < models.size(); ++t) {
+            INFO("model " << t);
+            const LpProblem lp = roundedIntegerBounds(linearized(models[t]));
+            auditPresolve(lp, pc);
+            auditPresolve(withoutObjective(lp), pc);
+        }
+    }
+}
+
+// =============================================================================
+// Node propagators
+// =============================================================================
+
+TEST_CASE("Validity: bound propagation keeps every feasible point of the node", "[validity]") {
+    const auto models = auditModels(1227, 300, true);
+    std::mt19937 rng(7);
+    Int tightened = 0;
+    Int pruned = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        const LpProblem lp = linearized(models[t]);
+        INFO("model " << t << ":\n" << describe(lp));
+
+        // The global structures the tree attaches, built on the root model.
+        ConflictGraph graph;
+        graph.build(lp, BinaryColumns::ZeroOne);
+        CliqueTable cliques;
+        cliques.build(lp, graph);
+        ImplicationGraph implications;
+        VariableBoundStore vbs;
+        ProbingEngine probing;
+        const auto probe_stats = probing.probe(lp, implications, vbs);
+        if (probe_stats.infeasible) {
+            CHECK_FALSE(anyFeasible(lp));
+            continue;
+        }
+
+        for (int node = 0; node < 6; ++node) {
+            std::vector<Real> lower;
+            std::vector<Real> upper;
+            if (node == 0) {
+                lower = lp.col_lower;
+                upper = lp.col_upper;
+            } else {
+                randomBox(lp, rng, lower, upper);
+            }
+            const LpProblem box = withBox(lp, lower, upper);
+            for (int attach = 0; attach < 3; ++attach) {
+                INFO("node " << node << " attach " << attach << "\nbox:\n" << describe(box));
+                DomainPropagator dp;
+                dp.load(lp);
+                if (attach == 1) {
+                    dp.setCliqueTable(&cliques);
+                } else if (attach == 2 && implications.numImplications() > 0) {
+                    dp.setImplicationGraph(&implications);
+                }
+                for (Index j = 0; j < lp.num_cols; ++j) {
+                    dp.setBound(j, lower[j], upper[j]);
+                }
+                if (!dp.propagate()) {
+                    ++pruned;
+                    CHECK_FALSE(anyFeasible(box));
+                    continue;
+                }
+                std::vector<Real> new_lower(lp.num_cols);
+                std::vector<Real> new_upper(lp.num_cols);
+                for (Index j = 0; j < lp.num_cols; ++j) {
+                    new_lower[j] = dp.getLower(j);
+                    new_upper[j] = dp.getUpper(j);
+                    tightened += (new_lower[j] > lower[j] || new_upper[j] < upper[j]) ? 1 : 0;
+                }
+                checkInside(box, new_lower, new_upper);
+            }
+        }
+    }
+    // The audit is not vacuous: propagation both tightened and pruned.
+    CHECK(tightened > 0);
+    CHECK(pruned > 0);
+}
+
+TEST_CASE("Validity: probing learns only what every feasible point satisfies", "[validity]") {
+    const auto models = auditModels(2227, 300, true);
+    Int learned_fixings = 0;
+    Int learned_implications = 0;
+    Int learned_bounds = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        const LpProblem lp = linearized(models[t]);
+        INFO("model " << t << ":\n" << describe(lp));
+        ImplicationGraph implications;
+        VariableBoundStore vbs;
+        ProbingEngine probing;
+        const auto stats = probing.probe(lp, implications, vbs);
+        if (stats.infeasible) {
+            CHECK_FALSE(anyFeasible(lp));
+            continue;
+        }
+        learned_fixings += static_cast<Int>(probing.fixings().size());
+        learned_implications += implications.numImplications();
+        learned_bounds += vbs.numVUBs() + vbs.numVLBs();
+        forEachFeasible(lp, [&](const Slice& s) {
+            INFO("feasible point" << describe(s.x));
+            for (const auto& [var, value] : probing.fixings()) {
+                INFO("fixing x" << var << " = " << value);
+                CHECK_THAT(s.x[var], WithinAbs(value, kFeasTol));
+            }
+            for (const auto& eq : probing.equivalences()) {
+                INFO("equivalence x" << eq.var_a << (eq.same_sense ? " = x" : " = 1 - x")
+                                     << eq.var_b);
+                const Real b = eq.same_sense ? s.x[eq.var_b] : 1.0 - s.x[eq.var_b];
+                CHECK_THAT(s.x[eq.var_a], WithinAbs(b, kFeasTol));
+            }
+            for (Index from : implications.binaryVars()) {
+                for (bool val : {false, true}) {
+                    if ((s.x[from] > 0.5) != val) {
+                        continue;
+                    }
+                    for (const auto& imp : implications.implications(from, val)) {
+                        INFO("implication x" << from << "=" << val << " => x" << imp.to_var << "="
+                                             << imp.to_val);
+                        CHECK((s.x[imp.to_var] > 0.5) == imp.to_val);
+                    }
+                }
+            }
+            // Variable bounds, over the whole feasible range of the
+            // continuous column.
+            for (const auto& x : slicePoints(s)) {
+                for (Index j = 0; j < lp.num_cols; ++j) {
+                    for (const auto& vub : vbs.vubs(j)) {
+                        INFO("vub x" << j << " <= " << vub.coeff << "*x" << vub.binary_var << " + "
+                                     << vub.constant << " at" << describe(x));
+                        CHECK(x[j] <= vub.coeff * x[vub.binary_var] + vub.constant + kFeasTol);
+                    }
+                    for (const auto& vlb : vbs.vlbs(j)) {
+                        INFO("vlb x" << j << " >= " << vlb.coeff << "*x" << vlb.binary_var << " + "
+                                     << vlb.constant << " at" << describe(x));
+                        CHECK(x[j] >= vlb.coeff * x[vlb.binary_var] + vlb.constant - kFeasTol);
+                    }
+                }
+            }
+        });
+    }
+    CHECK(learned_fixings > 0);
+    CHECK(learned_implications > 0);
+    CHECK(learned_bounds > 0);
+}
+
+TEST_CASE("Validity: conflicts and cliques hold at every feasible point", "[validity]") {
+    const auto models = auditModels(3227, 300, true);
+    Index num_cliques = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        const LpProblem lp = linearized(models[t]);
+        INFO("model " << t << ":\n" << describe(lp));
+        ConflictGraph graph;
+        graph.build(lp, BinaryColumns::ZeroOne);
+        CliqueTable cliques;
+        cliques.build(lp, graph);
+        cliques.mergeAndSubsume();
+        num_cliques += cliques.numCliques();
+        forEachFeasible(lp, [&](const Slice& s) {
+            INFO("feasible point" << describe(s.x));
+            for (Index j = 0; j < lp.num_cols; ++j) {
+                if (!graph.isBinary(j)) {
+                    continue;
+                }
+                for (bool comp : {false, true}) {
+                    const Literal a{j, comp};
+                    if (!literalTrue(s.x, a)) {
+                        continue;
+                    }
+                    for (const Literal b : graph.neighbors(a)) {
+                        INFO("conflict x" << a.var << (a.complemented ? "'" : "") << " x" << b.var
+                                          << (b.complemented ? "'" : ""));
+                        CHECK_FALSE(literalTrue(s.x, b));
+                    }
+                }
+            }
+            for (Index c = 0; c < cliques.numCliques(); ++c) {
+                const auto& clique = cliques.clique(c);
+                Index count = 0;
+                for (const auto& lit : clique.literals) {
+                    count += literalTrue(s.x, lit) ? 1 : 0;
+                }
+                INFO("clique " << c);
+                CHECK(count <= 1);
+                if (clique.is_equality) {
+                    CHECK(count == 1);
+                }
+            }
+        });
+    }
+    CHECK(num_cliques > 0);
+}
+
+TEST_CASE("Validity: reduced-cost fixing keeps every point better than the incumbent",
+          "[validity]") {
+    const auto models = auditModels(4227, 300, true);
+    std::mt19937 rng(11);
+    Int tightened_total = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        LpProblem lp = linearized(models[t]);
+        // The fixer works on minimization models with no offset, as the
+        // solver hands it its internal form.
+        if (lp.sense == Sense::Maximize) {
+            for (auto& c : lp.obj) {
+                c = -c;
+            }
+            lp.sense = Sense::Minimize;
+        }
+        lp.obj_offset = 0.0;
+        INFO("model " << t << ":\n" << describe(lp));
+
+        for (int node = 0; node < 4; ++node) {
+            std::vector<Real> lower;
+            std::vector<Real> upper;
+            if (node == 0) {
+                lower = lp.col_lower;
+                upper = lp.col_upper;
+            } else {
+                randomBox(lp, rng, lower, upper);
+            }
+            const LpProblem box = withBox(lp, lower, upper);
+            const Enumeration e = enumerate(box);
+            if (!e.feasible || e.unbounded) {
+                continue;
+            }
+            DualSimplexSolver lp_solver;
+            lp_solver.setVerbose(false);
+            lp_solver.load(box);
+            if (lp_solver.solve().status != Status::Optimal) {
+                continue;
+            }
+            const auto rc = lp_solver.getReducedCosts();
+            const auto primals = lp_solver.getPrimalValues();
+            const Real lp_obj = lp_solver.getObjective();
+
+            // Incumbents at the optimum and above it.
+            std::vector<Real> objectives;
+            forEachFeasible(box, [&](const Slice& s) {
+                std::vector<Real> x;
+                if (bestOfSlice(box, s, x)) {
+                    objectives.push_back(objective(box, x));
+                }
+            });
+            std::sort(objectives.begin(), objectives.end());
+            const std::vector<Real> incumbents = {
+                objectives.front(), objectives[objectives.size() / 2], objectives.back()};
+            for (Real incumbent : incumbents) {
+                for (bool global : {true, false}) {
+                    INFO("node " << node << " incumbent " << incumbent << " lp " << lp_obj
+                                 << (global ? " global" : " local") << "\nbox:\n"
+                                 << describe(box));
+                    ReducedCostFixer fixer;
+                    fixer.load(lp);
+                    std::vector<Real> new_lower = lower;
+                    std::vector<Real> new_upper = upper;
+                    std::vector<Index> tightened;
+                    const bool ok = global
+                                        ? fixer.applyGlobalFixing(rc, primals, lp_obj, incumbent,
+                                                                  new_lower, new_upper, tightened)
+                                        : fixer.applyLocalFixing(rc, primals, lp_obj, incumbent,
+                                                                 new_lower, new_upper, tightened);
+                    tightened_total += static_cast<Int>(tightened.size());
+                    // Every point strictly better than the incumbent survives.
+                    forEachFeasible(box, [&](const Slice& s) {
+                        std::vector<Real> x;
+                        REQUIRE(bestOfSlice(box, s, x));
+                        if (objective(box, x) >= incumbent - kObjTol) {
+                            return;
+                        }
+                        INFO("improving point" << describe(x) << " obj " << objective(box, x));
+                        REQUIRE(ok);
+                        for (Index j = 0; j < lp.num_cols; ++j) {
+                            CHECK(x[j] >= new_lower[j] - kFeasTol);
+                            CHECK(x[j] <= new_upper[j] + kFeasTol);
+                        }
+                    });
+                }
+            }
+        }
+    }
+    CHECK(tightened_total > 0);
+}
+
+// =============================================================================
+// The solver end to end
+// =============================================================================
+
+// Propagators that only run inside the search (tree presolve, orbital fixing
+// and symmetry cuts, conflict analysis, root probing and clique propagation)
+// are audited through the solver: whatever it switches on, the optimum it
+// reports must be the enumerated one.
+TEST_CASE("Validity: the solver finds the enumerated optimum under every propagator",
+          "[validity]") {
+    struct SolverCase {
+        const char* name;
+        std::function<void(MipSolver&)> configure;
+    };
+    const std::vector<SolverCase> cases = {
+        {"default", [](MipSolver&) {}},
+        {"no root cuts", [](MipSolver& s) { s.setCutsEnabled(false); }},
+        {"tree presolve at every node",
+         [](MipSolver& s) {
+             s.setTreePresolveAutoTuning(false);
+             s.setTreePresolveControls(100, 0, 1);
+         }},
+        {"symmetry off", [](MipSolver& s) { s.setSymmetryEnabled(false); }},
+        {"presolve off", [](MipSolver& s) { s.setPresolve(false); }},
+        {"probing and cliques (opt-in)",
+         [](MipSolver& s) {
+             s.setProbingEnabled(true);
+             s.setCliqueTableEnabled(true);
+         }},
+        {"all opt-in",
+         [](MipSolver& s) {
+             s.setProbingEnabled(true);
+             s.setCliqueTableEnabled(true);
+             s.setRestartsEnabled(true);
+             s.setCutStrengthening(true);
+             s.setTreeCutsEnabled(true);
+             PresolveOptions o = s.getRootPresolveOptions();
+             o.enable_coefficient_tightening = true;
+             o.enable_probing = true;
+             s.setRootPresolveOptions(o);
+         }},
+    };
+    const auto models = auditModels(5227, 200, true);
+    Int tree_presolve_runs = 0;
+    Int symmetry_orbits = 0;
+    for (const auto& sc : cases) {
+        for (std::size_t t = 0; t < models.size(); ++t) {
+            const LpProblem lp = minimized(roundedIntegerBounds(models[t]));
+            const Enumeration e = enumerate(linearized(lp));
+            if (e.unbounded) {
+                continue;
+            }
+            INFO("solver case: " << sc.name << "\nmodel " << t << ":\n" << describe(lp));
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setNumThreads(1);
+            solver.setGapTolerance(0.0);
+            sc.configure(solver);
+            solver.load(lp);
+            const auto result = solver.solve();
+            tree_presolve_runs += solver.getTreePresolveStats().runs;
+            symmetry_orbits += solver.getSymmetryStats().orbits;
+            if (!e.feasible) {
+                CHECK(result.status == Status::Infeasible);
+                continue;
+            }
+            REQUIRE(result.status == Status::Optimal);
+            REQUIRE(result.solution.size() >= static_cast<std::size_t>(lp.num_cols));
+            std::vector<Real> x(result.solution.begin(), result.solution.begin() + lp.num_cols);
+            INFO("solution" << describe(x) << " reported objective " << result.objective);
+            CHECK(pointFeasible(lp, x, kFeasTol));
+            CHECK_THAT(objective(lp, x), WithinAbs(e.best, kObjTol));
+            CHECK_THAT(result.objective, WithinAbs(e.best, kObjTol));
+        }
+    }
+    // The search-time propagators did run.
+    CHECK(tree_presolve_runs > 0);
+    CHECK(symmetry_orbits > 0);
+}
+
+// =============================================================================
+// Known bugs in default-on code, filed rather than fixed here: a fix changes
+// default behaviour, which waits on a benchmark. Each reproducer may fail
+// until its issue is fixed; then drop the [!mayfail] tag and the workaround
+// in the audits above.
+// =============================================================================
+
+TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns",
+          "[validity][!mayfail]") {
+    constexpr auto I = VarType::Integer;
+    // min x0 over x0 integer in [0.5, 3]: the optimum is x0 = 1.
+    const LpProblem lower_side =
+        makeModel(Sense::Minimize, {1, 0}, {0.5, 0}, {3, 2}, {I, I}, {{1, 1}}, {-kInf}, {4});
+    // max -3 x0 over x0 integer in [-0.5, 2]: the optimum is x0 = 0.
+    const LpProblem upper_side =
+        makeModel(Sense::Maximize, {-3, 0}, {-0.5, 0}, {2, 2}, {I, I}, {{1, 1}}, {-kInf}, {3});
+    for (const auto& lp : {lower_side, upper_side}) {
+        auditPresolve(lp, presolveCases()[0]);
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(pointFeasible(lp, result.solution, kFeasTol));
+        CHECK_THAT(objective(lp, result.solution), WithinAbs(enumerate(lp).best, kObjTol));
+    }
+}
+
+TEST_CASE("Known bug #229: the objective offset takes the wrong sign when maximizing",
+          "[validity][!mayfail]") {
+    // max -x0 + 1.5 s.t. x0 + x1 >= 1 over [0, 1]^2: the optimum is 1.5.
+    const LpProblem lp = [] {
+        LpProblem m = makeModel(Sense::Maximize, {-1, 0}, {0, 0}, {1, 1},
+                                {VarType::Continuous, VarType::Continuous}, {{1, 1}}, {1}, {kInf});
+        m.obj_offset = 1.5;
+        return m;
+    }();
+    DualSimplexSolver lp_solver;
+    lp_solver.setVerbose(false);
+    lp_solver.load(lp);
+    REQUIRE(lp_solver.solve().status == Status::Optimal);
+    CHECK_THAT(lp_solver.getObjective(), WithinAbs(1.5, kObjTol));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.load(lp);
+    CHECK_THAT(solver.solve().objective, WithinAbs(1.5, kObjTol));
+}
+
+TEST_CASE("Known bug #230: the tree search loses the optimum of a maximization",
+          "[validity][!mayfail]") {
+    // max -4x0 - 3x1 - 2x2 - 2x3 s.t. -4x0 - 7x1 - 4x2 <= 15, all integer.
+    // The optimum is 9 at (-1, -1, -1, 0); the solver stops at 8 after one
+    // node. The same model as a minimization solves correctly, and root cuts
+    // usually close the gap before the tree is entered, which hides this.
+    constexpr auto I = VarType::Integer;
+    const LpProblem lp = makeModel(Sense::Maximize, {-4, -3, -2, -2}, {-1, -2, -2, 0}, {1, 0, 1, 1},
+                                   {I, I, I, I}, {{-4, -7, -4, 0}}, {-kInf}, {15});
+    REQUIRE_THAT(enumerate(lp).best, WithinAbs(9.0, kObjTol));
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(objective(lp, result.solution), WithinAbs(9.0, kObjTol));
+
+    // With default settings: max 3x0 - 2x1 + 3x2 - x3 s.t. -x0 - 4x1 + 2x2 <= -3,
+    // 7x1 + 7x2 - 4x3 <= 9. The optimum is 4 at (2, 1, 0, 0); the solver
+    // returns 3.
+    const LpProblem defaults =
+        makeModel(Sense::Maximize, {3, -2, 3, -1}, {0, 0, -2, 0}, {2, 1, 1, 1}, {I, I, I, I},
+                  {{-1, -4, 2, 0}, {0, 7, 7, -4}}, {-kInf, -kInf}, {-3, 9});
+    REQUIRE_THAT(enumerate(defaults).best, WithinAbs(4.0, kObjTol));
+    MipSolver default_solver;
+    default_solver.setVerbose(false);
+    default_solver.setNumThreads(1);
+    default_solver.load(defaults);
+    const auto default_result = default_solver.solve();
+    REQUIRE(default_result.status == Status::Optimal);
+    CHECK_THAT(objective(defaults, default_result.solution), WithinAbs(4.0, kObjTol));
+}
+
+TEST_CASE("Known bug #231: presolve treats semi-continuous columns as integer",
+          "[validity][!mayfail]") {
+    // min -2x0 + 2x1 + 4x2 s.t. -x0 <= 1, -4x0 + 2x2 = -4, x2 semi-continuous
+    // in {0} or [1.5, 4]. The optimum is -6 at (1, -2, 0). The solver
+    // linearizes semi columns before presolve, so only a direct call sees this.
+    constexpr auto I = VarType::Integer;
+    const LpProblem lp =
+        makeModel(Sense::Minimize, {-2, 2, 4}, {1, -2, 1.5}, {2, -1, 4},
+                  {I, I, VarType::SemiContinuous}, {{-1, 0, 0}, {-4, 0, 2}}, {-kInf, -4}, {1, -4});
+    REQUIRE_THAT(enumerate(lp).best, WithinAbs(-6.0, kObjTol));
+    auditPresolve(lp, presolveCases()[0]);
+}
