@@ -549,6 +549,31 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
             }
         }
 
+        // Dropping the row leaves the column's bounds as its only record, but a
+        // tightening of at most kTol in column space was not applied above, and
+        // the row can still exclude a gap of up to |a| * kTol of activity: with
+        // a = 1e6, x in [0, 1] and row 1e6 * x >= 5e-3, the implied bound 5e-9
+        // is skipped and postsolve may return x = 0, missing the row entirely.
+        // Keep such a row; it is the same displacement-versus-gap distinction
+        // as the fixed-column guard (issue #215).
+        {
+            const Real a_abs = std::abs(singleton_coeff);
+            const bool lb_gap = new_lb > lp.col_lower[singleton_col] &&
+                                a_abs * (new_lb - lp.col_lower[singleton_col]) > kTol;
+            const bool ub_gap = new_ub < lp.col_upper[singleton_col] &&
+                                a_abs * (lp.col_upper[singleton_col] - new_ub) > kTol;
+            if (lb_gap || ub_gap) {
+                if (lp.col_lower[singleton_col] > lp.col_upper[singleton_col] + kTol) {
+                    infeasible_ = true;
+                    return changes;
+                }
+                if (tightened) {
+                    ++changes;
+                }
+                continue;
+            }
+        }
+
         // The row-implied range can contradict the column's own bounds, or the
         // range another singleton row on the same column already imposed, and
         // integer rounding can empty a fractional range outright. This row is

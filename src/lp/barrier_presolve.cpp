@@ -171,6 +171,15 @@ Index BarrierPresolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& co
             return changes;
         }
 
+        // A tightening of at most kTol in column space is not applied, but the
+        // row can still exclude up to |coeff| * kTol of activity there. Removing
+        // it would let the solution miss the row by that much, so keep it
+        // (issue #215, as in the main presolve's singleton-row pass).
+        if ((implied_lb > new_lb && std::abs(coeff) * (implied_lb - new_lb) > kTol) ||
+            (implied_ub < new_ub && std::abs(coeff) * (new_ub - implied_ub) > kTol)) {
+            continue;
+        }
+
         // Record postsolve op.
         BpSingletonRow op;
         op.orig_row = i;

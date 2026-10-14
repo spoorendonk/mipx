@@ -913,6 +913,40 @@ TEST_CASE("Barrier presolve: a column fixed only within tolerance is not substit
     CHECK(exact.stats().fixed_vars == 1);
 }
 
+TEST_CASE("Barrier presolve: a singleton row implying a sub-tolerance bound is kept",
+          "[barrier][presolve]") {
+    // 1e6 * x0 >= 5e-5 implies x0 >= 5e-11, under the barrier presolve's kTol
+    // of 1e-10, so the bound is not applied; dropping the row would lose 5e-5
+    // of activity. x0 + x1 <= 100 keeps x0 off the singleton-column path.
+    auto build = [](Real rhs) {
+        LpProblem lp;
+        lp.sense = Sense::Minimize;
+        lp.num_cols = 2;
+        lp.obj = {1.0, 0.0};
+        lp.col_lower = {0.0, 0.0};
+        lp.col_upper = {1.0, 10.0};
+        lp.col_type = {VarType::Continuous, VarType::Continuous};
+        lp.col_names = {"x0", "x1"};
+        lp.num_rows = 2;
+        lp.row_lower = {rhs, -kInf};
+        lp.row_upper = {kInf, 100.0};
+        lp.row_names = {"r0", "r1"};
+        std::vector<Triplet> trips = {{0, 0, 1e6}, {1, 0, 1.0}, {1, 1, 1.0}};
+        lp.matrix = SparseMatrix(2, 2, std::move(trips));
+        return lp;
+    };
+
+    BarrierPresolver kept;
+    kept.presolve(build(5e-5));
+    CHECK_FALSE(kept.isInfeasible());
+    CHECK(kept.stats().singleton_rows == 0);
+
+    BarrierPresolver applied;
+    applied.presolve(build(5e-1));
+    CHECK_FALSE(applied.isInfeasible());
+    CHECK(applied.stats().singleton_rows == 1);
+}
+
 TEST_CASE("Barrier presolve: singleton row elimination", "[barrier][presolve]") {
     // min -x - y  s.t.  x <= 5 (singleton row),  x + y <= 8,  x,y >= 0
     LpProblem lp;

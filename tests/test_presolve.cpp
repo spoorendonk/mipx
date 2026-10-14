@@ -1655,6 +1655,59 @@ TEST_CASE("Presolve: a column fixed only within tolerance is not substituted", "
     CHECK(exact.stats().fixed_var_changes >= 1);
 }
 
+/// A singleton row whose implied bound moves the column by less than the
+/// presolve tolerance, but by enough to matter through a large coefficient:
+///
+///   r0: 1e6 * x0 >= rhs,   r1: x0 + x1 <= 100,   x0 in [0, 1], x1 in [0, 10]
+///
+/// minimizing x0. The optimum is x0 = rhs / 1e6. r1 keeps x0 off the
+/// singleton-column path.
+static LpProblem buildSubToleranceSingletonRowProblem(Real rhs) {
+    LpProblem lp;
+    lp.name = "sub_tolerance_singleton_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {rhs, -kInf};
+    lp.row_upper = {kInf, 100.0};
+    lp.row_names = {"r0", "r1"};
+
+    std::vector<Triplet> trips = {{0, 0, 1e6}, {1, 0, 1.0}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("Presolve: a singleton row implying a sub-tolerance bound is kept", "[presolve]") {
+    // Found in review of the #215 fix. r0 implies x0 >= 5e-9, under kTol, so
+    // the bound was not applied -- and the row was dropped anyway, leaving
+    // x0 = 0 to miss it by its whole rhs of 5e-3.
+    //
+    // The check is on presolve's output, not on a solve: the dual simplex
+    // scales r0 by its coefficient and may accept x0 = 0 within its own
+    // tolerance, which is a separate question from presolve discarding r0.
+    Presolver presolver;
+    const auto reduced = presolver.presolve(buildSubToleranceSingletonRowProblem(5e-3));
+    REQUIRE_FALSE(presolver.isInfeasible());
+    bool r0_kept = false;
+    for (Index i = 0; i < reduced.num_rows; ++i) {
+        r0_kept = r0_kept || std::abs(reduced.row_lower[i] - 5e-3) <= 1e-15;
+    }
+    CHECK(r0_kept);
+
+    // A row whose implied bound is large enough to apply still goes: the
+    // bound carries it.
+    Presolver applied;
+    applied.presolve(buildSubToleranceSingletonRowProblem(5e-1));
+    CHECK_FALSE(applied.isInfeasible());
+    CHECK(applied.stats().singleton_row_changes >= 1);
+}
+
 // =============================================================================
 // Instance-driven regression: Netlib bore3d (issue #210)
 // =============================================================================
