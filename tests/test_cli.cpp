@@ -150,4 +150,87 @@ TEST_CASE("CLI: --format rejects an unknown value", "[cli][io]") {
     CHECK(run.mentions("Invalid --format value"));
 }
 
+// Issue #197: probing, presolve probing, the clique table and plunging are
+// off by default and were unreachable from the command line. cli_features.mps
+// is built so that each one fires: a 3-clique of BV columns, an implication
+// chain (x4 <= x5, x4 <= x6, x5 + x6 <= 1) that only probing fixes, and a
+// knapsack that branches once cuts are off.
+namespace {
+
+CliRun runFeatures(const std::string& flags) {
+    return runSolver("'" + testDataDir() + "/cli_features.mps' --threads 1 " + flags);
+}
+
+}  // namespace
+
+TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
+    const auto run = runSolver("--help");
+
+    CHECK(run.exit_code == 0);
+    for (const char* flag :
+         {"--probing", "--no-probing", "--probing-rounds", "--probing-probes", "--probing-time",
+          "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
+          "--presolve-probing-probes", "--presolve-probing-time", "--clique-table",
+          "--no-clique-table", "--plunge-depth", "--no-plunge", "--plunge-bound-quotient"}) {
+        INFO(flag);
+        CHECK(run.mentions(flag));
+    }
+}
+
+TEST_CASE("CLI: --probing reaches the solver", "[cli]") {
+    const auto off = runFeatures("");
+    const auto on = runFeatures("--probing");
+    const auto toggled = runFeatures("--probing --no-probing");
+
+    CHECK(on.exit_code == 0);
+    CHECK(on.mentions("Probing: "));
+    CHECK(on.mentions("1 fixings"));
+    CHECK_FALSE(off.mentions("Probing: "));
+    CHECK_FALSE(toggled.mentions("Probing: "));
+    // The budget knobs are passed through: one round is all it gets.
+    CHECK(runFeatures("--probing --probing-rounds 1").mentions(" 1 rounds"));
+}
+
+TEST_CASE("CLI: --presolve-probing reaches presolve", "[cli]") {
+    const auto off = runFeatures("");
+    const auto on = runFeatures("--presolve-probing");
+    const auto toggled = runFeatures("--presolve-probing --no-presolve-probing");
+
+    CHECK(on.exit_code == 0);
+    CHECK(on.mentions("probe=1]"));
+    // Without probing nothing in presolve fixes x4, so no reduction is logged.
+    CHECK_FALSE(off.mentions("probe=1]"));
+    CHECK_FALSE(toggled.mentions("probe=1]"));
+    // A zero probe budget leaves nothing for the pass to find.
+    CHECK_FALSE(runFeatures("--presolve-probing --presolve-probing-probes 1 "
+                            "--presolve-probing-rounds 1")
+                    .mentions("probe=1]"));
+}
+
+TEST_CASE("CLI: --clique-table reaches the solver", "[cli]") {
+    const auto off = runFeatures("");
+    const auto on = runFeatures("--clique-table");
+    const auto toggled = runFeatures("--clique-table --no-clique-table");
+
+    CHECK(on.exit_code == 0);
+    CHECK(on.mentions("Clique table: 11 binaries"));
+    CHECK_FALSE(off.mentions("Clique table:"));
+    CHECK_FALSE(toggled.mentions("Clique table:"));
+}
+
+TEST_CASE("CLI: --plunge-depth reaches the tree search", "[cli]") {
+    const auto off = runFeatures("--no-cuts");
+    const auto on = runFeatures("--no-cuts --plunge-depth 4");
+    const auto toggled = runFeatures("--no-cuts --plunge-depth 4 --no-plunge");
+
+    CHECK(on.exit_code == 0);
+    CHECK(on.mentions("Plunge: nodes="));
+    CHECK_FALSE(off.mentions("Plunge: nodes="));
+    CHECK_FALSE(toggled.mentions("Plunge: nodes="));
+    // All of them still solve the model.
+    for (const auto* run : {&off, &on, &toggled}) {
+        CHECK(run->mentions("Objective: -2.2000000000e+01"));
+    }
+}
+
 #endif  // MIPX_HAS_SOLVE_BINARY && !_WIN32

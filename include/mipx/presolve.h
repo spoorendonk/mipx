@@ -141,6 +141,10 @@ struct PresolveOptions {
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.
     bool enable_probing = false;
+    /// Budget of that probing pass, per presolve call.
+    Int probing_max_rounds = 2;
+    Int probing_max_probes_per_round = 5000;
+    double probing_time_limit = 5.0;  // seconds
 };
 
 // ---- Presolver --------------------------------------------------------------

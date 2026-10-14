@@ -398,6 +398,8 @@ public:
         plunge_max_depth_ = std::max<Int>(0, max_depth);
         plunge_bound_quotient_ = std::max<Real>(0.0, bound_quotient);
     }
+    [[nodiscard]] Int getPlungeMaxDepth() const { return plunge_max_depth_; }
+    [[nodiscard]] Real getPlungeBoundQuotient() const { return plunge_bound_quotient_; }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
     void setTreePresolveAutoTuning(bool enabled) {
         tree_presolve_auto_tuning_enabled_ = enabled;
@@ -438,6 +440,9 @@ public:
     void setProbingEnabled(bool enabled) { probing_enabled_ = enabled; }
     void setProbingMaxRounds(Int rounds) { probing_max_rounds_ = std::max<Int>(1, rounds); }
     void setProbingTimeLimit(double seconds) { probing_time_limit_ = std::max(0.1, seconds); }
+    void setProbingMaxProbesPerRound(Int probes) {
+        probing_max_probes_per_round_ = std::max<Int>(1, probes);
+    }
     const MipProbingStats& getProbingStats() const { return probing_stats_; }
     /// Enable the root conflict graph / clique table. When on, cliques drive
     /// node domain propagation and maximal-clique separation at the root.
@@ -676,6 +681,7 @@ private:
     bool probing_enabled_ = false;
     Int probing_max_rounds_ = 3;
     double probing_time_limit_ = 30.0;
+    Int probing_max_probes_per_round_ = ProbingConfig{}.max_probes_per_round;
     ImplicationGraph implication_graph_;
     VariableBoundStore vb_store_;
     MipProbingStats probing_stats_{};

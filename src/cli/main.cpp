@@ -14,53 +14,73 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+
+namespace {
+
+void printUsage(FILE* out) {
+    std::fprintf(out,
+                 "Usage: mipx-solve <model-file> [--format auto|mps|lp] "
+                 "[--threads N] [--time-limit S] "
+                 "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
+                 "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
+                 "[--conflicts|--no-conflicts] "
+                 "[--tree-presolve|--no-tree-presolve] "
+                 "[--tree-presolve-auto|--no-tree-presolve-auto] "
+                 "[--tree-presolve-max-depth N] "
+                 "[--tree-presolve-min-frac N] "
+                 "[--tree-presolve-depth-frequency N] "
+                 "[--tree-cuts|--no-tree-cuts] "
+                 "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
+                 "[--probing-time S] "
+                 "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
+                 "[--presolve-probing-probes N] [--presolve-probing-time S] "
+                 "[--clique-table|--no-clique-table] "
+                 "[--plunge-depth N|--no-plunge] [--plunge-bound-quotient Q] "
+                 "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
+                 "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
+                 "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
+                 "[--parallel-mode deterministic|opportunistic] [--seed N] "
+                 "[--heur-deterministic|--heur-opportunistic] "
+                 "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
+                 "[--pre-root-rounds N] [--pre-root-no-early-stop] "
+                 "[--pre-root-lplight|--no-pre-root-lplight] "
+                 "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
+                 "[--exact-refine-off|--exact-refine-auto|--exact-refine-on] "
+                 "[--exact-rational-check|--exact-no-rational-check] "
+                 "[--exact-warning-tol T] [--exact-cert-tol T] "
+                 "[--exact-max-rounds N] [--exact-repair-passes N] "
+                 "[--exact-rational-scale S] "
+                 "[--dual-idiot-crash|--dual-no-idiot-crash] "
+                 "[--dual-bfrt|--dual-no-bfrt] "
+                 "[--dual-lu-update-limit N] "
+                 "[--dual-lu-ft-drop-tol T] "
+                 "[--search-stable|--search-default|--search-aggressive] "
+                 "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
+                 "[--pdlp-opt-norm l2|linf] "
+                 "[--barrier-ordering auto|amd|nd|cudss] "
+                 "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
+                 "[--relax-integrality] "
+                 "[--verbose|--quiet] [--print-backend]\n"
+                 "\n"
+                 "The model file is read as MPS unless it ends in .lp, "
+                 "ignoring any .gz/.bz2\n"
+                 "compression suffix. --format overrides that choice.\n");
+}
+
+}  // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::fprintf(stdout,
-                     "Usage: mipx-solve <model-file> [--format auto|mps|lp] "
-                     "[--threads N] [--time-limit S] "
-                     "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
-                     "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
-                     "[--conflicts|--no-conflicts] "
-                     "[--tree-presolve|--no-tree-presolve] "
-                     "[--tree-presolve-auto|--no-tree-presolve-auto] "
-                     "[--tree-presolve-max-depth N] "
-                     "[--tree-presolve-min-frac N] "
-                     "[--tree-presolve-depth-frequency N] "
-                     "[--tree-cuts|--no-tree-cuts] "
-                     "[--presolve-forcing-rows|--no-presolve-forcing-rows] "
-                     "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
-                     "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
-                     "[--parallel-mode deterministic|opportunistic] [--seed N] "
-                     "[--heur-deterministic|--heur-opportunistic] "
-                     "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
-                     "[--pre-root-rounds N] [--pre-root-no-early-stop] "
-                     "[--pre-root-lplight|--no-pre-root-lplight] "
-                     "[--pre-root-portfolio|--pre-root-fixed] [--no-symmetry] "
-                     "[--exact-refine-off|--exact-refine-auto|--exact-refine-on] "
-                     "[--exact-rational-check|--exact-no-rational-check] "
-                     "[--exact-warning-tol T] [--exact-cert-tol T] "
-                     "[--exact-max-rounds N] [--exact-repair-passes N] "
-                     "[--exact-rational-scale S] "
-                     "[--dual-idiot-crash|--dual-no-idiot-crash] "
-                     "[--dual-bfrt|--dual-no-bfrt] "
-                     "[--dual-lu-update-limit N] "
-                     "[--dual-lu-ft-drop-tol T] "
-                     "[--search-stable|--search-default|--search-aggressive] "
-                     "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
-                     "[--pdlp-opt-norm l2|linf] "
-                     "[--barrier-ordering auto|amd|nd|cudss] "
-                     "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
-                     "[--relax-integrality] "
-                     "[--verbose|--quiet] [--print-backend]\n"
-                     "\n"
-                     "The model file is read as MPS unless it ends in .lp, "
-                     "ignoring any .gz/.bz2\n"
-                     "compression suffix. --format overrides that choice.\n");
+        printUsage(stdout);
         return 1;
+    }
+    if (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h") {
+        printUsage(stdout);
+        return 0;
     }
 
     std::string filename = argv[1];
@@ -101,6 +121,19 @@ int main(int argc, char* argv[]) {
     mipx::Int tree_presolve_min_frac = 8;
     mipx::Int tree_presolve_depth_frequency = 3;
     bool tree_cuts_enabled = false;
+    // Off by default in the solver; a numeric knob left unset keeps the
+    // solver's own default, so a run without these flags is unchanged.
+    bool probing_enabled = false;
+    std::optional<mipx::Int> probing_rounds;
+    std::optional<mipx::Int> probing_probes;
+    std::optional<double> probing_time;
+    bool presolve_probing = false;
+    std::optional<mipx::Int> presolve_probing_rounds;
+    std::optional<mipx::Int> presolve_probing_probes;
+    std::optional<double> presolve_probing_time;
+    bool clique_table_enabled = false;
+    std::optional<mipx::Int> plunge_depth;
+    std::optional<double> plunge_bound_quotient;
     mipx::SearchProfile search_profile = mipx::SearchProfile::Default;
     bool search_profile_explicit = false;
     bool symmetry_enabled = true;
@@ -158,6 +191,38 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--tree-cuts") {
             tree_cuts_enabled = true;
+        } else if (arg == "--probing") {
+            probing_enabled = true;
+        } else if (arg == "--no-probing") {
+            probing_enabled = false;
+        } else if (arg == "--probing-rounds" && i + 1 < argc) {
+            probing_rounds = static_cast<mipx::Int>(std::atoll(argv[++i]));
+        } else if (arg == "--probing-probes" && i + 1 < argc) {
+            probing_probes = static_cast<mipx::Int>(std::atoll(argv[++i]));
+        } else if (arg == "--probing-time" && i + 1 < argc) {
+            probing_time = std::atof(argv[++i]);
+        } else if (arg == "--presolve-probing") {
+            presolve_probing = true;
+        } else if (arg == "--no-presolve-probing") {
+            presolve_probing = false;
+        } else if (arg == "--presolve-probing-rounds" && i + 1 < argc) {
+            presolve_probing_rounds =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--presolve-probing-probes" && i + 1 < argc) {
+            presolve_probing_probes =
+                std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--presolve-probing-time" && i + 1 < argc) {
+            presolve_probing_time = std::max(0.0, std::atof(argv[++i]));
+        } else if (arg == "--clique-table") {
+            clique_table_enabled = true;
+        } else if (arg == "--no-clique-table") {
+            clique_table_enabled = false;
+        } else if (arg == "--plunge-depth" && i + 1 < argc) {
+            plunge_depth = static_cast<mipx::Int>(std::atoll(argv[++i]));
+        } else if (arg == "--no-plunge") {
+            plunge_depth = 0;
+        } else if (arg == "--plunge-bound-quotient" && i + 1 < argc) {
+            plunge_bound_quotient = std::atof(argv[++i]);
         } else if (arg == "--no-tree-cuts") {
             tree_cuts_enabled = false;
         } else if (arg == "--presolve-forcing-rows") {
@@ -372,6 +437,16 @@ int main(int argc, char* argv[]) {
         presolve_opts.enable_forcing_rows = presolve_forcing_rows;
         presolve_opts.enable_dual_fixing = presolve_dual_fixing;
         presolve_opts.enable_coefficient_tightening = presolve_coefficient_tightening;
+        presolve_opts.enable_probing = presolve_probing;
+        if (presolve_probing_rounds) {
+            presolve_opts.probing_max_rounds = *presolve_probing_rounds;
+        }
+        if (presolve_probing_probes) {
+            presolve_opts.probing_max_probes_per_round = *presolve_probing_probes;
+        }
+        if (presolve_probing_time) {
+            presolve_opts.probing_time_limit = *presolve_probing_time;
+        }
 
         if (lp.hasIntegers()) {
             // MIP solve — MipSolver prints its own banner.
@@ -413,6 +488,24 @@ int main(int argc, char* argv[]) {
             solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
             solver.setTreeCutsEnabled(tree_cuts_enabled);
+            solver.setProbingEnabled(probing_enabled);
+            if (probing_rounds) {
+                solver.setProbingMaxRounds(*probing_rounds);
+            }
+            if (probing_probes) {
+                solver.setProbingMaxProbesPerRound(*probing_probes);
+            }
+            if (probing_time) {
+                solver.setProbingTimeLimit(*probing_time);
+            }
+            solver.setCliqueTableEnabled(clique_table_enabled);
+            if (plunge_depth || plunge_bound_quotient) {
+                // The setter takes both; whichever was not given keeps the
+                // solver's default.
+                solver.setPlungeControls(
+                    plunge_depth.value_or(solver.getPlungeMaxDepth()),
+                    plunge_bound_quotient.value_or(solver.getPlungeBoundQuotient()));
+            }
             solver.setSymmetryEnabled(symmetry_enabled);
             solver.setExactRefinementMode(exact_refine_mode);
             solver.setExactRefinementRationalCheck(exact_rational_check);

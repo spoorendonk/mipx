@@ -1951,12 +1951,6 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
 
 namespace {
 
-// Work budget for the probing pass. Probing runs once per presolve call, so
-// the budget is per call, not per round.
-constexpr Int kProbingMaxRounds = 2;
-constexpr Int kProbingMaxProbesPerRound = 5000;
-constexpr double kProbingTimeLimit = 5.0;
-
 /// Returns true when the column behaves as a 0/1 variable.
 inline bool isBinaryCol(const LpProblem& lp, Index col) {
     if (lp.col_type[col] == VarType::Continuous) {
@@ -2019,10 +2013,12 @@ Index Presolver::probingPass(LpProblem& lp, const std::vector<bool>& col_removed
     }
     view.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(triplets));
 
+    // Probing runs once per presolve call, so the budget is per call, not per
+    // round.
     ProbingConfig config;
-    config.max_rounds = kProbingMaxRounds;
-    config.max_probes_per_round = kProbingMaxProbesPerRound;
-    config.time_limit = kProbingTimeLimit;
+    config.max_rounds = options_.probing_max_rounds;
+    config.max_probes_per_round = options_.probing_max_probes_per_round;
+    config.time_limit = options_.probing_time_limit;
     // Equivalence and domination output has no consumer in presolve yet.
     config.detect_equivalences = false;
     config.detect_dominated = false;

@@ -77,8 +77,17 @@ Key options:
 | `--pdlp` | off | Use PDLP for root LP |
 | `--concurrent-root` | off | Race LP solvers at root |
 | `--quiet` | off | Suppress progress output |
+| `--probing` / `--no-probing` | off | Root probing in the solver (fixings, implications, variable bounds) |
+| `--probing-rounds <n>` / `--probing-probes <n>` / `--probing-time <s>` | 3 / 10000 / 30 | Its budget: rounds, probes per round, seconds |
+| `--presolve-probing` / `--no-presolve-probing` | off | Probing pass inside presolve |
+| `--presolve-probing-rounds <n>` / `--presolve-probing-probes <n>` / `--presolve-probing-time <s>` | 2 / 5000 / 5 | Its budget, per presolve call |
+| `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |
+| `--plunge-depth <n>` / `--no-plunge` | 0 (off) | Maximum consecutive dives after a branch; serial search only |
+| `--plunge-bound-quotient <q>` | 0.05 | Decline a dive whose bound is this far (relative) behind the best |
 
-Run `./build/mipx-solve --help` for the full list.
+Run `./build/mipx-solve --help` for the full list. The probing, clique-table
+and plunging switches are off by default until benchmarks decide otherwise;
+leaving a flag out keeps the solver's own default.
 
 ## Python API
 
