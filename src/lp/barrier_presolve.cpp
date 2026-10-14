@@ -1,6 +1,8 @@
 #include "mipx/barrier_presolve.h"
 
+#include <algorithm>
 #include <cmath>
+#include <optional>
 #include <utility>
 
 namespace mipx {
@@ -9,6 +11,30 @@ namespace {
 
 inline bool isFinite(Real v) {
     return std::isfinite(v);
+}
+
+/// Row activity r at which a free column singleton is eliminated. A free x_j
+/// lets r take any value in the row's bounds. Without a cost every such r is
+/// optimal, and the midpoint (or the one finite bound) is taken. With a cost
+/// (c_j / a_j) r the activity sits at the bound that cost favours; nullopt
+/// when that bound is infinite, which presolve leaves for the solver.
+std::optional<Real> freeSingletonActivity(Real obj_coeff, Real coeff, Real row_lower,
+                                          Real row_upper, Sense sense) {
+    if (obj_coeff == 0.0) {
+        if (isFinite(row_lower) && isFinite(row_upper)) {
+            return 0.5 * (row_lower + row_upper);
+        }
+        if (isFinite(row_lower)) {
+            return row_lower;
+        }
+        return isFinite(row_upper) ? row_upper : 0.0;
+    }
+    Real sense_sign = (sense == Sense::Minimize) ? 1.0 : -1.0;
+    Real favoured = (sense_sign * obj_coeff / coeff > 0) ? row_lower : row_upper;
+    if (!isFinite(favoured)) {
+        return std::nullopt;
+    }
+    return favoured;
 }
 
 }  // namespace
@@ -340,14 +366,28 @@ Index BarrierPresolver::removeFreeColSingletons(LpProblem& lp, std::vector<bool>
             continue;
         }
 
+        // x_j = (r - sum_{k!=j} a_k x_k) / a_j for the row activity r, so its
+        // cost is (c_j / a_j) r minus (c_j a_k / a_j) on each other column.
+        // Dropping the column alone would lose that cost (issue #203: vtp-base
+        // and capri presolved to a different optimum).
+        // A cost is treated as none when what it moves onto the row, c_j / a_j,
+        // is within kTol of zero; substitutions below can leave such residues.
+        Real obj_coeff = std::abs(lp.obj[j] / coeff) <= kTol ? 0.0 : lp.obj[j];
+        std::optional<Real> activity =
+            freeSingletonActivity(obj_coeff, coeff, lp.row_lower[row], lp.row_upper[row], lp.sense);
+        if (!activity) {
+            continue;
+        }
+
         // Record postsolve op.
         BpFreeColSingleton op;
         op.orig_col = j;
         op.orig_row = row;
         op.coeff = coeff;
-        op.obj_coeff = lp.obj[j];
+        op.obj_coeff = obj_coeff;
         op.row_lower = lp.row_lower[row];
         op.row_upper = lp.row_upper[row];
+        op.activity = *activity;
 
         auto rv = lp.matrix.row(row);
         for (Index k = 0; k < rv.size(); ++k) {
@@ -355,6 +395,18 @@ Index BarrierPresolver::removeFreeColSingletons(LpProblem& lp, std::vector<bool>
                 op.row_col_indices.push_back(rv.indices[k]);
                 op.row_col_coeffs.push_back(rv.values[k]);
             }
+        }
+
+        if (obj_coeff != 0.0) {
+            Real ratio = obj_coeff / coeff;
+            for (size_t k = 0; k < op.row_col_indices.size(); ++k) {
+                Real& cost = lp.obj[op.row_col_indices[k]];
+                Real updated = cost - ratio * op.row_col_coeffs[k];
+                // Snap a cancellation residue to zero so the rules that test
+                // for a zero cost still recognise the column.
+                cost = std::abs(updated) <= kTol * std::max(1.0, std::abs(cost)) ? 0.0 : updated;
+            }
+            obj_offset_delta_ += ratio * *activity;
         }
         ops_.push_back(std::move(op));
 
@@ -457,120 +509,6 @@ Index BarrierPresolver::removeEmptyRowsCols(LpProblem& lp, std::vector<bool>& co
         ++stats_.empty_cols;
     }
 
-    return changes;
-}
-
-Index BarrierPresolver::tightenImpliedBounds(LpProblem& lp, const std::vector<bool>& col_removed,
-                                             const std::vector<bool>& row_removed,
-                                             const std::vector<Index>& row_nnz) {
-    Index changes = 0;
-    for (Index i = 0; i < lp.num_rows; ++i) {
-        if (row_removed[i]) {
-            continue;
-        }
-        if (row_nnz[i] < 2) {
-            continue;
-        }
-
-        auto rv = lp.matrix.row(i);
-
-        // Compute activity bounds: min/max of sum a_j * x_j.
-        Real act_min = 0.0;
-        Real act_max = 0.0;
-        bool act_min_finite = true;
-        bool act_max_finite = true;
-
-        for (Index k = 0; k < rv.size(); ++k) {
-            Index j = rv.indices[k];
-            if (col_removed[j]) {
-                continue;
-            }
-            Real a = rv.values[k];
-            Real lb = lp.col_lower[j];
-            Real ub = lp.col_upper[j];
-
-            if (a > 0) {
-                if (isFinite(lb)) {
-                    act_min += a * lb;
-                } else {
-                    act_min_finite = false;
-                }
-                if (isFinite(ub)) {
-                    act_max += a * ub;
-                } else {
-                    act_max_finite = false;
-                }
-            } else {
-                if (isFinite(ub)) {
-                    act_min += a * ub;
-                } else {
-                    act_min_finite = false;
-                }
-                if (isFinite(lb)) {
-                    act_max += a * lb;
-                } else {
-                    act_max_finite = false;
-                }
-            }
-
-            if (!act_min_finite && !act_max_finite) {
-                break;
-            }
-        }
-
-        // For each variable with one-sided infinite contribution, tighten.
-        for (Index k = 0; k < rv.size(); ++k) {
-            Index j = rv.indices[k];
-            if (col_removed[j]) {
-                continue;
-            }
-            Real a = rv.values[k];
-            if (std::abs(a) < kTol) {
-                continue;
-            }
-            Real lb = lp.col_lower[j];
-            Real ub = lp.col_upper[j];
-
-            // Tighten upper bound from row_upper:
-            // sum_{k!=j} a_k x_k + a_j x_j <= row_upper
-            // x_j <= (row_upper - min_{k!=j} a_k x_k) / a_j  (if a_j > 0)
-            if (isFinite(lp.row_upper[i]) && act_min_finite && a > 0 && isFinite(lb)) {
-                Real rest_min = act_min - a * lb;
-                Real implied_ub = (lp.row_upper[i] - rest_min) / a;
-                if (implied_ub < ub - kTol) {
-                    lp.col_upper[j] = implied_ub;
-                    ++changes;
-                }
-            }
-            if (isFinite(lp.row_upper[i]) && act_max_finite && a < 0 && isFinite(ub)) {
-                Real rest_max = act_max - a * ub;
-                Real implied_lb = (lp.row_upper[i] - rest_max) / a;
-                if (implied_lb > lb + kTol) {
-                    lp.col_lower[j] = implied_lb;
-                    ++changes;
-                }
-            }
-            // Tighten from row_lower:
-            if (isFinite(lp.row_lower[i]) && act_max_finite && a > 0 && isFinite(ub)) {
-                Real rest_max = act_max - a * ub;
-                Real implied_lb = (lp.row_lower[i] - rest_max) / a;
-                if (implied_lb > lb + kTol) {
-                    lp.col_lower[j] = implied_lb;
-                    ++changes;
-                }
-            }
-            if (isFinite(lp.row_lower[i]) && act_min_finite && a < 0 && isFinite(lb)) {
-                Real rest_min = act_min - a * lb;
-                Real implied_ub = (lp.row_lower[i] - rest_min) / a;
-                if (implied_ub < ub - kTol) {
-                    lp.col_upper[j] = implied_ub;
-                    ++changes;
-                }
-            }
-        }
-    }
-
-    stats_.implied_bounds_tightened += changes;
     return changes;
 }
 
@@ -775,6 +713,12 @@ LpProblem BarrierPresolver::presolve(const LpProblem& problem) {
     }
 
     // Iterate reductions until no more changes.
+    //
+    // Bounds a multi-row constraint implies on its columns are deliberately
+    // not imposed. The bound and the row that implies it are then active
+    // together at the optimum, a degenerate face the IPM fails to converge on
+    // (issue #203: blend solves without them and not with them). A singleton
+    // row is different: its bound replaces the row rather than doubling it.
     constexpr Index kMaxRounds = 20;
     for (Index round = 0; round < kMaxRounds; ++round) {
         Index changes = 0;
@@ -805,11 +749,6 @@ LpProblem BarrierPresolver::presolve(const LpProblem& problem) {
         }
 
         changes += removeEmptyRowsCols(lp, col_removed, row_removed, row_nnz, col_nnz);
-        if (infeasible_) {
-            break;
-        }
-
-        changes += tightenImpliedBounds(lp, col_removed, row_removed, row_nnz);
         if (infeasible_) {
             break;
         }
@@ -921,34 +860,27 @@ void BarrierPresolver::postsolve(const std::vector<Real>& primal_reduced,
                     if (lo <= hi) {
                         val = std::clamp(0.0, lo, hi);
                     } else {
-                        // Empty interval from numerical slack: fall back to a bound.
-                        val = isFinite(op.col_lower)
-                                  ? op.col_lower
-                                  : (isFinite(op.col_upper) ? op.col_upper : 0.0);
+                        // Empty because the reduced solution is feasible only
+                        // to a tolerance (rounding, or an IPM's feasibility
+                        // tolerance): the row pins x_j to a point just outside
+                        // its bounds (both ends are finite here). Splitting the
+                        // gap misses the row and the bound by half of it each;
+                        // falling back to a bound instead missed the row by the
+                        // whole bound-to-point distance (issue #203, kb2: 35).
+                        val = 0.5 * (lo + hi);
                     }
                     primal_orig[op.orig_col] = val;
                     rc_orig[op.orig_col] = 0.0;
 
                 } else if constexpr (std::is_same_v<T, BpFreeColSingleton>) {
                     // Free variable was used to make a constraint feasible.
-                    // Recover x_j from the row: a_j * x_j = rhs - sum_{k!=j} a_k * x_k.
-                    // Use midpoint of row bounds as target.
-                    Real rhs_target;
-                    if (isFinite(op.row_lower) && isFinite(op.row_upper)) {
-                        rhs_target = 0.5 * (op.row_lower + op.row_upper);
-                    } else if (isFinite(op.row_lower)) {
-                        rhs_target = op.row_lower;
-                    } else if (isFinite(op.row_upper)) {
-                        rhs_target = op.row_upper;
-                    } else {
-                        rhs_target = 0.0;
-                    }
-
+                    // Recover x_j from the row: a_j * x_j = r - sum_{k!=j} a_k * x_k,
+                    // with r the activity presolve chose (and priced in).
                     Real rest = 0.0;
                     for (Index k = 0; k < static_cast<Index>(op.row_col_indices.size()); ++k) {
                         rest += op.row_col_coeffs[k] * primal_orig[op.row_col_indices[k]];
                     }
-                    primal_orig[op.orig_col] = (rhs_target - rest) / op.coeff;
+                    primal_orig[op.orig_col] = (op.activity - rest) / op.coeff;
 
                     // Dual for the eliminated row: from the free variable's optimality,
                     // c_j = a_j * y_row  =>  y_row = c_j / a_j.

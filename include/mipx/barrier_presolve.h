@@ -50,17 +50,22 @@ struct BpSingletonCol {
 };
 
 /// A free column singleton (free variable in a single constraint) was
-/// eliminated, removing both the variable and the constraint.
+/// eliminated, removing both the variable and the constraint. A nonzero cost
+/// on x_j was substituted into the row's other columns, which pins the row
+/// activity to `activity` (its bound in the direction the cost favours).
 struct BpFreeColSingleton {
     Index orig_col;
     Index orig_row;
     Real coeff;
     Real obj_coeff;
-    // The other columns in the eliminated row, for dual reconstruction.
+    // The other columns in the eliminated row, for primal reconstruction.
     std::vector<Index> row_col_indices;
     std::vector<Real> row_col_coeffs;
     Real row_lower;
     Real row_upper;
+    // Row activity postsolve must restore; any point of [row_lower, row_upper]
+    // is optimal for a zero-cost column, which uses the midpoint.
+    Real activity;
 };
 
 /// An empty row (zero nonzeros) was removed.
@@ -91,7 +96,6 @@ struct BarrierPresolveStats {
     Index free_col_singletons = 0;
     Index empty_rows = 0;
     Index empty_cols = 0;
-    Index implied_bounds_tightened = 0;
     Index redundant_rows = 0;
     Index orig_rows = 0;
     Index orig_cols = 0;
@@ -108,9 +112,9 @@ struct BarrierPresolveStats {
         std::printf(
             "  fixed_vars=%d singleton_rows=%d singleton_cols=%d "
             "free_col_singletons=%d empty_rows=%d empty_cols=%d "
-            "implied_bounds=%d redundant_rows=%d\n",
+            "redundant_rows=%d\n",
             fixed_vars, singleton_rows, singleton_cols, free_col_singletons, empty_rows, empty_cols,
-            implied_bounds_tightened, redundant_rows);
+            redundant_rows);
     }
 };
 
@@ -162,10 +166,6 @@ private:
     Index removeEmptyRowsCols(LpProblem& lp, std::vector<bool>& col_removed,
                               std::vector<bool>& row_removed, std::vector<Index>& row_nnz,
                               std::vector<Index>& col_nnz);
-
-    Index tightenImpliedBounds(LpProblem& lp, const std::vector<bool>& col_removed,
-                               const std::vector<bool>& row_removed,
-                               const std::vector<Index>& row_nnz);
 
     Index removeRedundantRows(LpProblem& lp, const std::vector<bool>& col_removed,
                               std::vector<bool>& row_removed, std::vector<Index>& row_nnz,

@@ -4,7 +4,9 @@
 #include "mipx/mip_solver.h"
 #include "test_paths.hpp"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <filesystem>
 
@@ -1097,9 +1099,10 @@ TEST_CASE("Barrier presolve: presolve disabled matches presolve enabled", "[barr
     CHECK_THAT(result_on.objective, WithinAbs(result_off.objective, 1e-6));
 }
 
-TEST_CASE("Barrier presolve: implied bound tightening", "[barrier][presolve]") {
+TEST_CASE("Barrier presolve: row-implied bounds are not imposed", "[barrier][presolve]") {
     // min -x - y  s.t.  x + y <= 6,  x,y >= 0, x <= 100, y <= 100
-    // Implied: x <= 6 and y <= 6 (tightened from 100).
+    // The row implies x <= 6 and y <= 6. Imposed, those bounds are active
+    // together with the row at the optimum, which stalls the IPM (#203).
     LpProblem lp;
     lp.sense = Sense::Minimize;
     lp.num_cols = 2;
@@ -1119,10 +1122,9 @@ TEST_CASE("Barrier presolve: implied bound tightening", "[barrier][presolve]") {
     auto reduced = presolver.presolve(lp);
 
     CHECK_FALSE(presolver.isInfeasible());
-    CHECK(presolver.stats().implied_bounds_tightened >= 2);
-    // Both bounds tightened from 100 to 6.
-    CHECK(reduced.col_upper[0] <= 6.0 + 1e-8);
-    CHECK(reduced.col_upper[1] <= 6.0 + 1e-8);
+    REQUIRE(reduced.num_cols == 2);
+    CHECK(reduced.col_upper[0] == 100.0);
+    CHECK(reduced.col_upper[1] == 100.0);
 
     // Solve and verify.
     BarrierSolver solver;
@@ -1266,4 +1268,206 @@ TEST_CASE("Barrier presolve: zero-cost singleton column reconstructs from row",
     // Feasibility: x + y == 5, with the singleton y recovered from the row.
     CHECK_THAT(x[0] + x[1], WithinAbs(5.0, 1e-4));
     CHECK_THAT(x[1], WithinAbs(5.0, 1e-4));
+}
+
+TEST_CASE("Barrier presolve: a free column singleton's cost moves onto its row",
+          "[barrier][presolve]") {
+    // Issue #203. z is free and appears only in r0 = x + a_z z, so eliminating
+    // it must carry its cost: c_z z = (c_z / a_z)(r0 - x). Dropped, the reduced
+    // LP had a different optimum (vtp-base, capri).
+    auto build = [](Sense sense, Real z_cost, Real a_z, Real row_lower, Real row_upper) {
+        LpProblem lp;
+        lp.sense = sense;
+        lp.num_cols = 2;
+        lp.obj = {1.0, z_cost};
+        lp.col_lower = {0.0, -kInf};
+        lp.col_upper = {10.0, kInf};
+        lp.col_type = {VarType::Continuous, VarType::Continuous};
+        lp.col_names = {"x", "z"};
+        lp.num_rows = 1;
+        lp.row_lower = {row_lower};
+        lp.row_upper = {row_upper};
+        lp.row_names = {"r0"};
+        std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, a_z}};
+        lp.matrix = SparseMatrix(1, 2, std::move(trips));
+        return lp;
+    };
+    // Presolve eliminates z with r0, then x as an empty column at the bound its
+    // substituted cost favours, so the reduced LP is empty and postsolve alone
+    // gives the optimum, z and r0's dual c_z / a_z.
+    auto solveThrough = [](const LpProblem& lp, Real expected_obj, Real expected_z) {
+        BarrierPresolver presolver;
+        auto reduced = presolver.presolve(lp);
+        REQUIRE_FALSE(presolver.isInfeasible());
+        CHECK(presolver.stats().free_col_singletons == 1);
+        REQUIRE(reduced.num_cols == 0);
+        CHECK_THAT(reduced.obj_offset, WithinAbs(expected_obj, 1e-12));
+        std::vector<Real> x, y, rc;
+        presolver.postsolve({}, {}, {}, x, y, rc);
+        REQUIRE(x.size() == 2);
+        REQUIRE(y.size() == 1);
+        CHECK_THAT(originalObjective(lp, x), WithinAbs(expected_obj, 1e-12));
+        CHECK_THAT(x[1], WithinAbs(expected_z, 1e-12));
+        CHECK_THAT(y[0], WithinAbs(lp.obj[1] / lp.matrix.row(0).values[1], 1e-12));
+    };
+
+    SECTION("equality row") {
+        // min x + 2z, x + z = 5: z = 5 - x gives 10 - x, so x = 10, z = -5.
+        solveThrough(build(Sense::Minimize, 2.0, 1.0, 5.0, 5.0), 0.0, -5.0);
+    }
+    SECTION("negative coefficient") {
+        // min x + 2z, x - z = 5: z = x - 5 gives 3x - 10, so x = 0, z = -5.
+        solveThrough(build(Sense::Minimize, 2.0, -1.0, 5.0, 5.0), -10.0, -5.0);
+    }
+    SECTION("inequality row at the bound the cost favours") {
+        // min x - z, x + z <= 5: z = 5 - x gives 2x - 5, so x = 0, z = 5.
+        solveThrough(build(Sense::Minimize, -1.0, 1.0, -kInf, 5.0), -5.0, 5.0);
+    }
+    SECTION("maximize") {
+        // max x + 2z, x + z <= 5: z = 5 - x gives 10 - x, so x = 0, z = 5.
+        solveThrough(build(Sense::Maximize, 2.0, 1.0, -kInf, 5.0), 10.0, 5.0);
+    }
+    SECTION("no bound in the favoured direction keeps the column") {
+        // min x - z, x + z >= 5 is unbounded; presolve must not decide that.
+        BarrierPresolver presolver;
+        auto reduced = presolver.presolve(build(Sense::Minimize, -1.0, 1.0, 5.0, kInf));
+        CHECK_FALSE(presolver.isInfeasible());
+        CHECK(presolver.stats().free_col_singletons == 0);
+        CHECK(reduced.num_cols == 2);
+    }
+}
+
+TEST_CASE("Barrier presolve: singleton column postsolve splits a rounding gap",
+          "[barrier][presolve]") {
+    // Issue #203 (kb2). min x0 + x1  s.t.  x0 + y = 5,  x0 + x1 <= 100,
+    // y in [0, 3] with zero cost. y is eliminated into r0, which becomes the
+    // singleton row x0 in [2, 5]. A reduced x0 a hair below 2 asks for y a hair
+    // above 3: the interval is empty, and y must land at the gap, not at a bound.
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {1.0, 1.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, 3.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1", "y"};
+    lp.num_rows = 2;
+    lp.row_lower = {5.0, -kInf};
+    lp.row_upper = {5.0, 100.0};
+    lp.row_names = {"r0", "r1"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 2, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 3, std::move(trips));
+
+    BarrierPresolver presolver;
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    REQUIRE(presolver.stats().singleton_cols == 1);
+    REQUIRE(presolver.colMapping() == std::vector<Index>{0, 1});
+    REQUIRE(reduced.num_rows == 1);
+
+    std::vector<Real> x, y, rc;
+    presolver.postsolve({2.0 - 1e-9, 0.0}, {0.0}, {0.0, 0.0}, x, y, rc);
+    REQUIRE(x.size() == 3);
+    CHECK_THAT(x[2], WithinAbs(3.0, 1e-9));
+    CHECK_THAT(x[0] + x[2], WithinAbs(5.0, 1e-9));
+}
+
+TEST_CASE("Barrier presolve: Netlib reduced LP keeps the optimum", "[barrier][presolve][netlib]") {
+    // Issue #203. The barrier IPM itself does not yet converge on these (#204),
+    // so the reduction is checked through dual simplex: the reduced LP must
+    // have the original optimum, and postsolving its solution must give a
+    // point of the original LP with that objective.
+    // vtp-base and capri carry free column singletons with a cost.
+    auto name = GENERATE(as<std::string>{}, "afiro", "adlittle", "blend", "kb2", "sc50a", "sc50b",
+                         "sc105", "sc205", "share1b", "share2b", "stocfor1", "vtp-base", "capri");
+    INFO(name);
+    std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance " + name + " not downloaded");
+    }
+    auto lp = readMps(path);
+
+    DualSimplexSolver ds_orig;
+    ds_orig.setVerbose(false);
+    ds_orig.load(lp);
+    auto orig = ds_orig.solve();
+    REQUIRE(orig.status == Status::Optimal);
+
+    BarrierPresolver presolver;
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    DualSimplexSolver ds_red;
+    ds_red.setVerbose(false);
+    ds_red.load(reduced);
+    auto red = ds_red.solve();
+    REQUIRE(red.status == Status::Optimal);
+
+    Real scale = std::max(1.0, std::abs(orig.objective));
+    CHECK(std::abs(red.objective - orig.objective) <= 1e-7 * scale);
+
+    std::vector<Real> x, y, rc;
+    presolver.postsolve(ds_red.getPrimalValues(), ds_red.getDualValues(), ds_red.getReducedCosts(),
+                        x, y, rc);
+    REQUIRE(x.size() == static_cast<size_t>(lp.num_cols));
+    CHECK(std::abs(originalObjective(lp, x) - orig.objective) <= 1e-7 * scale);
+
+    // Row tolerance is relative to the magnitude of the row's terms, since
+    // large terms cancelling leave a residual of rounding size, not of |act|.
+    constexpr Real kFeasTol = 1e-6;
+    Real max_bound_viol = 0.0;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        max_bound_viol = std::max({max_bound_viol, lp.col_lower[j] - x[j], x[j] - lp.col_upper[j]});
+    }
+    Real max_row_viol = 0.0;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        auto rv = lp.matrix.row(i);
+        Real act = 0.0;
+        Real magnitude = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            Real term = rv.values[k] * x[rv.indices[k]];
+            act += term;
+            magnitude += std::abs(term);
+        }
+        Real tol = kFeasTol * std::max(1.0, magnitude);
+        max_row_viol =
+            std::max({max_row_viol, (lp.row_lower[i] - act) - tol, (act - lp.row_upper[i]) - tol});
+    }
+    CHECK(max_bound_viol <= kFeasTol);
+    CHECK(max_row_viol <= 0.0);
+}
+
+TEST_CASE("Barrier presolve: Netlib barrier objective matches presolve off",
+          "[barrier][presolve][netlib]") {
+    // Issue #203. Where the IPM converges without barrier presolve, it must
+    // converge to the same objective with it. Instances on which the IPM does
+    // not yet converge at all (#204) skip until it does.
+    auto name = GENERATE(as<std::string>{}, "afiro", "blend", "sc50a", "sc105", "sc205", "share2b",
+                         "stocfor1");
+    INFO(name);
+    std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance " + name + " not downloaded");
+    }
+    auto lp = readMps(path);
+
+    auto solve = [&lp](bool presolve) {
+        BarrierSolver solver;
+        BarrierOptions opts;
+        opts.verbose = false;
+        opts.presolve = presolve;
+        opts.algorithm = BarrierAlgorithm::CpuCholesky;
+        solver.setOptions(opts);
+        solver.load(lp);
+        return solver.solve();
+    };
+
+    auto off = solve(false);
+    if (off.status != Status::Optimal) {
+        SKIP("The IPM does not converge on " + name + " even without presolve (#204)");
+    }
+    auto on = solve(true);
+    REQUIRE(on.status == Status::Optimal);
+    Real scale = std::max(1.0, std::abs(off.objective));
+    CHECK(std::abs(on.objective - off.objective) <= 1e-6 * scale);
 }
