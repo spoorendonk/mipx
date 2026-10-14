@@ -309,15 +309,24 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 
 `MIPX_USE_CCACHE` is opportunistic — a no-op if neither tool is on PATH, and it
 never overrides a `CMAKE_CXX_COMPILER_LAUNCHER` you set yourself. It matters
-because the pre-push gate wipes the build tree and rebuilds on every push:
-measured on a 12-core box, that compile goes from ~52s to ~5s with a warm
-cache. The cache keys on the compile command, so a build directory at a
-*different path* misses (include flags differ) — the gate always uses `build/`,
-so it hits.
+because the pre-push gate builds from scratch on every push: measured on a
+12-core box, that compile goes from ~52s to ~5s with a warm cache.
 
-The `clean` block deliberately keeps `build/_deps`. Everything of ours is
-rebuilt from scratch, but Catch2 and nanobind are not re-cloned — that was
-~12s of network per push and validates nothing about this codebase. Use
+The gate builds in a fresh worktree at a new path under
+`${XDG_CACHE_HOME:-~/.cache}/local-ci` each push (unless
+`hooks.localCiWorktree` keeps one between pushes), and ccache keys on the
+compile command, so it only hits there with `base_dir` set in the user's
+ccache config to a directory above both checkouts (e.g. `$HOME`). That
+rewrites absolute path *arguments* but not `-D` values: an absolute path in a
+target-wide definition makes every file of the target miss direct mode, and
+the files that expand it miss outright. Keep such paths in
+`tests/test_paths.cpp`, the one file that carries them (#217: 96% → 99.5%
+hits, second-worktree build ~19s → ~11s).
+
+The `clean` block deliberately keeps `build/_deps`, so a build in place in
+this checkout rebuilds everything of ours but does not re-clone Catch2 and
+nanobind — ~12s of network that validates nothing about this codebase. A
+fresh pre-push worktree has no `_deps` to keep, so it clones them again. Use
 `rm -rf build` for a genuine full reset, e.g. when a dependency pin changes.
 
 **Ninja is optional.** The build blocks don't name a generator, so
