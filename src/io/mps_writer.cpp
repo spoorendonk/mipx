@@ -85,8 +85,12 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         out << "    INTMARK   'MARKER'                 'INTEND'\n";
     }
 
-    // RHS section.
+    // RHS section. The objective constant goes on the objective row negated,
+    // the convention mps_reader.cpp reads it with (issue #207).
     out << "RHS\n";
+    if (problem->obj_offset != 0.0) {
+        out << "    rhs  obj  " << -problem->obj_offset << '\n';
+    }
     for (Index i = 0; i < problem->num_rows; ++i) {
         Real lo = problem->row_lower[i];
         Real up = problem->row_upper[i];

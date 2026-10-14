@@ -58,6 +58,10 @@ CPLEX LP, anything else as MPS, ignoring a `.gz`/`.bz2` suffix
 the format it is read as fails with an error instead of quietly solving as an
 empty or nonsense model.
 
+An RHS entry on the MPS objective row is read as the *negated* objective
+constant (`obj_offset = -RHS`), as HiGHS and CPLEX do; the Netlib reference
+values in `tests/data/netlib.solu` follow the same convention.
+
 Key options:
 
 | Option | Default | Description |

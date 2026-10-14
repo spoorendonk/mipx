@@ -715,7 +715,12 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                         continue;
                     }
                     if (it->second == -1) {
-                        // Objective offset (RHS of N row).
+                        // An RHS on the objective row is the negated objective
+                        // constant: obj_offset = -RHS, so the model reads as
+                        // c'x - RHS. Same convention as HiGHS and CPLEX, and the
+                        // one tests/data/netlib.solu follows (e226's RHS of
+                        // -7.113 gives -11.638929066, not -18.751929066; issue
+                        // #207). mps_writer.cpp writes it back negated.
                         prob.obj_offset = -val;
                         continue;
                     }

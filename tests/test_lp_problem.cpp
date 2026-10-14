@@ -141,6 +141,39 @@ TEST_CASE("MPS writer: round-trip", "[io][mps]") {
     std::filesystem::remove(tmp);
 }
 
+TEST_CASE("MPS reader: an objective-row RHS is the negated constant", "[io][mps]") {
+    // min x + 2 with x >= 1, written the way e226 writes its constant: as an
+    // RHS of -2 on the N row. Read as obj_offset = -RHS, the optimum is 3; the
+    // other convention would give -1 (issue #207).
+    const std::string path = testDataDir() + "/obj_rhs.mps";
+    {
+        std::ofstream out(path);
+        out << "NAME          OBJRHS\n"
+               "ROWS\n"
+               " N  COST\n"
+               " G  R1\n"
+               "COLUMNS\n"
+               "    X         COST      1.0          R1        1.0\n"
+               "RHS\n"
+               "    RHS       COST      -2.0         R1        1.0\n"
+               "ENDATA\n";
+    }
+    auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    CHECK(lp.obj_offset == 2.0);
+    REQUIRE(lp.num_rows == 1);
+    CHECK(lp.row_lower[0] == 1.0);
+
+    // The writer puts it back on the objective row negated, so a round trip
+    // keeps the constant.
+    const std::string copy = testDataDir() + "/obj_rhs_roundtrip.mps";
+    writeMps(copy, lp);
+    auto reread = readMps(copy);
+    std::filesystem::remove(copy);
+    CHECK(reread.obj_offset == 2.0);
+}
+
 TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
     auto prob = readLp(testDataDir() + "/tiny.lp");
 
