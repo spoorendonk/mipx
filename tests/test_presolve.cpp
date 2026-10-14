@@ -1591,6 +1591,70 @@ TEST_CASE("Presolve: a row forcing only within tolerance is not reduced", "[pres
     CHECK(reduced.num_cols == 0);
 }
 
+/// Issue #215's reproducer: x0 has a domain narrower than the presolve
+/// tolerance, and r0 can only be met near x0's upper bound,
+///
+///   r0: 1e3 * x0 >= 1e3 + 8e-6 - 1e-9     (needs x0 >= 1 + 8e-9 - 1e-12)
+///   r1: x0 + x1 <= 100,  x1 in [0, 10]
+///
+/// so pinning x0 at its lower bound 1 leaves r0 short by 8e-6, far over the
+/// tolerance, even though the domain width 8e-9 is under it. r1 keeps x0 off
+/// the singleton-column path. With x0_lb = x0_ub = 1 + 8e-9 the domain is an
+/// exact point that satisfies r0, and fixing it is exact.
+static LpProblem buildNearFixedColumnProblem(Real x0_lb, Real x0_ub) {
+    LpProblem lp;
+    lp.name = "near_fixed_column";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 1.0};
+    lp.col_lower = {x0_lb, 0.0};
+    lp.col_upper = {x0_ub, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1"};
+
+    lp.num_rows = 2;
+    lp.row_lower = {1e3 + 8e-6 - 1e-9, -kInf};
+    lp.row_upper = {kInf, 100.0};
+    lp.row_names = {"r0", "r1"};
+
+    std::vector<Triplet> trips = {{0, 0, 1e3}, {1, 0, 1.0}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("Presolve: a column fixed only within tolerance is not substituted", "[presolve]") {
+    // Data-free guard for issue #215. Before the fix removeFixedVariables()
+    // pinned x0 at 1, shifted r0 by 1e3 * 1, and the leftover 8e-6 on an
+    // empty row read as infeasibility.
+    const auto problem = buildNearFixedColumnProblem(1.0, 1.0 + 8e-9);
+    Presolver presolver;
+    const auto reduced = presolver.presolve(problem);
+
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().fixed_var_changes == 0);
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(0.0, 1e-9));
+
+    const auto full = presolver.postsolve(solver.getPrimalValues());
+    REQUIRE(static_cast<Index>(full.size()) == problem.num_cols);
+    // The LP is free to leave x0 at 1: r0 then misses by 8e-6, which is 8e-9
+    // relative to a row of magnitude 1e3 and so inside the LP's tolerance.
+    // The defect was presolve turning that same miss into infeasibility.
+    CHECK(problem.row_lower[0] - 1e3 * full[0] <= 1e-8 * std::abs(problem.row_lower[0]));
+
+    // The guard must discriminate, not disable the pass: an exact point is
+    // still fixed and removed.
+    Presolver exact;
+    exact.presolve(buildNearFixedColumnProblem(1.0 + 8e-9, 1.0 + 8e-9));
+    CHECK_FALSE(exact.isInfeasible());
+    CHECK(exact.stats().fixed_var_changes >= 1);
+}
+
 // =============================================================================
 // Instance-driven regression: Netlib bore3d (issue #210)
 // =============================================================================

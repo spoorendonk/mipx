@@ -876,6 +876,43 @@ TEST_CASE("Barrier presolve: fixed variable elimination", "[barrier][presolve]")
     CHECK_THAT(x[1], WithinAbs(3.0, 1e-5));
 }
 
+/// Barrier-presolve form of issue #215's reproducer, scaled to its kTol of
+/// 1e-10: x0's domain is 8e-11 wide, and r0 needs x0 >= 1 + 8e-11 - 1e-14.
+/// Fixing x0 at the midpoint 1 + 4e-11 leaves r0 short by about 4e-8.
+static LpProblem buildBarrierNearFixedColumnProblem(Real x0_lb, Real x0_ub) {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 1.0};
+    lp.col_lower = {x0_lb, 0.0};
+    lp.col_upper = {x0_ub, 10.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1"};
+    lp.num_rows = 2;
+    lp.row_lower = {1e3 + 8e-8 - 1e-11, -kInf};
+    lp.row_upper = {kInf, 100.0};
+    lp.row_names = {"r0", "r1"};
+    std::vector<Triplet> trips = {{0, 0, 1e3}, {1, 0, 1.0}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("Barrier presolve: a column fixed only within tolerance is not substituted",
+          "[barrier][presolve]") {
+    // Issue #215. Before the fix x0 was fixed at the midpoint, r0 became an
+    // empty row with a lower bound of ~4e-8, and presolve reported infeasible.
+    BarrierPresolver presolver;
+    presolver.presolve(buildBarrierNearFixedColumnProblem(1.0, 1.0 + 8e-11));
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().fixed_vars == 0);
+
+    // An exact point is still fixed.
+    BarrierPresolver exact;
+    exact.presolve(buildBarrierNearFixedColumnProblem(1.0 + 8e-11, 1.0 + 8e-11));
+    CHECK_FALSE(exact.isInfeasible());
+    CHECK(exact.stats().fixed_vars == 1);
+}
+
 TEST_CASE("Barrier presolve: singleton row elimination", "[barrier][presolve]") {
     // min -x - y  s.t.  x <= 5 (singleton row),  x + y <= 8,  x,y >= 0
     LpProblem lp;

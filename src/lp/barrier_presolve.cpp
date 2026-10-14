@@ -39,7 +39,29 @@ Index BarrierPresolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& c
             continue;
         }
 
-        // Fixed variable: x_j = lb (or midpoint).
+        auto cv = lp.matrix.col(j);
+
+        // Fixing at the midpoint moves x_j by up to half the width, and the RHS
+        // update below carries that into every live row scaled by its
+        // coefficient, so a width test against a bare kTol does not bound the
+        // row perturbation (issue #215, the twin of the main presolve's
+        // fixed-column guard). Require width * max(1, max |a_kj|) <= kTol:
+        // never looser than the plain test, and an exact point always passes.
+        // Crossed bounds within kTol are fixed regardless; left in the model
+        // they make it infeasible outright.
+        if (ub > lb) {
+            Real amplification = 1.0;
+            for (Index k = 0; k < cv.size(); ++k) {
+                if (!row_removed[cv.indices[k]]) {
+                    amplification = std::max(amplification, std::abs(cv.values[k]));
+                }
+            }
+            if ((ub - lb) * amplification > kTol) {
+                continue;
+            }
+        }
+
+        // Fixed variable: x_j = midpoint.
         Real val = 0.5 * (lb + ub);
 
         // Record postsolve op with row info for dual reconstruction.
@@ -48,7 +70,6 @@ Index BarrierPresolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& c
         op.value = val;
         op.obj_coeff = lp.obj[j];
 
-        auto cv = lp.matrix.col(j);
         for (Index k = 0; k < cv.size(); ++k) {
             Index row = cv.indices[k];
             if (row_removed[row]) {

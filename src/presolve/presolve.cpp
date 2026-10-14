@@ -373,8 +373,42 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
             continue;
         }
         ++stats_.cols_examined;
-        if (std::abs(lp.col_lower[j] - lp.col_upper[j]) > kTol) {
+        const Real width = lp.col_upper[j] - lp.col_lower[j];
+        if (std::abs(width) > kTol) {
             continue;
+        }
+
+        // Pinning x_j at its lower bound displaces it by up to `width`, and the
+        // loop below moves that displacement into every live row's bounds,
+        // scaled by a_kj. A width test against a bare kTol bounds the first
+        // perturbation but not the second: x0 in [1, 1 + 8e-9] with a
+        // coefficient of 1e3 shifts that row's rhs by 8e-6, enough to turn a
+        // row satisfiable only near x0's upper bound into an infeasibility
+        // (issue #215). This is the fixed-column twin of the forcing-row
+        // defect fixed in #210, and gets the same treatment: bound the
+        // displacement the reduction authorizes, folding in the largest
+        // coefficient over live rows. The factor is clamped at 1, so this only
+        // rejects columns the plain test accepted. An exact point (width 0)
+        // always passes.
+        //
+        // Crossed bounds (lb > ub, by at most kTol) are fixed regardless:
+        // left in the model they make it infeasible outright, which is worse
+        // than any displacement fixing them introduces.
+        if (width > 0.0) {
+            Real amplification = 1.0;
+            auto cv = lp.matrix.col(j);
+            for (Index k = 0; k < cv.size(); ++k) {
+                const Index row = cv.indices[k];
+                if (row_removed[row]) {
+                    continue;
+                }
+                amplification =
+                    std::max(amplification,
+                             std::abs(effectiveCoeff(coeff_overrides_, row, j, cv.values[k])));
+            }
+            if (width * amplification > kTol) {
+                continue;
+            }
         }
 
         // Variable is fixed.
