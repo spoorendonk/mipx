@@ -580,6 +580,16 @@ LpProblem roundedIntegerBounds(LpProblem lp) {
     return lp;
 }
 
+bool hasFractionalIntegerBound(const LpProblem& lp) {
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (isIntegral(lp.col_type[j]) && (lp.col_lower[j] != std::round(lp.col_lower[j]) ||
+                                           lp.col_upper[j] != std::round(lp.col_upper[j]))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The same model as a minimization, which the solver audit uses until the
 // tree search handles maximization (#230, reproducer below).
 LpProblem minimized(LpProblem lp) {
@@ -777,6 +787,7 @@ bool literalTrue(const std::vector<Real>& x, Literal lit) {
 TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum", "[validity]") {
     const auto models = auditModels(227, 300, true);
     for (const auto& pc : presolveCases()) {
+        Int fractional_judged = 0;
         for (std::size_t t = 0; t < models.size(); ++t) {
             INFO("model " << t);
             const LpProblem lp = roundedIntegerBounds(linearized(models[t]));
@@ -784,15 +795,22 @@ TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum
             auditPresolve(withoutObjective(lp), pc);
             // On fractional bounds default presolve trips on #228 (reproducer
             // below), so an opt-in reduction is judged there only on models
-            // the default reductions get right.
-            if (pc.opt_in) {
+            // the default reductions get right. The opt-in run still includes
+            // the default reductions, so a failure here may also be #228
+            // reached through a column the opt-in reduction fixed.
+            if (pc.opt_in && hasFractionalIntegerBound(models[t])) {
                 for (const LpProblem& raw :
                      {linearized(models[t]), withoutObjective(linearized(models[t]))}) {
                     if (auditPresolve(raw, presolveCases()[0], false)) {
+                        ++fractional_judged;
                         auditPresolve(raw, pc);
                     }
                 }
             }
+        }
+        if (pc.opt_in) {
+            INFO("presolve case: " << pc.name);
+            CHECK(fractional_judged > 0);
         }
     }
 }
@@ -1011,10 +1029,15 @@ TEST_CASE("Validity: symmetry handling keeps an image of every feasible point", 
         const Index cuts = symmetry.addSymmetryCuts(with_cuts);
         INFO("model " << t << " (" << cuts << " symmetry cuts):\n" << describe(with_cuts));
         std::vector<std::vector<Index>> orbits;
+        bool searchable = true;
         for (const auto& orbit : symmetry.orbits()) {
-            if (orbit.size() > 1 && orbit.size() <= 6) {
+            searchable = searchable && orbit.size() <= 6;
+            if (orbit.size() > 1) {
                 orbits.push_back(orbit);
             }
+        }
+        if (!searchable) {
+            continue;  // Too many permutations to try; the cuts stay unjudged.
         }
         forEachFeasible(lp, [&](const Slice& s) {
             for (const auto& x : slicePoints(s)) {
@@ -1031,7 +1054,9 @@ TEST_CASE("Validity: symmetry handling keeps an image of every feasible point", 
                             y[orbits[o][k]] = x[perm[o][k]];
                         }
                     }
-                    found = pointFeasible(with_cuts, y, kFeasTol);
+                    // The image must be as good, or pruning x's twin loses it.
+                    found = pointFeasible(with_cuts, y, kFeasTol) &&
+                            std::abs(objective(lp, y) - objective(lp, x)) <= kObjTol;
                     std::size_t o = 0;
                     while (o < perm.size() &&
                            !std::next_permutation(perm[o].begin(), perm[o].end())) {
