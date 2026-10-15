@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -2316,6 +2317,14 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 // =============================================================================
 
 LpProblem Presolver::presolve(const LpProblem& problem) {
+    // The reductions read every column as an interval and every constraint as
+    // a row, so a semi column's {0} and SOS or indicator constraints would be
+    // dropped silently (#231). MipSolver linearizes these before presolve.
+    if (hasAdvancedModelFeatures(problem)) {
+        throw std::invalid_argument(
+            "Presolver: model has semi columns, SOS or indicator constraints; "
+            "linearize it with linearizeModelFeatures first");
+    }
     auto t0 = std::chrono::steady_clock::now();
 
     // Reset state so one Presolver instance can be reused safely.

@@ -32,6 +32,7 @@
 #include <functional>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -1179,13 +1180,11 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
 }
 
 // =============================================================================
-// Known bugs in default-on code, filed rather than fixed here: a fix changes
-// default behaviour, which waits on a benchmark. Each reproducer may fail
-// until its issue is fixed; then drop the [!mayfail] tag and the workaround
-// in the audits above.
+// Regressions: the reproducers of bugs the audits above found, each kept
+// with its issue number.
 // =============================================================================
 
-TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns", "[validity]") {
+TEST_CASE("Regression #228: presolve keeps fractional bounds of integer columns", "[validity]") {
     constexpr auto I = VarType::Integer;
     // min x0 over x0 integer in [0.5, 3]: the optimum is x0 = 1.
     const LpProblem lower_side =
@@ -1217,7 +1216,7 @@ TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns",
     }
 }
 
-TEST_CASE("Known bug #229: the objective offset takes the wrong sign when maximizing",
+TEST_CASE("Regression #229: the objective offset takes the wrong sign when maximizing",
           "[validity]") {
     // max -x0 + 1.5 s.t. x0 + x1 >= 1 over [0, 1]^2: the optimum is 1.5.
     const LpProblem lp = [] {
@@ -1239,7 +1238,7 @@ TEST_CASE("Known bug #229: the objective offset takes the wrong sign when maximi
     CHECK_THAT(solver.solve().objective, WithinAbs(1.5, kObjTol));
 }
 
-TEST_CASE("Known bug #230: the tree search loses the optimum of a maximization", "[validity]") {
+TEST_CASE("Regression #230: the tree search loses the optimum of a maximization", "[validity]") {
     // max -4x0 - 3x1 - 2x2 - 2x3 s.t. -4x0 - 7x1 - 4x2 <= 15, all integer.
     // The optimum is 9 at (-1, -1, -1, 0); the solver stops at 8 after one
     // node. The same model as a minimization solves correctly, and root cuts
@@ -1274,15 +1273,17 @@ TEST_CASE("Known bug #230: the tree search loses the optimum of a maximization",
     CHECK_THAT(objective(defaults, default_result.solution), WithinAbs(4.0, kObjTol));
 }
 
-TEST_CASE("Known bug #231: presolve treats semi-continuous columns as integer",
-          "[validity][!mayfail]") {
+TEST_CASE("Regression #231: presolve treats semi-continuous columns as integer", "[validity]") {
     // min -2x0 + 2x1 + 4x2 s.t. -x0 <= 1, -4x0 + 2x2 = -4, x2 semi-continuous
-    // in {0} or [1.5, 4]. The optimum is -6 at (1, -2, 0). The solver
-    // linearizes semi columns before presolve, so only a direct call sees this.
+    // in {0} or [1.5, 4]. The optimum is -6 at (1, -2, 0). Read as an interval
+    // the semi column loses its 0, so a direct presolve call refuses the model
+    // and presolves its linearization instead.
     constexpr auto I = VarType::Integer;
     const LpProblem lp =
         makeModel(Sense::Minimize, {-2, 2, 4}, {1, -2, 1.5}, {2, -1, 4},
                   {I, I, VarType::SemiContinuous}, {{-1, 0, 0}, {-4, 0, 2}}, {-kInf, -4}, {1, -4});
     REQUIRE_THAT(enumerate(lp).best, WithinAbs(-6.0, kObjTol));
-    auditPresolve(lp, presolveCases()[0]);
+    Presolver presolver;
+    CHECK_THROWS_AS(presolver.presolve(lp), std::invalid_argument);
+    auditPresolve(linearized(lp), presolveCases()[0]);
 }

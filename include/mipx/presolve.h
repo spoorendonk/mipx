@@ -155,6 +155,8 @@ public:
 
     /// Run presolve on the given problem. Returns the reduced problem.
     /// The postsolve stack and column mapping are stored internally.
+    /// Throws std::invalid_argument when the problem has semi columns, SOS or
+    /// indicator constraints: linearize them with linearizeModelFeatures first.
     LpProblem presolve(const LpProblem& problem);
 
     /// Postsolve: given solution to presolved problem, reconstruct full solution.
