@@ -2591,13 +2591,14 @@ LpResult DualSimplexSolver::solve() {
                     break;
                 }
             }
-            if (dual_feasible) {
+            // The proof needs no dual feasibility: no nonbasic move within its
+            // bounds brings the leaving variable towards its violated bound,
+            // whatever the reduced costs are. Dual infeasibility here only
+            // hints that the factorization has drifted, so refactorize once,
+            // and trust an empty row computed from the fresh factors (#237).
+            if (dual_feasible || empty_candidate_retry_streak > 0) {
                 status_ = Status::Infeasible;
                 storeDualRay(btran_work.dense(), sigma);
-                break;
-            }
-            if (empty_candidate_retry_streak >= 4) {
-                status_ = Status::Error;
                 break;
             }
 

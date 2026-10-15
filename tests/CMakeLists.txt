@@ -27,6 +27,7 @@ add_executable(mipx-tests
     test_reduced_cost_fixer.cpp
     test_objective_propagator.cpp
     test_validity.cpp
+    test_lp_validity.cpp
     test_cli.cpp
     test_paths.cpp
 )
