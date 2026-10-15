@@ -1,3 +1,4 @@
+#include "common.h"
 #include "mipx/heuristic_runtime.h"
 
 #include <algorithm>
@@ -203,6 +204,8 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(const RootHeuristicConte
 
     auto accept = [&](const char* source, std::optional<HeuristicSolution>& candidate) -> bool {
         if (!candidate.has_value())
+            return false;
+        if (!heuristic_detail::isFeasiblePoint(ctx.problem, candidate->values))
             return false;
         if (!isImprovement(ctx.problem.sense, candidate->objective, incumbent))
             return false;

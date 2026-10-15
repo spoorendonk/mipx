@@ -17,6 +17,7 @@
 #include <unistd.h>
 #endif
 
+#include "../heuristics/common.h"
 #include "mipx/barrier.h"
 #include "mipx/cut_pool.h"
 #include "mipx/heuristics.h"
@@ -1797,6 +1798,11 @@ bool MipSolver::isFeasibleMip(const std::vector<Real>& primals) const {
     return true;
 }
 
+bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
+    return static_cast<Index>(x.size()) == problem_.num_cols &&
+           heuristic_detail::isFeasiblePoint(problem_, x);
+}
+
 bool MipSolver::isFeasibleLp(const std::vector<Real>& primals) const {
     if (static_cast<Index>(primals.size()) != problem_.num_cols) {
         return false;
@@ -3007,7 +3013,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         total_work += heur_outcome.work_units;
 
         if (heur_outcome.improved && heur_outcome.solution.has_value() &&
-            heur_outcome.solution->objective < incumbent) {
+            heur_outcome.solution->objective < incumbent &&
+            isAcceptableIncumbent(heur_outcome.solution->values)) {
             incumbent = heur_outcome.solution->objective;
             best_solution = std::move(heur_outcome.solution->values);
             solution_pool.submit({best_solution, incumbent}, "rins", 0);
@@ -3049,7 +3056,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
 
         if (!branched && !node_primals.empty() && node_int_inf == 0) {
-            if (node_obj < incumbent) {
+            if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
                 incumbent = node_obj;
                 best_solution = node_primals;
                 solution_pool.submit({best_solution, incumbent}, "tree_integral", 0);
@@ -3112,7 +3119,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             ++search_stats_.plunge_rounding_calls;
             RoundingHeuristic rounding;
             auto rounded = rounding.run(problem_, lp, node_primals, incumbent);
-            if (rounded.has_value() && rounded->objective < incumbent) {
+            if (rounded.has_value() && rounded->objective < incumbent &&
+                isAcceptableIncumbent(rounded->values)) {
                 ++search_stats_.plunge_rounding_improvements;
                 incumbent = rounded->objective;
                 best_solution = std::move(rounded->values);
@@ -3396,7 +3404,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                     worker_ctx.rins_fixed_sum += heur_outcome.fixed_count;
 
                     if (heur_outcome.improved && heur_outcome.solution.has_value() &&
-                        heur_outcome.solution->objective < incumbent) {
+                        heur_outcome.solution->objective < incumbent &&
+                        isAcceptableIncumbent(heur_outcome.solution->values)) {
                         incumbent = heur_outcome.solution->objective;
                         best_solution = std::move(heur_outcome.solution->values);
                         solution_pool.submit({best_solution, incumbent}, "rins", task.worker_id);
@@ -3406,7 +3415,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
 
                 if (!task.branched && !task.node_primals.empty() && task.node_int_inf == 0) {
-                    if (task.node_obj < incumbent) {
+                    if (task.node_obj < incumbent && isAcceptableIncumbent(task.node_primals)) {
                         incumbent = task.node_obj;
                         best_solution = task.node_primals;
                         solution_pool.submit({best_solution, incumbent}, "tree_integral",
@@ -3655,7 +3664,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
                 local_rins_fixed_sum += heur_outcome.fixed_count;
 
-                if (heur_outcome.improved && heur_outcome.solution.has_value()) {
+                if (heur_outcome.improved && heur_outcome.solution.has_value() &&
+                    isAcceptableIncumbent(heur_outcome.solution->values)) {
                     bool accepted = false;
                     std::lock_guard<std::mutex> lock(incumbent_mutex);
                     if (heur_outcome.solution->objective < incumbent) {
@@ -3674,7 +3684,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             // Check for new incumbent.
             if (!branched && !node_primals.empty() && node_int_inf == 0) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
-                if (node_obj < incumbent) {
+                if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
                     incumbent = node_obj;
                     best_solution = node_primals;
                     solution_pool.submit({best_solution, incumbent}, "tree_integral", thread_id);
@@ -4619,7 +4629,7 @@ MipResult MipSolver::solveMinimization() {
                 const bool had_incumbent_before =
                     std::isfinite(incumbent_before) && incumbent_before < kInf;
                 bool accepted = false;
-                if (out.candidate.has_value() &&
+                if (out.candidate.has_value() && isAcceptableIncumbent(out.candidate->values) &&
                     pre_root_pool.submit(*out.candidate, "pre_root_stage", out.thread_id)) {
                     accepted = true;
                     ++improvements;

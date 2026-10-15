@@ -556,6 +556,8 @@ private:
     // Check if all integer variables are integral in the given solution.
     bool isFeasibleMip(const std::vector<Real>& primals) const;
     bool isFeasibleLp(const std::vector<Real>& primals) const;
+    // The gate every incumbent passes (#240), heuristic_detail::isFeasiblePoint.
+    bool isAcceptableIncumbent(std::span<const Real> x) const;
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;

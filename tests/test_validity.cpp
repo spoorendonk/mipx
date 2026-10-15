@@ -1879,3 +1879,45 @@ TEST_CASE("Regression #236: propagation through a tiny coefficient keeps the exa
         CHECK(prop.getUpper(1) >= t);
     }
 }
+
+TEST_CASE("Regression #240: incumbents stay inside the column bounds with cuts on", "[validity]") {
+    // Rounding submitted x3 = -1125 against bounds [1500, 2500] (-1125 is
+    // x3's lower bound plus fixed x4's value), and the solve ended Optimal
+    // with it, with presolve on and off.
+    constexpr auto C = VarType::Continuous;
+    constexpr auto I = VarType::Integer;
+    LpProblem lp = makeModel(
+        Sense::Maximize, {67968.75, -7.296875, -475, 0.0033593749999999999, 0.0013749999999999999},
+        {-0.000475, -kInf, -0.029999999999999999, 1500, -2625}, {kInf, kInf, kInf, 2500, -2625},
+        {I, I, I, C, I},
+        {{262500000, -26250, 0, 1.25, 0},
+         {-187.5, 0.02375, 4.75, -3.1250000000000001e-05, 0},
+         {0, -0.014999999999999999, 2.25, 1.7500000000000002e-05, 6.2500000000000003e-06}},
+        {-100156.25, -0.095468750000000005, -kInf}, {-80156.25, kInf, kInf});
+    lp.obj_offset = 9.5;
+    for (const bool presolve : {true, false}) {
+        INFO("presolve " << presolve);
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.setNodeLimit(300);
+        solver.setTimeLimit(2.0);
+        solver.setPresolve(presolve);
+        std::vector<std::string> bad;
+        solver.setIncumbentObserver([&](const std::vector<Real>& x, const std::string& source) {
+            if (!pointFeasible(lp, x, kFeasTol * 10)) {
+                bad.push_back(source + ": " + describe(x));
+            }
+        });
+        solver.load(lp);
+        const auto result = solver.solve();
+        for (const auto& b : bad) {
+            UNSCOPED_INFO(b);
+        }
+        CHECK(bad.empty());
+        if (result.status == Status::Optimal) {
+            INFO(describe(result.solution));
+            CHECK(pointFeasible(lp, result.solution, kFeasTol * 10));
+        }
+    }
+}
