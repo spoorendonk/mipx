@@ -3309,9 +3309,12 @@ std::vector<Real> DualSimplexSolver::getDualRay() const {
 // x = C x', so r_j = col_scale_j * d'_j.
 //
 // A structural entry whose sign its finite bound cannot carry is one the
-// ratio test skipped as too small (any other would have blocked); it is
-// dropped, as the ratio test treated it as zero. Slack entries are not returned: q = A r is the
-// caller's to form, and is right up to the same skipped entries.
+// ratio test skipped (any other would have blocked): below kPivotTol, or
+// below harris_min_relative_pivot of ||B^{-1} a_q||, or blocking only past
+// kRepairMaxStep. It is dropped, as the ratio test treated it as zero, so
+// q = A r (the caller's to form; slack entries are not returned) is off by
+// up to those skipped entries -- small against ||B^{-1} a_q|| in the scaled
+// space, which may be far larger than |r| when slacks carry the column.
 void DualSimplexSolver::storePrimalRay(std::span<const Real> pivot_col, Index entering,
                                        Real delta_dir) {
     primal_ray_.assign(static_cast<std::size_t>(num_cols_), 0.0);
@@ -3452,6 +3455,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
+    primal_ray_.clear();  // a new finite bound may stop the ray
     if (!loaded_ || col < 0 || col >= num_cols_) {
         return;
     }
@@ -3511,6 +3515,7 @@ void DualSimplexSolver::getColBounds(Index col, Real& lower, Real& upper) const 
 }
 
 void DualSimplexSolver::setObjective(std::span<const Real> obj) {
+    primal_ray_.clear();  // the ray need not improve the new objective
     if (!loaded_ || static_cast<Index>(obj.size()) != num_cols_) {
         return;
     }
@@ -3531,6 +3536,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
                                 std::span<const Real> values, std::span<const Real> lower,
                                 std::span<const Real> upper) {
     dual_ray_.clear();
+    primal_ray_.clear();
     if (!loaded_) {
         return;
     }
@@ -3632,6 +3638,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
 
 void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     dual_ray_.clear();
+    primal_ray_.clear();
     if (!loaded_ || rows.empty()) {
         return;
     }

@@ -1213,3 +1213,40 @@ TEST_CASE("Regression #237: a small entry that blocks first is pivoted on, not o
     DualSimplexSolver solver;
     CHECK(std::abs(solveLiteral(solver, lp).objective - -22.21875) < 1e-6);
 }
+
+TEST_CASE("Regression #238: the primal ray does not outlive a change to the model",
+          "[lp_validity]") {
+    // min -x0 s.t. x0 - x1 <= 1, x >= 0: unbounded along r = (1, 1).
+    const LpProblem lp = literalLp(Sense::Minimize, 0.0, {-1.0, 0.0}, {0.0, 0.0}, {kInf, kInf},
+                                   {-kInf}, {1.0}, {{0, 0, 1.0}, {0, 1, -1.0}});
+    const std::vector<Index> starts{0, 1};
+    const std::vector<Index> idx{0};
+    const std::vector<Real> vals{1.0};
+    const std::vector<Real> lo{-kInf};
+    const std::vector<Real> up{5.0};
+    for (int change = 0; change < 4; ++change) {
+        DualSimplexSolver solver;
+        REQUIRE(solveLiteral(solver, lp).status == Status::Unbounded);
+        REQUIRE(checkPrimalRay(lp, solver.getPrimalRay()) == "");
+        switch (change) {
+            case 0:
+                solver.addRows(starts, idx, vals, lo, up);  // x0 <= 5 stops the ray
+                break;
+            case 1: {
+                const std::vector<Index> rows{0};
+                solver.removeRows(rows);
+                break;
+            }
+            case 2:
+                solver.setColBounds(0, 0.0, 5.0);
+                break;
+            default: {
+                const std::vector<Real> obj{1.0, 0.0};
+                solver.setObjective(obj);
+                break;
+            }
+        }
+        INFO("change " << change);
+        CHECK(solver.getPrimalRay().empty());
+    }
+}

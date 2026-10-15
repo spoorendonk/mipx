@@ -76,9 +76,11 @@ public:
     /// the space of the loaded problem (unscaled, original column order).
     ///
     /// Returned when the last solve() proved the LP unbounded; empty after any
-    /// other status, and from backends that do not produce one (the default;
-    /// only the dual simplex does). It certifies unboundedness only together
-    /// with a feasible point, which the Unbounded status does not provide.
+    /// other status, after any change to the model since that solve (rows,
+    /// column bounds or objective; the status still reads Unbounded), and
+    /// from backends that do not produce one (the default; only the dual
+    /// simplex does). It certifies unboundedness only together with a
+    /// feasible point, which the Unbounded status does not provide.
     ///
     /// Contract, for the ray r and q = A r:
     ///   - c^T r < 0 for minimize, c^T r > 0 for maximize;
@@ -89,10 +91,14 @@ public:
     /// so x + t r stays feasible for every t >= 0 from any feasible x, and the
     /// objective improves without bound. The ray's length is arbitrary.
     ///
-    /// Floating point: the column sign conditions hold exactly, but q is only
-    /// right up to the solver's tolerances -- treat |q_i| below a tolerance
-    /// (relative to |r| times the row's coefficients) as zero before using an
-    /// infinite row side.
+    /// Floating point: the column sign conditions hold exactly, but q and the
+    /// sign of c^T r only up to the solver's tolerances -- treat |q_i| below
+    /// a tolerance (relative to |r| times the row's coefficients) as zero
+    /// before using an infinite row side. The dual simplex drops entries its
+    /// ratio test skipped; their size is bounded relative to the whole
+    /// direction in its scaled space, slacks included, so on badly scaled
+    /// models q_i can exceed that tolerance. A consumer that needs a rigorous
+    /// proof recomputes q and c^T r itself.
     virtual std::vector<Real> getPrimalRay() const { return {}; }
 
     /// Basis operations.
