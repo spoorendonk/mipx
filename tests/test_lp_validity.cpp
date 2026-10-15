@@ -439,3 +439,22 @@ TEST_CASE("Regression #237: a basic variable just past its bound blocks the prim
                    {3, 3, -3.125}});
     requireCertifiedOptimal(lp);
 }
+
+TEST_CASE("Regression #237: a small entry that blocks first is pivoted on, not overshot",
+          "[lp_validity]") {
+    // The optimal basis pivots on row 0's -7.5e-9. The primal ratio test
+    // skipped it and stepped past row 0's bound; the dual phase stepped back,
+    // and the two cycled until the iteration limit.
+    const LpProblem lp =
+        literalLp(Sense::Maximize, -6.125, {-8.4375000000000004e-05, 4656.25}, {-kInf, -kInf},
+                  {-20000, -0.0040000000000000001}, {-kInf, -137500, -kInf, -kInf},
+                  {-0.00067500000000000004, kInf, kInf, 875},
+                  {{0, 0, -7.500000000000001e-09},
+                   {0, 1, 0.22500000000000003},
+                   {1, 0, 3.875},
+                   {2, 1, -0.48750000000000004},
+                   {3, 0, -0.022500000000000003}});
+    requireCertifiedOptimal(lp);
+    DualSimplexSolver solver;
+    CHECK(std::abs(solveLiteral(solver, lp).objective - -22.21875) < 1e-6);
+}

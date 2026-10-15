@@ -2173,6 +2173,48 @@ LpResult DualSimplexSolver::solve() {
                 entering_bound_step = primal_[entering_p] - varLower(entering_p);
             }
 
+            // The ratio test above skips entries below kPivotTol (or of poor
+            // relative size). A skipped entry still blocks when the step
+            // would carry its basic variable past its bound by more than the
+            // primal tolerance: otherwise the step overshoots it, and the dual
+            // phase pivots the overshoot back, which cycled on a two-column
+            // LP; with nothing else blocking, the ray was reported Unbounded
+            // on a bounded LP (#237). Such an entry becomes the pivot, unless
+            // it blocks only past kRepairMaxStep. Its pivot passes the check
+            // below by the same floor, as both read the same pivot column.
+            bool repair_pivot_p = false;
+            {
+                const Real limit = std::min(min_step, entering_bound_step);
+                Real repair_step = kInf;
+                Index repair_row = -1;
+                for (Index i = 0; i < num_rows_; ++i) {
+                    const Real f = pivot_col[i] * delta_dir;
+                    const Real abs_f = std::abs(f);
+                    const bool skipped =
+                        abs_f < kPivotTol ||
+                        (options_.enable_adaptive_harris && abs_f / pivot_col_norm < min_rel_pivot);
+                    if (!skipped || abs_f < kRepairPivotTol) {
+                        continue;
+                    }
+                    const Index bvar = basis_[i];
+                    const Real bound = f > 0 ? varLower(bvar) : varUpper(bvar);
+                    if (!std::isfinite(bound)) {
+                        continue;
+                    }
+                    const Real step_i = std::max<Real>((primal_[bvar] - bound) / f, 0.0);
+                    if (step_i < repair_step && step_i <= kRepairMaxStep &&
+                        (limit == kInf || abs_f * (limit - step_i) > kPrimalTol)) {
+                        repair_step = step_i;
+                        repair_row = i;
+                    }
+                }
+                if (repair_row >= 0) {
+                    min_step = repair_step;
+                    leaving_row_p = repair_row;
+                    repair_pivot_p = true;
+                }
+            }
+
             if (min_step == kInf && entering_bound_step == kInf) {
                 status_ = Status::Unbounded;
                 break;
@@ -2223,7 +2265,7 @@ LpResult DualSimplexSolver::solve() {
             // Guard against numerically degenerate pivot. Ratio test filters
             // |alpha| < kPivotTol, but values can drift after LU updates between
             // selection and use. Refactorize and retry on degeneracy.
-            if (std::abs(pivot_elem) < kPivotTol) {
+            if (std::abs(pivot_elem) < (repair_pivot_p ? kRepairPivotTol : kPivotTol)) {
                 try {
                     refactorize();
                 } catch (const std::runtime_error&) {
