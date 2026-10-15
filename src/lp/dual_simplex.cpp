@@ -1322,7 +1322,7 @@ LpResult DualSimplexSolver::solve() {
     Int degenerate_pivot_streak = 0;
     Int empty_candidate_retry_streak = 0;
     // The row whose repair pivot (see the dual ratio test) was rejected as
-    // numerically zero, or -1; cleared by the next ordinary pivot.
+    // numerically zero, or -1; cleared by the next pivot that stands.
     Index repair_rejected_row = -1;
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
@@ -2705,9 +2705,6 @@ LpResult DualSimplexSolver::solve() {
             continue;
         }
         empty_candidate_retry_streak = 0;
-        if (!repair_pivot) {
-            repair_rejected_row = -1;
-        }
 
         auto cand_ratio_pos_less = [](const BfrtCand& a, const BfrtCand& b) {
             if (a.ratio != b.ratio) {
@@ -2911,6 +2908,9 @@ LpResult DualSimplexSolver::solve() {
             degenerate_pivot_streak = 0;
             continue;
         }
+        // The pivot stands, so the basis changes and a rejected repair may
+        // be retried.
+        repair_rejected_row = -1;
 
         // ---- UPDATE ----
         // Dual step size: delta_dual = sigma * (bound violation) / alpha_entering? No.
