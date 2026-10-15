@@ -2021,3 +2021,24 @@ TEST_CASE("Regression #244: presolve keeps the rows of an all-integer MIP", "[va
     lp.obj_offset = 6.125;
     requirePresolveAgrees(lp);
 }
+
+TEST_CASE("Regression #244: presolve keeps a row of a mixed MIP", "[validity]") {
+    constexpr auto C = VarType::Continuous;
+    constexpr auto I = VarType::Integer;
+    LpProblem lp = makeModel(
+        Sense::Maximize, {-45000, 0.00039375, 38906.25, -4.8437500000000005e-05},
+        {-0.000825, -35000, -0.00052499999999999997, 17500},
+        {-0.00038749999999999999, -35000, -0.00022499999999999999, 17500}, {C, C, C, I},
+        {{-500, 0, 0, 0},
+         {112.5, -2.0000000000000003e-06, 275, 3.7500000000000001e-07},
+         {0, 3.3750000000000001e-08, 0.25, 0},
+         {-4000000, 0, 3125000, 0.00125},
+         {0, 0.0016250000000000001, 0, 0.0013750000000000001},
+         {-200000, 0.002, 387500, -0.002},
+         {-25000000, 0, -7500000, -0.38750000000000001},
+         {0, 2.2500000000000004e-07, -12.5, -4.3750000000000005e-07}},
+        {-kInf, -kInf, -kInf, -kInf, -70.3125, -172.8125, 5718.75, -kInf},
+        {kInf, -0.070156250000000003, -0.0012750000000000001, 400, 4.6875, -147.8125, kInf, kInf});
+    lp.obj_offset = 6.125;
+    requirePresolveAgrees(lp);
+}

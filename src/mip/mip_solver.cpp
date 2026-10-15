@@ -3912,7 +3912,53 @@ MipResult MipSolver::solve() {
     return result;
 }
 
+// Presolve's reductions hold to tolerances, and the reduced model's answer
+// to the LP's; postsolved, a point that holds both can still miss a row of
+// the model as loaded by far more (#244: a row removed as redundant at its
+// bounds, with a coefficient of 4e6 on a column 1.3e-8 past one). Check the
+// final point there, the gate every incumbent passes. A failing point is
+// re-solved with its integers fixed; if that fails too, the model is solved
+// again without presolve in the time left. No point that fails the gate is
+// returned.
 MipResult MipSolver::solveMinimization() {
+    MipResult result = solveMinimizationOnce();
+    if (result.solution.empty() || isAcceptableIncumbent(result.solution)) {
+        return result;
+    }
+    double repair_work = 0.0;
+    auto repaired = integralNodeIncumbent(result.solution, result.objective, repair_work);
+    result.work_units += repair_work;
+    if (repaired.has_value()) {
+        result.solution = std::move(repaired->values);
+        result.objective = repaired->objective;
+        if (result.best_bound > -kInf) {
+            result.gap = computeGap(result.objective, result.best_bound);
+        }
+        return result;
+    }
+    const double time_left = time_limit_ - result.time_seconds;
+    if (presolve_ && time_left > 0.0) {
+        const double saved_time_limit = time_limit_;
+        presolve_ = false;
+        time_limit_ = time_left;
+        MipResult again = solveMinimizationOnce();
+        presolve_ = true;
+        time_limit_ = saved_time_limit;
+        again.nodes += result.nodes;
+        again.lp_iterations += result.lp_iterations;
+        again.work_units += result.work_units;
+        again.time_seconds += result.time_seconds;
+        if (again.solution.empty() || isAcceptableIncumbent(again.solution)) {
+            return again;
+        }
+        result = std::move(again);
+    }
+    result.solution.clear();
+    result.status = Status::Error;
+    return result;
+}
+
+MipResult MipSolver::solveMinimizationOnce() {
     lp_stats_ = {};
     cut_stats_ = {};
     root_cut_family_stats_ = {};
@@ -4195,7 +4241,9 @@ MipResult MipSolver::solveMinimization() {
         if (did_presolve) {
             result.solution = presolver.postsolve({});
         }
-        if (incumbent_observer_) {
+        // problem_ is still the model as loaded here; a point that fails it
+        // is repaired, or replaced, by solveMinimization() (#244).
+        if (incumbent_observer_ && isAcceptableIncumbent(result.solution)) {
             incumbent_observer_(result.solution, "presolve");
         }
         return result;

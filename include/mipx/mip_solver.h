@@ -538,6 +538,8 @@ private:
     /// The solve proper, on a minimization: solve() negates a maximization
     /// into one before calling it and converts the result back.
     MipResult solveMinimization();
+    /// One solve of the minimization; solveMinimization() checks its answer.
+    MipResult solveMinimizationOnce();
 
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
