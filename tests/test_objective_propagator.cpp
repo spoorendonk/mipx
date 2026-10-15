@@ -313,6 +313,11 @@ TEST_CASE("ObjectiveCutoffBounds: a crossing within tolerance prunes nothing", "
             const auto result = solver.solve();
             REQUIRE(result.status == Status::Optimal);
             objectives[on] = result.objective;
+            if (on == 1) {
+                // The tree ran past an incumbent, so the bounds were replayed.
+                CHECK(solver.getObjPropStats().repropagations > 0);
+                CHECK(result.nodes > 1);
+            }
         }
         CHECK_THAT(objectives[1], WithinAbs(objectives[0], 1e-6));
     }

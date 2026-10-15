@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace mipx {
 
@@ -163,9 +164,10 @@ bool ObjectiveCutoffBounds::refresh(Real cutoff) {
             Real ub = dp.getUpper(j);
             // The propagator accepts a continuous column crossed by up to its
             // tolerance; replayed on every node as is, that would prune them
-            // all, so such a column is fixed between the two.
+            // all. The swapped interval still holds every feasible value up to
+            // rounding, where a single point might leave a row unsatisfiable.
             if (lb > ub) {
-                lb = ub = 0.5 * (lb + ub);
+                std::swap(lb, ub);
             }
             if (lb > root_.col_lower[j] || ub < root_.col_upper[j]) {
                 next->cols.push_back(j);
@@ -196,7 +198,7 @@ bool ObjectiveCutoffBounds::enforce(std::vector<Real>& lower, std::vector<Real>&
             return false;
         }
         if (lb > ub) {
-            lb = ub = 0.5 * (lb + ub);
+            std::swap(lb, ub);
         }
         if (lb > lower[j] || ub < upper[j]) {
             lower[j] = lb;
