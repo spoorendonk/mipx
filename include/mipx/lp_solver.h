@@ -72,6 +72,29 @@ public:
     /// needs a rigorous proof recomputes alpha and beta itself.
     virtual std::vector<Real> getDualRay() const { return {}; }
 
+    /// Certificate of unboundedness (a primal ray), one entry per column, in
+    /// the space of the loaded problem (unscaled, original column order).
+    ///
+    /// Returned when the last solve() proved the LP unbounded; empty after any
+    /// other status, and from backends that do not produce one (the default;
+    /// only the dual simplex does). It certifies unboundedness only together
+    /// with a feasible point, which the Unbounded status does not provide.
+    ///
+    /// Contract, for the ray r and q = A r:
+    ///   - c^T r < 0 for minimize, c^T r > 0 for maximize;
+    ///   - r_j > 0 only where col_upper_j is infinite, r_j < 0 only where
+    ///     col_lower_j is infinite;
+    ///   - q_i > 0 only where row_upper_i is infinite, q_i < 0 only where
+    ///     row_lower_i is infinite;
+    /// so x + t r stays feasible for every t >= 0 from any feasible x, and the
+    /// objective improves without bound. The ray's length is arbitrary.
+    ///
+    /// Floating point: the column sign conditions hold exactly, but q is only
+    /// right up to the solver's tolerances -- treat |q_i| below a tolerance
+    /// (relative to |r| times the row's coefficients) as zero before using an
+    /// infinite row side.
+    virtual std::vector<Real> getPrimalRay() const { return {}; }
+
     /// Basis operations.
     virtual std::vector<BasisStatus> getBasis() const = 0;
     virtual void setBasis(std::span<const BasisStatus> basis) = 0;

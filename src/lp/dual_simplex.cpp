@@ -73,6 +73,7 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
 
 void DualSimplexSolver::load(const LpProblem& problem) {
     dual_ray_.clear();
+    primal_ray_.clear();
     num_cols_ = problem.num_cols;
     num_rows_ = problem.num_rows;
     sense_ = problem.sense;
@@ -766,6 +767,7 @@ void DualSimplexSolver::refactorize() {
 
 LpResult DualSimplexSolver::solve() {
     dual_ray_.clear();
+    primal_ray_.clear();
     if (!loaded_) {
         return {Status::Error, 0.0, 0};
     }
@@ -2219,6 +2221,7 @@ LpResult DualSimplexSolver::solve() {
 
             if (min_step == kInf && entering_bound_step == kInf) {
                 status_ = Status::Unbounded;
+                storePrimalRay(pivot_col, entering_p, delta_dir);
                 break;
             }
 
@@ -3294,6 +3297,48 @@ std::vector<Real> DualSimplexSolver::getDualRay() const {
         return {};
     }
     return dual_ray_;
+}
+
+// Moving the entering variable q by delta_dir * t changes the basic
+// variables by -delta_dir * t * B^{-1} a_q and nothing else, so with
+// [A | -I] z = 0 kept, the structural part of that direction is a ray of the
+// rows; the ratio test found no basic variable and no bound of q that stops
+// it, and q priced in with c^T d = rc_q * delta_dir < 0, the
+// LpSolver::getPrimalRay() contract in internal minimization terms (the
+// external objective is -c for maximize, hence c^T r > 0 there). Scaling:
+// x = C x', so r_j = col_scale_j * d'_j.
+//
+// A structural entry whose sign its finite bound cannot carry is one the
+// ratio test skipped as too small (any other would have blocked); it is
+// dropped, as the ratio test treated it as zero. Slack entries are not returned: q = A r is the
+// caller's to form, and is right up to the same skipped entries.
+void DualSimplexSolver::storePrimalRay(std::span<const Real> pivot_col, Index entering,
+                                       Real delta_dir) {
+    primal_ray_.assign(static_cast<std::size_t>(num_cols_), 0.0);
+    if (entering < num_cols_) {
+        primal_ray_[static_cast<std::size_t>(entering)] =
+            delta_dir * (scaled_ ? col_scale_[static_cast<std::size_t>(entering)] : 1.0);
+    }
+    for (Index i = 0; i < num_rows_; ++i) {
+        const Index k = basis_[i];
+        const Real f = pivot_col[i] * delta_dir;
+        if (k >= num_cols_ || std::abs(f) < kZeroTol) {
+            continue;
+        }
+        const Real dk = -f;
+        if ((dk > 0.0 && varUpper(k) != kInf) || (dk < 0.0 && varLower(k) != -kInf)) {
+            continue;
+        }
+        primal_ray_[static_cast<std::size_t>(k)] =
+            dk * (scaled_ ? col_scale_[static_cast<std::size_t>(k)] : 1.0);
+    }
+}
+
+std::vector<Real> DualSimplexSolver::getPrimalRay() const {
+    if (status_ != Status::Unbounded || static_cast<Index>(primal_ray_.size()) != num_cols_) {
+        return {};
+    }
+    return primal_ray_;
 }
 
 std::vector<Real> DualSimplexSolver::getReducedCosts() const {

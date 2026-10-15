@@ -191,6 +191,10 @@ public:
     /// See LpSolver::getDualRay(). The ray is the row of B^{-1} for the basic
     /// variable that the dual ratio test proved cannot reach its bound.
     std::vector<Real> getDualRay() const override;
+    /// See LpSolver::getPrimalRay(). The ray is the entering column's
+    /// direction (B^{-1} a_q, signed by the entering move) from the primal
+    /// ratio test that found nothing blocking.
+    std::vector<Real> getPrimalRay() const override;
 
     std::vector<BasisStatus> getBasis() const override;
     void setBasis(std::span<const BasisStatus> basis) override;
@@ -311,6 +315,11 @@ private:
     // its lower bound, -1 when above its upper.
     void storeDualRay(std::span<const Real> rho, Real sigma);
 
+    // Record the unbounded direction of the primal ratio test: the entering
+    // variable moves by delta_dir, basis position i by -delta_dir *
+    // pivot_col[i] (internal scaled space).
+    void storePrimalRay(std::span<const Real> pivot_col, Index entering, Real delta_dir);
+
     // Variable bounds (structural + slack).
     Real varLower(Index k) const;
     /// Bring one nonbasic variable's status and value in line with its bounds.
@@ -354,6 +363,8 @@ private:
     std::vector<Real> reduced_cost_;  // size numVars
     // Farkas ray in external row space, set when a solve ends Infeasible.
     std::vector<Real> dual_ray_;
+    // Primal ray in external column space, set when a solve ends Unbounded.
+    std::vector<Real> primal_ray_;
 
     // LU factorization.
     SparseLU lu_;

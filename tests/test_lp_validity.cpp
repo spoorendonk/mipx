@@ -16,7 +16,9 @@
 //     LpSolver::getDualRay() contract.
 //   - Unbounded models open a feasible one along a ray r (every row and
 //     bound that r moves towards is made infinite) and tilt c so c^T r < 0.
-//     The API exposes no primal ray, so only the status is checked (#238).
+//     The primal ray the solver returns is checked against the
+//     LpSolver::getPrimalRay() contract (#238), as is every Unbounded the
+//     warm rounds produce.
 //
 // Shapes: equality, ranged, one-sided and free rows; free, fixed, boxed and
 // half-bounded columns; degenerate points (zero multipliers on active rows
@@ -658,6 +660,64 @@ std::string checkFarkas(const LpProblem& lp, const std::vector<Real>& y, bool ma
     return {};
 }
 
+// Returns an empty string when r satisfies the LpSolver::getPrimalRay()
+// contract.
+//
+// q = A r is accumulated in long double. The column signs must hold exactly.
+// A row entry meeting a finite side counts as zero when it is below the
+// pivot tolerance of the ray's size in the row's units, max_j |a_ij| * |r|:
+// round-off in the ray's small entries, as the contract allows. Measuring it
+// against the row's own terms max_j |a_ij r_j| would not do: an entry of
+// 1e-12 against |r| = 3e-3, alone in its row, is still round-off. c^T r must
+// be negative (in minimization terms) by more than round-off of its terms.
+std::string checkPrimalRay(const LpProblem& lp, const std::vector<Real>& r) {
+    if (static_cast<Index>(r.size()) != lp.num_cols) {
+        return "primal ray has size " + std::to_string(r.size());
+    }
+    if (std::all_of(r.begin(), r.end(), [](Real v) { return v == 0.0; })) {
+        return "primal ray is zero";
+    }
+    long double rmax = 0.0L;
+    for (Real v : r) {
+        rmax = std::max(rmax, std::abs(static_cast<long double>(v)));
+    }
+    const long double s = lp.sense == Sense::Maximize ? -1.0L : 1.0L;
+    long double cr = 0.0L;
+    long double cmag = 0.0L;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if ((r[j] > 0.0 && lp.col_upper[j] != kInf) || (r[j] < 0.0 && lp.col_lower[j] != -kInf)) {
+            std::ostringstream os;
+            os << "r" << j << " = " << r[j] << " moves towards a finite bound";
+            return os.str();
+        }
+        const long double t = s * static_cast<long double>(lp.obj[j]) * r[j];
+        cr += t;
+        cmag += std::abs(t);
+    }
+    if (cr >= -1e-9L * cmag) {
+        std::ostringstream os;
+        os << "c^T r = " << static_cast<double>(cr) << " (minimization terms) is not negative";
+        return os.str();
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        long double q = 0.0L;
+        long double amax = 0.0L;
+        const auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            q += static_cast<long double>(rv.values[k]) * r[rv.indices[k]];
+            amax = std::max(amax, std::abs(static_cast<long double>(rv.values[k])));
+        }
+        const bool blocked =
+            (q > 0.0L && lp.row_upper[i] != kInf) || (q < 0.0L && lp.row_lower[i] != -kInf);
+        if (blocked && std::abs(q) > 1e-7L * amax * rmax) {
+            std::ostringstream os;
+            os << "(A r)" << i << " = " << static_cast<double>(q) << " meets a finite side";
+            return os.str();
+        }
+    }
+    return {};
+}
+
 const char* statusName(Status s) {
     switch (s) {
         case Status::Optimal:
@@ -704,6 +764,20 @@ Status checkSolve(DualSimplexSolver& solver, const Generated& g, const std::stri
     const auto want = g.shape == Shape::Optimal      ? Status::Optimal
                       : g.shape == Shape::Infeasible ? Status::Infeasible
                                                      : Status::Unbounded;
+    if (res.status == Status::Unbounded) {
+        const std::string err = checkPrimalRay(lp, solver.getPrimalRay());
+        if (!err.empty()) {
+            std::ostringstream os;
+            os.precision(17);
+            os << tag << ": primal ray: " << err << "\n  r:";
+            for (Real v : solver.getPrimalRay()) {
+                os << ' ' << v;
+            }
+            audit.fail(os.str(), lp);
+        }
+    } else if (!solver.getPrimalRay().empty()) {
+        audit.fail(tag + ": primal ray after status " + statusName(res.status), lp);
+    }
     if (res.status != want) {
         audit.fail(tag + ": status " + statusName(res.status) + ", expected " + statusName(want),
                    lp);
@@ -811,6 +885,21 @@ void auditWarm(std::uint32_t seed, int variant, Audit& audit) {
         const LpResult cr = cold.solve();
         const LpResult wr = warm.solve();
         const std::string rtag = tag + " round " + std::to_string(round);
+        // Neither solve's Unbounded is known to be right here: check each ray.
+        for (const auto* sv : {&warm, &cold}) {
+            const char* who = sv == &warm ? " warm" : " cold";
+            if (sv->getStatus() == Status::Unbounded) {
+                const std::string err = checkPrimalRay(g.lp, sv->getPrimalRay());
+                if (!err.empty()) {
+                    audit.fail(rtag + who + " primal ray: " + err, g.lp);
+                    return;
+                }
+            } else if (!sv->getPrimalRay().empty()) {
+                audit.fail(rtag + who + " primal ray after status " + statusName(sv->getStatus()),
+                           g.lp);
+                return;
+            }
+        }
         // Bounds cut at arbitrary points leave models that are feasible, or
         // infeasible, only to within the solver's scaled tolerance. A ray
         // valid up to tolerance on one side then makes a point from the
@@ -970,7 +1059,7 @@ TEST_CASE("LP validity: infeasible LPs give a valid Farkas ray", "[lp_validity]"
     report(audit);
 }
 
-TEST_CASE("LP validity: unbounded LPs report Unbounded", "[lp_validity]") {
+TEST_CASE("LP validity: unbounded LPs give a valid primal ray", "[lp_validity]") {
     Audit audit;
     for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
         for (int variant = 0; variant < 8; ++variant) {
