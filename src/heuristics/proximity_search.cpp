@@ -40,7 +40,7 @@ std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
     last_work_units_ = 0.0;
 
     const Index n = problem.num_cols;
-    if (incumbent == kInf || static_cast<Index>(incumbent_values.size()) != n) {
+    if (!std::isfinite(incumbent) || static_cast<Index>(incumbent_values.size()) != n) {
         return std::nullopt;
     }
 
@@ -66,15 +66,17 @@ std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
     const auto saved_basis = lp.getBasis();
     const std::vector<Real> original_obj(problem.obj.begin(), problem.obj.end());
 
-    // Build Hamming distance objective.
+    // Build Hamming distance objective. The LP keeps the model's sense, so on
+    // a maximization the distance is negated to still be minimized.
+    const bool maximize = problem.sense == Sense::Maximize;
     std::vector<Real> prox_obj(n, 0.0);
     for (Index j : bin_cols) {
         const bool inc_one = incumbent_values[j] >= 0.5;
-        prox_obj[j] = inc_one ? -1.0 : 1.0;
+        prox_obj[j] = (inc_one ? -1.0 : 1.0) * (maximize ? -1.0 : 1.0);
     }
 
-    // Add cutoff constraint: c^T x <= incumbent - epsilon.
-    const Real cutoff = incumbent - kObjectiveTol;
+    // Add cutoff constraint: c^T x <= incumbent - epsilon when minimizing,
+    // c^T x >= incumbent + epsilon when maximizing.
     std::vector<Index> cutoff_cols;
     std::vector<Real> cutoff_vals;
     cutoff_cols.reserve(n);
@@ -89,7 +91,12 @@ std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
     const Index added_row = lp.numRows();
     std::vector<Index> starts = {0, static_cast<Index>(cutoff_cols.size())};
     std::vector<Real> lower = {-kInf};
-    std::vector<Real> upper = {cutoff - problem.obj_offset};
+    std::vector<Real> upper = {kInf};
+    if (maximize) {
+        lower[0] = incumbent + kObjectiveTol - problem.obj_offset;
+    } else {
+        upper[0] = incumbent - kObjectiveTol - problem.obj_offset;
+    }
     lp.addRows(starts, cutoff_cols, cutoff_vals, lower, upper);
 
     lp.setObjective(prox_obj);

@@ -1057,6 +1057,45 @@ TEST_CASE("ProximitySearchHeuristic: finds nearby solution on knapsack", "[heuri
     }
 }
 
+// Regression #232: the cutoff row was <= whatever the sense, and the Hamming
+// distance was maximized on a maximization, so the heuristic could never
+// improve a maximization's incumbent.
+TEST_CASE("ProximitySearchHeuristic: improves the incumbent of a maximization", "[heuristics]") {
+    // max 6x1 + 5x2 + 4x3 + z + 2, 3x1 + 2x2 + 2x3 <= 5, x binary, z in [0, 1].
+    // From x = (0, 0, 1), z = 0 (objective 6), raising z improves at Hamming
+    // distance 0.
+    auto problem = buildKnapsack();
+    problem.sense = Sense::Maximize;
+    problem.obj = {6.0, 5.0, 4.0, 1.0};
+    problem.obj_offset = 2.0;
+    problem.num_cols = 4;
+    problem.col_lower.push_back(0.0);
+    problem.col_upper.push_back(1.0);
+    problem.col_type.push_back(VarType::Continuous);
+    problem.col_names.push_back("z");
+    problem.matrix = SparseMatrix(1, 4, {{0, 0, 3.0}, {0, 1, 2.0}, {0, 2, 2.0}});
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    auto primals = lp.getPrimalValues();
+
+    ProximitySearchHeuristic prox;
+    prox.setSubproblemIterLimit(100);
+    prox.setMinBinaryVars(1);
+    const std::vector<Real> incumbent_values = {0.0, 0.0, 1.0, 0.0};
+    auto result = prox.run(problem, lp, primals, 6.0, incumbent_values);
+
+    REQUIRE(result.has_value());
+    CHECK(isFeasible(problem, result->values));
+    CHECK(result->objective > 6.0);
+    // The binaries stay where the incumbent has them.
+    CHECK(result->values[0] == 0.0);
+    CHECK(result->values[1] == 0.0);
+    CHECK(result->values[2] == 1.0);
+}
+
 TEST_CASE("ProximitySearchHeuristic: LP state restored", "[heuristics]") {
     auto problem = buildKnapsack();
 
