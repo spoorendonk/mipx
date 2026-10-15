@@ -2134,9 +2134,12 @@ LpResult DualSimplexSolver::solve() {
                         step = (ub == kInf) ? kInf : (ub - xval) / (-f);
                     }
 
-                    if (step < -kPrimalTol) {
-                        continue;
-                    }
+                    // A basic variable already past the bound it moves towards
+                    // blocks at once. Skipping it (the old step < -kPrimalTol
+                    // test, which compared a step length with a primal
+                    // tolerance) let the ray run on and reported a bounded LP
+                    // Unbounded (#237).
+                    step = std::max<Real>(step, 0.0);
 
                     // Score by relative pivot size |alpha|/||column|| for stability.
                     const Real score = rel_pivot;

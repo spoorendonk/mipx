@@ -416,3 +416,26 @@ TEST_CASE("Regression #237: a repair that needs an astronomically long step does
                    {4, 3, -0.023928571428571428},
                    {4, 4, 4.9285714285714286e-06}}));
 }
+
+TEST_CASE("Regression #237: a basic variable just past its bound blocks the primal ray",
+          "[lp_validity]") {
+    // In the primal phase, row 2's logical sat a hair above its upper bound,
+    // so its ratio-test step came out below -1e-7 and the row was skipped as
+    // not blocking: Unbounded on a bounded LP (optimum 10.2109375).
+    const LpProblem lp =
+        literalLp(Sense::Maximize, 0.75, {-0.097187499999999996, -47812.5, 0.004875, 0.0, -7500},
+                  {-225.5922724253347, -kInf, -kInf, -kInf, -1.2500000000000001e-05},
+                  {-225.5922724253347, kInf, kInf, 0.0061250000000000002, 0.00033750000000000002},
+                  {-kInf, -kInf, 0.080937499999999996, 0.0087187500000000008},
+                  {-26562.5, kInf, 0.093437500000000007, 0.0092187499999999995},
+                  {{0, 0, -362.5},
+                   {0, 1, -412500000},
+                   {1, 2, 3.875},
+                   {1, 3, -1250000},
+                   {2, 0, -0.00022499999999999999},
+                   {2, 1, 162.5},
+                   {2, 2, 3.2500000000000004e-05},
+                   {3, 0, -4.125e-05},
+                   {3, 3, -3.125}});
+    requireCertifiedOptimal(lp);
+}
