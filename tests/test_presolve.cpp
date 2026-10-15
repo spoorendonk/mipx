@@ -682,9 +682,9 @@ TEST_CASE("Presolve: presolved MIP matches direct solve", "[presolve]") {
     REQUIRE(direct_result.status == Status::Optimal);
     REQUIRE(presolved_result.status == Status::Optimal);
 
-    // Objectives should match (accounting for obj_offset).
-    Real presolved_obj = presolved_result.objective + reduced.obj_offset;
-    CHECK_THAT(presolved_obj, WithinAbs(direct_result.objective, 1e-6));
+    // The reduced model carries the folded constant in obj_offset, and the
+    // solver's objective already includes it.
+    CHECK_THAT(presolved_result.objective, WithinAbs(direct_result.objective, 1e-6));
 }
 
 // =============================================================================
