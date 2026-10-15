@@ -804,6 +804,7 @@ LpResult DualSimplexSolver::solve() {
     auto nonbasic_pos = nonbasic_pos_;
     auto dual_ray = dual_ray_;
     const Status warm_status = status_;
+    const bool dse_fell_back = dse_fell_back_;
     iter_limit_ = iter_limit - res.iterations;
     has_basis_ = false;
     LpResult cold = solveFromCurrentBasis();
@@ -827,6 +828,16 @@ LpResult DualSimplexSolver::solve() {
     dual_ray_ = std::move(dual_ray);
     primal_ray_.clear();
     status_ = warm_status;
+    dse_fell_back_ = dse_fell_back;
+    // The factors are the cold run's; getTableauRow (cut separation) reads
+    // them against the restored basis.
+    try {
+        refactorize();
+    } catch (const std::runtime_error&) {
+        has_basis_ = false;
+        status_ = cold.status;
+        return cold;
+    }
     has_basis_ = true;
     res.iterations = cold.iterations;
     res.work_units = cold.work_units;
@@ -834,21 +845,31 @@ LpResult DualSimplexSolver::solve() {
     return res;
 }
 
-// The getDualRay() contract's test of d = A^T y, in the model's units: an
-// entry meeting an infinite column bound must be round-off, below kPivotTol
-// of the ray's largest term.
+// The getDualRay() contract, in the model's units: a nonzero ray; every entry
+// of d = A^T y meeting an infinite column bound round-off, below kPivotTol of
+// the ray's largest term; and alpha - beta, the box minimum of d^T x less the
+// row-side bound of y^T A x, not short of zero by more than kUnscaledRelTol
+// of its terms (the margin perturbed bounds may cost, per the contract).
 bool DualSimplexSolver::dualRayMeetsContract() const {
-    if (dual_ray_.empty()) {
+    if (std::all_of(dual_ray_.begin(), dual_ray_.end(), [](Real v) { return v == 0.0; })) {
         return false;
     }
     std::vector<Real> d(static_cast<std::size_t>(num_cols_), 0.0);
     Real size = 0.0;
+    Real beta = 0.0;
+    Real mag = 0.0;
     for (Index i = 0; i < num_rows_; ++i) {
         const Real yi = dual_ray_[static_cast<std::size_t>(i)];
         if (yi == 0.0) {
             continue;
         }
         const Real rs = scaled_ ? row_scale_[i] : 1.0;
+        const Real side = yi > 0.0 ? row_upper_[i] : row_lower_[i];
+        if (!std::isfinite(side)) {
+            return false;
+        }
+        beta += yi * side / rs;
+        mag = std::max(mag, std::abs(yi * side / rs));
         const auto rv = matrix_.row(i);
         for (Index k = 0; k < rv.size(); ++k) {
             const Index j = rv.indices[k];
@@ -857,14 +878,22 @@ bool DualSimplexSolver::dualRayMeetsContract() const {
             size = std::max(size, std::abs(t));
         }
     }
+    Real alpha = 0.0;
     for (Index j = 0; j < num_cols_; ++j) {
         const Real dj = d[static_cast<std::size_t>(j)];
-        const bool open = dj > 0.0 ? col_lower_[j] == -kInf : col_upper_[j] == kInf;
-        if (open && std::abs(dj) > kPivotTol * size) {
+        if (dj == 0.0) {
+            continue;
+        }
+        const Real bound = dj > 0.0 ? col_lower_[j] : col_upper_[j];
+        if (std::isfinite(bound)) {
+            const Real t = dj * bound * (scaled_ ? col_scale_[j] : 1.0);
+            alpha += t;
+            mag = std::max(mag, std::abs(t));
+        } else if (std::abs(dj) > kPivotTol * size) {
             return false;
         }
     }
-    return true;
+    return alpha - beta > -kUnscaledRelTol * std::max(1.0, mag);
 }
 
 // The optimum read back in the model's units: rows within a relative
