@@ -14,7 +14,9 @@ class ObjectivePropagator;
 
 class DomainPropagator {
 public:
-    /// Bound tolerance: a column crossed by up to kTol counts as feasible.
+    /// Bound tolerance: a column crossed by up to kTol counts as feasible,
+    /// and a row violated by up to kTol times its magnitude (the largest of
+    /// 1, its finite sides and its finite activity terms).
     static constexpr Real kTol = 1e-8;
     /// Integer column bounds round to the nearest integer within this.
     static constexpr Real kIntRoundTol = 1e-6;

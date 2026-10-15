@@ -280,9 +280,13 @@ TEST_CASE("ObjectiveCutoffBounds: a crossing within tolerance prunes nothing", "
         if (!dp.propagate()) {
             continue;
         }
+        // The propagator pins the two free columns through the equality
+        // chain. It used to cross them by a few 1e-12; since #236 a derived
+        // bound keeps the row's slack, so the pin lands within kTol either
+        // way, which is the case this test is after.
         bool cross = false;
-        for (Index j = 0; j < lp.num_cols; ++j) {
-            cross = cross || dp.getLower(j) > dp.getUpper(j) + 1e-12;
+        for (Index j = n + 1; j < lp.num_cols; ++j) {
+            cross = cross || dp.getLower(j) > dp.getUpper(j) - DomainPropagator::kTol;
         }
         if (!cross) {
             continue;

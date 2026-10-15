@@ -1727,3 +1727,121 @@ TEST_CASE("Regression #235: presolve rounds a bound divided by a tiny coefficien
         CHECK_THAT(result.objective, WithinAbs(optimum, kObjTol));
     }
 }
+
+namespace {
+
+/// Equality rows over integers near 2e4 with fractional coefficients near
+/// 1e4, so terms reach 1e9. Each rhs is the anchor's activity, rounded once
+/// to double: the anchor sits on its rows up to that rounding.
+struct LargeTermModel {
+    LpProblem lp;
+    std::vector<Real> anchor;
+};
+
+std::vector<LargeTermModel> largeTermModels(int count) {
+    constexpr auto I = VarType::Integer;
+    constexpr Index n = 4;
+    constexpr Index m = 2;
+    std::mt19937 rng(2361);
+    std::uniform_real_distribution<double> coef(1e3, 1e5);
+    std::uniform_int_distribution<int> val(-20000, 20000);
+    std::uniform_int_distribution<int> cost(-3, 3);
+    std::vector<LargeTermModel> models;
+    for (int t = 0; t < count; ++t) {
+        std::vector<Real> xs(n);
+        for (auto& v : xs) {
+            v = val(rng);
+        }
+        std::vector<std::vector<Real>> rows(m, std::vector<Real>(n));
+        std::vector<Real> rhs(m);
+        for (Index i = 0; i < m; ++i) {
+            long double act = 0;
+            for (Index j = 0; j < n; ++j) {
+                rows[i][j] = coef(rng) * (j % 2 == 1 ? -1 : 1);
+                act += static_cast<long double>(rows[i][j]) * xs[j];
+            }
+            rhs[i] = static_cast<Real>(act);
+        }
+        std::vector<Real> lower(n);
+        std::vector<Real> upper(n);
+        std::vector<Real> obj(n);
+        for (Index j = 0; j < n; ++j) {
+            lower[j] = xs[j] - 2;
+            upper[j] = xs[j] + 2;
+            obj[j] = cost(rng);
+        }
+        models.push_back({makeModel(Sense::Minimize, obj, lower, upper, std::vector<VarType>(n, I),
+                                    rows, rhs, rhs),
+                          xs});
+    }
+    return models;
+}
+
+}  // namespace
+
+TEST_CASE("Regression #236: a row with terms near 1e9 reads its own point as infeasible",
+          "[validity]") {
+    // The activity sums round by more than an absolute 1e-8 at this size, so
+    // the propagator rejected the anchor's own domain and the solver called
+    // feasible models infeasible. Rows now hold to 1e-8 relative to their
+    // magnitude.
+    Int solved = 0;
+    for (const auto& [lp, anchor] : largeTermModels(400)) {
+        if (!pointFeasible(lp, anchor, kFeasTol)) {
+            continue;
+        }
+        INFO(describe(lp) << "anchor" << describe(anchor));
+        DomainPropagator prop;
+        prop.load(lp);
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            prop.setBound(j, anchor[j], anchor[j]);
+        }
+        CHECK(prop.propagate());
+        for (const bool presolve : {false}) {
+            INFO("presolve: " << presolve);
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setNumThreads(1);
+            solver.setGapTolerance(0.0);
+            solver.setPresolve(presolve);
+            solver.setCutsEnabled(presolve);
+            solver.load(lp);
+            const auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            const std::vector<Real> x(result.solution.begin(),
+                                      result.solution.begin() + lp.num_cols);
+            CHECK(pointFeasible(lp, x, kFeasTol));
+            CHECK(result.objective <= objective(lp, anchor) + kObjTol);
+            ++solved;
+        }
+    }
+    CHECK(solved > 300);
+}
+
+TEST_CASE("Regression #236: propagation through a tiny coefficient keeps the exact point",
+          "[validity]") {
+    // c x0 + a x1 = c K + t a with x0 fixed at K: x1 = t exactly. The bound on
+    // x1 divides the rhs rounding of c K by a, up to 5e-4 for a near 1e-6, and
+    // the propagator crossed x1's bounds on 2440 of 3000 such rows. A term
+    // below the row's slack now bounds nothing.
+    constexpr auto I = VarType::Integer;
+    std::mt19937 rng(236);
+    std::uniform_real_distribution<double> mantissa(1.0, 10.0);
+    std::uniform_int_distribution<int> digit(1, 9);
+    std::uniform_int_distribution<int> exponent(7, 10);
+    std::uniform_int_distribution<int> target(1, 4);
+    for (int trial = 0; trial < 3000; ++trial) {
+        const Real k = std::floor(std::pow(10.0, mantissa(rng) / 2.0 + 1.0));
+        const Real c = digit(rng);
+        const Real a = mantissa(rng) * std::pow(10.0, -exponent(rng));
+        const Real t = target(rng);
+        const LpProblem lp = makeModel(Sense::Minimize, {0, 1}, {k, 0}, {k, 5}, {I, I}, {{c, a}},
+                                       {c * k + t * a}, {c * k + t * a});
+        INFO(describe(lp));
+        DomainPropagator prop;
+        prop.load(lp);
+        REQUIRE(prop.propagate());
+        CHECK(prop.getLower(1) <= t);
+        CHECK(prop.getUpper(1) >= t);
+    }
+}

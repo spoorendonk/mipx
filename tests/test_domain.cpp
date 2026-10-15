@@ -92,7 +92,9 @@ TEST_CASE("Domain: checkpoint/restore", "[domain]") {
     dp.setBound(0, 7.0, dp.getUpper(0));
     REQUIRE(dp.propagate());
     CHECK_THAT(dp.getLower(0), WithinAbs(7.0, 1e-7));
-    CHECK_THAT(dp.getUpper(1), WithinAbs(3.0, 1e-7));
+    // A derived bound keeps the row's slack, kTol times its magnitude (#236).
+    CHECK_THAT(dp.getUpper(1), WithinAbs(3.0, 2 * DomainPropagator::kTol * 10.0));
+    CHECK(dp.getUpper(1) >= 3.0);
     CHECK(dp.numTightened() > 0);
 
     // Restore — bounds should go back.

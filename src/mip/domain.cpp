@@ -250,6 +250,14 @@ bool DomainPropagator::propagateRow(Index row) {
     Index inf_max_count = 0;
     Index inf_min_col = -1;  // Valid only when inf_min_count == 1.
     Index inf_max_col = -1;
+    // The row's magnitude: its finite sides and its largest finite term.
+    Real scale = 1.0;
+    if (!std::isinf(rl)) {
+        scale = std::max(scale, std::abs(rl));
+    }
+    if (!std::isinf(ru)) {
+        scale = std::max(scale, std::abs(ru));
+    }
 
     for (Index k = 0; k < rv.size(); ++k) {
         Index j = rv.indices[k];
@@ -265,6 +273,7 @@ bool DomainPropagator::propagateRow(Index row) {
             inf_min_col = j;
         } else {
             act_min += contrib_min;
+            scale = std::max(scale, std::abs(contrib_min));
         }
 
         if (std::isinf(contrib_max)) {
@@ -272,14 +281,21 @@ bool DomainPropagator::propagateRow(Index row) {
             inf_max_col = j;
         } else {
             act_max += contrib_max;
+            scale = std::max(scale, std::abs(contrib_max));
         }
     }
 
-    // Check infeasibility using the full activity bounds.
-    if (inf_min_count == 0 && act_min > ru + kTol) {
+    // The row holds to kTol relative to its magnitude (#236). An absolute
+    // kTol is below the rounding of the activity sums once terms reach about
+    // 1e8, and a point exactly on the row read as infeasible. The derived
+    // bounds below take the same slack, so a term smaller than it (a tiny
+    // coefficient) bounds nothing instead of amplifying the sums' rounding
+    // by 1/|a| into a crossing.
+    const Real row_tol = kTol * scale;
+    if (inf_min_count == 0 && act_min > ru + row_tol) {
         return false;
     }
-    if (inf_max_count == 0 && act_max < rl - kTol) {
+    if (inf_max_count == 0 && act_max < rl - row_tol) {
         return false;
     }
 
@@ -334,15 +350,15 @@ bool DomainPropagator::propagateRow(Index row) {
         const bool integral = col_type_[j] != VarType::Continuous;
         Real new_ub = kInf;
         if (a > 0 && !std::isinf(ru) && res_min_finite) {
-            new_ub = (ru - res_min) / a;
+            new_ub = (ru + row_tol - res_min) / a;
         } else if (a < 0 && !std::isinf(rl) && res_max_finite) {
-            new_ub = (rl - res_max) / a;
+            new_ub = (rl - row_tol - res_max) / a;
         }
         Real new_lb = -kInf;
         if (a > 0 && !std::isinf(rl) && res_max_finite) {
-            new_lb = (rl - res_max) / a;
+            new_lb = (rl - row_tol - res_max) / a;
         } else if (a < 0 && !std::isinf(ru) && res_min_finite) {
-            new_lb = (ru - res_min) / a;
+            new_lb = (ru + row_tol - res_min) / a;
         }
         if (integral) {
             new_ub = std::floor(new_ub + kIntRoundTol);
