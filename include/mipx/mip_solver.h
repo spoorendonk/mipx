@@ -568,9 +568,9 @@ private:
     bool isAcceptableIncumbent(std::span<const Real> x) const;
     // An integral node LP point as an incumbent: the point itself when it
     // passes the gate, else the LP completion of its integer values when that
-    // passes, else nothing (the node is then fathomed as a tolerance call).
-    std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x,
-                                                           Real node_obj) const;
+    // passes, else nothing. The completion's work is added to work_units.
+    std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x, Real node_obj,
+                                                           double& work_units) const;
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;

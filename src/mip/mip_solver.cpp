@@ -1805,12 +1805,13 @@ bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
 
 // The node LP holds rows and bounds to 1e-7 in its scaled space, which on a
 // row of large coefficients or a column of tiny ones is looser than the
-// gate's 1e-6 in model units. Rejecting such a point outright would fathom
-// the node, and with it every assignment below it that beats the incumbent.
-// Fixing the integers at their values and solving what is left from scratch
-// takes another path to the same optimum and usually lands inside the gate.
+// gate's 1e-6 in model units. Fixing the integers at their values and
+// solving what is left from scratch takes another path to the same optimum
+// and usually lands inside the gate. The cap keeps a model that fails this
+// at many nodes from spending its time limit here.
 std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<const Real> x,
-                                                                  Real node_obj) const {
+                                                                  Real node_obj,
+                                                                  double& work_units) const {
     if (isAcceptableIncumbent(x)) {
         return HeuristicSolution{{x.begin(), x.end()}, node_obj};
     }
@@ -1832,8 +1833,12 @@ std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<cons
     if (any_continuous) {
         DualSimplexSolver completion;
         completion.setVerbose(false);
+        completion.setIterationLimit(
+            std::max<Int>(1000, 2 * (problem_.num_rows + problem_.num_cols)));
         completion.load(fixed);
-        if (completion.solve().status != Status::Optimal) {
+        const auto result = completion.solve();
+        work_units += result.work_units;
+        if (result.status != Status::Optimal) {
             return std::nullopt;
         }
         const auto values = completion.getPrimalValues();
@@ -2792,26 +2797,57 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     // Check integer feasibility after any in-tree separation.
+    Index branch_var = -1;
+    Real branch_value = 0.0;
     if (isFeasibleMip(node_primals_out)) {
         int_inf_out = 0;
-        return false;  // Caller handles incumbent update.
-    }
-    frac_count = 0;
-    for (Index j = 0; j < problem_.num_cols; ++j) {
-        if (problem_.col_type[j] == VarType::Continuous) {
-            continue;
+        if (node_obj_out >= incumbent_snapshot || isAcceptableIncumbent(node_primals_out)) {
+            return false;  // Caller handles incumbent update.
         }
-        if (!isIntegral(node_primals_out[j], kIntTol)) {
-            ++frac_count;
+        // An integral point the incumbent gate rejects (#240). Its LP
+        // completion replaces it when that passes; otherwise the node is not
+        // done, as other assignments below it may still beat the incumbent:
+        // split an unfixed integer column at its value so the point's value
+        // is left in one child with a smaller domain. Once every integer is
+        // fixed the completion is the node's whole answer, and the node is
+        // fathomed as a tolerance call.
+        auto repaired = integralNodeIncumbent(node_primals_out, node_obj_out, node_work_out);
+        if (repaired.has_value()) {
+            node_primals_out = std::move(repaired->values);
+            node_obj_out = repaired->objective;
+            return false;
         }
+        for (Index j = 0; j < problem_.num_cols && branch_var < 0; ++j) {
+            if (problem_.col_type[j] != VarType::Continuous &&
+                current_lower[j] < current_upper[j] - 0.5) {
+                branch_var = j;
+                const Real v = std::round(node_primals_out[j]);
+                // createChildren splits at floor/ceil: v - 0.5 gives x <= v-1
+                // and x >= v, v + 0.5 gives x <= v and x >= v+1.
+                branch_value = v > current_lower[j] + 0.5 ? v - 0.5 : v + 0.5;
+            }
+        }
+        if (branch_var < 0) {
+            return false;
+        }
+    } else {
+        frac_count = 0;
+        for (Index j = 0; j < problem_.num_cols; ++j) {
+            if (problem_.col_type[j] == VarType::Continuous) {
+                continue;
+            }
+            if (!isIntegral(node_primals_out[j], kIntTol)) {
+                ++frac_count;
+            }
+        }
+        int_inf_out = frac_count;
     }
-    int_inf_out = frac_count;
 
     // Branch with reliability branching (strong-branch bootstrap + pseudocosts),
     // with optional sibling branch-variable reuse.
-    Index branch_var = -1;
+    const bool forced_branch = branch_var >= 0;
     const bool use_sibling_cache = (num_threads_ <= 1);
-    if (use_sibling_cache && node.parent_id >= 0) {
+    if (!forced_branch && use_sibling_cache && node.parent_id >= 0) {
         auto it = sibling_branch_cache_.find(node.parent_id);
         if (it != sibling_branch_cache_.end()) {
             const Index cached = it->second;
@@ -2852,6 +2888,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     if (branch_var < 0) {
         return false;
     }
+    if (!forced_branch) {
+        branch_value = node_primals_out[branch_var];
+    }
 
     BnbNode solved_node = std::move(node);
     solved_node.lp_bound = node_obj_out;
@@ -2868,8 +2907,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     solved_node.local_cuts = std::move(node_local_cuts);
 
-    auto [left, right] =
-        createChildren(std::move(solved_node), branch_var, node_primals_out[branch_var]);
+    auto [left, right] = createChildren(std::move(solved_node), branch_var, branch_value);
     left.lp_bound = node_obj_out;
     right.lp_bound = node_obj_out;
     left.parent_objective = children_reference_objective;
@@ -3102,14 +3140,10 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             }
         }
 
-        std::optional<HeuristicSolution> node_incumbent;
-        if (!branched && !node_primals.empty() && node_int_inf == 0 && node_obj < incumbent) {
-            node_incumbent = integralNodeIncumbent(node_primals, node_obj);
-        }
-        if (node_incumbent.has_value()) {
-            if (node_incumbent->objective < incumbent) {
-                incumbent = node_incumbent->objective;
-                best_solution = std::move(node_incumbent->values);
+        if (!branched && !node_primals.empty() && node_int_inf == 0) {
+            if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
+                incumbent = node_obj;
+                best_solution = node_primals;
                 solution_pool.submit({best_solution, incumbent}, "tree_integral", 0);
                 const double log_elapsed =
                     (parallel_mode_ == ParallelMode::Deterministic)
@@ -3465,12 +3499,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                     }
                 }
 
-                if (!task.branched && !task.node_primals.empty() && task.node_int_inf == 0 &&
-                    task.node_obj < incumbent) {
-                    auto node_incumbent = integralNodeIncumbent(task.node_primals, task.node_obj);
-                    if (node_incumbent.has_value() && node_incumbent->objective < incumbent) {
-                        incumbent = node_incumbent->objective;
-                        best_solution = std::move(node_incumbent->values);
+                if (!task.branched && !task.node_primals.empty() && task.node_int_inf == 0) {
+                    if (task.node_obj < incumbent && isAcceptableIncumbent(task.node_primals)) {
+                        incumbent = task.node_obj;
+                        best_solution = task.node_primals;
                         solution_pool.submit({best_solution, incumbent}, "tree_integral",
                                              task.worker_id);
                         found_incumbent = true;
@@ -3735,23 +3767,11 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             }
 
             // Check for new incumbent.
-            // The completion LP of a rejected point runs outside the lock.
-            std::optional<HeuristicSolution> node_incumbent;
             if (!branched && !node_primals.empty() && node_int_inf == 0) {
-                bool improves = false;
-                {
-                    std::lock_guard<std::mutex> lock(incumbent_mutex);
-                    improves = node_obj < incumbent;
-                }
-                if (improves) {
-                    node_incumbent = integralNodeIncumbent(node_primals, node_obj);
-                }
-            }
-            if (node_incumbent.has_value()) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
-                if (node_incumbent->objective < incumbent) {
-                    incumbent = node_incumbent->objective;
-                    best_solution = std::move(node_incumbent->values);
+                if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
+                    incumbent = node_obj;
+                    best_solution = node_primals;
                     solution_pool.submit({best_solution, incumbent}, "tree_integral", thread_id);
                     found_incumbent = true;
                 }

@@ -67,9 +67,11 @@ answers, and changing them alters behaviour on every model:
 - Every incumbent, a node's integral LP point included, must hold its
   rows and bounds to 1e-6 in model units (`heuristic_detail::isFeasiblePoint`,
   #240). The node LP holds them only to its scaled 1e-7, so an integral
-  point can fail. It is then re-solved with its integers fixed, cold; if
-  that point fails too, the node is fathomed as a tolerance call, as for a
-  model feasible only within tolerance.
+  point can fail. It is then re-solved with its integers fixed, cold. If
+  that point fails too, the node is branched on an unfixed integer column,
+  split at the point's value, so the rest of its subtree is still searched.
+  Only a node with every integer fixed, whose completion fails, is fathomed
+  as a tolerance call, as for a model feasible only within tolerance.
 - A root cut round whose LP does not solve to optimality is removed again,
   and the root LP goes back to the previous round's (#240). The cuts are
   valid, so such an LP is a numerical failure, not a proof of infeasibility.
