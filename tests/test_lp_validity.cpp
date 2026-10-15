@@ -1390,3 +1390,56 @@ TEST_CASE("Regression #238: the primal ray does not outlive a change to the mode
         CHECK(solver.getPrimalRay().empty());
     }
 }
+
+TEST_CASE("Regression #243: a cold solve of a one-point feasible set is not Infeasible",
+          "[lp_validity]") {
+    // x2 is fixed, row 4 fixes x0 at its upper bound, and row 3 is tight at
+    // x1's lower bound: x = (0.03875, 16250, 0.0003375) is the only feasible
+    // point. A cold solve returned Infeasible (audit seed 27267, variant 7).
+    requireCertifiedOptimal(literalLp(Sense::Maximize, 5.25, {-567.1875, 0.000125, -30000},
+                                      {0.02375, 16250, 0.00033750000000000002},
+                                      {0.03875, 32500, 0.00033750000000000002},
+                                      {-kInf, -kInf, -kInf, -kInf, -121.09375},
+                                      {kInf, kInf, kInf, -0.00059843750000000001, -121.09375},
+                                      {{0, 1, -0.625},
+                                       {1, 1, 2.5000000000000002e-06},
+                                       {2, 0, 0.26250000000000001},
+                                       {3, 1, 1.2500000000000001e-08},
+                                       {3, 2, -2.375},
+                                       {4, 0, -3125}}));
+}
+
+TEST_CASE("Regression #243: a row repaired exactly to its bound is not a Farkas proof",
+          "[lp_validity]") {
+    // Audit seed 44060, variant 3. Like the case above, a cold solve returned
+    // Infeasible: the skipped small entries could repair the leaving row by
+    // exactly its violation, and rounding put the repair just short of it.
+    requireCertifiedOptimal(literalLp(
+        Sense::Minimize, 9.75,
+        {0.00013750000000000001, -146093.75, 5250, 0.00037500000000000001, 0.00021875},
+        {-28750, -0.0001125, -0.00075000000000000002, -kInf, -2875},
+        {-28750, -0.0001125, -0.00075000000000000002, -22500, -2000},
+        {-kInf, 0.00013593750000000002, -kInf, -435.9375, -kInf, -0.0087500000000000008, 69531.25},
+        {kInf, 0.00013593750000000002, kInf, kInf, kInf, -0.0087500000000000008, kInf},
+        {{0, 1, 25000},
+         {0, 2, -625},
+         {0, 3, -0.0004125},
+         {1, 1, -3.8750000000000004},
+         {1, 2, -0.20000000000000001},
+         {1, 3, 2e-08},
+         {2, 0, 2},
+         {2, 3, 0.125},
+         {2, 4, 28.75},
+         {3, 0, 0.033750000000000002},
+         {3, 1, -4750000},
+         {4, 0, -1.0000000000000002e-06},
+         {4, 1, -462.5},
+         {4, 2, -48.75},
+         {4, 3, 4.2500000000000008e-06},
+         {4, 4, -2.5000000000000002e-06},
+         {5, 1, 400},
+         {5, 2, -45},
+         {5, 4, -1.2500000000000001e-06},
+         {6, 0, -2.125},
+         {6, 1, -75000000}}));
+}

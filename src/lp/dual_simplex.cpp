@@ -2921,7 +2921,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 bfrt_cands.push_back({k, pos, std::abs(reducedCostForPricing(k) / alpha), alpha,
                                       range, std::abs(alpha) / cnorm});
             }
-            if (repair < violation) {
+            // The row needs to come back only to within kPrimalTol. On a
+            // feasible set of one point the full repair equals the violation,
+            // and comparing them exactly let rounding decide (#243).
+            if (repair < violation - kPrimalTol) {
                 bfrt_cands.clear();
             }
             repair_pivot = !bfrt_cands.empty();
