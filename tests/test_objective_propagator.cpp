@@ -4,6 +4,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <random>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -232,4 +233,88 @@ TEST_CASE("MipSolver: objective propagation tightens and keeps the optimum", "[m
     CHECK(stats.repropagations > 0);
     CHECK(stats.node_tightenings > 0);
     CHECK(stats.global_tightenings > 0);
+}
+
+// Review of #117: root propagation can leave a continuous column crossed by
+// less than its tolerance. The global cutoff bounds replayed that crossing on
+// every node and pruned the whole tree, so a worse incumbent came back as
+// optimal. Three continuous columns tied by equality rows with non-round
+// coefficients, next to the integer knapsack, cross like that now and then.
+TEST_CASE("ObjectiveCutoffBounds: a crossing within tolerance prunes nothing", "[mip][objprop]") {
+    std::mt19937 rng(1);
+    std::uniform_real_distribution<double> coef(-50.0, 50.0);
+    Int crossed = 0;
+    for (int t = 0; t < 200000 && crossed < 3; ++t) {
+        const double xs[3] = {coef(rng), coef(rng), coef(rng)};
+        LpProblem lp = integerKnapsack();
+        const Index n = lp.num_cols;
+        std::vector<Triplet> trips;
+        std::vector<Real> rhs;
+        for (Index i = 0; i < 3; ++i) {
+            Real sum = 0.0;
+            for (Index j = 0; j < 3; ++j) {
+                if (j == i) {
+                    continue;
+                }
+                const Real a = coef(rng) / 7.0;
+                trips.push_back({i, n + j, a});
+                sum += a * xs[j];
+            }
+            rhs.push_back(sum);
+        }
+        for (Index j = 0; j < n; ++j) {
+            trips.push_back({3, j, lp.matrix.row(0).values[j]});
+        }
+        lp.num_cols = n + 3;
+        lp.num_rows = 4;
+        lp.obj.insert(lp.obj.end(), 3, 0.0);
+        lp.col_lower.insert(lp.col_lower.end(), {xs[0], -100.0, -100.0});
+        lp.col_upper.insert(lp.col_upper.end(), {xs[0], 100.0, 100.0});
+        lp.col_type.insert(lp.col_type.end(), 3, VarType::Continuous);
+        lp.row_lower = {rhs[0], rhs[1], rhs[2], -kInf};
+        lp.row_upper = {rhs[0], rhs[1], rhs[2], lp.row_upper[0]};
+        lp.matrix = SparseMatrix(4, lp.num_cols, std::move(trips));
+
+        DomainPropagator dp;
+        dp.load(lp);
+        if (!dp.propagate()) {
+            continue;
+        }
+        bool cross = false;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            cross = cross || dp.getLower(j) > dp.getUpper(j) + 1e-12;
+        }
+        if (!cross) {
+            continue;
+        }
+        ++crossed;
+        INFO("model t=" << t);
+
+        ObjectivePropagator objective;
+        objective.load(lp);
+        ObjectiveCutoffBounds bounds;
+        bounds.load(lp, &objective, nullptr, nullptr);
+        REQUIRE(bounds.refresh(1e9));
+        std::vector<Real> lower = lp.col_lower;
+        std::vector<Real> upper = lp.col_upper;
+        std::vector<Index> tightened;
+        CHECK(bounds.enforce(lower, upper, tightened));
+
+        Real objectives[2] = {0.0, 0.0};
+        for (int on = 0; on < 2; ++on) {
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setNumThreads(1);
+            solver.setGapTolerance(0.0);
+            solver.setCutsEnabled(false);
+            solver.setPresolve(false);
+            solver.setObjectivePropagationEnabled(on == 1);
+            solver.load(lp);
+            const auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            objectives[on] = result.objective;
+        }
+        CHECK_THAT(objectives[1], WithinAbs(objectives[0], 1e-6));
+    }
+    CHECK(crossed == 3);
 }

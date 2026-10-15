@@ -131,6 +131,12 @@ bool ObjectiveCutoffBounds::refresh(Real cutoff) {
     if (objective_ == nullptr || !std::isfinite(cutoff)) {
         return false;
     }
+    // Cheap test first, so workers do not queue behind a running refresh for a
+    // cutoff that is not new.
+    if (const auto seen = current();
+        seen == nullptr || seen->infeasible || cutoff >= seen->cutoff) {
+        return false;
+    }
     std::lock_guard<std::mutex> refresh_lock(refresh_mutex_);
     const auto old = current();
     if (old == nullptr || old->infeasible || cutoff >= old->cutoff) {
@@ -153,8 +159,14 @@ bool ObjectiveCutoffBounds::refresh(Real cutoff) {
         next->infeasible = true;
     } else {
         for (Index j = 0; j < root_.num_cols; ++j) {
-            const Real lb = dp.getLower(j);
-            const Real ub = dp.getUpper(j);
+            Real lb = dp.getLower(j);
+            Real ub = dp.getUpper(j);
+            // The propagator accepts a continuous column crossed by up to its
+            // tolerance; replayed on every node as is, that would prune them
+            // all, so such a column is fixed between the two.
+            if (lb > ub) {
+                lb = ub = 0.5 * (lb + ub);
+            }
             if (lb > root_.col_lower[j] || ub < root_.col_upper[j]) {
                 next->cols.push_back(j);
                 next->lower.push_back(lb);
@@ -178,10 +190,13 @@ bool ObjectiveCutoffBounds::enforce(std::vector<Real>& lower, std::vector<Real>&
     }
     for (std::size_t k = 0; k < snap->cols.size(); ++k) {
         const Index j = snap->cols[k];
-        const Real lb = std::max(lower[j], snap->lower[k]);
-        const Real ub = std::min(upper[j], snap->upper[k]);
-        if (lb > ub + 1e-12) {
+        Real lb = std::max(lower[j], snap->lower[k]);
+        Real ub = std::min(upper[j], snap->upper[k]);
+        if (lb > ub + kCrossTol) {
             return false;
+        }
+        if (lb > ub) {
+            lb = ub = 0.5 * (lb + ub);
         }
         if (lb > lower[j] || ub < upper[j]) {
             lower[j] = lb;

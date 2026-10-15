@@ -442,7 +442,7 @@ public:
         out.node_tightenings = obj_prop_node_tightenings_.load(std::memory_order_relaxed);
         out.node_infeasible = obj_prop_node_infeasible_.load(std::memory_order_relaxed);
         out.repropagations = obj_prop_repropagations_.load(std::memory_order_relaxed);
-        out.global_tightenings = obj_prop_global_tightenings_.load(std::memory_order_relaxed);
+        out.global_tightenings = objective_cutoff_bounds_.numTightenings();
         return out;
     }
     [[nodiscard]] bool isTreePresolveAutoTuningEnabled() const {
@@ -704,7 +704,6 @@ private:
     std::atomic<Int> obj_prop_node_tightenings_{0};
     std::atomic<Int> obj_prop_node_infeasible_{0};
     std::atomic<Int> obj_prop_repropagations_{0};
-    std::atomic<Int> obj_prop_global_tightenings_{0};
     ExactRefinementMode exact_refinement_mode_ = ExactRefinementMode::Off;
     bool exact_refinement_rational_check_ = false;
     Real exact_refinement_warning_tol_ = 1e-7;

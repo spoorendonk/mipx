@@ -2067,8 +2067,6 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     if (objective_propagator_.loaded()) {
         if (objective_cutoff_bounds_.refresh(incumbent_snapshot)) {
             obj_prop_repropagations_.fetch_add(1, std::memory_order_relaxed);
-            obj_prop_global_tightenings_.store(objective_cutoff_bounds_.numTightenings(),
-                                               std::memory_order_relaxed);
         }
         auto& obj_tightened = node_scratch.rc_tightened;
         obj_tightened.clear();
@@ -3823,7 +3821,6 @@ MipResult MipSolver::solveMinimization() {
     obj_prop_node_tightenings_.store(0, std::memory_order_relaxed);
     obj_prop_node_infeasible_.store(0, std::memory_order_relaxed);
     obj_prop_repropagations_.store(0, std::memory_order_relaxed);
-    obj_prop_global_tightenings_.store(0, std::memory_order_relaxed);
     for (auto& clause : conflict_pool_) {
         recycleConflictClause(std::move(clause));
     }

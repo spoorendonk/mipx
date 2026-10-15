@@ -111,6 +111,9 @@ private:
 
     [[nodiscard]] std::shared_ptr<const Snapshot> current() const;
 
+    /// A crossing up to this is the propagator's tolerance, not infeasibility.
+    static constexpr Real kCrossTol = 1e-8;
+
     LpProblem root_;
     const ObjectivePropagator* objective_ = nullptr;
     const ImplicationGraph* implications_ = nullptr;
