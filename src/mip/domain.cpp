@@ -54,8 +54,8 @@ void DomainPropagator::setBound(Index col, Real lower, Real upper) {
 
     // Round for integer variables.
     if (col_type_[col] != VarType::Continuous) {
-        Real rounded_lb = std::ceil(lower_[col] - kTol);
-        Real rounded_ub = std::floor(upper_[col] + kTol);
+        const Real rounded_lb = std::ceil(lower_[col] - kIntRoundTol);
+        const Real rounded_ub = std::floor(upper_[col] + kIntRoundTol);
         if (rounded_lb > lower_[col] + kTol) {
             lower_[col] = rounded_lb;
             changed = true;
@@ -324,46 +324,46 @@ bool DomainPropagator::propagateRow(Index row) {
             res_max = kInf;
         }
 
-        bool changed = false;
-
-        // Derive new upper bound.
+        // Derive new bounds. A derived bound carries the rounding of the row
+        // sums and the inexactness of the other columns' bounds, both scaled
+        // by the coefficients, so on an integer column it can miss an integer
+        // by far more than kTol (#235: 1.9e-7 with terms near 1e7), and
+        // rounding at kTol turned that into a whole-unit crossing. Integer
+        // candidates round at the LP's feasibility scale before they are
+        // compared, so a bound only ever tightens to an integer.
+        const bool integral = col_type_[j] != VarType::Continuous;
+        Real new_ub = kInf;
         if (a > 0 && !std::isinf(ru) && res_min_finite) {
-            Real new_ub = (ru - res_min) / a;
-            if (new_ub < upper_[j] - kTol) {
-                recordChange(j);
-                upper_[j] = new_ub;
-                changed = true;
-            }
+            new_ub = (ru - res_min) / a;
         } else if (a < 0 && !std::isinf(rl) && res_max_finite) {
-            Real new_ub = (rl - res_max) / a;
-            if (new_ub < upper_[j] - kTol) {
-                recordChange(j);
-                upper_[j] = new_ub;
-                changed = true;
-            }
+            new_ub = (rl - res_max) / a;
         }
-
-        // Derive new lower bound.
+        Real new_lb = -kInf;
         if (a > 0 && !std::isinf(rl) && res_max_finite) {
-            Real new_lb = (rl - res_max) / a;
-            if (new_lb > lower_[j] + kTol) {
-                recordChange(j);
-                lower_[j] = new_lb;
-                changed = true;
-            }
+            new_lb = (rl - res_max) / a;
         } else if (a < 0 && !std::isinf(ru) && res_min_finite) {
-            Real new_lb = (ru - res_min) / a;
-            if (new_lb > lower_[j] + kTol) {
-                recordChange(j);
-                lower_[j] = new_lb;
-                changed = true;
-            }
+            new_lb = (ru - res_min) / a;
+        }
+        if (integral) {
+            new_ub = std::floor(new_ub + kIntRoundTol);
+            new_lb = std::ceil(new_lb - kIntRoundTol);
         }
 
-        // Integer rounding.
-        if (changed && col_type_[j] != VarType::Continuous) {
-            Real rounded_lb = std::ceil(lower_[j] - kTol);
-            Real rounded_ub = std::floor(upper_[j] + kTol);
+        bool changed = false;
+        if (new_ub < upper_[j] - kTol) {
+            recordChange(j);
+            upper_[j] = new_ub;
+            changed = true;
+        }
+        if (new_lb > lower_[j] + kTol) {
+            recordChange(j);
+            lower_[j] = new_lb;
+            changed = true;
+        }
+        // The other bound may still be fractional (a model bound).
+        if (changed && integral) {
+            const Real rounded_lb = std::ceil(lower_[j] - kIntRoundTol);
+            const Real rounded_ub = std::floor(upper_[j] + kIntRoundTol);
             if (rounded_lb > lower_[j] + kTol) {
                 recordChange(j);
                 lower_[j] = rounded_lb;

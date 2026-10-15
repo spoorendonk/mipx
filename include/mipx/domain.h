@@ -16,6 +16,8 @@ class DomainPropagator {
 public:
     /// Bound tolerance: a column crossed by up to kTol counts as feasible.
     static constexpr Real kTol = 1e-8;
+    /// Integer column bounds round to the nearest integer within this.
+    static constexpr Real kIntRoundTol = 1e-6;
 
     /// Initialize with problem data.
     void load(const LpProblem& problem);

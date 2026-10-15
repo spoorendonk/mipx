@@ -1434,17 +1434,23 @@ TEST_CASE("Regression #231: presolve treats semi-continuous columns as integer",
     auditPresolve(linearized(lp), presolveCases()[0]);
 }
 
-TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasible", "[validity]") {
-    // A general-integer knapsack whose column k also sits in three equality
-    // rows over integer columns x0..x2, with coefficients near 1000 and |x|
-    // up to 20000. Only k = kv and x = xs (from the generator) satisfy the
-    // rows, and once a node fixes k the propagator pins x crossed by a few
-    // 1e-12: within its tolerance, but the node code pruned at 1e-12. Tree
-    // presolve (forced at every node) and the reduced-cost re-propagation each
-    // lost the optimum on these models (-455 or -540 for -461 or -544). Too
-    // large to enumerate; with k and x fixed and the equality rows dropped,
-    // the rest is a plain knapsack.
-    const std::vector<int> picks = {211, 2707, 4791};
+// A general-integer knapsack whose column k also sits in three equality rows
+// over integer columns x0..x2, with coefficients near 1000 and |x| up to
+// 20000. Only k = kv and x = xs (drawn here) satisfy the rows, so once a node
+// fixes k the propagator pins x through rows with terms near 1e7. The models
+// are those of a seeded generator at the given indices; each comes with its
+// optimum, too large to enumerate but, with k and x fixed and the equality
+// rows dropped, a plain knapsack.
+namespace {
+
+struct ChainKnapsack {
+    int index;
+    LpProblem lp;
+    Real optimum;
+};
+
+std::vector<ChainKnapsack> chainKnapsacks(const std::vector<int>& picks) {
+    std::vector<ChainKnapsack> models;
     std::mt19937 rng(1);
     std::uniform_int_distribution<int> val(-20000, 20000);
     std::uniform_real_distribution<double> big(500.0, 1500.0);
@@ -1467,7 +1473,6 @@ TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasib
         if (std::find(picks.begin(), picks.end(), t) == picks.end()) {
             continue;
         }
-        INFO("model t=" << t);
         rows[3] = {5, 5, 4, 9, 7, 5, 3, 5, 3, 1, 0, 0, 0};
         std::vector<Real> obj = {-15, -14, -17, -17, -2, -17, -14, -8, -14, -13, 0, 0, 0};
         if (t % 2 == 1) {
@@ -1477,7 +1482,7 @@ TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasib
         std::vector<Real> upper(10, 5.0);
         lower.insert(lower.end(), 3, -20000.0);
         upper.insert(upper.end(), 3, 20000.0);
-        const LpProblem lp =
+        LpProblem lp =
             makeModel(Sense::Minimize, obj, lower, upper, std::vector<VarType>(13, I), rows,
                       {rhs[0], rhs[1], rhs[2], -kInf}, {rhs[0], rhs[1], rhs[2], 82});
 
@@ -1495,7 +1500,16 @@ TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasib
         knapsack.load(fixed);
         const auto truth = knapsack.solve();
         REQUIRE(truth.status == Status::Optimal);
+        models.push_back({t, std::move(lp), truth.objective});
+    }
+    return models;
+}
 
+/// Solves each model with cuts and presolve off, tree presolve forced at every
+/// node and then off (which leaves the reduced-cost re-propagation).
+void checkChainKnapsacks(const std::vector<int>& picks) {
+    for (const auto& model : chainKnapsacks(picks)) {
+        INFO("model t=" << model.index);
         for (const bool tree_presolve : {true, false}) {
             INFO("tree presolve at every node: " << tree_presolve);
             MipSolver solver;
@@ -1507,10 +1521,28 @@ TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasib
             solver.setTreePresolveEnabled(tree_presolve);
             solver.setTreePresolveAutoTuning(false);
             solver.setTreePresolveControls(1000, 1, 1);
-            solver.load(lp);
+            solver.load(model.lp);
             const auto result = solver.solve();
             REQUIRE(result.status == Status::Optimal);
-            CHECK_THAT(result.objective, WithinAbs(truth.objective, kObjTol));
+            CHECK_THAT(result.objective, WithinAbs(model.optimum, kObjTol));
         }
     }
+}
+
+}  // namespace
+
+TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasible", "[validity]") {
+    // The propagator pinned x crossed by a few 1e-12: within its tolerance,
+    // but the node code pruned at 1e-12. Tree presolve and the reduced-cost
+    // re-propagation each lost the optimum (-455 or -540 for -461 or -544).
+    checkChainKnapsacks({211, 2707, 4791});
+}
+
+TEST_CASE("Regression #235: integer rounding turns a near-integer bound into a crossing",
+          "[validity]") {
+    // A derived bound on x missed its integer by 1.9e-7, from the other
+    // columns' bounds and the row sums at terms near 1e7. Rounding at 1e-8
+    // floored it a whole unit below the lower bound, and the propagator
+    // pruned the node holding the optimum (-455 for -461).
+    checkChainKnapsacks({751, 5621});
 }
