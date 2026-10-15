@@ -1264,6 +1264,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
              s.setTreePresolveControls(100, 0, 1);
          }},
         {"symmetry off", [](MipSolver& s) { s.setSymmetryEnabled(false); }},
+        {"no tree pseudocosts", [](MipSolver& s) { s.setTreePseudocostsEnabled(false); }},
         {"objective propagation (opt-in)",
          [](MipSolver& s) { s.setObjectivePropagationEnabled(true); }},
         {"presolve off", [](MipSolver& s) { s.setPresolve(false); }},

@@ -382,6 +382,10 @@ public:
     /// Turn strong branching off: branching then rests on pseudocosts alone,
     /// learned from the tree. Mainly for tests and experiments.
     void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
+    /// Learn pseudocosts from the gains of solved child nodes (#199). On by
+    /// default; off restores the search where only strong-branch probes feed
+    /// pseudocosts, as an A/B switch for benchmarking.
+    void setTreePseudocostsEnabled(bool enabled) { tree_pseudocosts_enabled_ = enabled; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
     void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
@@ -662,6 +666,7 @@ private:
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
     bool strong_branching_enabled_ = true;
+    bool tree_pseudocosts_enabled_ = true;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;

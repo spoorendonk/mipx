@@ -2145,15 +2145,17 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // at the cutoff, so the gain says more about the incumbent than about
     // the branching. A caller that runs nodes concurrently but must stay
     // deterministic collects the sample instead and applies it in batch order.
-    const bool cutoff = node_result.status == Status::Optimal && incumbent_snapshot < kInf &&
-                        node_result.objective >= incumbent_snapshot - 1e-6;
-    const auto sample =
-        TreePseudocostSample::fromChild(node, node_result.status, node_result.objective, cutoff);
-    if (deferred_pseudocost != nullptr) {
-        *deferred_pseudocost = sample;
-    } else {
-        std::lock_guard<std::mutex> lock(branching_mutex_);
-        branching_rule_.updateFromChild(sample, branching_stats_);
+    if (tree_pseudocosts_enabled_) {
+        const bool cutoff = node_result.status == Status::Optimal && incumbent_snapshot < kInf &&
+                            node_result.objective >= incumbent_snapshot - 1e-6;
+        const auto sample = TreePseudocostSample::fromChild(node, node_result.status,
+                                                            node_result.objective, cutoff);
+        if (deferred_pseudocost != nullptr) {
+            *deferred_pseudocost = sample;
+        } else {
+            std::lock_guard<std::mutex> lock(branching_mutex_);
+            branching_rule_.updateFromChild(sample, branching_stats_);
+        }
     }
 
     if (node_result.status == Status::Infeasible) {

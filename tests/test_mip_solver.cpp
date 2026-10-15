@@ -699,6 +699,32 @@ TEST_CASE("MipSolver: without strong branching, pseudocosts come from the tree a
     CHECK(solver.getBranchingStats().strong_branch_probes > 0);
 }
 
+TEST_CASE("MipSolver: tree pseudocost updates can be switched off", "[mip][branching]") {
+    // Issue #199 landed on by default; the switch restores the search where
+    // only strong-branch probes feed pseudocosts, for A/B benchmarking.
+    auto lp = buildRcFixingKnapsackMip();
+    for (const Int threads : {1, 2}) {
+        INFO("threads " << threads);
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setCutsEnabled(false);
+        solver.setPresolve(false);
+        solver.setNumThreads(threads);
+        solver.setParallelMode(ParallelMode::Deterministic);
+        solver.setTreePseudocostsEnabled(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(rcKnapsackOptimum(), 1e-6));
+        REQUIRE(result.nodes > 5);
+        const auto& stats = solver.getBranchingStats();
+        CHECK(stats.pseudocost_updates_tree == 0);
+        CHECK(stats.pseudocost_tree_skipped == 0);
+        CHECK(stats.pseudocost_updates_strong > 0);
+    }
+}
+
 TEST_CASE("MipSolver: infeasible", "[mip]") {
     auto lp = buildInfeasibleMip();
 
