@@ -151,6 +151,10 @@ struct PresolveOptions {
 
 class Presolver {
 public:
+    /// A row presolve drops must hold to this, the MIP's feasibility
+    /// tolerance, as no later step checks it again.
+    static constexpr Real kDropTol = 1e-6;
+
     Presolver() = default;
 
     /// Run presolve on the given problem. Returns the reduced problem.

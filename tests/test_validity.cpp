@@ -1831,6 +1831,25 @@ TEST_CASE("Regression #236: a row with terms near 1e9 reads its own point as inf
     CHECK(solved > 300);
 }
 
+TEST_CASE("Regression #236: presolve drops an emptied row only within the feasibility tolerance",
+          "[validity]") {
+    // A fixed column folded into the row leaves its rhs 9 (or 9e-6) short.
+    // The emptied row's relative slack at 1e9 is about 10, so the review of
+    // the first fix found presolve dropping it and returning x as Optimal.
+    // Past kFeasTol the row now stays, and the model is infeasible.
+    constexpr auto C = VarType::Continuous;
+    for (const Real base : {1e3, 1e9}) {
+        const Real x = base + (base > 1e6 ? 9.0 : 9e-6);
+        const LpProblem lp = makeModel(Sense::Minimize, {1}, {x}, {x}, {C}, {{1}}, {-kInf}, {base});
+        INFO(describe(lp));
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.load(lp);
+        CHECK(solver.solve().status == Status::Infeasible);
+    }
+}
+
 TEST_CASE("Regression #236: propagation through a tiny coefficient keeps the exact point",
           "[validity]") {
     // c x0 + a x1 = c K + t a with x0 fixed at K: x1 = t exactly. The bound on

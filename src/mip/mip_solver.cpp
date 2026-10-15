@@ -4077,6 +4077,20 @@ MipResult MipSolver::solveMinimization() {
     }
 
     if (working_problem.num_cols == 0) {
+        // Presolve keeps an emptied row it could neither drop nor call
+        // infeasible (#236); with no columns left, 0 must satisfy it.
+        bool rows_hold = true;
+        for (Index i = 0; i < working_problem.num_rows; ++i) {
+            rows_hold = rows_hold && working_problem.row_lower[i] <= Presolver::kDropTol &&
+                        working_problem.row_upper[i] >= -Presolver::kDropTol;
+        }
+        if (!rows_hold) {
+            MipResult result;
+            result.status = Status::Infeasible;
+            result.work_units = canonicalReportedWork(symmetry_pre_work);
+            result.time_seconds = elapsed();
+            return result;
+        }
         MipResult result;
         result.status = Status::Optimal;
         result.objective = working_problem.obj_offset;

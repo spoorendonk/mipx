@@ -479,10 +479,16 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
         Real singleton_coeff = 0.0;
 
         if (count == 0) {
-            // Empty row. Check feasibility, then remove.
-            if (lp.row_lower[i] > rowTol(i) || lp.row_upper[i] < -rowTol(i)) {
+            // Empty row. Infeasible past its slack; dropped only when it
+            // holds within the feasibility tolerance, since postsolve never
+            // checks it again. In between it stays, and the LP decides (#236).
+            const Real excess = std::max(lp.row_lower[i], -lp.row_upper[i]);
+            if (excess > rowTol(i)) {
                 infeasible_ = true;
                 return changes;
+            }
+            if (excess > std::min(rowTol(i), kDropTol)) {
+                continue;
             }
             removeActiveRow(lp, i, col_removed, row_removed, row_active_nnz, col_active_nnz,
                             next_dirty_rows, next_dirty_cols);
