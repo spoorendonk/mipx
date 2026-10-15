@@ -308,6 +308,10 @@ private:
     void computeGeometricMeanScaling();
     void computeRuizScaling();
     void applyScaling();
+    void rescaleKeepingBasis();
+    LpResult solveFromCurrentBasis();
+    bool dualRayMeetsContract() const;
+    bool optimumHoldsUnscaled() const;
     void unscaleResults();
 
     // Record the Farkas ray proven by basis position `row` (rho = B^{-T} e_row,
@@ -400,6 +404,14 @@ private:
     // Smallest pivot the ratio test admits when no entry reaches kPivotTol
     // but a small one, over its column's range, can still repair the row.
     static constexpr Real kRepairPivotTol = 1e-9;
+    // Relative disagreement between the row- and column-wise pivot element
+    // above which updated factors are refreshed before pivoting.
+    static constexpr Real kAlphaTroubleTol = 1e-7;
+    // A primal ray must improve the objective by more than this fraction of
+    // the magnitude of the terms its reduced cost sums.
+    static constexpr Real kRayGainRelTol = 1e-9;
+    // Relative tolerance of the check of an optimum in the model's units.
+    static constexpr Real kUnscaledRelTol = 1e-6;
     // Largest move (scaled units) a repair may count on. Reaching a bound
     // only past it puts the column where round-off in its value exceeds the
     // primal tolerance, so such a row still stands as a proof.

@@ -979,6 +979,135 @@ void auditWarm(std::uint32_t seed, int variant, Audit& audit) {
     }
 }
 
+// Empty when the solver's verdict carries a certificate valid to tolerance for
+// a model of unknown status: a point at kWarmRel, a Farkas ray up to
+// tolerance, or a primal ray. Any other status certifies nothing.
+std::string certify(const DualSimplexSolver& sv, const LpProblem& lp) {
+    switch (sv.getStatus()) {
+        case Status::Optimal:
+            return checkOptimal(lp, sv.getPrimalValues(), sv.getDualValues(), sv.getObjective(),
+                                kWarmRel);
+        case Status::Infeasible:
+            return checkFarkas(lp, sv.getDualRay(), true);
+        case Status::Unbounded:
+            return checkPrimalRay(lp, sv.getPrimalRay());
+        default:
+            return std::string("status ") + statusName(sv.getStatus());
+    }
+}
+
+// One model through rounds of cut-like rows added with addRows (#241), as
+// branch-and-cut adds them: each round cuts off the current LP point by a
+// margin, is re-solved warm, and is compared with a cold solve of the
+// extended model. A warm answer fails only when it carries no certificate
+// while the cold one does; two certified answers that differ are tolerance
+// calls, since cuts at arbitrary points leave models that are feasible only
+// to within tolerance.
+void auditCuts(std::uint32_t seed, int variant, Audit& audit) {
+    Rng rng(700000U + seed * 8U + static_cast<std::uint32_t>(variant));
+    const Options opt = optionsFor(variant);
+    Generated g = generateOptimal(rng, opt);
+    DualSimplexSolver warm;
+    warm.setVerbose(false);
+    warm.load(g.lp);
+    const std::string tag = tagFor("cuts", seed, variant);
+    ++audit.models;
+    if (checkSolve(warm, g, tag, audit) != Status::Optimal) {
+        return;
+    }
+    const Index n = g.lp.num_cols;
+    for (int round = 0; round < 3; ++round) {
+        const auto x = warm.getPrimalValues();
+        std::vector<Index> idx;
+        std::vector<Real> val;
+        long double gx = 0.0L;
+        Real gmax = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            if (!rng.coin(0.6)) {
+                continue;
+            }
+            Real v = rng.value(-5.0, 5.0);
+            if (v == 0.0) {
+                continue;
+            }
+            if (opt.scaled) {
+                v *= std::pow(10.0, rng.pick(-4, 4));
+            }
+            idx.push_back(j);
+            val.push_back(v);
+            gx += static_cast<long double>(v) * x[j];
+            gmax = std::max(gmax, std::abs(v * x[j]));
+        }
+        if (idx.empty()) {
+            const Index j = rng.pick(0, n - 1);
+            idx.push_back(j);
+            val.push_back(1.0);
+            gx = x[j];
+            gmax = std::abs(x[j]);
+        }
+        const Real delta = 0.05 * std::max(1.0, gmax) * rng.uniform(0.25, 2.0);
+        Real lo = -kInf;
+        Real hi = kInf;
+        if (rng.coin(0.5)) {
+            lo = static_cast<Real>(gx) + delta;
+        } else {
+            hi = static_cast<Real>(gx) - delta;
+        }
+        const std::vector<Index> starts{0};
+        const std::vector<Real> los{lo};
+        const std::vector<Real> his{hi};
+        warm.addRows(starts, idx, val, los, his);
+        auto rows = denseRows(g.lp);
+        rows.emplace_back(n, 0.0);
+        for (std::size_t k = 0; k < idx.size(); ++k) {
+            rows.back()[idx[k]] = val[k];
+        }
+        setRows(g.lp, rows);
+        g.lp.row_lower.push_back(lo);
+        g.lp.row_upper.push_back(hi);
+
+        DualSimplexSolver cold;
+        cold.setVerbose(false);
+        cold.load(g.lp);
+        const LpResult cr = cold.solve();
+        const LpResult wr = warm.solve();
+        const std::string rtag = tag + " round " + std::to_string(round);
+        const std::string werr = certify(warm, g.lp);
+        const std::string cerr = certify(cold, g.lp);
+        if (!werr.empty() && cerr.empty()) {
+            std::ostringstream os;
+            os.precision(17);
+            os << rtag << ": warm " << statusName(wr.status) << " uncertified (" << werr
+               << "), cold " << statusName(cr.status) << " obj " << cr.objective;
+            auto dump = [&os](const char* name, const std::vector<Real>& v) {
+                os << "\n  " << name << ':';
+                for (Real e : v) {
+                    os << ' ' << e;
+                }
+            };
+            if (wr.status == Status::Optimal) {
+                os << "\n  warm obj " << wr.objective;
+                dump("x", warm.getPrimalValues());
+                dump("y", warm.getDualValues());
+            } else if (wr.status == Status::Infeasible) {
+                dump("ray", warm.getDualRay());
+            } else if (wr.status == Status::Unbounded) {
+                dump("ray", warm.getPrimalRay());
+            }
+            audit.fail(os.str(), g.lp);
+            return;
+        }
+        if (!werr.empty() || wr.status != Status::Optimal) {
+            return;  // nothing further to cut, or no certified point to cut
+        }
+        if (cerr.empty() &&
+            (cr.status != Status::Optimal || std::abs(wr.objective - cr.objective) >
+                                                 kObjRel * std::max(1.0, std::abs(cr.objective)))) {
+            ++audit.tolerance_calls;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Models the audit found wrong answers on (#237), fixed as literals so they
 // do not depend on the generator or the standard library's distributions.
@@ -1080,6 +1209,17 @@ TEST_CASE("LP validity: warm re-solves after bound changes match a cold solve", 
     for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
         for (int variant = 0; variant < 8; ++variant) {
             auditWarm(seed, variant, audit);
+        }
+    }
+    report(audit);
+}
+
+TEST_CASE("LP validity: warm re-solves after addRows are certified when a cold solve is",
+          "[lp_validity]") {
+    Audit audit;
+    for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
+        for (int variant = 0; variant < 8; ++variant) {
+            auditCuts(seed, variant, audit);
         }
     }
     report(audit);

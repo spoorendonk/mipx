@@ -766,6 +766,165 @@ void DualSimplexSolver::refactorize() {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
+    const bool warm = has_basis_;
+    const auto start = std::chrono::steady_clock::now();
+    LpResult res = solveFromCurrentBasis();
+    // A warm basis can carry the solve into a corner its tolerances cannot
+    // see out of: ill-conditioned pivots after addRows left optima that miss
+    // rows or optimality badly in the model's own units, and Farkas rows that
+    // lean on entries the current scaling makes look like zero (#241). Check
+    // the verdict in the model's units and, when it does not hold, give it
+    // to a cold start, which takes another path, within what is left of the
+    // iteration and time limits.
+    const bool doubtful = (res.status == Status::Infeasible && !dualRayMeetsContract()) ||
+                          (res.status == Status::Optimal && !optimumHoldsUnscaled());
+    if (!warm || !doubtful || res.iterations >= iter_limit_) {
+        return res;
+    }
+    const Int iter_limit = iter_limit_;
+    const double time_limit = options_.max_solve_seconds;
+    if (time_limit >= 0.0) {
+        const double spent =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (spent >= time_limit) {
+            return res;
+        }
+        options_.max_solve_seconds = time_limit - spent;
+    }
+    iter_limit_ = iter_limit - res.iterations;
+    has_basis_ = false;
+    LpResult cold = solveFromCurrentBasis();
+    iter_limit_ = iter_limit;
+    options_.max_solve_seconds = time_limit;
+    cold.iterations += res.iterations;
+    cold.work_units += res.work_units;
+    iterations_ = cold.iterations;
+    return cold;
+}
+
+// The getDualRay() contract's test of d = A^T y, in the model's units: an
+// entry meeting an infinite column bound must be round-off, below kPivotTol
+// of the ray's largest term.
+bool DualSimplexSolver::dualRayMeetsContract() const {
+    if (dual_ray_.empty()) {
+        return false;
+    }
+    std::vector<Real> d(static_cast<std::size_t>(num_cols_), 0.0);
+    Real size = 0.0;
+    for (Index i = 0; i < num_rows_; ++i) {
+        const Real yi = dual_ray_[static_cast<std::size_t>(i)];
+        if (yi == 0.0) {
+            continue;
+        }
+        const Real rs = scaled_ ? row_scale_[i] : 1.0;
+        const auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            const Real t = yi * rv.values[k] / (rs * (scaled_ ? col_scale_[j] : 1.0));
+            d[static_cast<std::size_t>(j)] += t;
+            size = std::max(size, std::abs(t));
+        }
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        const Real dj = d[static_cast<std::size_t>(j)];
+        const bool open = dj > 0.0 ? col_lower_[j] == -kInf : col_upper_[j] == kInf;
+        if (open && std::abs(dj) > kPivotTol * size) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The optimum read back in the model's units: rows within a relative
+// kUnscaledRelTol of their sides, no multiplier of the wrong sign on a side or
+// bound that is infinite, and a duality gap within kUnscaledRelTol of the
+// terms that make it up. Tolerances hold in the scaled space, where a basis
+// reached through ill-conditioned pivots can still miss all three badly: a
+// dual infeasibility of 1e-9 times a primal value of 1e7 left an optimum 5%
+// above the true one (#241).
+bool DualSimplexSolver::optimumHoldsUnscaled() const {
+    const auto uz = [](Index k) { return static_cast<std::size_t>(k); };
+    const std::vector<Real> x = getPrimalValues();
+    const std::vector<Real> y = getDualValues();
+    const Real s = sense_ == Sense::Maximize ? -1.0 : 1.0;
+    // Reduced costs in minimization terms, d = c - A^T y, and the largest
+    // term of each, against which its sign is read.
+    std::vector<Real> d(uz(num_cols_));
+    std::vector<Real> d_mag(uz(num_cols_));
+    Real primal_obj = 0.0;
+    Real gap_mag = 1.0;
+    for (Index j = 0; j < num_cols_; ++j) {
+        d[uz(j)] = obj_[j] / (scaled_ ? col_scale_[j] : 1.0);
+        d_mag[uz(j)] = std::abs(d[uz(j)]);
+        primal_obj += d[uz(j)] * x[uz(j)];
+        gap_mag = std::max(gap_mag, std::abs(d[uz(j)] * x[uz(j)]));
+    }
+    Real dual_obj = 0.0;
+    std::vector<Real> row_max(uz(num_rows_), 0.0);
+    std::vector<Real> yi_min(uz(num_rows_));
+    for (Index i = 0; i < num_rows_; ++i) {
+        const Real rs = scaled_ ? row_scale_[i] : 1.0;
+        const Real lo = row_lower_[i] == -kInf ? -kInf : row_lower_[i] / rs;
+        const Real up = row_upper_[i] == kInf ? kInf : row_upper_[i] / rs;
+        const Real yi = s * y[uz(i)];
+        yi_min[uz(i)] = yi;
+        Real act = 0.0;
+        Real mag = 1.0;
+        const auto rv = matrix_.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            const Real a = rv.values[k] / (rs * (scaled_ ? col_scale_[j] : 1.0));
+            const Real t = a * x[uz(j)];
+            act += t;
+            mag = std::max(mag, std::abs(t));
+            row_max[uz(i)] = std::max(row_max[uz(i)], std::abs(a));
+            d[uz(j)] -= a * yi;
+            d_mag[uz(j)] = std::max(d_mag[uz(j)], std::abs(a * yi));
+        }
+        if (std::isfinite(lo)) {
+            mag = std::max(mag, std::abs(lo));
+        }
+        if (std::isfinite(up)) {
+            mag = std::max(mag, std::abs(up));
+        }
+        if (act < lo - kUnscaledRelTol * mag || act > up + kUnscaledRelTol * mag) {
+            return false;
+        }
+        const Real side = yi > 0.0 ? lo : up;
+        if (yi != 0.0 && std::isfinite(side)) {
+            dual_obj += yi * side;
+            gap_mag = std::max(gap_mag, std::abs(yi * side));
+        }
+    }
+    Real dual_scale = 1.0;
+    for (Index j = 0; j < num_cols_; ++j) {
+        dual_scale = std::max(dual_scale, d_mag[uz(j)]);
+    }
+    for (Index i = 0; i < num_rows_; ++i) {
+        const Real yi = yi_min[uz(i)];
+        const Real side = yi > 0.0 ? row_lower_[i] : row_upper_[i];
+        if (yi != 0.0 && !std::isfinite(side) &&
+            std::abs(yi) * row_max[uz(i)] > kUnscaledRelTol * dual_scale) {
+            return false;
+        }
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        const Real dj = d[uz(j)];
+        if (std::abs(dj) <= kUnscaledRelTol * std::max(1.0, d_mag[uz(j)])) {
+            continue;
+        }
+        const Real cs = scaled_ ? col_scale_[j] : 1.0;
+        const Real bound = dj > 0.0 ? col_lower_[j] : col_upper_[j];
+        if (!std::isfinite(bound)) {
+            return false;
+        }
+        dual_obj += dj * bound * cs;
+        gap_mag = std::max(gap_mag, std::abs(dj * bound * cs));
+    }
+    return std::abs(primal_obj - dual_obj) <= kUnscaledRelTol * gap_mag;
+}
+
+LpResult DualSimplexSolver::solveFromCurrentBasis() {
     dual_ray_.clear();
     primal_ray_.clear();
     if (!loaded_) {
@@ -2220,6 +2379,41 @@ LpResult DualSimplexSolver::solve() {
             }
 
             if (min_step == kInf && entering_bound_step == kInf) {
+                // The ray improves the objective by its reduced cost, read
+                // here from the column itself: c_q - c_B^T B^-1 a_q. The
+                // maintained reduced cost can be round-off of large terms; a
+                // ray whose gain is at that level is no proof (#241: gains of
+                // 1e-7 against terms of 2e9 on bounded LPs). Refresh updated
+                // factors and price again, and on fresh ones take the column
+                // as priced out.
+                Real ray_gain = varCost(entering_p);
+                Real ray_mag = std::abs(ray_gain);
+                for (Index i = 0; i < num_rows_; ++i) {
+                    const Real t = varCost(basis_[i]) * pivot_col[i];
+                    ray_gain -= t;
+                    ray_mag += std::abs(t);
+                }
+                ray_gain *= delta_dir;
+                if (ray_gain >= -kRayGainRelTol * ray_mag) {
+                    if (lu_.numUpdates() > 0) {
+                        try {
+                            refactorize();
+                        } catch (const std::runtime_error&) {
+                            if (!recoverFromSingularBasis()) {
+                                break;
+                            }
+                            repair_rejected_row = -1;
+                        }
+                        computePrimals();
+                        computeDuals();
+                        initDseWeights();
+                    } else {
+                        reduced_cost_[entering_p] = 0.0;
+                    }
+                    rebuildInfeasibleSet();
+                    ++iterations_;
+                    continue;
+                }
                 status_ = Status::Unbounded;
                 storePrimalRay(pivot_col, entering_p, delta_dir);
                 break;
@@ -2919,6 +3113,30 @@ LpResult DualSimplexSolver::solve() {
             degenerate_pivot_streak = 0;
             continue;
         }
+        // The pivot element computed by row (BTRAN, then the row of B^-1 N)
+        // and by column (FTRAN) agree up to round-off on sound factors. When
+        // they do not, the updated factors have drifted, and pivoting on them
+        // takes steps the model does not have: after addRows a 5% mismatch
+        // on a 3e-6 pivot moved a column by 8e15 and ended in a false Optimal
+        // (#241). Refactorize and choose again from fresh factors.
+        if (lu_.numUpdates() > 0 &&
+            std::abs(pivot_element - alpha_entering) >
+                kAlphaTroubleTol * std::min(std::abs(pivot_element), std::abs(alpha_entering))) {
+            try {
+                refactorize();
+            } catch (const std::runtime_error&) {
+                if (!recoverFromSingularBasis()) {
+                    break;
+                }
+                repair_rejected_row = -1;
+            }
+            computePrimals();
+            computeDuals();
+            initDseWeights();
+            rebuildInfeasibleSet();
+            degenerate_pivot_streak = 0;
+            continue;
+        }
         // The pivot stands, so the basis changes and a rejected repair may
         // be retried.
         repair_rejected_row = -1;
@@ -3254,8 +3472,18 @@ std::vector<Real> DualSimplexSolver::getPrimalValues() const {
 
 std::vector<Real> DualSimplexSolver::getDualValues() const {
     // Unscale: dual_external[i] = dual_internal[i] * row_scale[i].
+    //
+    // A row whose logical is basic has y_i = -d_logical = 0 exactly; what
+    // the BTRAN leaves there is round-off. On a row far from its sides that
+    // round-off times the slack shows up as a duality gap (#241), so report
+    // the exact zero.
+    const bool basis_known = has_basis_ && static_cast<Index>(var_status_.size()) == numVars();
     std::vector<Real> result(num_rows_);
     for (Index i = 0; i < num_rows_; ++i) {
+        if (basis_known && var_status_[num_cols_ + i] == BasisStatus::Basic) {
+            result[i] = 0.0;
+            continue;
+        }
         result[i] = dual_[i] * (scaled_ ? row_scale_[i] : 1.0);
         if (sense_ == Sense::Maximize) {
             result[i] = -result[i];
@@ -3606,6 +3834,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     // then claiming has_basis_, is how a stale basis gets into the next solve.
     // The cold start there builds one over the new size instead.
     if (!has_basis_) {
+        rescaleKeepingBasis();
         return;
     }
 
@@ -3634,6 +3863,63 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     }
 
     has_basis_ = true;
+    rescaleKeepingBasis();
+}
+
+void DualSimplexSolver::rescaleKeepingBasis() {
+    if (!scaled_ || !options_.enable_scaling) {
+        return;
+    }
+    // Back to the model's own units.
+    {
+        std::vector<Triplet> triplets;
+        triplets.reserve(matrix_.numNonzeros());
+        for (Index i = 0; i < num_rows_; ++i) {
+            auto rv = matrix_.row(i);
+            for (Index k = 0; k < rv.size(); ++k) {
+                triplets.push_back(
+                    {i, rv.indices[k], rv.values[k] / (row_scale_[i] * col_scale_[rv.indices[k]])});
+            }
+        }
+        matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+    }
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (row_lower_[i] != -kInf) {
+            row_lower_[i] /= row_scale_[i];
+        }
+        if (row_upper_[i] != kInf) {
+            row_upper_[i] /= row_scale_[i];
+        }
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        if (col_lower_[j] != -kInf) {
+            col_lower_[j] *= col_scale_[j];
+        }
+        if (col_upper_[j] != kInf) {
+            col_upper_[j] *= col_scale_[j];
+        }
+        obj_[j] /= col_scale_[j];
+    }
+    const bool have_values = static_cast<Index>(primal_.size()) == numVars();
+    if (have_values) {
+        for (Index j = 0; j < num_cols_; ++j) {
+            primal_[j] *= col_scale_[j];
+        }
+        for (Index i = 0; i < num_rows_; ++i) {
+            primal_[num_cols_ + i] /= row_scale_[i];
+        }
+    }
+    computeScaling();
+    applyScaling();
+    if (have_values) {
+        for (Index j = 0; j < num_cols_; ++j) {
+            primal_[j] /= col_scale_[j];
+        }
+        for (Index i = 0; i < num_rows_; ++i) {
+            primal_[num_cols_ + i] *= row_scale_[i];
+        }
+    }
+    std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
 }
 
 void DualSimplexSolver::removeRows(std::span<const Index> rows) {
