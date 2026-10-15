@@ -791,6 +791,19 @@ LpResult DualSimplexSolver::solve() {
         }
         options_.max_solve_seconds = time_limit - spent;
     }
+    // A cold run that stops on a limit has no verdict; the warm one is then
+    // the better answer (strong branching reads IterLimit objectives as
+    // bounds), so keep what it left to put back.
+    auto primal = primal_;
+    auto dual = dual_;
+    auto reduced_cost = reduced_cost_;
+    auto var_status = var_status_;
+    auto basis = basis_;
+    auto nonbasic = nonbasic_;
+    auto basis_pos = basis_pos_;
+    auto nonbasic_pos = nonbasic_pos_;
+    auto dual_ray = dual_ray_;
+    const Status warm_status = status_;
     iter_limit_ = iter_limit - res.iterations;
     has_basis_ = false;
     LpResult cold = solveFromCurrentBasis();
@@ -799,7 +812,26 @@ LpResult DualSimplexSolver::solve() {
     cold.iterations += res.iterations;
     cold.work_units += res.work_units;
     iterations_ = cold.iterations;
-    return cold;
+    if (cold.status == Status::Optimal || cold.status == Status::Infeasible ||
+        cold.status == Status::Unbounded) {
+        return cold;
+    }
+    primal_ = std::move(primal);
+    dual_ = std::move(dual);
+    reduced_cost_ = std::move(reduced_cost);
+    var_status_ = std::move(var_status);
+    basis_ = std::move(basis);
+    nonbasic_ = std::move(nonbasic);
+    basis_pos_ = std::move(basis_pos);
+    nonbasic_pos_ = std::move(nonbasic_pos);
+    dual_ray_ = std::move(dual_ray);
+    primal_ray_.clear();
+    status_ = warm_status;
+    has_basis_ = true;
+    res.iterations = cold.iterations;
+    res.work_units = cold.work_units;
+    res.objective = getObjective();
+    return res;
 }
 
 // The getDualRay() contract's test of d = A^T y, in the model's units: an
@@ -1431,6 +1463,22 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector).
     std::vector<Real> dse_tau(num_rows_, 0.0);
     SparseWorkVector pricing_reduced_cost(numVars());
+    // Columns the bound-flipping ratio test moved this iteration. A flip is
+    // dual feasible only with the dual step that follows it, so a pivot
+    // abandoned after the flips puts them back.
+    std::vector<Index> bfrt_flipped;
+    auto undoBoundFlips = [&]() {
+        for (Index k : bfrt_flipped) {
+            if (var_status_[k] == BasisStatus::AtUpper) {
+                primal_[k] = varLower(k);
+                var_status_[k] = BasisStatus::AtLower;
+            } else {
+                primal_[k] = varUpper(k);
+                var_status_[k] = BasisStatus::AtUpper;
+            }
+        }
+        bfrt_flipped.clear();
+    };
     // Column 2-norms for pivot quality scoring in ratio tests.
     // col_norms[k] = ||a_k||_2 for structural columns, 1.0 for slacks.
     std::vector<Real> col_norms(static_cast<std::size_t>(numVars()), 1.0);
@@ -2666,6 +2714,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         bfrt_cands.clear();
 
         bool has_flips = false;
+        bfrt_flipped.clear();
         Real target = (sigma > 0.0) ? leaving_lb : leaving_ub;
 
         bool adaptive_bfrt_gate = true;
@@ -3029,6 +3078,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     var_status_[c.var] = BasisStatus::AtLower;
                 }
                 has_flips = true;
+                bfrt_flipped.push_back(c.var);
                 accumulated += contribution;
                 accumulated_primal_change += c.gap;
                 ++flip_count;
@@ -3097,6 +3147,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (repair_pivot && lu_.numUpdates() == 0) {
                 repair_rejected_row = leaving_row;
             }
+            undoBoundFlips();
             // Numerically degenerate pivot. Refactorize and retry.
             try {
                 refactorize();
@@ -3122,6 +3173,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         if (lu_.numUpdates() > 0 &&
             std::abs(pivot_element - alpha_entering) >
                 kAlphaTroubleTol * std::min(std::abs(pivot_element), std::abs(alpha_entering))) {
+            undoBoundFlips();
             try {
                 refactorize();
             } catch (const std::runtime_error&) {
@@ -3785,8 +3837,30 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     }
 
     // Extend scaling factors (new rows get scale = 1.0).
+    // The new rows meet column scales chosen without them. A row whose
+    // coefficients land far from 1, or far apart, there makes the scaled
+    // model ill-conditioned (#241), so the model is then rescaled whole.
+    // Rescaling always cost up to 2.5x the LP iterations on MIPLIB cut
+    // loops, for little gain on rows that already sit well.
+    bool rescale = false;
     if (scaled_) {
         row_scale_.resize(num_rows_, 1.0);
+        for (Index i = 0; i < num_new; ++i) {
+            const Index start = starts[i];
+            const Index end = (i + 1 < num_new) ? starts[i + 1] : static_cast<Index>(values.size());
+            Real mx = 0.0;
+            Real mn = kInf;
+            for (Index p = start; p < end; ++p) {
+                const Real a = std::abs(values[p] * col_scale_[indices[p]]);
+                if (a > 0.0) {
+                    mx = std::max(mx, a);
+                    mn = std::min(mn, a);
+                }
+            }
+            if (mx > 0.0 && std::max({mx / mn, mx, 1.0 / mx}) > kRescaleSpread) {
+                rescale = true;
+            }
+        }
     }
 
     // Build new constraint matrix with added rows.
@@ -3834,7 +3908,9 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     // then claiming has_basis_, is how a stale basis gets into the next solve.
     // The cold start there builds one over the new size instead.
     if (!has_basis_) {
-        rescaleKeepingBasis();
+        if (rescale) {
+            rescaleKeepingBasis();
+        }
         return;
     }
 
@@ -3863,7 +3939,9 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     }
 
     has_basis_ = true;
-    rescaleKeepingBasis();
+    if (rescale) {
+        rescaleKeepingBasis();
+    }
 }
 
 void DualSimplexSolver::rescaleKeepingBasis() {
@@ -3900,25 +3978,43 @@ void DualSimplexSolver::rescaleKeepingBasis() {
         }
         obj_[j] /= col_scale_[j];
     }
-    const bool have_values = static_cast<Index>(primal_.size()) == numVars();
-    if (have_values) {
+    // Values move with their scales: x = cs x', s = s' / rs, y = rs y',
+    // d_j = d'_j / cs_j, and a logical's reduced cost is its row's dual.
+    const bool have_values = static_cast<Index>(primal_.size()) == numVars() &&
+                             static_cast<Index>(reduced_cost_.size()) == numVars() &&
+                             static_cast<Index>(dual_.size()) == num_rows_;
+    // The same operations as the bounds get, so nonbasic values stay exactly
+    // on them.
+    auto rescaleValues = [&](bool to_model) {
+        if (!have_values) {
+            return;
+        }
         for (Index j = 0; j < num_cols_; ++j) {
-            primal_[j] *= col_scale_[j];
+            if (to_model) {
+                primal_[j] *= col_scale_[j];
+                reduced_cost_[j] /= col_scale_[j];
+            } else {
+                primal_[j] /= col_scale_[j];
+                reduced_cost_[j] *= col_scale_[j];
+            }
         }
         for (Index i = 0; i < num_rows_; ++i) {
-            primal_[num_cols_ + i] /= row_scale_[i];
+            const auto k = static_cast<std::size_t>(num_cols_ + i);
+            if (to_model) {
+                primal_[k] /= row_scale_[i];
+                dual_[i] *= row_scale_[i];
+                reduced_cost_[k] *= row_scale_[i];
+            } else {
+                primal_[k] *= row_scale_[i];
+                dual_[i] /= row_scale_[i];
+                reduced_cost_[k] /= row_scale_[i];
+            }
         }
-    }
+    };
+    rescaleValues(true);
     computeScaling();
     applyScaling();
-    if (have_values) {
-        for (Index j = 0; j < num_cols_; ++j) {
-            primal_[j] /= col_scale_[j];
-        }
-        for (Index i = 0; i < num_rows_; ++i) {
-            primal_[num_cols_ + i] *= row_scale_[i];
-        }
-    }
+    rescaleValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
 }
 

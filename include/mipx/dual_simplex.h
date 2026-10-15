@@ -412,6 +412,10 @@ private:
     static constexpr Real kRayGainRelTol = 1e-9;
     // Relative tolerance of the check of an optimum in the model's units.
     static constexpr Real kUnscaledRelTol = 1e-6;
+    // addRows rescales the whole model when a new row's coefficients, in the
+    // current column scaling, spread more than this or sit further than this
+    // from 1.
+    static constexpr Real kRescaleSpread = 1e3;
     // Largest move (scaled units) a repair may count on. Reaching a bound
     // only past it puts the column where round-off in its value exceeds the
     // primal tolerance, so such a row still stands as a proof.
