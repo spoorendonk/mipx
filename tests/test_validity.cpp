@@ -22,6 +22,7 @@
 #include "mipx/presolve.h"
 #include "mipx/probing.h"
 #include "mipx/reduced_cost_fixer.h"
+#include "mipx/symmetry.h"
 #include "mipx/variable_bounds.h"
 
 #include <algorithm>
@@ -580,7 +581,7 @@ LpProblem roundedIntegerBounds(LpProblem lp) {
 }
 
 // The same model as a minimization, which the solver audit uses until the
-// tree search handles maximization (#230).
+// tree search handles maximization (#230, reproducer below).
 LpProblem minimized(LpProblem lp) {
     if (lp.sense == Sense::Maximize) {
         for (auto& c : lp.obj) {
@@ -597,6 +598,7 @@ LpProblem minimized(LpProblem lp) {
 struct PresolveCase {
     const char* name;
     PresolveOptions options;
+    bool opt_in = false;
 };
 
 std::vector<PresolveCase> presolveCases() {
@@ -611,41 +613,51 @@ std::vector<PresolveCase> presolveCases() {
     cases.push_back({"always-on reductions only", core});
     PresolveOptions coeff = o;
     coeff.enable_coefficient_tightening = true;
-    cases.push_back({"coefficient tightening (opt-in)", coeff});
+    cases.push_back({"coefficient tightening (opt-in)", coeff, true});
     PresolveOptions probing = o;
     probing.enable_probing = true;
-    cases.push_back({"probing (opt-in)", probing});
+    cases.push_back({"probing (opt-in)", probing, true});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
-    cases.push_back({"all opt-in", all});
+    cases.push_back({"all opt-in", all, true});
     return cases;
 }
 
 // Checks one model under one option set. With a zero objective every
 // reduction must keep the projection of each feasible point; with an
-// objective, dual reductions may drop points but never the optimum.
-void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
+// objective, dual reductions may drop points but never the optimum. With
+// `report` false nothing is asserted and the result only says whether the
+// model passed, so a caller can tell a known bug from a new one.
+bool auditPresolve(const LpProblem& lp, const PresolveCase& pc, bool report = true) {
+    bool ok = true;
+    auto expect = [&](bool cond) {
+        if (report) {
+            CHECK(cond);
+        }
+        ok = ok && cond;
+    };
     const Enumeration orig = enumerate(lp);
     if (orig.unbounded) {
-        return;
+        return true;
     }
     Presolver presolver;
     presolver.setOptions(pc.options);
     const LpProblem reduced = presolver.presolve(lp);
     INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
     if (presolver.isInfeasible()) {
-        CHECK_FALSE(orig.feasible);
-        return;
+        expect(!orig.feasible);
+        return ok;
     }
     const auto& mapping = presolver.colMapping();
     INFO("reduced:\n" << describe(reduced));
 
     const Enumeration red = enumerate(reduced);
-    CHECK(red.feasible == orig.feasible);
-    CHECK_FALSE(red.unbounded);
+    INFO("optimum " << orig.best << ", reduced optimum " << red.best);
+    expect(red.feasible == orig.feasible);
+    expect(!red.unbounded);
     if (red.feasible && orig.feasible) {
-        CHECK_THAT(red.best, WithinAbs(orig.best, kObjTol));
+        expect(std::abs(red.best - orig.best) <= kObjTol);
     }
 
     // Every point the reduced model admits postsolves to a feasible point of
@@ -653,16 +665,21 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
     forEachFeasible(reduced, [&](const Slice& s) {
         for (const auto& xr : slicePoints(s)) {
             const auto full = presolver.postsolve(xr);
-            INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full));
-            REQUIRE(full.size() == static_cast<std::size_t>(lp.num_cols));
-            CHECK(pointFeasible(lp, full, kFeasTol));
-            CHECK_THAT(objective(lp, full), WithinAbs(objective(reduced, xr), kObjTol));
+            if (full.size() != static_cast<std::size_t>(lp.num_cols)) {
+                expect(false);
+                continue;
+            }
+            INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full)
+                                 << ", objective " << objective(reduced, xr) << " -> "
+                                 << objective(lp, full));
+            expect(pointFeasible(lp, full, kFeasTol));
+            expect(std::abs(objective(lp, full) - objective(reduced, xr)) <= kObjTol);
         }
     });
 
     const bool primal = std::all_of(lp.obj.begin(), lp.obj.end(), [](Real c) { return c == 0.0; });
     if (!primal) {
-        return;
+        return ok;
     }
     forEachFeasible(lp, [&](const Slice& s) {
         for (const auto& x : slicePoints(s)) {
@@ -671,9 +688,10 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
                 xr[jj] = x[mapping[jj]];
             }
             INFO("original point" << describe(x));
-            CHECK(pointFeasible(reduced, xr, kFeasTol));
+            expect(pointFeasible(reduced, xr, kFeasTol));
         }
     });
+    return ok;
 }
 
 LpProblem withoutObjective(LpProblem lp) {
@@ -764,6 +782,17 @@ TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum
             const LpProblem lp = roundedIntegerBounds(linearized(models[t]));
             auditPresolve(lp, pc);
             auditPresolve(withoutObjective(lp), pc);
+            // On fractional bounds default presolve trips on #228 (reproducer
+            // below), so an opt-in reduction is judged there only on models
+            // the default reductions get right.
+            if (pc.opt_in) {
+                for (const LpProblem& raw :
+                     {linearized(models[t]), withoutObjective(linearized(models[t]))}) {
+                    if (auditPresolve(raw, presolveCases()[0], false)) {
+                        auditPresolve(raw, pc);
+                    }
+                }
+            }
         }
     }
 }
@@ -882,19 +911,29 @@ TEST_CASE("Validity: probing learns only what every feasible point satisfies", "
                 }
             }
             // Variable bounds, over the whole feasible range of the
-            // continuous column.
-            for (const auto& x : slicePoints(s)) {
-                for (Index j = 0; j < lp.num_cols; ++j) {
-                    for (const auto& vub : vbs.vubs(j)) {
-                        INFO("vub x" << j << " <= " << vub.coeff << "*x" << vub.binary_var << " + "
-                                     << vub.constant << " at" << describe(x));
-                        CHECK(x[j] <= vub.coeff * x[vub.binary_var] + vub.constant + kFeasTol);
-                    }
-                    for (const auto& vlb : vbs.vlbs(j)) {
-                        INFO("vlb x" << j << " >= " << vlb.coeff << "*x" << vlb.binary_var << " + "
-                                     << vlb.constant << " at" << describe(x));
-                        CHECK(x[j] >= vlb.coeff * x[vlb.binary_var] + vlb.constant - kFeasTol);
-                    }
+            // continuous column: its intervals' ends, infinite ones included.
+            auto valueRange = [&](Index j) -> Interval {
+                if (j != s.cont) {
+                    return {s.x[j], s.x[j]};
+                }
+                Interval r{kInf, -kInf};
+                for (const auto& iv : s.cont_set) {
+                    r.lo = std::min(r.lo, iv.lo);
+                    r.hi = std::max(r.hi, iv.hi);
+                }
+                return r;
+            };
+            for (Index j = 0; j < lp.num_cols; ++j) {
+                const Interval range = valueRange(j);
+                for (const auto& vub : vbs.vubs(j)) {
+                    INFO("vub x" << j << " <= " << vub.coeff << "*x" << vub.binary_var << " + "
+                                 << vub.constant << ", x" << j << " up to " << range.hi);
+                    CHECK(range.hi <= vub.coeff * s.x[vub.binary_var] + vub.constant + kFeasTol);
+                }
+                for (const auto& vlb : vbs.vlbs(j)) {
+                    INFO("vlb x" << j << " >= " << vlb.coeff << "*x" << vlb.binary_var << " + "
+                                 << vlb.constant << ", x" << j << " down to " << range.lo);
+                    CHECK(range.lo >= vlb.coeff * s.x[vlb.binary_var] + vlb.constant - kFeasTol);
                 }
             }
         });
@@ -949,6 +988,65 @@ TEST_CASE("Validity: conflicts and cliques hold at every feasible point", "[vali
         });
     }
     CHECK(num_cliques > 0);
+}
+
+TEST_CASE("Validity: symmetry handling keeps an image of every feasible point", "[validity]") {
+    // The solver detects orbits of interchangeable columns, adds the cut
+    // x_variable <= x_canonical for each orbital fix, and at every node raises
+    // lb(canonical) to lb(variable), which those cuts imply. That is valid
+    // when every feasible point has an image under the orbits' permutations
+    // that satisfies the cuts (and, since the image must satisfy the rows
+    // too, when the detected orbits are real symmetries).
+    const auto models = auditModels(6227, 300, true);
+    Int symmetric = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        const LpProblem lp = linearized(models[t]);
+        SymmetryManager symmetry;
+        symmetry.detect(lp);
+        if (!symmetry.hasSymmetry()) {
+            continue;
+        }
+        ++symmetric;
+        LpProblem with_cuts = lp;
+        const Index cuts = symmetry.addSymmetryCuts(with_cuts);
+        INFO("model " << t << " (" << cuts << " symmetry cuts):\n" << describe(with_cuts));
+        std::vector<std::vector<Index>> orbits;
+        for (const auto& orbit : symmetry.orbits()) {
+            if (orbit.size() > 1 && orbit.size() <= 6) {
+                orbits.push_back(orbit);
+            }
+        }
+        forEachFeasible(lp, [&](const Slice& s) {
+            for (const auto& x : slicePoints(s)) {
+                // Try every combination of one permutation per orbit.
+                std::vector<std::vector<Index>> perm = orbits;
+                for (auto& p : perm) {
+                    std::sort(p.begin(), p.end());
+                }
+                bool found = false;
+                while (!found) {
+                    auto y = x;
+                    for (std::size_t o = 0; o < orbits.size(); ++o) {
+                        for (std::size_t k = 0; k < orbits[o].size(); ++k) {
+                            y[orbits[o][k]] = x[perm[o][k]];
+                        }
+                    }
+                    found = pointFeasible(with_cuts, y, kFeasTol);
+                    std::size_t o = 0;
+                    while (o < perm.size() &&
+                           !std::next_permutation(perm[o].begin(), perm[o].end())) {
+                        ++o;
+                    }
+                    if (o == perm.size()) {
+                        break;
+                    }
+                }
+                INFO("feasible point" << describe(x));
+                CHECK(found);
+            }
+        });
+    }
+    CHECK(symmetric > 0);
 }
 
 TEST_CASE("Validity: reduced-cost fixing keeps every point better than the incumbent",
