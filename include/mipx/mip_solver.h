@@ -15,6 +15,7 @@
 #include "mipx/implication_graph.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
+#include "mipx/objective_propagator.h"
 #include "mipx/presolve.h"
 #include "mipx/probing.h"
 #include "mipx/reduced_cost_fixer.h"
@@ -408,6 +409,10 @@ public:
         }
     }
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
+    /// Objective propagation (#117): propagate c^T x <= incumbent as a row in
+    /// node propagation, and re-propagate the root domain against it whenever
+    /// a new incumbent lowers the cutoff. Off by default until benchmarked.
+    void setObjectivePropagationEnabled(bool enabled) { objective_propagation_enabled_ = enabled; }
     /// Tighten separated cuts' coefficients against the global bounds before
     /// they are scored and pooled (SeparatorManager::setStrengthenCuts).
     /// "Global" includes root reduced-cost fixings, which hold relative to the
@@ -432,6 +437,14 @@ public:
     const MipSearchStats& getSearchStats() const { return search_stats_; }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
+    [[nodiscard]] ObjPropStats getObjPropStats() const {
+        ObjPropStats out;
+        out.node_tightenings = obj_prop_node_tightenings_.load(std::memory_order_relaxed);
+        out.node_infeasible = obj_prop_node_infeasible_.load(std::memory_order_relaxed);
+        out.repropagations = obj_prop_repropagations_.load(std::memory_order_relaxed);
+        out.global_tightenings = obj_prop_global_tightenings_.load(std::memory_order_relaxed);
+        return out;
+    }
     [[nodiscard]] bool isTreePresolveAutoTuningEnabled() const {
         return tree_presolve_auto_tuning_enabled_;
     }
@@ -573,6 +586,17 @@ private:
         return clique_table_enabled_ && clique_table_.numCliques() > 0;
     }
 
+    /// Hand a node's DomainPropagator the objective cutoff row, when objective
+    /// propagation is on and there is an incumbent to cut off against.
+    void attachObjectiveCutoff(DomainPropagator& dp, Real incumbent) const {
+        if (objective_propagator_.loaded() && incumbent < kInf) {
+            dp.setObjectiveCutoff(&objective_propagator_, incumbent);
+        }
+    }
+
+    /// dp.propagate(), counting what the objective row did in it.
+    bool propagateNode(DomainPropagator& dp);
+
     /// Run root probing and populate implication graph / variable bounds.
     /// Returns true if probing proved the problem infeasible.
     [[nodiscard]] bool runRootProbing();
@@ -673,6 +697,14 @@ private:
     MipSymmetryStats symmetry_stats_{};
     RcFixingStats rc_fixing_stats_{};
     ReducedCostFixer rc_fixer_;
+    bool objective_propagation_enabled_ = false;
+    ObjectivePropagator objective_propagator_;
+    ObjectiveCutoffBounds objective_cutoff_bounds_;
+    // Node workers bump these concurrently.
+    std::atomic<Int> obj_prop_node_tightenings_{0};
+    std::atomic<Int> obj_prop_node_infeasible_{0};
+    std::atomic<Int> obj_prop_repropagations_{0};
+    std::atomic<Int> obj_prop_global_tightenings_{0};
     ExactRefinementMode exact_refinement_mode_ = ExactRefinementMode::Off;
     bool exact_refinement_rational_check_ = false;
     Real exact_refinement_warning_tol_ = 1e-7;

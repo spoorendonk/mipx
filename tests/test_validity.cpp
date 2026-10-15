@@ -19,6 +19,7 @@
 #include "mipx/dual_simplex.h"
 #include "mipx/implication_graph.h"
 #include "mipx/mip_solver.h"
+#include "mipx/objective_propagator.h"
 #include "mipx/presolve.h"
 #include "mipx/probing.h"
 #include "mipx/reduced_cost_fixer.h"
@@ -1099,6 +1100,147 @@ TEST_CASE("Validity: reduced-cost fixing keeps every point better than the incum
     CHECK(tightened_total > 0);
 }
 
+// Objective propagation (#117) may drop every point whose objective is not
+// strictly better than the incumbent, but nothing better. For the continuous
+// column that is a sub-interval of each feasible interval, checked at its ends.
+TEST_CASE("Validity: objective propagation keeps every point better than the incumbent",
+          "[validity][objprop]") {
+    const auto models = auditModels(6227, 300, true);
+    std::mt19937 rng(13);
+    Int tightened_total = 0;
+    Int pruned_total = 0;
+    for (std::size_t t = 0; t < models.size(); ++t) {
+        LpProblem lp = linearized(models[t]);
+        // The solver's internal form: a minimization. The offset is kept.
+        if (lp.sense == Sense::Maximize) {
+            for (auto& c : lp.obj) {
+                c = -c;
+            }
+            lp.obj_offset = -lp.obj_offset;
+            lp.sense = Sense::Minimize;
+        }
+        INFO("model " << t << ":\n" << describe(lp));
+        ObjectivePropagator obj_prop;
+        obj_prop.load(lp);
+
+        for (int node = 0; node < 4; ++node) {
+            std::vector<Real> lower;
+            std::vector<Real> upper;
+            if (node == 0) {
+                lower = lp.col_lower;
+                upper = lp.col_upper;
+            } else {
+                randomBox(lp, rng, lower, upper);
+            }
+            const LpProblem box = withBox(lp, lower, upper);
+            const Enumeration e = enumerate(box);
+            if (!e.feasible || e.unbounded) {
+                continue;
+            }
+            std::vector<Real> objectives;
+            forEachFeasible(box, [&](const Slice& s) {
+                std::vector<Real> x;
+                if (bestOfSlice(box, s, x)) {
+                    objectives.push_back(objective(box, x));
+                }
+            });
+            std::sort(objectives.begin(), objectives.end());
+            const std::vector<Real> incumbents = {objectives.front(),
+                                                  objectives[objectives.size() / 2],
+                                                  objectives.back(), objectives.back() + 1.0};
+            for (Real incumbent : incumbents) {
+                // Node propagation, and at the root the global cutoff bounds.
+                for (bool global : {false, true}) {
+                    if (global && node != 0) {
+                        continue;
+                    }
+                    INFO("node " << node << " incumbent " << incumbent
+                                 << (global ? " global" : " node") << "\nbox:\n"
+                                 << describe(box));
+                    std::vector<Real> new_lower = lower;
+                    std::vector<Real> new_upper = upper;
+                    bool ok = true;
+                    if (global) {
+                        ObjectiveCutoffBounds bounds;
+                        bounds.load(lp, &obj_prop, nullptr, nullptr);
+                        bounds.refresh(incumbent);
+                        std::vector<Index> tightened;
+                        ok = bounds.enforce(new_lower, new_upper, tightened);
+                        tightened_total += static_cast<Int>(tightened.size());
+                    } else {
+                        DomainPropagator dp;
+                        dp.load(lp);
+                        dp.setObjectiveCutoff(&obj_prop, incumbent);
+                        for (Index j = 0; j < lp.num_cols; ++j) {
+                            dp.setBound(j, lower[j], upper[j]);
+                        }
+                        ok = dp.propagate();
+                        tightened_total += dp.numObjectiveTightenings();
+                        if (ok) {
+                            for (Index j = 0; j < lp.num_cols; ++j) {
+                                new_lower[j] = dp.getLower(j);
+                                new_upper[j] = dp.getUpper(j);
+                            }
+                        }
+                    }
+                    pruned_total += ok ? 0 : 1;
+                    const Real limit = incumbent - kObjTol;
+                    forEachFeasible(box, [&](const Slice& s) {
+                        std::vector<Real> best;
+                        REQUIRE(bestOfSlice(box, s, best));
+                        if (objective(box, best) >= limit) {
+                            return;
+                        }
+                        INFO("improving slice" << describe(best) << " obj "
+                                               << objective(box, best));
+                        REQUIRE(ok);
+                        for (Index j = 0; j < lp.num_cols; ++j) {
+                            if (j == s.cont) {
+                                continue;
+                            }
+                            CHECK(s.x[j] >= new_lower[j] - kFeasTol);
+                            CHECK(s.x[j] <= new_upper[j] + kFeasTol);
+                        }
+                        if (s.cont < 0) {
+                            return;
+                        }
+                        auto at_zero = s.x;
+                        at_zero[s.cont] = 0.0;
+                        const Real base = objective(box, at_zero);
+                        const Real c = box.obj[s.cont];
+                        for (const auto& iv : s.cont_set) {
+                            Real lo = iv.lo;
+                            Real hi = iv.hi;
+                            if (c > 0.0) {
+                                hi = std::min(hi, (limit - base) / c);
+                            } else if (c < 0.0) {
+                                lo = std::max(lo, (limit - base) / c);
+                            }
+                            if (lo > hi) {
+                                continue;
+                            }
+                            INFO("improving interval [" << lo << ", " << hi << "]");
+                            if (std::isfinite(lo)) {
+                                CHECK(lo >= new_lower[s.cont] - kFeasTol);
+                            } else {
+                                CHECK(new_lower[s.cont] == -kInf);
+                            }
+                            if (std::isfinite(hi)) {
+                                CHECK(hi <= new_upper[s.cont] + kFeasTol);
+                            } else {
+                                CHECK(new_upper[s.cont] == kInf);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+    // The audit is not vacuous: the objective row both tightened and pruned.
+    CHECK(tightened_total > 0);
+    CHECK(pruned_total > 0);
+}
+
 // =============================================================================
 // The solver end to end
 // =============================================================================
@@ -1122,6 +1264,8 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
              s.setTreePresolveControls(100, 0, 1);
          }},
         {"symmetry off", [](MipSolver& s) { s.setSymmetryEnabled(false); }},
+        {"objective propagation (opt-in)",
+         [](MipSolver& s) { s.setObjectivePropagationEnabled(true); }},
         {"presolve off", [](MipSolver& s) { s.setPresolve(false); }},
         {"probing and cliques (opt-in)",
          [](MipSolver& s) {
@@ -1135,6 +1279,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
              s.setRestartsEnabled(true);
              s.setCutStrengthening(true);
              s.setTreeCutsEnabled(true);
+             s.setObjectivePropagationEnabled(true);
              PresolveOptions o = s.getRootPresolveOptions();
              o.enable_coefficient_tightening = true;
              o.enable_probing = true;

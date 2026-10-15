@@ -35,6 +35,7 @@ void printUsage(FILE* out) {
                  "[--tree-presolve-min-frac N] "
                  "[--tree-presolve-depth-frequency N] "
                  "[--tree-cuts|--no-tree-cuts] "
+                 "[--objective-propagation|--no-objective-propagation] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
@@ -123,6 +124,7 @@ int main(int argc, char* argv[]) {
     mipx::Int tree_presolve_min_frac = 8;
     mipx::Int tree_presolve_depth_frequency = 3;
     bool tree_cuts_enabled = false;
+    bool objective_propagation = false;
     bool cut_strengthening = false;
     // Off by default in the solver; a numeric knob left unset keeps the
     // solver's own default, so a run without these flags is unchanged.
@@ -231,6 +233,10 @@ int main(int argc, char* argv[]) {
             plunge_bound_quotient = std::atof(argv[++i]);
         } else if (arg == "--no-tree-cuts") {
             tree_cuts_enabled = false;
+        } else if (arg == "--objective-propagation") {
+            objective_propagation = true;
+        } else if (arg == "--no-objective-propagation") {
+            objective_propagation = false;
         } else if (arg == "--cut-strengthening") {
             cut_strengthening = true;
         } else if (arg == "--no-cut-strengthening") {
@@ -504,6 +510,7 @@ int main(int argc, char* argv[]) {
             solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
             solver.setTreeCutsEnabled(tree_cuts_enabled);
+            solver.setObjectivePropagationEnabled(objective_propagation);
             solver.setCutStrengthening(cut_strengthening);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {
@@ -547,12 +554,13 @@ int main(int argc, char* argv[]) {
                 "Run profile: mode=%s seed=%llu threads=%d search=%s "
                 "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
                 "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s "
-                "cut_strengthening=%s\n",
+                "cut_strengthening=%s objective_propagation=%s\n",
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
                 tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
-                tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off");
+                tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
+                objective_propagation ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");

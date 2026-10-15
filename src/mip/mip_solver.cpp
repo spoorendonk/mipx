@@ -1475,6 +1475,19 @@ void MipSolver::mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta) {
     tree_presolve_stats_.lp_delta += delta.lp_delta;
 }
 
+bool MipSolver::propagateNode(DomainPropagator& dp) {
+    const Int before = dp.numObjectiveTightenings();
+    const bool ok = dp.propagate();
+    const Int tightened = dp.numObjectiveTightenings() - before;
+    if (tightened > 0) {
+        obj_prop_node_tightenings_.fetch_add(tightened, std::memory_order_relaxed);
+    }
+    if (!ok && dp.objectiveInfeasible()) {
+        obj_prop_node_infeasible_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return ok;
+}
+
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
     if (delta.tree_local_fixings == 0 && delta.tree_local_tightenings == 0 &&
         delta.propagation_triggers == 0) {
@@ -2048,6 +2061,30 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
     }
 
+    // Objective propagation: the root domain re-propagated against the
+    // incumbent cutoff, recomputed here the first time a node sees a lower
+    // incumbent and replayed on every node like the global RC fixings.
+    if (objective_propagator_.loaded()) {
+        if (objective_cutoff_bounds_.refresh(incumbent_snapshot)) {
+            obj_prop_repropagations_.fetch_add(1, std::memory_order_relaxed);
+            obj_prop_global_tightenings_.store(objective_cutoff_bounds_.numTightenings(),
+                                               std::memory_order_relaxed);
+        }
+        auto& obj_tightened = node_scratch.rc_tightened;
+        obj_tightened.clear();
+        const bool obj_ok =
+            objective_cutoff_bounds_.enforce(current_lower, current_upper, obj_tightened);
+        for (Index j : obj_tightened) {
+            lp.setColBounds(j, current_lower[j], current_upper[j]);
+            touched_vars.push_back(j);
+        }
+        if (!obj_ok) {
+            node_stats.bound_apply_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return false;
+        }
+    }
+
     node_stats.bound_apply_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (use_conflicts && isConflictTriggered(node_scratch)) {
@@ -2241,6 +2278,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     clique_node_attachments_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
+            attachObjectiveCutoff(dp, incumbent_snapshot);
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
@@ -2248,7 +2286,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
             }
 
-            if (!dp.propagate()) {
+            if (!propagateNode(dp)) {
                 ++tree_presolve_delta.infeasible;
                 flushTreePresolveStats();
                 if (use_conflicts) {
@@ -2343,7 +2381,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     for (Index j : rc_tightened) {
                         dp.setBound(j, current_lower[j], current_upper[j]);
                     }
-                    if (!dp.propagate()) {
+                    if (!propagateNode(dp)) {
                         ++tree_presolve_delta.infeasible;
                         flushTreePresolveStats();
                         if (use_conflicts) {
@@ -2468,13 +2506,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     clique_node_attachments_.fetch_add(1, std::memory_order_relaxed);
                 }
             }
+            attachObjectiveCutoff(rc_dp, incumbent_snapshot);
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
                     rc_dp.setBound(j, current_lower[j], current_upper[j]);
                 }
             }
-            if (!rc_dp.propagate()) {
+            if (!propagateNode(rc_dp)) {
                 flushRcStats();
                 if (use_conflicts) {
                     learnConflictFromNode(node.bound_changes, false);
@@ -3779,6 +3818,12 @@ MipResult MipSolver::solveMinimization() {
     clique_node_attachments_.store(0, std::memory_order_relaxed);
     rc_fixing_stats_ = {};
     rc_fixer_.reset();
+    objective_cutoff_bounds_.reset();
+    objective_propagator_.reset();
+    obj_prop_node_tightenings_.store(0, std::memory_order_relaxed);
+    obj_prop_node_infeasible_.store(0, std::memory_order_relaxed);
+    obj_prop_repropagations_.store(0, std::memory_order_relaxed);
+    obj_prop_global_tightenings_.store(0, std::memory_order_relaxed);
     for (auto& clause : conflict_pool_) {
         recycleConflictClause(std::move(clause));
     }
@@ -5469,6 +5514,17 @@ MipResult MipSolver::solveMinimization() {
         }
     }
 
+    // Objective propagation works on the root domain as the tree sees it,
+    // global reduced-cost fixings included. The global cutoff bounds are
+    // first computed by the first node that sees an incumbent.
+    if (objective_propagation_enabled_) {
+        objective_propagator_.load(problem_);
+        objective_cutoff_bounds_.load(
+            problem_, &objective_propagator_,
+            implication_graph_.numImplications() > 0 ? &implication_graph_ : nullptr,
+            cliquePropagationActive() ? &clique_table_ : nullptr);
+    }
+
     // Branch-and-bound.
     if (verbose_) {
         log_.log("\n%10s  %8s  %6s  %6s  %14s  %14s  %7s  %5s\n", "Nodes", "Active", "LPit/n",
@@ -5584,6 +5640,15 @@ MipResult MipSolver::solveMinimization() {
         std::lock_guard<std::mutex> rc_lock(rc_fixing_stats_mutex_);
         rc_fixing_stats_.root_global_fixings = root_rc_stats.root_global_fixings;
         rc_fixing_stats_.root_global_tightenings = root_rc_stats.root_global_tightenings;
+    }
+
+    if (verbose_ && objective_propagator_.loaded()) {
+        const ObjPropStats obj_stats = getObjPropStats();
+        log_.log(
+            "Objective propagation: node_tightenings=%d node_infeasible=%d "
+            "repropagations=%d global_tightenings=%d\n",
+            obj_stats.node_tightenings, obj_stats.node_infeasible, obj_stats.repropagations,
+            obj_stats.global_tightenings);
     }
 
     if (verbose_) {

@@ -2,6 +2,7 @@
 
 #include "mipx/clique_table.h"
 #include "mipx/implication_graph.h"
+#include "mipx/objective_propagator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,14 @@ void DomainPropagator::load(const LpProblem& problem) {
 
     row_in_queue_.assign(num_rows_, false);
     queue_.clear();
+
+    objective_tightenings_ = 0;
+    objective_infeasible_ = false;
+}
+
+void DomainPropagator::setObjectiveCutoff(const ObjectivePropagator* objective, Real cutoff) {
+    objective_ = objective;
+    objective_cutoff_ = cutoff;
 }
 
 void DomainPropagator::setCliqueTable(const CliqueTable* table) {
@@ -72,6 +81,11 @@ Real DomainPropagator::getUpper(Index col) const {
 }
 
 bool DomainPropagator::propagate(Int max_iterations) {
+    objective_infeasible_ = false;
+    return propagate(max_iterations, 0);
+}
+
+bool DomainPropagator::propagate(Int max_iterations, Int objective_passes) {
     // If queue is empty, seed with all rows.
     if (queue_.empty()) {
         for (Index i = 0; i < num_rows_; ++i) {
@@ -103,10 +117,51 @@ bool DomainPropagator::propagate(Int max_iterations) {
         }
         // If clique propagation changed bounds, re-run row propagation.
         if (!queue_.empty()) {
-            return propagate(max_iterations > 0 ? max_iterations - iterations : 0);
+            return propagate(max_iterations > 0 ? max_iterations - iterations : 0,
+                             objective_passes);
         }
     }
 
+    // The objective row last: it is dense, so it runs once per fixpoint of
+    // the sparse rows rather than whenever one of its columns moves.
+    if (objective_ != nullptr && queue_.empty() && objective_passes < kMaxObjectivePasses) {
+        if (!propagateObjective()) {
+            return false;
+        }
+        if (!queue_.empty()) {
+            return propagate(max_iterations > 0 ? max_iterations - iterations : 0,
+                             objective_passes + 1);
+        }
+    }
+
+    return true;
+}
+
+bool DomainPropagator::propagateObjective() {
+    std::vector<ObjectivePropagator::BoundUpdate> updates;
+    if (!objective_->propagate(objective_cutoff_, lower_, upper_, updates)) {
+        objective_infeasible_ = true;
+        return false;
+    }
+    for (const auto& upd : updates) {
+        const Index j = upd.col;
+        recordChange(j);
+        if (upd.new_lower > lower_[j] + kTol) {
+            lower_[j] = upd.new_lower;
+            ++objective_tightenings_;
+        }
+        if (upd.new_upper < upper_[j] - kTol) {
+            upper_[j] = upd.new_upper;
+            ++objective_tightenings_;
+        }
+        enqueueColumn(j);
+        if (implication_graph_ != nullptr && col_type_[j] != VarType::Continuous &&
+            lower_[j] > upper_[j] - kTol) {
+            if (!propagateImplications(j)) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 
