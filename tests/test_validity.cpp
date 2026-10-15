@@ -1273,7 +1273,7 @@ TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns",
 }
 
 TEST_CASE("Known bug #229: the objective offset takes the wrong sign when maximizing",
-          "[validity][!mayfail]") {
+          "[validity]") {
     // max -x0 + 1.5 s.t. x0 + x1 >= 1 over [0, 1]^2: the optimum is 1.5.
     const LpProblem lp = [] {
         LpProblem m = makeModel(Sense::Maximize, {-1, 0}, {0, 0}, {1, 1},

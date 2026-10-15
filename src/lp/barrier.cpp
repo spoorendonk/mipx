@@ -356,7 +356,9 @@ bool BarrierSolver::buildStandardForm() {
     beq_.clear();
     cstd_.clear();
     col_expr_.assign(static_cast<size_t>(prob.num_cols), OriginalColExpr{});
-    std_obj_offset_ = prob.obj_offset;
+    // The standard form minimises obj_sign * c, so its offset carries the same sign.
+    const Real obj_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
+    std_obj_offset_ = obj_sign * prob.obj_offset;
 
     std::vector<Triplet> trips;
 
@@ -375,8 +377,6 @@ bool BarrierSolver::buildStandardForm() {
             }
         }
     };
-
-    const Real obj_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
 
     for (Index j = 0; j < prob.num_cols; ++j) {
         Real lb = prob.col_lower[j];

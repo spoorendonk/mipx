@@ -3120,14 +3120,15 @@ Real DualSimplexSolver::getObjective() const {
     // primal_internal[j] = primal_external[j] / col_scale[j].
     // So obj_internal[j] * primal_internal[j] = obj_original[j] * primal_external[j]
     //   (with negation if maximize).
-    Real obj = obj_offset_;
+    // The offset is never negated, so it is added once the sign is restored.
+    Real obj = 0.0;
     for (Index j = 0; j < num_cols_; ++j) {
         obj += obj_[j] * primal_[j];
     }
     if (sense_ == Sense::Maximize) {
         obj = -obj;
     }
-    return obj;
+    return obj + obj_offset_;
 }
 
 std::vector<Real> DualSimplexSolver::getPrimalValues() const {
