@@ -1891,8 +1891,11 @@ bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real
                 fix.variable >= cols) {
                 continue;
             }
-            const Real new_canon_lower = std::max(lower[fix.canonical], lower[fix.variable]);
-            if (new_canon_lower > upper[fix.canonical] + 1e-12) {
+            // A crossing within the propagator's tolerance is no conflict
+            // (#236): clamp it rather than prune at 1e-12.
+            const Real new_canon_lower =
+                std::min(std::max(lower[fix.canonical], lower[fix.variable]), upper[fix.canonical]);
+            if (lower[fix.variable] > upper[fix.canonical] + DomainPropagator::kTol) {
                 return false;
             }
             if (new_canon_lower > lower[fix.canonical]) {
@@ -1903,8 +1906,9 @@ bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real
                     seen[static_cast<std::size_t>(fix.canonical)] = 1;
                 }
             }
-            const Real new_var_upper = std::min(upper[fix.variable], upper[fix.canonical]);
-            if (new_var_upper < lower[fix.variable] - 1e-12) {
+            const Real new_var_upper =
+                std::max(std::min(upper[fix.variable], upper[fix.canonical]), lower[fix.variable]);
+            if (upper[fix.canonical] < lower[fix.variable] - DomainPropagator::kTol) {
                 return false;
             }
             if (new_var_upper < upper[fix.variable]) {
@@ -2024,7 +2028,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
     for (Index p = 0; p < static_cast<Index>(vars.size()); ++p) {
         Index j = vars[p];
-        if (node_lb[p] > node_ub[p] + 1e-12) {
+        if (!keepCrossingWithinTolerance(node_lb[p], node_ub[p])) {
             if (use_conflicts) {
                 learnConflictFromNode(node.bound_changes, false);
             }
