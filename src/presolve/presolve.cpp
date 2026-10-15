@@ -253,6 +253,22 @@ inline void removeActiveRow(const LpProblem& lp, Index row, const std::vector<bo
     }
 }
 
+/// Rounding tolerance for an integer column's bound implied by a row through
+/// coefficient a. The row holds a * x to within kRowTol, which leaves x free
+/// to within kRowTol / |a|, and the division scales the rhs and residual
+/// rounding up by the same factor: with a = 1e-7 a rhs error of 1e-15 put a
+/// bound 3.5e-8 above an integer, and rounding at 1e-8 moved it a whole unit
+/// and emptied the column (#235). Rounding a candidate at this scale before
+/// it is compared can only keep more integer points. A row that is dropped
+/// afterwards must still hold at the rounded bound to within kRowTol, so it
+/// rounds at no more than kRowTol / |a|; a row that stays in the model also
+/// gets the propagator's 1e-6, for residuals inexact at that size.
+Real integerRoundTol(Real a, bool row_dropped) {
+    constexpr Real kRowTol = 1e-8;
+    constexpr Real kIntRoundTol = 1e-6;
+    return std::max(row_dropped ? kRowTol : kIntRoundTol, kRowTol / std::abs(a));
+}
+
 }  // namespace
 
 // =============================================================================
@@ -516,6 +532,15 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
             }
         }
 
+        // The gap guard below reads the bounds as the row implies them.
+        const Real implied_lb = new_lb;
+        const Real implied_ub = new_ub;
+        if (lp.col_type[singleton_col] != VarType::Continuous) {
+            const Real round_tol = integerRoundTol(singleton_coeff, true);
+            new_lb = std::ceil(new_lb - round_tol);
+            new_ub = std::floor(new_ub + round_tol);
+        }
+
         bool tightened = false;
         if (new_lb > lp.col_lower[singleton_col] + kTol) {
             lp.col_lower[singleton_col] = new_lb;
@@ -559,10 +584,10 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
         // as the fixed-column guard (issue #215).
         {
             const Real a_abs = std::abs(singleton_coeff);
-            const bool lb_gap = new_lb > lp.col_lower[singleton_col] &&
-                                a_abs * (new_lb - lp.col_lower[singleton_col]) > kTol;
-            const bool ub_gap = new_ub < lp.col_upper[singleton_col] &&
-                                a_abs * (lp.col_upper[singleton_col] - new_ub) > kTol;
+            const bool lb_gap = implied_lb > lp.col_lower[singleton_col] &&
+                                a_abs * (implied_lb - lp.col_lower[singleton_col]) > kTol;
+            const bool ub_gap = implied_ub < lp.col_upper[singleton_col] &&
+                                a_abs * (lp.col_upper[singleton_col] - implied_ub) > kTol;
             if (lb_gap || ub_gap) {
                 if (lp.col_lower[singleton_col] > lp.col_upper[singleton_col] + kTol) {
                     infeasible_ = true;
@@ -1553,34 +1578,32 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
                 res_max = act_max;
             }
 
-            bool tightened = false;
-
+            Real new_ub = kInf;
             if (a > 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
-                Real new_ub = (lp.row_upper[i] - res_min) / a;
-                if (new_ub < lp.col_upper[j] - kTol) {
-                    lp.col_upper[j] = new_ub;
-                    tightened = true;
-                }
+                new_ub = (lp.row_upper[i] - res_min) / a;
             } else if (a < 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
-                Real new_ub = (lp.row_lower[i] - res_max) / a;
-                if (new_ub < lp.col_upper[j] - kTol) {
-                    lp.col_upper[j] = new_ub;
-                    tightened = true;
-                }
+                new_ub = (lp.row_lower[i] - res_max) / a;
+            }
+            Real new_lb = -kInf;
+            if (a > 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
+                new_lb = (lp.row_lower[i] - res_max) / a;
+            } else if (a < 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
+                new_lb = (lp.row_upper[i] - res_min) / a;
+            }
+            if (lp.col_type[j] != VarType::Continuous) {
+                const Real round_tol = integerRoundTol(a, false);
+                new_ub = std::floor(new_ub + round_tol);
+                new_lb = std::ceil(new_lb - round_tol);
             }
 
-            if (a > 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
-                Real new_lb = (lp.row_lower[i] - res_max) / a;
-                if (new_lb > lp.col_lower[j] + kTol) {
-                    lp.col_lower[j] = new_lb;
-                    tightened = true;
-                }
-            } else if (a < 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
-                Real new_lb = (lp.row_upper[i] - res_min) / a;
-                if (new_lb > lp.col_lower[j] + kTol) {
-                    lp.col_lower[j] = new_lb;
-                    tightened = true;
-                }
+            bool tightened = false;
+            if (new_ub < lp.col_upper[j] - kTol) {
+                lp.col_upper[j] = new_ub;
+                tightened = true;
+            }
+            if (new_lb > lp.col_lower[j] + kTol) {
+                lp.col_lower[j] = new_lb;
+                tightened = true;
             }
 
             if (tightened && lp.col_type[j] != VarType::Continuous) {

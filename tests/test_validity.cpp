@@ -1546,3 +1546,35 @@ TEST_CASE("Regression #235: integer rounding turns a near-integer bound into a c
     // pruned the node holding the optimum (-455 for -461).
     checkChainKnapsacks({751, 5621});
 }
+
+TEST_CASE("Regression #235: presolve rounds a bound divided by a tiny coefficient", "[validity]") {
+    // An equality row with integer coefficients and one of 1e-7, its rhs off
+    // an integer by that term at the optimum. Presolve fixed the other
+    // columns, divided the leftover rhs by 1e-7, got a bound 3.5e-8 above an
+    // integer, rounded it a whole unit up and reported the model infeasible.
+    constexpr auto I = VarType::Integer;
+    constexpr auto B = VarType::Binary;
+    const std::vector<std::pair<LpProblem, Real>> models = {
+        // min -x0 - 2x1 - 3x2 s.t. -7x0 + 1e-7 x2 = -28 + 1e-7: -9 at (4, 1, 1),
+        // via a singleton row.
+        {makeModel(Sense::Minimize, {-1, -2, -3}, {1, 0, 0}, {5, 1, 1}, {I, I, B}, {{-7, 0, 1e-7}},
+                   {-28 + 1e-7}, {-28 + 1e-7}),
+         -9.0},
+        // max -3x0 + 2x1 + 2x2 s.t. 7x0 - 3x1 + 1e-7 x2 = 18 + 2e-7: -3 at
+        // (3, 1, 2), via activity bound tightening.
+        {makeModel(Sense::Maximize, {-3, 2, 2}, {-1, 0, 1}, {4, 1, 5}, {I, B, I}, {{7, -3, 1e-7}},
+                   {18 + 2e-7}, {18 + 2e-7}),
+         -3.0},
+    };
+    for (const auto& [lp, optimum] : models) {
+        INFO(describe(lp));
+        REQUIRE_THAT(enumerate(lp).best, WithinAbs(optimum, kObjTol));
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(optimum, kObjTol));
+    }
+}
