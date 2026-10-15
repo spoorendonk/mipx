@@ -794,8 +794,11 @@ LpResult DualSimplexSolver::solve() {
         }
     }
 
-    // Reset iteration counter for this solve call.
+    // Reset iteration counter and verdict for this solve call: every exit
+    // below sets a status, and one that hits the iteration limit must not
+    // report the previous solve's Optimal or Infeasible (#222).
     iterations_ = 0;
+    status_ = Status::Error;
     solve_start_ = std::chrono::steady_clock::now();
     bound_perturb_active_ = false;
     bound_perturb_activations_ = 0;

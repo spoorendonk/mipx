@@ -246,6 +246,11 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
         const Int old_limit = lp.getIterationLimit();
         lp.setIterationLimit(strong_branch_iter_limit_);
 
+        // A probe stopped by the iteration limit still scores its child by the
+        // objective it reached: dual simplex moves the objective toward the
+        // child's LP bound, so the partial gain is the better estimate. Only a
+        // proven Infeasible gets the infeasible gain. Falling back to
+        // pseudocosts there instead lost gt2 its optimum within 60s (#222).
         Int probe_budget = strong_branch_probe_budget_;
         for (const auto& c : candidates) {
             if (probe_budget < 2)
@@ -272,7 +277,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
 
                 if (down.status == Status::Infeasible) {
                     down_gain = kStrongInfeasibleGain;
-                } else if (down.status == Status::Optimal) {
+                } else if (down.status == Status::Optimal || down.status == Status::IterLimit) {
                     down_gain = std::max<Real>(0.0, down.objective - node_objective);
                 } else {
                     down_gain = c.down_dist * safeDownCost(c.var);
@@ -297,7 +302,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
 
                 if (up.status == Status::Infeasible) {
                     up_gain = kStrongInfeasibleGain;
-                } else if (up.status == Status::Optimal) {
+                } else if (up.status == Status::Optimal || up.status == Status::IterLimit) {
                     up_gain = std::max<Real>(0.0, up.objective - node_objective);
                 } else {
                     up_gain = c.up_dist * safeUpCost(c.var);

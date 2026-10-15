@@ -1450,9 +1450,9 @@ TEST_CASE("DualSimplex: dual ray carries the row scaling back", "[dual_simplex][
 
 TEST_CASE("DualSimplex: no dual ray without a proof in the last solve", "[dual_simplex][farkas]") {
     // x + y = 5 with x, y in [0, 2] is infeasible; with x <= 10 it is not.
-    // Re-solved with no iterations allowed, nothing is proven. The status may
-    // still read Infeasible, carried over from the first solve (#222), but
-    // there must be no ray to go with it.
+    // Re-solved with no iterations allowed, nothing is proven: the verdict is
+    // the iteration limit, not the first solve's Infeasible (#222), and there
+    // is no ray.
     DualSimplexSolver solver;
     solver.setVerbose(false);
     solver.load(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
@@ -1461,8 +1461,23 @@ TEST_CASE("DualSimplex: no dual ray without a proof in the last solve", "[dual_s
     REQUIRE_FALSE(solver.getDualRay().empty());
     solver.setColBounds(0, 0.0, 10.0);
     solver.setIterationLimit(0);
-    solver.solve();
+    CHECK(solver.solve().status == Status::IterLimit);
     CHECK(solver.getDualRay().empty());
+}
+
+TEST_CASE("DualSimplex: an iteration-limited re-solve does not keep the last verdict",
+          "[dual_simplex]") {
+    // min x + 2y s.t. x + y >= 1 over [0, 2]^2 solves to Optimal 1 at x = 1.
+    // Capping x at 0.5 needs a pivot to y; with none allowed the re-solve
+    // must report the limit, not the first solve's Optimal (#222).
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(buildLp(Sense::Minimize, {1.0, 2.0}, {0.0, 0.0}, {2.0, 2.0}, {1.0}, {kInf},
+                        {{0, 0, 1.0}, {0, 1, 1.0}}));
+    REQUIRE(solver.solve().status == Status::Optimal);
+    solver.setColBounds(0, 0.0, 0.5);
+    solver.setIterationLimit(0);
+    CHECK(solver.solve().status == Status::IterLimit);
 }
 
 TEST_CASE("DualSimplex: dual ray is empty unless the solve was infeasible",
