@@ -590,19 +590,6 @@ bool hasFractionalIntegerBound(const LpProblem& lp) {
     return false;
 }
 
-// The same model as a minimization, which the solver audit uses until the
-// tree search handles maximization (#230, reproducer below).
-LpProblem minimized(LpProblem lp) {
-    if (lp.sense == Sense::Maximize) {
-        for (auto& c : lp.obj) {
-            c = -c;
-        }
-        lp.obj_offset = -lp.obj_offset;
-        lp.sense = Sense::Minimize;
-    }
-    return lp;
-}
-
 // ---- Presolve ---------------------------------------------------------------
 
 struct PresolveCase {
@@ -1211,7 +1198,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
     Int symmetry_orbits = 0;
     for (const auto& sc : cases) {
         for (std::size_t t = 0; t < models.size(); ++t) {
-            const LpProblem lp = minimized(roundedIntegerBounds(models[t]));
+            const LpProblem lp = roundedIntegerBounds(models[t]);
             const Enumeration e = enumerate(linearized(lp));
             if (e.unbounded) {
                 continue;
@@ -1294,8 +1281,7 @@ TEST_CASE("Known bug #229: the objective offset takes the wrong sign when maximi
     CHECK_THAT(solver.solve().objective, WithinAbs(1.5, kObjTol));
 }
 
-TEST_CASE("Known bug #230: the tree search loses the optimum of a maximization",
-          "[validity][!mayfail]") {
+TEST_CASE("Known bug #230: the tree search loses the optimum of a maximization", "[validity]") {
     // max -4x0 - 3x1 - 2x2 - 2x3 s.t. -4x0 - 7x1 - 4x2 <= 15, all integer.
     // The optimum is 9 at (-1, -1, -1, 0); the solver stops at 8 after one
     // node. The same model as a minimization solves correctly, and root cuts

@@ -1821,10 +1821,11 @@ void MipSolver::logProgress(Int nodes, Int open, Int lp_iters, Real incumbent, R
     if (incumbent < kInf) {
         Real gap = computeGap(incumbent, best_bound) * 100.0;
         log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14.6e  %7.2f%%  %5.1fs\n", prefix, nodes, open,
-                 lpit_per_node, int_inf_buf, best_bound, incumbent, gap, elapsed);
+                 lpit_per_node, int_inf_buf, log_obj_sign_ * best_bound, log_obj_sign_ * incumbent,
+                 gap, elapsed);
     } else {
         log_.log("%s%8d  %8d  %6d  %s  %14.6e  %14s  %7s  %5.1fs\n", prefix, nodes, open,
-                 lpit_per_node, int_inf_buf, best_bound, "-", "-", elapsed);
+                 lpit_per_node, int_inf_buf, log_obj_sign_ * best_bound, "-", "-", elapsed);
     }
 }
 
@@ -3717,10 +3718,47 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
 }
 #endif
 
+namespace {
+
+/// Turns a maximization into the minimization of its negated objective, in
+/// place. Negation is exact, so applying it twice restores the model.
+void negateObjective(LpProblem& problem) {
+    for (auto& c : problem.obj) {
+        c = -c;
+    }
+    problem.obj_offset = -problem.obj_offset;
+    problem.sense = (problem.sense == Sense::Maximize) ? Sense::Minimize : Sense::Maximize;
+}
+
+}  // namespace
+
 MipResult MipSolver::solve() {
     if (!loaded_) {
         return {};
     }
+    if (problem_.sense == Sense::Minimize) {
+        return solveMinimization();
+    }
+    // The search solves minimizations only, so a maximization is solved as
+    // min -c'x - offset and its objective values are negated back.
+    struct RestoreSense {
+        MipSolver& solver;
+        ~RestoreSense() {
+            negateObjective(solver.problem_);
+            solver.log_obj_sign_ = 1.0;
+        }
+    } restore{*this};
+    negateObjective(problem_);
+    log_obj_sign_ = -1.0;
+    MipResult result = solveMinimization();
+    // 0.0 - x rather than -x, so an objective never set stays 0.0, not -0.0.
+    result.objective = 0.0 - result.objective;
+    result.best_bound = -result.best_bound;
+    pre_root_stats_.incumbent_at_root = -pre_root_stats_.incumbent_at_root;
+    return result;
+}
+
+MipResult MipSolver::solveMinimization() {
     lp_stats_ = {};
     cut_stats_ = {};
     root_cut_family_stats_ = {};
@@ -4058,7 +4096,8 @@ MipResult MipSolver::solve() {
             result.solution = lp.getPrimalValues();
             if (verbose_) {
                 std::fflush(stdout);
-                log_.log("\nOptimal: %.10e (%d iterations)\n", result.objective, lr.iterations);
+                log_.log("\nOptimal: %.10e (%d iterations)\n", log_obj_sign_ * result.objective,
+                         lr.iterations);
             }
         }
         applyPostsolve(result);
@@ -4670,8 +4709,9 @@ MipResult MipSolver::solve() {
                         pre_root_stats_.fj_calls, pre_root_stats_.fpr_calls,
                         pre_root_stats_.local_mip_calls, pre_root_stats_.lp_light_fpr_calls,
                         pre_root_stats_.lp_light_diving_calls, pre_root_stats_.feasible_found,
-                        pre_root_stats_.incumbent_at_root, pre_root_stats_.work_units,
-                        pre_root_stats_.time_seconds, pre_root_stats_.time_to_first_feasible);
+                        log_obj_sign_ * pre_root_stats_.incumbent_at_root,
+                        pre_root_stats_.work_units, pre_root_stats_.time_seconds,
+                        pre_root_stats_.time_to_first_feasible);
                 } else {
                     log_.log(
                         "Pre-root stage (%s, %d thread%s): calls=%d fj=%d fpr=%d local=%d "
@@ -4682,8 +4722,8 @@ MipResult MipSolver::solve() {
                         pre_root_stats_.fj_calls, pre_root_stats_.fpr_calls,
                         pre_root_stats_.local_mip_calls, pre_root_stats_.lp_light_fpr_calls,
                         pre_root_stats_.lp_light_diving_calls, pre_root_stats_.feasible_found,
-                        pre_root_stats_.incumbent_at_root, pre_root_stats_.work_units,
-                        pre_root_stats_.time_seconds);
+                        log_obj_sign_ * pre_root_stats_.incumbent_at_root,
+                        pre_root_stats_.work_units, pre_root_stats_.time_seconds);
                 }
                 if (pre_root_stats_.lp_light_lp_solves > 0) {
                     log_.log("Pre-root LP-light guide (%s): solves=%d iters=%d work=%.3f\n",
@@ -4980,15 +5020,17 @@ MipResult MipSolver::solve() {
                     log_.log(
                         "Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s err=\"%s\"\n",
                         backendName(candidate.backend),
-                        static_cast<int>(candidate.lp_result.status), candidate.lp_result.objective,
+                        static_cast<int>(candidate.lp_result.status),
+                        log_obj_sign_ * candidate.lp_result.objective,
                         candidate.lp_result.iterations, candidate.seconds,
                         candidate.used_gpu ? " gpu" : "", candidate.error_message.c_str());
                 } else {
                     log_.log("Root race arm=%s status=%d obj=%.10e iters=%d time=%.4fs%s\n",
                              backendName(candidate.backend),
                              static_cast<int>(candidate.lp_result.status),
-                             candidate.lp_result.objective, candidate.lp_result.iterations,
-                             candidate.seconds, candidate.used_gpu ? " gpu" : "");
+                             log_obj_sign_ * candidate.lp_result.objective,
+                             candidate.lp_result.iterations, candidate.seconds,
+                             candidate.used_gpu ? " gpu" : "");
                 }
             }
             log_.log("Root race winner=%s time=%.4fs\n", root_backend_used,
@@ -5056,7 +5098,7 @@ MipResult MipSolver::solve() {
     if (verbose_) {
         std::fflush(stdout);  // flush LP solver's printf output before Logger write()
         log_.log("Root LP (%s -> %s): obj = %.10e, %d iters\n", rootPolicyName(root_lp_policy_),
-                 root_backend_used, root_bound, root_result.iterations);
+                 root_backend_used, log_obj_sign_ * root_bound, root_result.iterations);
     }
 
     // Dual simplex supports reliable warm-starts for node LPs only after at least one solve.
@@ -5635,12 +5677,14 @@ MipResult MipSolver::solve() {
         }
         if (result.status == Status::Optimal) {
             if (result.gap_limit_reached) {
-                log_.log("Gap-limited: %.10e (gap %.2f%%)\n", result.objective, result.gap * 100.0);
+                log_.log("Gap-limited: %.10e (gap %.2f%%)\n", log_obj_sign_ * result.objective,
+                         result.gap * 100.0);
             } else {
-                log_.log("Optimal: %.10e\n", result.objective);
+                log_.log("Optimal: %.10e\n", log_obj_sign_ * result.objective);
             }
         } else if (incumbent < kInf) {
-            log_.log("Best solution: %.10e (gap %.2f%%)\n", result.objective, result.gap * 100.0);
+            log_.log("Best solution: %.10e (gap %.2f%%)\n", log_obj_sign_ * result.objective,
+                     result.gap * 100.0);
         }
     }
 
@@ -5940,7 +5984,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     if (verbose_ && total_cuts > 0) {
         Real end_obj = lp.getObjective();
         log_.log("Cutting planes (%s): %d rounds, %d cuts, obj %.10e -> %.10e\n",
-                 cutEffortName(cut_effort_mode_), rounds_done, total_cuts, start_obj, end_obj);
+                 cutEffortName(cut_effort_mode_), rounds_done, total_cuts,
+                 log_obj_sign_ * start_obj, log_obj_sign_ * end_obj);
         for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
             const auto family = static_cast<CutFamily>(fi);
             if (family == CutFamily::Unknown || family == CutFamily::Count) {

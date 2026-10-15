@@ -504,6 +504,10 @@ private:
         std::vector<Index> rc_tightened;
     };
 
+    /// The solve proper, on a minimization: solve() negates a maximization
+    /// into one before calling it and converts the result back.
+    MipResult solveMinimization();
+
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
                          LpProblem* certificate_problem = nullptr);
@@ -594,6 +598,9 @@ private:
     // Problem data.
     LpProblem problem_;
     bool loaded_ = false;
+    // -1 while a maximization is solved as its negation, so logs show objective
+    // values in the model's own sense.
+    Real log_obj_sign_ = 1.0;
 
     // Parameters.
     Int node_limit_ = 1000000;
