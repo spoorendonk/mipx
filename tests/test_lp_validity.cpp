@@ -56,6 +56,9 @@ constexpr long double kObjRel = 1e-6L;
 // rows of mixed scale exactly at a bound; the scaled 1e-7 maps to a little
 // more than 1e-6 relative there (seen up to 2e-6).
 constexpr long double kWarmRel = 1e-5L;
+// How far two optima that both hold to kWarmRel may differ (seen up to
+// 2.5e-5 relative); a larger gap fails whatever the certificates say.
+constexpr Real kWarmObjRel = 1e-4;
 
 enum class Shape : std::uint8_t { Optimal, Infeasible, Unbounded };
 
@@ -470,6 +473,9 @@ std::string checkOptimal(const LpProblem& lp, const std::vector<Real>& x,
         col_tol[j] = primal_rel * std::max({1.0L, finiteMag(lp.col_lower[j]),
                                             finiteMag(lp.col_upper[j]), finiteMag(x[j])});
     }
+    // The widened tolerance below excuses a bound miss only. A column off
+    // its bound on the feasible side still breaks complementarity at this.
+    const std::vector<long double> col_tol_strict = col_tol;
     {
         std::vector<long double> reach(lp.num_cols, kInf);
         for (Index i = 0; i < lp.num_rows; ++i) {
@@ -567,9 +573,11 @@ std::string checkOptimal(const LpProblem& lp, const std::vector<Real>& x,
             continue;
         }
         const Real bound = d[j] > 0.0L ? lp.col_lower[j] : lp.col_upper[j];
+        // > 0: off the bound on the feasible side; < 0: past the bound.
         const long double term = d[j] * (x[j] - bound);
+        const long double off = term > 0.0L ? col_tol_strict[j] : col_tol[j];
         const long double tol =
-            std::abs(d[j]) * col_tol[j] * 10.0L + kObjRel * std::max(1.0L, std::abs(d[j] * bound));
+            std::abs(d[j]) * off * 10.0L + kObjRel * std::max(1.0L, std::abs(d[j] * bound));
         if (std::abs(term) > tol) {
             err << "x" << j << " complementarity d=" << static_cast<double>(d[j]) << " gap "
                 << static_cast<double>(x[j] - bound) << "; ";
@@ -848,8 +856,9 @@ void auditWarm(std::uint32_t seed, int variant, Audit& audit) {
             // Both optima hold to tolerance, so they may differ by as much
             // as the tolerance moves the optimum; flag it only when the cold
             // one fails its own certificate.
-            if (std::abs(wr.objective - cr.objective) >
-                    kObjRel * std::max(1.0, std::abs(cr.objective)) &&
+            const Real obj_gap =
+                std::abs(wr.objective - cr.objective) / std::max(1.0, std::abs(cr.objective));
+            if (obj_gap > kObjRel && obj_gap <= kWarmObjRel &&
                 checkOptimal(g.lp, cold.getPrimalValues(), cold.getDualValues(), cr.objective,
                              kWarmRel)
                     .empty()) {
