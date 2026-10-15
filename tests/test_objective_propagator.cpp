@@ -329,3 +329,29 @@ TEST_CASE("ObjectiveCutoffBounds: a column pinned within tolerance prunes nothin
     }
     CHECK(crossed == 3);
 }
+
+TEST_CASE("ObjectiveCutoffBounds: a node crossed within kCrossTol keeps its swapped interval",
+          "[mip][objprop]") {
+    // The #234 crossing, built directly: the cutoff bounds put x >= 3 and the
+    // node has x <= 3 - d. Within the tolerance the swapped interval stays;
+    // past it the node is pruned.
+    const LpProblem lp = makeObjectiveProblem({-1.0}, {VarType::Continuous}, {0.0}, {10.0});
+    ObjectivePropagator objective;
+    objective.load(lp);
+    ObjectiveCutoffBounds bounds;
+    bounds.load(lp, &objective, nullptr, nullptr);
+    REQUIRE(bounds.refresh(-3.0));
+    for (const Real d : {1e-12, 1e-9, 1e-6}) {
+        INFO("node upper bound 3 - " << d);
+        std::vector<Real> lower = {0.0};
+        std::vector<Real> upper = {3.0 - d};
+        std::vector<Index> tightened;
+        const bool kept = bounds.enforce(lower, upper, tightened);
+        CHECK(kept == (d < 1e-8));
+        if (kept) {
+            CHECK(lower[0] <= upper[0]);
+            CHECK_THAT(lower[0], WithinAbs(3.0 - d, 1e-15));
+            CHECK_THAT(upper[0], WithinAbs(3.0, 1e-15));
+        }
+    }
+}
