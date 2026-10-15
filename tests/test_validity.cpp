@@ -1449,10 +1449,12 @@ TEST_CASE("Validity: end-to-end solves under the opt-in families, every incumben
                 ++incumbents;
             }
             if (!e.feasible) {
-                // Infeasible at 1e-9 may still hold a point within kFeasTol,
-                // and does when the anchor is one: the solver must find it.
-                if (pointFeasible(lp, anchors[t], kFeasTol)) {
-                    INFO("anchor" << describe(anchors[t]) << " is feasible within kFeasTol");
+                // Infeasible at 1e-9 may still hold a point within kFeasTol.
+                // The search keeps every point within the row slack (kTol
+                // times the row's magnitude, at least kTol), so when the
+                // anchor is one the solver must find a solution.
+                if (pointFeasible(lp, anchors[t], DomainPropagator::kTol)) {
+                    INFO("anchor" << describe(anchors[t]) << " is feasible within kTol");
                     CHECK(result.status == Status::Optimal);
                 }
                 if (result.status == Status::Optimal) {

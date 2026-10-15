@@ -240,7 +240,8 @@ TEST_CASE("MipSolver: objective propagation tightens and keeps the optimum", "[m
 // every node and pruned the whole tree, so a worse incumbent came back as
 // optimal. Three continuous columns tied by equality rows with non-round
 // coefficients, next to the integer knapsack, cross like that now and then.
-TEST_CASE("ObjectiveCutoffBounds: a crossing within tolerance prunes nothing", "[mip][objprop]") {
+TEST_CASE("ObjectiveCutoffBounds: a column pinned within tolerance prunes nothing",
+          "[mip][objprop]") {
     std::mt19937 rng(1);
     std::uniform_real_distribution<double> coef(-50.0, 50.0);
     Int crossed = 0;
@@ -281,9 +282,10 @@ TEST_CASE("ObjectiveCutoffBounds: a crossing within tolerance prunes nothing", "
             continue;
         }
         // The propagator pins the two free columns through the equality
-        // chain. It used to cross them by a few 1e-12; since #236 a derived
-        // bound keeps the row's slack, so the pin lands within kTol either
-        // way, which is the case this test is after.
+        // chain. Before #236 it crossed them by a few 1e-12 (the #234
+        // case); a derived bound now keeps the row's slack, so they land
+        // pinned within kTol instead of crossed. The cutoff bounds and the
+        // solver must still lose nothing on such a domain.
         bool cross = false;
         for (Index j = n + 1; j < lp.num_cols; ++j) {
             cross = cross || dp.getLower(j) > dp.getUpper(j) - DomainPropagator::kTol;

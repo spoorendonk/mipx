@@ -22,9 +22,13 @@ says what each one means, and records where each one is used (#236).
 ## The rule
 
 **A test that prunes, fixes or declares infeasible is never stricter than
-the feasibility test it guards.** If a point passes the acceptance test, no
-propagator, presolve reduction or pruning test may remove it by a stricter
-reading of the same row, bound or objective. Concretely:
+the feasibility test it guards.** The search keeps every point that holds
+each row to the row slack and each bound to the crossing tolerance. Rounding
+error of the row's own arithmetic is not a reason to remove a point.
+Acceptance at 1e-6 is looser than that on rows of magnitude below 100. A
+point that violates such a row by between the slack and 1e-6 is accepted
+when a heuristic finds it, but the search does not promise to keep it.
+Concretely:
 
 - Infeasibility of a row is decided at the row slack, not at an absolute
   1e-8: at terms near 1e9 the activity sums round by more than 1e-8, and a
@@ -35,8 +39,10 @@ reading of the same row, bound or objective. Concretely:
 - Integer bounds round at the integer bound rounding tolerance, never at the
   crossing tolerance (#235, and the objective propagator in #236).
 - Slack added to a derived bound is safe only while the row stays in the
-  model. Presolve, which drops rows, relaxes only its infeasibility claims
-  and keeps its absolute tests for bounds that replace a row (#210, #215).
+  model. Presolve, which drops rows, relaxes only its infeasibility claims.
+  It keeps its absolute tests for bounds that replace a row (#210, #215),
+  and drops an emptied row only when it holds within 1e-6 (`kDropTol`).
+  Between that and the slack the row stays, and the LP decides.
 
 ## Known divergences left as they are
 
