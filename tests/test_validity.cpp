@@ -1433,3 +1433,84 @@ TEST_CASE("Regression #231: presolve treats semi-continuous columns as integer",
     CHECK_THROWS_AS(presolver.presolve(lp), std::invalid_argument);
     auditPresolve(linearized(lp), presolveCases()[0]);
 }
+
+TEST_CASE("Regression #234: tree presolve reads a tolerance crossing as infeasible", "[validity]") {
+    // A general-integer knapsack whose column k also sits in three equality
+    // rows over integer columns x0..x2, with coefficients near 1000 and |x|
+    // up to 20000. Only k = kv and x = xs (from the generator) satisfy the
+    // rows, and once a node fixes k the propagator pins x crossed by a few
+    // 1e-12: within its tolerance, but the node code pruned at 1e-12. Tree
+    // presolve (forced at every node) and the reduced-cost re-propagation each
+    // lost the optimum on these models (-455 or -540 for -461 or -544). Too
+    // large to enumerate; with k and x fixed and the equality rows dropped,
+    // the rest is a plain knapsack.
+    const std::vector<int> picks = {211, 2707, 4791};
+    std::mt19937 rng(1);
+    std::uniform_int_distribution<int> val(-20000, 20000);
+    std::uniform_real_distribution<double> big(500.0, 1500.0);
+    std::uniform_real_distribution<double> small(0.5, 3.0);
+    constexpr auto I = VarType::Integer;
+    for (int t = 0; t <= picks.back(); ++t) {
+        const Real xs[3] = {Real(val(rng)), Real(val(rng)), Real(val(rng))};
+        const Index kc = t % 10;
+        const Real kv = Real(t % 5);
+        std::vector<std::vector<Real>> rows(4, std::vector<Real>(13, 0.0));
+        std::vector<Real> rhs(3, 0.0);
+        for (Index i = 0; i < 3; ++i) {
+            rows[i][kc] = big(rng);
+            rhs[i] = rows[i][kc] * kv;
+            for (Index j = 0; j < 3; ++j) {
+                rows[i][10 + j] = (j == i) ? small(rng) : big(rng);
+                rhs[i] += rows[i][10 + j] * xs[j];
+            }
+        }
+        if (std::find(picks.begin(), picks.end(), t) == picks.end()) {
+            continue;
+        }
+        INFO("model t=" << t);
+        rows[3] = {5, 5, 4, 9, 7, 5, 3, 5, 3, 1, 0, 0, 0};
+        std::vector<Real> obj = {-15, -14, -17, -17, -2, -17, -14, -8, -14, -13, 0, 0, 0};
+        if (t % 2 == 1) {
+            obj[kc] = -100.0;
+        }
+        std::vector<Real> lower(10, 0.0);
+        std::vector<Real> upper(10, 5.0);
+        lower.insert(lower.end(), 3, -20000.0);
+        upper.insert(upper.end(), 3, 20000.0);
+        const LpProblem lp =
+            makeModel(Sense::Minimize, obj, lower, upper, std::vector<VarType>(13, I), rows,
+                      {rhs[0], rhs[1], rhs[2], -kInf}, {rhs[0], rhs[1], rhs[2], 82});
+
+        LpProblem fixed = lp;
+        fixed.col_lower[kc] = fixed.col_upper[kc] = kv;
+        for (Index j = 0; j < 3; ++j) {
+            fixed.col_lower[10 + j] = fixed.col_upper[10 + j] = xs[j];
+            fixed.row_lower[j] = -kInf;
+            fixed.row_upper[j] = kInf;
+        }
+        MipSolver knapsack;
+        knapsack.setVerbose(false);
+        knapsack.setNumThreads(1);
+        knapsack.setGapTolerance(0.0);
+        knapsack.load(fixed);
+        const auto truth = knapsack.solve();
+        REQUIRE(truth.status == Status::Optimal);
+
+        for (const bool tree_presolve : {true, false}) {
+            INFO("tree presolve at every node: " << tree_presolve);
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setNumThreads(1);
+            solver.setGapTolerance(0.0);
+            solver.setCutsEnabled(false);
+            solver.setPresolve(false);
+            solver.setTreePresolveEnabled(tree_presolve);
+            solver.setTreePresolveAutoTuning(false);
+            solver.setTreePresolveControls(1000, 1, 1);
+            solver.load(lp);
+            const auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            CHECK_THAT(result.objective, WithinAbs(truth.objective, kObjTol));
+        }
+    }
+}

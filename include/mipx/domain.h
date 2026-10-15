@@ -14,6 +14,9 @@ class ObjectivePropagator;
 
 class DomainPropagator {
 public:
+    /// Bound tolerance: a column crossed by up to kTol counts as feasible.
+    static constexpr Real kTol = 1e-8;
+
     /// Initialize with problem data.
     void load(const LpProblem& problem);
 
@@ -119,8 +122,6 @@ private:
     Real objective_cutoff_ = kInf;
     Int objective_tightenings_ = 0;
     bool objective_infeasible_ = false;
-
-    static constexpr Real kTol = 1e-8;
 
     /// Objective passes per propagate() call. Each pass that tightens hands
     /// the rows another round, and a continuous column can creep towards its

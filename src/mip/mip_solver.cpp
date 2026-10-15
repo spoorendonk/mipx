@@ -11,6 +11,7 @@
 #include <random>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #ifdef __linux__
 #include <unistd.h>
@@ -41,6 +42,20 @@ unsigned getPhysicalCores() {
     }
 #endif
     return std::thread::hardware_concurrency();
+}
+
+/// Node bounds read back from a DomainPropagator (#234). It accepts a column
+/// crossed by up to its tolerance, so only a larger crossing is infeasible;
+/// a smaller one keeps the swapped interval, which still holds every
+/// feasible value up to rounding (as ObjectiveCutoffBounds does).
+bool keepCrossingWithinTolerance(Real& lb, Real& ub) {
+    if (lb > ub + DomainPropagator::kTol) {
+        return false;
+    }
+    if (lb > ub) {
+        std::swap(lb, ub);
+    }
+    return true;
 }
 
 /// Count binary, general-integer, and continuous variables.
@@ -2298,9 +2313,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             Int activity_tight = 0;
             Int rc_tight = 0;
             auto applyTightening = [&](Index j, Real new_lb, Real new_ub, bool from_rc) {
-                const Real lb = std::max(current_lower[j], new_lb);
-                const Real ub = std::min(current_upper[j], new_ub);
-                if (lb > ub + 1e-12) {
+                Real lb = std::max(current_lower[j], new_lb);
+                Real ub = std::min(current_upper[j], new_ub);
+                if (!keepCrossingWithinTolerance(lb, ub)) {
                     ++tree_presolve_delta.infeasible;
                     return false;
                 }
@@ -2521,9 +2536,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 return false;
             }
             for (Index j = 0; j < problem_.num_cols; ++j) {
-                const Real lb = std::max(current_lower[j], rc_dp.getLower(j));
-                const Real ub = std::min(current_upper[j], rc_dp.getUpper(j));
-                if (lb > ub + 1e-12) {
+                Real lb = std::max(current_lower[j], rc_dp.getLower(j));
+                Real ub = std::min(current_upper[j], rc_dp.getUpper(j));
+                if (!keepCrossingWithinTolerance(lb, ub)) {
                     flushRcStats();
                     if (use_conflicts) {
                         learnConflictFromNode(node.bound_changes, false);
