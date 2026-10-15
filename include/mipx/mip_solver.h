@@ -539,6 +539,12 @@ private:
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
                          LpProblem* certificate_problem = nullptr);
+    /// Remove the last num_cuts rows from lp (and its certificate mirror) and
+    /// re-solve from the basis the LP had before they were added.
+    static void backOutCutRound(DualSimplexSolver& lp, Index num_cuts,
+                                std::span<const BasisStatus> pre_round_basis,
+                                LpProblem* certificate_problem, Int& total_lp_iters,
+                                double& total_work);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,

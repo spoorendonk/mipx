@@ -5275,7 +5275,9 @@ MipResult MipSolver::solveMinimization() {
                 runCuttingPlanes(lp, total_lp_iters, total_work, root_certificate_problem_ptr);
             lp_stats_.root_cut_lp_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            if (cuts_added > 0) {
+            // A backed-out round re-solves the previous LP; should that
+            // re-solve fail too, keep the root solution from before the cuts.
+            if (cuts_added > 0 && lp.getStatus() == Status::Optimal) {
                 root_bound = lp.getObjective();
                 root_primals = lp.getPrimalValues();
                 root_basis = lp.getBasis();
@@ -5816,6 +5818,29 @@ MipResult MipSolver::solveMinimization() {
     return result;
 }
 
+void MipSolver::backOutCutRound(DualSimplexSolver& lp, Index num_cuts,
+                                std::span<const BasisStatus> pre_round_basis,
+                                LpProblem* certificate_problem, Int& total_lp_iters,
+                                double& total_work) {
+    std::vector<Index> round_rows(static_cast<std::size_t>(num_cuts));
+    std::iota(round_rows.begin(), round_rows.end(), lp.numRows() - num_cuts);
+    lp.removeRows(round_rows);
+    lp.setBasis(pre_round_basis);
+    const auto restored = lp.solve();
+    total_lp_iters += restored.iterations;
+    total_work += restored.work_units;
+
+    if (certificate_problem != nullptr) {
+        for (Index r = 0; r < num_cuts; ++r) {
+            certificate_problem->matrix.removeRow(certificate_problem->matrix.numRows() - 1);
+            certificate_problem->row_lower.pop_back();
+            certificate_problem->row_upper.pop_back();
+            certificate_problem->row_names.pop_back();
+        }
+        certificate_problem->num_rows = certificate_problem->matrix.numRows();
+    }
+}
+
 Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
                                 LpProblem* certificate_problem) {
     if (cut_effort_mode_ == CutEffortMode::Off) {
@@ -6042,6 +6067,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             certificate_problem->num_rows = certificate_problem->matrix.numRows();
         }
 
+        const auto pre_round_basis = lp.getBasis();
         lp.addRows(starts, col_indices, values, lower, upper);
 
         auto result = lp.solve();
@@ -6050,6 +6076,18 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         cut_node_work += result.work_units;
 
         if (result.status != Status::Optimal) {
+            // Back the round out. Left in, its rows keep the LP in a state
+            // with no optimal point, and the caller reads the root solution
+            // from it (#240: root rounding took a column far outside its
+            // bounds). The cuts are valid, so a failed solve is numerical,
+            // not a proof of infeasibility; the LP of the previous round is
+            // the safe one to continue from.
+            backOutCutRound(lp, cuts_this_round, pre_round_basis, certificate_problem,
+                            total_lp_iters, total_work);
+            if (verbose_) {
+                log_.log("  cut-round %d: LP status %d after adding cuts, round backed out\n",
+                         round + 1, static_cast<int>(result.status));
+            }
             break;
         }
 

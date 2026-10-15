@@ -1919,5 +1919,23 @@ TEST_CASE("Regression #240: incumbents stay inside the column bounds with cuts o
             INFO(describe(result.solution));
             CHECK(pointFeasible(lp, result.solution, kFeasTol * 10));
         }
+        // The second cut round leaves the root LP infeasible and is backed
+        // out; the answer must agree with a solve that never cuts.
+        MipSolver ref;
+        ref.setVerbose(false);
+        ref.setNumThreads(1);
+        ref.setNodeLimit(300);
+        ref.setTimeLimit(2.0);
+        ref.setPresolve(presolve);
+        ref.setCutsEnabled(false);
+        ref.load(lp);
+        const auto expected = ref.solve();
+        if (expected.status == Status::Optimal) {
+            CHECK(result.status != Status::Infeasible);
+        }
+        if (result.status == Status::Optimal && expected.status == Status::Optimal) {
+            CHECK(std::abs(result.objective - expected.objective) <=
+                  kObjTol * std::max(1.0, std::abs(expected.objective)));
+        }
     }
 }
