@@ -809,9 +809,16 @@ LpResult PdlpSolver::solve() {
     const Index m = scaled_a_.numRows();
     const Index n = scaled_a_.numCols();
 
-    // Trivial: no variables.
+    // Trivial: no variables. Every row is then empty and holds only if its
+    // range contains 0; presolve can leave such a row for the solver (#236).
     if (n == 0) {
+        constexpr Real kEmptyRowTol = 1e-6;
         status_ = Status::Optimal;
+        for (Index i = 0; i < original_.num_rows; ++i) {
+            if (original_.row_lower[i] > kEmptyRowTol || original_.row_upper[i] < -kEmptyRowTol) {
+                status_ = Status::Infeasible;
+            }
+        }
         objective_ = original_.obj_offset;
         iterations_ = 0;
         primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);

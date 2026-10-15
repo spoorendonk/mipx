@@ -1554,3 +1554,23 @@ TEST_CASE("PdlpSolver: polishing on GPU matches CPU", "[pdlp][polishing][gpu]") 
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
 }
+
+TEST_CASE("PdlpSolver: an empty row that excludes 0 makes a column-free LP infeasible", "[pdlp]") {
+    // Presolve can leave an emptied row it could neither drop nor call
+    // infeasible (#236); with no columns the shortcut must still read it.
+    for (const Real upper : {-9e-6, 0.0}) {
+        LpProblem lp;
+        lp.num_cols = 0;
+        lp.num_rows = 1;
+        lp.row_lower = {-kInf};
+        lp.row_upper = {upper};
+        lp.row_names = {"r0"};
+        lp.matrix = SparseMatrix(1, 0, {});
+        PdlpSolver solver;
+        PdlpOptions opts;
+        opts.verbose = false;
+        solver.setOptions(opts);
+        solver.load(lp);
+        CHECK(solver.solve().status == (upper < 0.0 ? Status::Infeasible : Status::Optimal));
+    }
+}
