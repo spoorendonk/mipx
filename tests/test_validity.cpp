@@ -1940,3 +1940,65 @@ TEST_CASE("Regression #240: incumbents stay inside the column bounds with cuts o
         }
     }
 }
+
+namespace {
+
+// Presolve on, as in the #244 sweep; the final point must hold the model as
+// given, and its objective must match a solve without presolve.
+void requirePresolveAgrees(const LpProblem& lp) {
+    INFO(describe(lp));
+    auto solveWith = [&](bool presolve) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.setNodeLimit(300);
+        solver.setTimeLimit(2.0);
+        solver.setPresolve(presolve);
+        solver.load(lp);
+        return solver.solve();
+    };
+    const auto result = solveWith(true);
+    const auto expected = solveWith(false);
+    REQUIRE(expected.status == Status::Optimal);
+    REQUIRE(result.status == Status::Optimal);
+    INFO(describe(result.solution));
+    CHECK(pointFeasible(lp, result.solution, kFeasTol * 10));
+    CHECK(std::abs(result.objective - expected.objective) <=
+          kObjTol * std::max(1.0, std::abs(expected.objective)));
+}
+
+}  // namespace
+
+TEST_CASE("Regression #244: presolve keeps the equality that fixes x2 in an LP", "[validity]") {
+    // Postsolve returned x2 = 10000 (its upper bound); row 4 with x1 fixed by
+    // row 1 forces x2 = -7500.
+    constexpr auto C = VarType::Continuous;
+    LpProblem lp =
+        makeModel(Sense::Maximize, {6.875, -4375, 1.8750000000000002e-05},
+                  {0.375, 3.7499999999999997e-05, -7500},
+                  {0.72499999999999998, 0.00048749999999999998, 10000}, {C, C, C},
+                  {{-137500, 0, 0},
+                   {0, 1, 0},
+                   {0, -262500000, 0},
+                   {0, 125, 2.3750000000000001e-05},
+                   {0, 1625000, 0.0025000000000000001},
+                   {0, -21250000, 0}},
+                  {-51562.5, 0.00026250000000000004, -77656.25, -kInf, 407.8125, -kInf},
+                  {-51562.5, 0.00026250000000000004, -60156.25, kInf, 407.8125, -5578.125});
+    lp.obj_offset = 1;
+    requirePresolveAgrees(lp);
+}
+
+TEST_CASE("Regression #244: presolve keeps a ranged row of an LP", "[validity]") {
+    constexpr auto C = VarType::Continuous;
+    LpProblem lp = makeModel(
+        Sense::Minimize, {6000, 0, -1.8750000000000002e-05, 0, 0},
+        {-kInf, -30000, -26250, -52.5, -kInf}, {kInf, kInf, kInf, -12.5, 42500}, {C, C, C, C, C},
+        {{0, 0, 0, 0.025000000000000001, 3.1250000000000001e-05},
+         {-25000, -0.047500000000000001, 0.041250000000000002, -22.5, -0.036250000000000004},
+         {2.5, 0, 1.875e-06, 0.0043750000000000004, -3.625e-06},
+         {-40000000, 0, 0.125, 0, 0}},
+        {-kInf, 507.8125, -0.23828125, -13125}, {kInf, kInf, -0.17828125, -13125});
+    lp.obj_offset = 4.5;
+    requirePresolveAgrees(lp);
+}

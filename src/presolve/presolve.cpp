@@ -893,6 +893,15 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             }
             score = col_active_nnz[elim_col];
             const Real ratio = a_keep / a_elim;
+            // The eliminated column's bounds live on as bounds of the kept
+            // one, projected through 1/ratio. A ratio too small to project
+            // through would drop them, and postsolve would then clamp the
+            // eliminated value off its equality (#244).
+            const bool elim_bounded =
+                !std::isinf(lp.col_lower[elim_col]) || !std::isinf(lp.col_upper[elim_col]);
+            if (elim_bounded && std::abs(ratio) <= kTol) {
+                return false;
+            }
 
             auto cv = lp.matrix.col(elim_col);
             for (Index k = 0; k < cv.size(); ++k) {
@@ -1012,7 +1021,9 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
         for (const auto& update : updates) {
             shiftRowSides(lp, update.row, update.shift);
             const uint64_t key = coeffKey(update.row, best_keep);
-            if (std::abs(update.new_keep - update.matrix_keep) <= kTol) {
+            // Exact: on a row of small coefficients a change below kTol is
+            // still the whole substitution (#244: 1.875e-6 became 1.883e-6).
+            if (update.new_keep == update.matrix_keep) {
                 coeff_overrides_.erase(key);
             } else {
                 coeff_overrides_[key] = update.new_keep;
