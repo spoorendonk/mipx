@@ -598,6 +598,9 @@ private:
     // Problem data.
     LpProblem problem_;
     bool loaded_ = false;
+    // False when an integer column of the loaded model has no integer value
+    // between its bounds.
+    bool integer_bounds_ok_ = true;
     // -1 while a maximization is solved as its negation, so logs show objective
     // values in the model's own sense.
     Real log_obj_sign_ = 1.0;

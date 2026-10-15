@@ -152,6 +152,21 @@ bool hasAdvancedModelFeatures(const LpProblem& problem) {
     });
 }
 
+bool roundIntegerBounds(LpProblem& problem, Real tol) {
+    bool ok = true;
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        if (problem.col_type[j] != VarType::Integer && problem.col_type[j] != VarType::Binary) {
+            continue;
+        }
+        problem.col_lower[j] = std::ceil(problem.col_lower[j] - tol);
+        problem.col_upper[j] = std::floor(problem.col_upper[j] + tol);
+        if (problem.col_lower[j] > problem.col_upper[j]) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 LpProblem linearizeModelFeatures(const LpProblem& problem) {
     validateModelFeatures(problem);
 

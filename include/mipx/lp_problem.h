@@ -72,6 +72,13 @@ void validateModelFeatures(const LpProblem& problem);
 /// Linearize SOS/indicator/semi features into core row/bound form.
 LpProblem linearizeModelFeatures(const LpProblem& problem);
 
+/// Round the bounds of each Integer and Binary column in to the nearest
+/// integers inside them (within @p tol), so no reduction or search step ever
+/// fixes such a column at a fractional bound. Returns false when some column's
+/// rounded bounds cross, i.e. it has no integer value and the model is
+/// infeasible. Semi columns are left alone: their domain is not an interval.
+bool roundIntegerBounds(LpProblem& problem, Real tol = 1e-6);
+
 /// True when column @p j is a 0/1 variable by the problem's own bounds: typed
 /// VarType::Binary, or VarType::Integer with bounds exactly [0, 1]. The MPS
 /// reader types only a BV bound as Binary, so the MARKER INTORG columns with

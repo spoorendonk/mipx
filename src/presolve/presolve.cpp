@@ -2331,6 +2331,10 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     LpProblem lp = problem;
     orig_num_cols_ = lp.num_cols;
 
+    // Round integer bounds in before any reduction reasons from them, so a
+    // column fixed at a bound is fixed at an integer.
+    infeasible_ = !roundIntegerBounds(lp);
+
     std::vector<bool> col_removed(lp.num_cols, false);
     std::vector<bool> row_removed(lp.num_rows, false);
     std::vector<Index> row_active_nnz(lp.num_rows, 0);
@@ -2346,7 +2350,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     std::vector<uint8_t> dirty_cols(lp.num_cols, 1);
 
     // Iterative reduction loop.
-    for (Index round = 0; round < max_rounds_; ++round) {
+    for (Index round = 0; round < max_rounds_ && !infeasible_; ++round) {
         Index total_changes = 0;
         std::vector<Index> dirty_row_list;
         std::vector<Index> dirty_col_list;

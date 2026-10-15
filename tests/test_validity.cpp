@@ -567,35 +567,11 @@ std::vector<LpProblem> auditModels(int seed, int count, bool allow_continuous) {
     return models;
 }
 
-// The model with each integral column's bounds rounded in. Presolve does not
-// round fractional bounds itself yet (#228), so the audits that would trip on
-// that one known bug run on rounded models and the reproducer below tracks it.
-LpProblem roundedIntegerBounds(LpProblem lp) {
-    for (Index j = 0; j < lp.num_cols; ++j) {
-        if (isIntegral(lp.col_type[j])) {
-            lp.col_lower[j] = std::ceil(lp.col_lower[j] - 1e-9);
-            lp.col_upper[j] = std::floor(lp.col_upper[j] + 1e-9);
-        }
-    }
-    return lp;
-}
-
-bool hasFractionalIntegerBound(const LpProblem& lp) {
-    for (Index j = 0; j < lp.num_cols; ++j) {
-        if (isIntegral(lp.col_type[j]) && (lp.col_lower[j] != std::round(lp.col_lower[j]) ||
-                                           lp.col_upper[j] != std::round(lp.col_upper[j]))) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // ---- Presolve ---------------------------------------------------------------
 
 struct PresolveCase {
     const char* name;
     PresolveOptions options;
-    bool opt_in = false;
 };
 
 std::vector<PresolveCase> presolveCases() {
@@ -610,51 +586,42 @@ std::vector<PresolveCase> presolveCases() {
     cases.push_back({"always-on reductions only", core});
     PresolveOptions coeff = o;
     coeff.enable_coefficient_tightening = true;
-    cases.push_back({"coefficient tightening (opt-in)", coeff, true});
+    cases.push_back({"coefficient tightening (opt-in)", coeff});
     PresolveOptions probing = o;
     probing.enable_probing = true;
-    cases.push_back({"probing (opt-in)", probing, true});
+    cases.push_back({"probing (opt-in)", probing});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
-    cases.push_back({"all opt-in", all, true});
+    cases.push_back({"all opt-in", all});
     return cases;
 }
 
 // Checks one model under one option set. With a zero objective every
 // reduction must keep the projection of each feasible point; with an
-// objective, dual reductions may drop points but never the optimum. With
-// `report` false nothing is asserted and the result only says whether the
-// model passed, so a caller can tell a known bug from a new one.
-bool auditPresolve(const LpProblem& lp, const PresolveCase& pc, bool report = true) {
-    bool ok = true;
-    auto expect = [&](bool cond) {
-        if (report) {
-            CHECK(cond);
-        }
-        ok = ok && cond;
-    };
+// objective, dual reductions may drop points but never the optimum.
+void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
     const Enumeration orig = enumerate(lp);
     if (orig.unbounded) {
-        return true;
+        return;
     }
     Presolver presolver;
     presolver.setOptions(pc.options);
     const LpProblem reduced = presolver.presolve(lp);
     INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
     if (presolver.isInfeasible()) {
-        expect(!orig.feasible);
-        return ok;
+        CHECK(!orig.feasible);
+        return;
     }
     const auto& mapping = presolver.colMapping();
     INFO("reduced:\n" << describe(reduced));
 
     const Enumeration red = enumerate(reduced);
     INFO("optimum " << orig.best << ", reduced optimum " << red.best);
-    expect(red.feasible == orig.feasible);
-    expect(!red.unbounded);
+    CHECK(red.feasible == orig.feasible);
+    CHECK(!red.unbounded);
     if (red.feasible && orig.feasible) {
-        expect(std::abs(red.best - orig.best) <= kObjTol);
+        CHECK(std::abs(red.best - orig.best) <= kObjTol);
     }
 
     // Every point the reduced model admits postsolves to a feasible point of
@@ -663,20 +630,20 @@ bool auditPresolve(const LpProblem& lp, const PresolveCase& pc, bool report = tr
         for (const auto& xr : slicePoints(s)) {
             const auto full = presolver.postsolve(xr);
             if (full.size() != static_cast<std::size_t>(lp.num_cols)) {
-                expect(false);
+                CHECK(false);
                 continue;
             }
             INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full)
                                  << ", objective " << objective(reduced, xr) << " -> "
                                  << objective(lp, full));
-            expect(pointFeasible(lp, full, kFeasTol));
-            expect(std::abs(objective(lp, full) - objective(reduced, xr)) <= kObjTol);
+            CHECK(pointFeasible(lp, full, kFeasTol));
+            CHECK(std::abs(objective(lp, full) - objective(reduced, xr)) <= kObjTol);
         }
     });
 
     const bool primal = std::all_of(lp.obj.begin(), lp.obj.end(), [](Real c) { return c == 0.0; });
     if (!primal) {
-        return ok;
+        return;
     }
     forEachFeasible(lp, [&](const Slice& s) {
         for (const auto& x : slicePoints(s)) {
@@ -685,10 +652,9 @@ bool auditPresolve(const LpProblem& lp, const PresolveCase& pc, bool report = tr
                 xr[jj] = x[mapping[jj]];
             }
             INFO("original point" << describe(x));
-            expect(pointFeasible(reduced, xr, kFeasTol));
+            CHECK(pointFeasible(reduced, xr, kFeasTol));
         }
     });
-    return ok;
 }
 
 LpProblem withoutObjective(LpProblem lp) {
@@ -774,30 +740,11 @@ bool literalTrue(const std::vector<Real>& x, Literal lit) {
 TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum", "[validity]") {
     const auto models = auditModels(227, 300, true);
     for (const auto& pc : presolveCases()) {
-        Int fractional_judged = 0;
         for (std::size_t t = 0; t < models.size(); ++t) {
             INFO("model " << t);
-            const LpProblem lp = roundedIntegerBounds(linearized(models[t]));
+            const LpProblem lp = linearized(models[t]);
             auditPresolve(lp, pc);
             auditPresolve(withoutObjective(lp), pc);
-            // On fractional bounds default presolve trips on #228 (reproducer
-            // below), so an opt-in reduction is judged there only on models
-            // the default reductions get right. The opt-in run still includes
-            // the default reductions, so a failure here may also be #228
-            // reached through a column the opt-in reduction fixed.
-            if (pc.opt_in && hasFractionalIntegerBound(models[t])) {
-                for (const LpProblem& raw :
-                     {linearized(models[t]), withoutObjective(linearized(models[t]))}) {
-                    if (auditPresolve(raw, presolveCases()[0], false)) {
-                        ++fractional_judged;
-                        auditPresolve(raw, pc);
-                    }
-                }
-            }
-        }
-        if (pc.opt_in) {
-            INFO("presolve case: " << pc.name);
-            CHECK(fractional_judged > 0);
         }
     }
 }
@@ -1198,7 +1145,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
     Int symmetry_orbits = 0;
     for (const auto& sc : cases) {
         for (std::size_t t = 0; t < models.size(); ++t) {
-            const LpProblem lp = roundedIntegerBounds(models[t]);
+            const LpProblem& lp = models[t];
             const Enumeration e = enumerate(linearized(lp));
             if (e.unbounded) {
                 continue;
@@ -1238,8 +1185,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
 // in the audits above.
 // =============================================================================
 
-TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns",
-          "[validity][!mayfail]") {
+TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns", "[validity]") {
     constexpr auto I = VarType::Integer;
     // min x0 over x0 integer in [0.5, 3]: the optimum is x0 = 1.
     const LpProblem lower_side =
@@ -1256,6 +1202,18 @@ TEST_CASE("Known bug #228: presolve keeps fractional bounds of integer columns",
         REQUIRE(result.status == Status::Optimal);
         CHECK(pointFeasible(lp, result.solution, kFeasTol));
         CHECK_THAT(objective(lp, result.solution), WithinAbs(enumerate(lp).best, kObjTol));
+    }
+    // x0 integer in [0.3, 0.7] has no integer value.
+    const LpProblem crossed =
+        makeModel(Sense::Minimize, {1, 0}, {0.3, 0}, {0.7, 2}, {I, I}, {{1, 1}}, {-kInf}, {4});
+    auditPresolve(crossed, presolveCases()[0]);
+    for (bool presolve : {true, false}) {
+        INFO("presolve " << presolve);
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(presolve);
+        solver.load(crossed);
+        CHECK(solver.solve().status == Status::Infeasible);
     }
 }
 

@@ -1327,6 +1327,10 @@ void MipSolver::load(const LpProblem& problem) {
     } else {
         problem_ = problem;
     }
+    // Every path below (presolve, the search when presolve is off or finds
+    // nothing, heuristics reading the bounds) assumes integer columns have
+    // integer bounds.
+    integer_bounds_ok_ = roundIntegerBounds(problem_);
     refreshTreePresolveProfile();
     loaded_ = true;
 }
@@ -3994,7 +3998,7 @@ MipResult MipSolver::solveMinimization() {
         branching_rule_.setSymmetryManager(nullptr);
     }
 
-    if (presolver.isInfeasible()) {
+    if (presolver.isInfeasible() || !integer_bounds_ok_) {
         MipResult result;
         result.status = Status::Infeasible;
         result.nodes = 0;
@@ -4002,7 +4006,9 @@ MipResult MipSolver::solveMinimization() {
         result.work_units = canonicalReportedWork(symmetry_pre_work);
         result.time_seconds = elapsed();
         if (verbose_) {
-            log_.log("Presolve detected infeasibility.\n");
+            log_.log(integer_bounds_ok_ ? "Presolve detected infeasibility.\n"
+                                        : "An integer column has no integer value in its "
+                                          "bounds.\n");
         }
         return result;
     }
