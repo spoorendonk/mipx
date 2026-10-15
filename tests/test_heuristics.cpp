@@ -1084,6 +1084,9 @@ TEST_CASE("ProximitySearchHeuristic: improves the incumbent of a maximization", 
     ProximitySearchHeuristic prox;
     prox.setSubproblemIterLimit(100);
     prox.setMinBinaryVars(1);
+    // Without repair, a worse-than-incumbent LP point cannot be rounded into
+    // an accidental improvement, so the improvement itself is what is tested.
+    prox.setEnableRoundingRepair(false);
     const std::vector<Real> incumbent_values = {0.0, 0.0, 1.0, 0.0};
     auto result = prox.run(problem, lp, primals, 6.0, incumbent_values);
 
