@@ -1908,9 +1908,6 @@ bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real
             }
             const Real new_var_upper =
                 std::max(std::min(upper[fix.variable], upper[fix.canonical]), lower[fix.variable]);
-            if (upper[fix.canonical] < lower[fix.variable] - DomainPropagator::kTol) {
-                return false;
-            }
             if (new_var_upper < upper[fix.variable]) {
                 upper[fix.variable] = new_var_upper;
                 changed = true;
