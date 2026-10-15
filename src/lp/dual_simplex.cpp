@@ -1322,7 +1322,8 @@ LpResult DualSimplexSolver::solve() {
     Int degenerate_pivot_streak = 0;
     Int empty_candidate_retry_streak = 0;
     // The row whose repair pivot (see the dual ratio test) was rejected as
-    // numerically zero, or -1; cleared by the next pivot that stands.
+    // numerically zero on fresh factors, or -1; cleared by the next basis
+    // change.
     Index repair_rejected_row = -1;
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
@@ -1624,6 +1625,7 @@ LpResult DualSimplexSolver::solve() {
                 if (!recoverFromSingularBasis()) {
                     break;
                 }
+                repair_rejected_row = -1;
             }
             computePrimals();
             computeDuals();
@@ -2272,6 +2274,7 @@ LpResult DualSimplexSolver::solve() {
                     if (!recoverFromSingularBasis()) {
                         break;
                     }
+                    repair_rejected_row = -1;
                 }
                 computePrimals();
                 computeDuals();
@@ -2328,6 +2331,7 @@ LpResult DualSimplexSolver::solve() {
             // Swap basis.
             basis_[leaving_row_p] = entering_p;
             basis_pos_[entering_p] = leaving_row_p;
+            repair_rejected_row = -1;
             basis_pos_[leaving_var_p] = -1;
             var_status_[entering_p] = BasisStatus::Basic;
             var_status_[leaving_var_p] = leaving_st;
@@ -2371,6 +2375,7 @@ LpResult DualSimplexSolver::solve() {
                     if (!recoverFromSingularBasis()) {
                         break;
                     }
+                    repair_rejected_row = -1;
                 }
                 computePrimals();
                 computeDuals();
@@ -2694,6 +2699,7 @@ LpResult DualSimplexSolver::solve() {
                 if (!recoverFromSingularBasis()) {
                     break;
                 }
+                repair_rejected_row = -1;
             }
             computePrimals();
             computeDuals();
@@ -2888,9 +2894,10 @@ LpResult DualSimplexSolver::solve() {
         // rejecting it here again would refactorize and pick it forever.
         Real pivot_element = pivot_col[leaving_row];
         if (std::abs(pivot_element) < (repair_pivot ? kRepairPivotTol : kPivotTol)) {
-            // A repair pivot the fresh factors still reject is round-off, so
-            // the row's next empty ratio test stands as the proof.
-            if (repair_pivot) {
+            // A repair pivot that fresh factors reject is round-off, so the
+            // row's next empty ratio test stands as the proof. Updated factors
+            // may have drifted, so then only refactorize and try it again.
+            if (repair_pivot && lu_.numUpdates() == 0) {
                 repair_rejected_row = leaving_row;
             }
             // Numerically degenerate pivot. Refactorize and retry.
@@ -2900,6 +2907,7 @@ LpResult DualSimplexSolver::solve() {
                 if (!recoverFromSingularBasis()) {
                     break;
                 }
+                repair_rejected_row = -1;
             }
             computePrimals();
             computeDuals();
@@ -3129,6 +3137,7 @@ LpResult DualSimplexSolver::solve() {
                 if (!recoverFromSingularBasis()) {
                     break;
                 }
+                repair_rejected_row = -1;
             }
             computePrimals();
             computeDuals();
