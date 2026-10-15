@@ -15,15 +15,20 @@ says what each one means, and records where each one is used (#236).
 | Integrality | 1e-6, absolute | A value is integral when it is within 1e-6 of an integer. | `MipSolver::kIntTol`, `isIntegral` |
 | Bound crossing | 1e-8, absolute | A column whose lower bound passes its upper by at most 1e-8 is not empty; keep the swapped (or clamped) interval. | `DomainPropagator::kTol`, `keepCrossingWithinTolerance` |
 | Row slack | 1e-8 times the row's magnitude | A row is violated only past 1e-8 times the largest of 1, its finite sides and its finite activity terms. Bounds derived from a row take the same slack. | `DomainPropagator::propagateRow`, `Presolver::rowTol` |
-| Integer bound rounding | 1e-6; `1e-8 / \|a\|` when larger | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Through a coefficient `a` the division scales the sums' rounding by `1/\|a\|`. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
+| Integer bound rounding | 1e-6, or `1e-8 / \|a\|` when larger; 1e-8 (or `1e-8 / \|a\|`) where presolve drops the row | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Through a coefficient `a` the division scales the sums' rounding by `1/\|a\|`. A row presolve drops must still hold at the rounded bound, so it rounds at no more than its own tolerance. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
 | Prune | 1e-6, absolute | A node is pruned when its bound is within 1e-6 of the incumbent. | `ObjectivePropagator::kPruneTol`, the node queue |
 | Improvement | 1e-6, absolute | The solution pool keeps a solution only when it improves by more than 1e-6. The tree takes any strict improvement as its incumbent. | `SolutionPool::better` |
 
 ## The rule
 
 **A test that prunes, fixes or declares infeasible is never stricter than
-the feasibility test it guards.** The search keeps every point that holds
-each row to the row slack and each bound to the crossing tolerance. Rounding
+the feasibility test it guards.** Bound propagation (DomainPropagator, and
+through it probing, tree presolve and the cutoff bounds) and the node
+search keep every point that holds each row to the row slack and each
+bound to the crossing tolerance. Presolve's reductions that replace or drop
+a row (singleton rows, forcing, implied equations, duplicate and parallel
+rows) still test at an absolute 1e-8, which is stricter than the slack on
+large rows, though never stricter than 1e-6. Rounding
 error of the row's own arithmetic is not a reason to remove a point.
 Acceptance at 1e-6 is looser than that on rows of magnitude below 100. A
 point that violates such a row by between the slack and 1e-6 is accepted
@@ -42,7 +47,9 @@ Concretely:
   model. Presolve, which drops rows, relaxes only its infeasibility claims.
   It keeps its absolute tests for bounds that replace a row (#210, #215),
   and drops an emptied row only when it holds within 1e-6 (`kDropTol`).
-  Between that and the slack the row stays, and the LP decides.
+  Between that and the slack the row stays, and the LP decides. The
+  computed excess carries the rounding of the terms folded into the row,
+  so on rows near 1e9 "within 1e-6" holds up to about 1e-7.
 
 ## Known divergences left as they are
 
