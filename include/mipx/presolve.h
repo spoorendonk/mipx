@@ -278,6 +278,17 @@ private:
     bool probing_done_ = false;
     std::unordered_map<uint64_t, Real> coeff_overrides_{};
 
+    /// Subtract a fixed column's term from the row's finite sides, and keep
+    /// the term's size in the row's magnitude.
+    void shiftRowSides(LpProblem& lp, Index row, Real shift);
+    /// Infeasibility tolerance of a row: kTol relative to its magnitude, the
+    /// largest of 1, its original sides and every term folded into them. The
+    /// sides carry the rounding of those terms, so an emptied row's rhs can be
+    /// off zero by far more than an absolute kTol (#236).
+    [[nodiscard]] Real rowTol(Index row) const { return kTol * row_scale_[row]; }
+
+    std::vector<Real> row_scale_;
+
     static constexpr Real kTol = 1e-8;
 };
 

@@ -1797,7 +1797,7 @@ TEST_CASE("Regression #236: a row with terms near 1e9 reads its own point as inf
             prop.setBound(j, anchor[j], anchor[j]);
         }
         CHECK(prop.propagate());
-        for (const bool presolve : {false}) {
+        for (const bool presolve : {false, true}) {
             INFO("presolve: " << presolve);
             MipSolver solver;
             solver.setVerbose(false);

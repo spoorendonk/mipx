@@ -444,13 +444,7 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
                 continue;
             }
             Real a = effectiveCoeff(coeff_overrides_, row, j, cv.values[k]);
-            Real shift = a * value;
-            if (!std::isinf(lp.row_lower[row])) {
-                lp.row_lower[row] -= shift;
-            }
-            if (!std::isinf(lp.row_upper[row])) {
-                lp.row_upper[row] -= shift;
-            }
+            shiftRowSides(lp, row, a * value);
             next_dirty_rows[row] = 1;
         }
 
@@ -486,7 +480,7 @@ Index Presolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& col_remov
 
         if (count == 0) {
             // Empty row. Check feasibility, then remove.
-            if (lp.row_lower[i] > kTol || lp.row_upper[i] < -kTol) {
+            if (lp.row_lower[i] > rowTol(i) || lp.row_upper[i] < -rowTol(i)) {
                 infeasible_ = true;
                 return changes;
             }
@@ -802,13 +796,7 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
         ++stats_.vars_removed;
 
         // Adjust row bounds.
-        Real shift = singleton_coeff * fix_value;
-        if (!std::isinf(lp.row_lower[singleton_row])) {
-            lp.row_lower[singleton_row] -= shift;
-        }
-        if (!std::isinf(lp.row_upper[singleton_row])) {
-            lp.row_upper[singleton_row] -= shift;
-        }
+        shiftRowSides(lp, singleton_row, singleton_coeff * fix_value);
 
         // Adjust objective.
         lp.obj_offset += obj * fix_value;
@@ -1016,12 +1004,7 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
         next_dirty_cols[best_keep] = 1;
 
         for (const auto& update : updates) {
-            if (!std::isinf(lp.row_lower[update.row])) {
-                lp.row_lower[update.row] -= update.shift;
-            }
-            if (!std::isinf(lp.row_upper[update.row])) {
-                lp.row_upper[update.row] -= update.shift;
-            }
+            shiftRowSides(lp, update.row, update.shift);
             const uint64_t key = coeffKey(update.row, best_keep);
             if (std::abs(update.new_keep - update.matrix_keep) <= kTol) {
                 coeff_overrides_.erase(key);
@@ -1102,6 +1085,16 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
     return changes;
 }
 
+void Presolver::shiftRowSides(LpProblem& lp, Index row, Real shift) {
+    if (!std::isinf(lp.row_lower[row])) {
+        lp.row_lower[row] -= shift;
+    }
+    if (!std::isinf(lp.row_upper[row])) {
+        lp.row_upper[row] -= shift;
+    }
+    row_scale_[row] = std::max(row_scale_[row], std::abs(shift));
+}
+
 Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed,
                                    std::vector<bool>& row_removed,
                                    std::vector<Index>& row_active_nnz,
@@ -1124,6 +1117,9 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
         Real act_max = 0.0;
         bool has_inf_min = false;
         bool has_inf_max = false;
+        // The row's magnitude: its sides, the terms folded into them, and
+        // its largest finite term.
+        Real scale = row_scale_[i];
 
         for (Index k = 0; k < rv.size(); ++k) {
             Index j = rv.indices[k];
@@ -1135,6 +1131,12 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             Real lb = lp.col_lower[j];
             Real ub = lp.col_upper[j];
 
+            if (!std::isinf(lb)) {
+                scale = std::max(scale, std::abs(a * lb));
+            }
+            if (!std::isinf(ub)) {
+                scale = std::max(scale, std::abs(a * ub));
+            }
             if (a > 0) {
                 if (std::isinf(lb)) {
                     has_inf_min = true;
@@ -1160,11 +1162,16 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
             }
         }
 
-        if (!has_inf_min && !std::isinf(lp.row_upper[i]) && act_min > lp.row_upper[i] + kTol) {
+        // Infeasible only past kTol relative to the row's magnitude, as in
+        // DomainPropagator: with terms near 1e9 the activity sums round by
+        // more than an absolute kTol, and a model whose only point lies
+        // exactly on the row read as infeasible (#236).
+        const Real row_tol = kTol * scale;
+        if (!has_inf_min && !std::isinf(lp.row_upper[i]) && act_min > lp.row_upper[i] + row_tol) {
             infeasible_ = true;
             return changes;
         }
-        if (!has_inf_max && !std::isinf(lp.row_lower[i]) && act_max < lp.row_lower[i] - kTol) {
+        if (!has_inf_max && !std::isinf(lp.row_lower[i]) && act_max < lp.row_lower[i] - row_tol) {
             infeasible_ = true;
             return changes;
         }
@@ -1329,13 +1336,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
                     continue;
                 }
                 const Real a = effectiveCoeff(coeff_overrides_, other_row, j, cv.values[kk]);
-                Real shift = a * fix_value;
-                if (!std::isinf(lp.row_lower[other_row])) {
-                    lp.row_lower[other_row] -= shift;
-                }
-                if (!std::isinf(lp.row_upper[other_row])) {
-                    lp.row_upper[other_row] -= shift;
-                }
+                shiftRowSides(lp, other_row, a * fix_value);
                 next_dirty_rows[other_row] = 1;
             }
 
@@ -1716,13 +1717,7 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
                 continue;
             }
             const Real a = effectiveCoeff(coeff_overrides_, row, j, cv.values[kk]);
-            Real shift = a * fix_value;
-            if (!std::isinf(lp.row_lower[row])) {
-                lp.row_lower[row] -= shift;
-            }
-            if (!std::isinf(lp.row_upper[row])) {
-                lp.row_upper[row] -= shift;
-            }
+            shiftRowSides(lp, row, a * fix_value);
             next_dirty_rows[row] = 1;
         }
     }
@@ -2367,6 +2362,15 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     // column fixed at a bound is fixed at an integer.
     infeasible_ = !roundIntegerBounds(lp);
 
+    row_scale_.assign(lp.num_rows, 1.0);
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        for (const Real side : {lp.row_lower[i], lp.row_upper[i]}) {
+            if (!std::isinf(side)) {
+                row_scale_[i] = std::max(row_scale_[i], std::abs(side));
+            }
+        }
+    }
+
     std::vector<bool> col_removed(lp.num_cols, false);
     std::vector<bool> row_removed(lp.num_rows, false);
     std::vector<Index> row_active_nnz(lp.num_rows, 0);
@@ -2522,7 +2526,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
             }
             if (row_active_nnz[i] == 0) {
                 // Empty row: check bounds.
-                if (lp.row_lower[i] > kTol || lp.row_upper[i] < -kTol) {
+                if (lp.row_lower[i] > rowTol(i) || lp.row_upper[i] < -rowTol(i)) {
                     infeasible_ = true;
                     break;
                 }
