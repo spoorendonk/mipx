@@ -334,7 +334,10 @@ struct ModelSpec {
     bool continuous = false;  // One continuous column: bounded, free, half-free or semi.
     bool semi_integer = false;
     bool objective = true;
-    bool symmetric = false;  // Duplicate a column, so the model has a symmetry.
+    bool symmetric = false;   // Duplicate a column, so the model has a symmetry.
+    int int_width = 3;        // General integer columns span up to this many units.
+    bool equalities = false;  // Half the rows are equalities.
+    bool tiny_coefs = false;  // Rows may carry one coefficient of 1e-9 to 1e-6.
 };
 
 LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
@@ -366,7 +369,7 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
             addCol(semi_lower, semi_lower + uniform(1, 2), VarType::SemiInteger);
         } else {
             Real lb = uniform(-2, 1);
-            Real ub = lb + uniform(1, 3);
+            Real ub = lb + uniform(1, spec.int_width);
             // Fractional bounds on integer columns, which every reduction
             // must round in before it reasons from them.
             if (chance(0.2)) {
@@ -441,12 +444,19 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
                 }
             }
         }
+        if (spec.tiny_coefs && sym_src < 0 && chance(0.5)) {
+            // A near-tolerance coefficient, on a column of the row or a new one.
+            const Index j = uniform(0, lp.num_cols - 1);
+            const Real a = std::pow(10.0, -uniform(6, 9)) * (chance(0.5) ? 1.0 : -1.0);
+            std::erase_if(row, [&](const auto& t) { return t.first == j; });
+            row.push_back({j, a});
+        }
         Real act = 0.0;
         for (const auto& [j, a] : row) {
             act += a * anchor[j];
             trips.push_back({static_cast<Index>(i), j, a});
         }
-        switch (uniform(0, 4)) {
+        switch (spec.equalities && chance(0.5) ? 0 : uniform(0, 4)) {
             case 0:
                 lp.row_lower.push_back(act);
                 lp.row_upper.push_back(act);
@@ -1323,6 +1333,145 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
     // The search-time propagators did run.
     CHECK(tree_presolve_runs > 0);
     CHECK(symmetry_orbits > 0);
+}
+
+TEST_CASE("Validity: end-to-end solves under the opt-in families, every incumbent feasible",
+          "[validity]") {
+    // Part 2 of the audit (#235): equality-heavy models over wider general
+    // integers, some rows with a coefficient of 1e-9 to 1e-6, solved with
+    // each opt-in family and all of them at once. Every incumbent the search
+    // accepts, heuristic or not, must be feasible on the model as given.
+    //
+    // A near-tolerance coefficient lets the solver accept a point that
+    // violates a row by less than its feasibility tolerance, which the
+    // enumeration (at 1e-9) rejects. So the reported solution must be
+    // feasible at kFeasTol and at least as good as the enumerated optimum, and
+    // exactly as good when it is feasible at the enumeration's tolerance.
+    struct SolverCase {
+        const char* name;
+        std::function<void(MipSolver&)> configure;
+    };
+    auto coefficientTightening = [](MipSolver& s) {
+        PresolveOptions o = s.getRootPresolveOptions();
+        o.enable_coefficient_tightening = true;
+        s.setRootPresolveOptions(o);
+    };
+    auto multiRowCuts = [](MipSolver& s) {
+        s.setCutFamilyEnabled(CutFamily::IntersectionCut, true);
+        s.setCutFamilyEnabled(CutFamily::MultiRow, true);
+    };
+    const std::vector<SolverCase> cases = {
+        {"default", [](MipSolver&) {}},
+        {"no cuts, no presolve",
+         [](MipSolver& s) {
+             s.setCutsEnabled(false);
+             s.setPresolve(false);
+         }},
+        {"intersection and multi-row cuts (opt-in)", multiRowCuts},
+        {"cut strengthening (opt-in)", [](MipSolver& s) { s.setCutStrengthening(true); }},
+        {"clique table and probing (opt-in)",
+         [](MipSolver& s) {
+             s.setCliqueTableEnabled(true);
+             s.setProbingEnabled(true);
+         }},
+        {"coefficient tightening (opt-in)", coefficientTightening},
+        {"objective propagation (opt-in)",
+         [](MipSolver& s) { s.setObjectivePropagationEnabled(true); }},
+        {"tree presolve and tree cuts at every node",
+         [](MipSolver& s) {
+             s.setTreePresolveAutoTuning(false);
+             s.setTreePresolveControls(100, 0, 1);
+             s.setTreeCutsEnabled(true);
+         }},
+        {"all opt-in",
+         [&](MipSolver& s) {
+             multiRowCuts(s);
+             coefficientTightening(s);
+             s.setCutStrengthening(true);
+             s.setCliqueTableEnabled(true);
+             s.setProbingEnabled(true);
+             s.setRestartsEnabled(true);
+             s.setTreeCutsEnabled(true);
+             s.setObjectivePropagationEnabled(true);
+         }},
+    };
+
+    std::mt19937 rng(235);
+    std::vector<LpProblem> models;
+    for (int t = 0; t < 120; ++t) {
+        ModelSpec spec;
+        spec.min_int = 3;
+        spec.max_int = 5;
+        spec.int_width = 5;
+        spec.equalities = true;
+        spec.continuous = t % 3 == 1;
+        spec.tiny_coefs = t % 2 == 0;
+        spec.symmetric = t % 7 == 3;
+        models.push_back(randomModel(rng, spec));
+    }
+
+    Int judged = 0;
+    Int incumbents = 0;
+    for (const auto& sc : cases) {
+        for (std::size_t t = 0; t < models.size(); ++t) {
+            const LpProblem& lp = models[t];
+            const Enumeration e = enumerate(linearized(lp));
+            if (e.unbounded) {
+                continue;
+            }
+            INFO("solver case: " << sc.name << "\nmodel " << t << ":\n"
+                                 << describe(lp) << "enumerated optimum " << e.best << " at"
+                                 << describe(e.argbest));
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setNumThreads(1);
+            solver.setGapTolerance(0.0);
+            sc.configure(solver);
+            std::vector<std::pair<std::vector<Real>, std::string>> seen;
+            solver.setIncumbentObserver([&](const std::vector<Real>& x, const std::string& source) {
+                seen.emplace_back(x, source);
+            });
+            solver.load(lp);
+            const auto result = solver.solve();
+            for (const auto& [x, source] : seen) {
+                INFO("incumbent from " << source << describe(x));
+                REQUIRE(x.size() >= static_cast<std::size_t>(lp.num_cols));
+                CHECK(pointFeasible(lp, std::vector<Real>(x.begin(), x.begin() + lp.num_cols),
+                                    kFeasTol));
+                ++incumbents;
+            }
+            if (!e.feasible) {
+                // Infeasible at 1e-9 may still hold a point within kFeasTol.
+                if (result.status == Status::Optimal) {
+                    std::vector<Real> x(result.solution.begin(),
+                                        result.solution.begin() + lp.num_cols);
+                    CHECK(pointFeasible(lp, x, kFeasTol));
+                } else {
+                    CHECK(result.status == Status::Infeasible);
+                }
+                continue;
+            }
+            ++judged;
+            CHECK(result.status == Status::Optimal);
+            if (result.status != Status::Optimal) {
+                continue;
+            }
+            REQUIRE(result.solution.size() >= static_cast<std::size_t>(lp.num_cols));
+            std::vector<Real> x(result.solution.begin(), result.solution.begin() + lp.num_cols);
+            INFO("solution" << describe(x) << " reported objective " << result.objective
+                            << ", enumerated " << e.best);
+            CHECK(pointFeasible(lp, x, kFeasTol));
+            const Real sign = lp.sense == Sense::Minimize ? 1.0 : -1.0;
+            CHECK_THAT(result.objective, WithinAbs(objective(lp, x), kObjTol));
+            if (pointFeasible(lp, x, 1e-9)) {
+                CHECK_THAT(objective(lp, x), WithinAbs(e.best, kObjTol));
+            } else {
+                CHECK(sign * objective(lp, x) <= sign * e.best + kObjTol);
+            }
+        }
+    }
+    CHECK(judged > 500);
+    CHECK(incumbents > 0);
 }
 
 // =============================================================================

@@ -5,6 +5,7 @@
 #include "mipx/lp_problem.h"
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -50,6 +51,11 @@ public:
 
     bool submit(HeuristicSolution solution, const char* source = "", Int thread_id = -1);
 
+    /// Called with every submission that becomes the new best, under the
+    /// pool's lock, so calls are serialized.
+    using Observer = std::function<void(const HeuristicSolution&, const std::string& source)>;
+    void setObserver(Observer observer) { observer_ = std::move(observer); }
+
     [[nodiscard]] std::optional<HeuristicSolution> bestSolution() const;
     [[nodiscard]] bool hasSolution() const;
     [[nodiscard]] Real bestObjective() const;
@@ -67,6 +73,7 @@ private:
     Sense sense_ = Sense::Minimize;
     mutable std::mutex mutex_;
     std::optional<Entry> best_;
+    Observer observer_;
     uint64_t update_count_ = 0;
 };
 

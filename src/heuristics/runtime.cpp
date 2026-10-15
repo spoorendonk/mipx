@@ -31,6 +31,9 @@ bool SolutionPool::submit(HeuristicSolution solution, const char* source, Int th
     if (!best_ || better(sense_, solution.objective, best_->solution.objective)) {
         best_ = Entry{std::move(solution), source != nullptr ? source : "", thread_id};
         ++update_count_;
+        if (observer_) {
+            observer_(best_->solution, best_->source);
+        }
         return true;
     }
     return false;

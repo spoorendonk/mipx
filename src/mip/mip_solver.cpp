@@ -4128,6 +4128,16 @@ MipResult MipSolver::solveMinimization() {
         }
     };
 
+    auto observeIncumbents = [&](SolutionPool& pool) {
+        if (!incumbent_observer_) {
+            return;
+        }
+        pool.setObserver([&](const HeuristicSolution& solution, const std::string& source) {
+            incumbent_observer_(
+                did_presolve ? presolver.postsolve(solution.values) : solution.values, source);
+        });
+    };
+
     // If no integers, solve as LP directly.
     if (!problem_.hasIntegers()) {
         if (verbose_) {
@@ -4462,6 +4472,7 @@ MipResult MipSolver::solveMinimization() {
             constexpr uint64_t kNoFirstFeasibleWorkTick = std::numeric_limits<uint64_t>::max();
             std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
             SolutionPool pre_root_pool(problem_.sense);
+            observeIncumbents(pre_root_pool);
             Real deterministic_stage_incumbent = pre_root_pool.bestObjective();
             std::vector<Real> deterministic_incumbent_values;
             const auto stage_start = std::chrono::steady_clock::now();
@@ -5395,6 +5406,7 @@ MipResult MipSolver::solveMinimization() {
     const std::vector<Real> root_reduced_costs = lp.getReducedCosts();
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
+    observeIncumbents(solution_pool);
     HeuristicRuntime root_runtime(runtime_config);
     if (incumbent < kInf && !best_solution.empty()) {
         solution_pool.submit({best_solution, incumbent}, "pre_root_stage", 0);

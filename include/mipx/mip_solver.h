@@ -30,6 +30,7 @@
 #include <functional>
 #include <mutex>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -417,6 +418,14 @@ public:
     /// node propagation, and re-propagate the root domain against it whenever
     /// a new incumbent lowers the cutoff. Off by default until benchmarked.
     void setObjectivePropagationEnabled(bool enabled) { objective_propagation_enabled_ = enabled; }
+    /// Called with every solution that becomes the incumbent (from a
+    /// heuristic, an integral node LP or the root), postsolved to the loaded
+    /// model's columns, with the name of its source. For validity audits.
+    using IncumbentObserver =
+        std::function<void(const std::vector<Real>& x, const std::string& source)>;
+    void setIncumbentObserver(IncumbentObserver observer) {
+        incumbent_observer_ = std::move(observer);
+    }
     /// Tighten separated cuts' coefficients against the global bounds before
     /// they are scored and pooled (SeparatorManager::setStrengthenCuts).
     /// "Global" includes root reduced-cost fixings, which hold relative to the
@@ -703,6 +712,7 @@ private:
     RcFixingStats rc_fixing_stats_{};
     ReducedCostFixer rc_fixer_;
     bool objective_propagation_enabled_ = false;
+    IncumbentObserver incumbent_observer_;
     ObjectivePropagator objective_propagator_;
     ObjectiveCutoffBounds objective_cutoff_bounds_;
     // Node workers bump these concurrently.
