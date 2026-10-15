@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -82,6 +83,8 @@ struct MipLpStats {
 struct MipCutStats {
     Int root_rounds = 0;
     Int root_cuts_added = 0;
+    /// Root rounds whose LP did not solve to optimality and were removed.
+    Int root_rounds_backed_out = 0;
     Int tree_nodes_with_cuts = 0;
     Int tree_nodes_skipped = 0;
     Int tree_rounds = 0;
@@ -539,12 +542,11 @@ private:
     /// Run cutting plane rounds at the root node.
     Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
                          LpProblem* certificate_problem = nullptr);
-    /// Remove the last num_cuts rows from lp (and its certificate mirror) and
-    /// re-solve from the basis the LP had before they were added.
-    static void backOutCutRound(DualSimplexSolver& lp, Index num_cuts,
-                                std::span<const BasisStatus> pre_round_basis,
-                                LpProblem* certificate_problem, Int& total_lp_iters,
-                                double& total_work);
+    /// Remove lp's rows from keep_rows on (and the certificate mirror's),
+    /// then re-solve from basis, the basis the LP had with keep_rows rows.
+    static Status backOutCutRows(DualSimplexSolver& lp, Index keep_rows,
+                                 std::span<const BasisStatus> basis, LpProblem* certificate_problem,
+                                 Int& total_lp_iters, double& total_work);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,
@@ -564,6 +566,11 @@ private:
     bool isFeasibleLp(const std::vector<Real>& primals) const;
     // The gate every incumbent passes (#240), heuristic_detail::isFeasiblePoint.
     bool isAcceptableIncumbent(std::span<const Real> x) const;
+    // An integral node LP point as an incumbent: the point itself when it
+    // passes the gate, else the LP completion of its integer values when that
+    // passes, else nothing (the node is then fathomed as a tolerance call).
+    std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x,
+                                                           Real node_obj) const;
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;

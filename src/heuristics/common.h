@@ -3,6 +3,7 @@
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 
+#include <algorithm>
 #include <cmath>
 #include <span>
 #include <utility>
@@ -65,8 +66,13 @@ inline bool isFeasiblePoint(const LpProblem& problem, std::span<const Real> valu
         }
         const VarType t = problem.col_type[j];
         const bool semi = t == VarType::SemiContinuous || t == VarType::SemiInteger;
-        const bool in_bounds =
-            v >= problem.col_lower[j] - kFeasTol && v <= problem.col_upper[j] + kFeasTol;
+        // A semi column is 0 or in [L, U], L read as linearizeModelFeatures does.
+        const Real semi_lower =
+            semi && j < static_cast<Index>(problem.col_semi_lower.size()) &&
+                    problem.col_semi_lower[j] > 0.0
+                ? problem.col_semi_lower[j]
+                : (semi ? std::max<Real>(0.0, problem.col_lower[j]) : problem.col_lower[j]);
+        const bool in_bounds = v >= semi_lower - kFeasTol && v <= problem.col_upper[j] + kFeasTol;
         if (!in_bounds && !(semi && std::abs(v) <= kFeasTol)) {
             return false;
         }

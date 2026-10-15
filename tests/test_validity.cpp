@@ -1911,6 +1911,7 @@ TEST_CASE("Regression #240: incumbents stay inside the column bounds with cuts o
         });
         solver.load(lp);
         const auto result = solver.solve();
+        CHECK(solver.getCutStats().root_rounds_backed_out > 0);
         for (const auto& b : bad) {
             UNSCOPED_INFO(b);
         }

@@ -1803,6 +1803,53 @@ bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
            heuristic_detail::isFeasiblePoint(problem_, x);
 }
 
+// The node LP holds rows and bounds to 1e-7 in its scaled space, which on a
+// row of large coefficients or a column of tiny ones is looser than the
+// gate's 1e-6 in model units. Rejecting such a point outright would fathom
+// the node, and with it every assignment below it that beats the incumbent.
+// Fixing the integers at their values and solving what is left from scratch
+// takes another path to the same optimum and usually lands inside the gate.
+std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<const Real> x,
+                                                                  Real node_obj) const {
+    if (isAcceptableIncumbent(x)) {
+        return HeuristicSolution{{x.begin(), x.end()}, node_obj};
+    }
+    if (static_cast<Index>(x.size()) != problem_.num_cols) {
+        return std::nullopt;
+    }
+    LpProblem fixed = problem_;
+    std::vector<Real> point(x.begin(), x.end());
+    bool any_continuous = false;
+    for (Index j = 0; j < problem_.num_cols; ++j) {
+        if (!heuristic_detail::isIntegerVar(problem_.col_type[j])) {
+            any_continuous = true;
+            continue;
+        }
+        point[j] = std::round(x[j]);
+        fixed.col_lower[j] = point[j];
+        fixed.col_upper[j] = point[j];
+    }
+    if (any_continuous) {
+        DualSimplexSolver completion;
+        completion.setVerbose(false);
+        completion.load(fixed);
+        if (completion.solve().status != Status::Optimal) {
+            return std::nullopt;
+        }
+        const auto values = completion.getPrimalValues();
+        for (Index j = 0; j < problem_.num_cols; ++j) {
+            if (!heuristic_detail::isIntegerVar(problem_.col_type[j])) {
+                point[j] = values[j];
+            }
+        }
+    }
+    if (!isAcceptableIncumbent(point)) {
+        return std::nullopt;
+    }
+    const Real obj = heuristic_detail::computeObjective(problem_, point);
+    return HeuristicSolution{std::move(point), obj};
+}
+
 bool MipSolver::isFeasibleLp(const std::vector<Real>& primals) const {
     if (static_cast<Index>(primals.size()) != problem_.num_cols) {
         return false;
@@ -3055,10 +3102,14 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             }
         }
 
-        if (!branched && !node_primals.empty() && node_int_inf == 0) {
-            if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
-                incumbent = node_obj;
-                best_solution = node_primals;
+        std::optional<HeuristicSolution> node_incumbent;
+        if (!branched && !node_primals.empty() && node_int_inf == 0 && node_obj < incumbent) {
+            node_incumbent = integralNodeIncumbent(node_primals, node_obj);
+        }
+        if (node_incumbent.has_value()) {
+            if (node_incumbent->objective < incumbent) {
+                incumbent = node_incumbent->objective;
+                best_solution = std::move(node_incumbent->values);
                 solution_pool.submit({best_solution, incumbent}, "tree_integral", 0);
                 const double log_elapsed =
                     (parallel_mode_ == ParallelMode::Deterministic)
@@ -3414,10 +3465,12 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                     }
                 }
 
-                if (!task.branched && !task.node_primals.empty() && task.node_int_inf == 0) {
-                    if (task.node_obj < incumbent && isAcceptableIncumbent(task.node_primals)) {
-                        incumbent = task.node_obj;
-                        best_solution = task.node_primals;
+                if (!task.branched && !task.node_primals.empty() && task.node_int_inf == 0 &&
+                    task.node_obj < incumbent) {
+                    auto node_incumbent = integralNodeIncumbent(task.node_primals, task.node_obj);
+                    if (node_incumbent.has_value() && node_incumbent->objective < incumbent) {
+                        incumbent = node_incumbent->objective;
+                        best_solution = std::move(node_incumbent->values);
                         solution_pool.submit({best_solution, incumbent}, "tree_integral",
                                              task.worker_id);
                         found_incumbent = true;
@@ -3682,11 +3735,23 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             }
 
             // Check for new incumbent.
+            // The completion LP of a rejected point runs outside the lock.
+            std::optional<HeuristicSolution> node_incumbent;
             if (!branched && !node_primals.empty() && node_int_inf == 0) {
+                bool improves = false;
+                {
+                    std::lock_guard<std::mutex> lock(incumbent_mutex);
+                    improves = node_obj < incumbent;
+                }
+                if (improves) {
+                    node_incumbent = integralNodeIncumbent(node_primals, node_obj);
+                }
+            }
+            if (node_incumbent.has_value()) {
                 std::lock_guard<std::mutex> lock(incumbent_mutex);
-                if (node_obj < incumbent && isAcceptableIncumbent(node_primals)) {
-                    incumbent = node_obj;
-                    best_solution = node_primals;
+                if (node_incumbent->objective < incumbent) {
+                    incumbent = node_incumbent->objective;
+                    best_solution = std::move(node_incumbent->values);
                     solution_pool.submit({best_solution, incumbent}, "tree_integral", thread_id);
                     found_incumbent = true;
                 }
@@ -5275,8 +5340,9 @@ MipResult MipSolver::solveMinimization() {
                 runCuttingPlanes(lp, total_lp_iters, total_work, root_certificate_problem_ptr);
             lp_stats_.root_cut_lp_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            // A backed-out round re-solves the previous LP; should that
-            // re-solve fail too, keep the root solution from before the cuts.
+            // A failed round is backed out (to the LP the cuts started
+            // from, if need be), so a non-Optimal LP here holds no cuts and
+            // the root solution from before them stands.
             if (cuts_added > 0 && lp.getStatus() == Status::Optimal) {
                 root_bound = lp.getObjective();
                 root_primals = lp.getPrimalValues();
@@ -5434,6 +5500,9 @@ MipResult MipSolver::solveMinimization() {
     // for the root relaxation. Pairing those with root_primals/root_bound made
     // global reduced-cost fixing unsound and silently cut off optimal solutions.
     const std::vector<Real> root_reduced_costs = lp.getReducedCosts();
+    // Without an optimal root LP (a cut back-out that did not re-solve) these
+    // reduced costs prove nothing about root_primals and root_bound.
+    const bool root_reduced_costs_valid = lp.getStatus() == Status::Optimal;
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
     SolutionPool solution_pool(problem_.sense);
     observeIncumbents(solution_pool);
@@ -5535,7 +5604,7 @@ MipResult MipSolver::solveMinimization() {
 
     // Reduced-cost fixing: load engine and apply global fixings at root.
     rc_fixer_.load(problem_);
-    if (incumbent < kInf) {
+    if (incumbent < kInf && root_reduced_costs_valid) {
         // root_reduced_costs is the snapshot taken with root_basis, not a fresh
         // lp.getReducedCosts(): the heuristic portfolio above may have left the
         // solver's cached duals belonging to one of its subproblems.
@@ -5818,20 +5887,22 @@ MipResult MipSolver::solveMinimization() {
     return result;
 }
 
-void MipSolver::backOutCutRound(DualSimplexSolver& lp, Index num_cuts,
-                                std::span<const BasisStatus> pre_round_basis,
-                                LpProblem* certificate_problem, Int& total_lp_iters,
-                                double& total_work) {
-    std::vector<Index> round_rows(static_cast<std::size_t>(num_cuts));
-    std::iota(round_rows.begin(), round_rows.end(), lp.numRows() - num_cuts);
-    lp.removeRows(round_rows);
-    lp.setBasis(pre_round_basis);
+Status MipSolver::backOutCutRows(DualSimplexSolver& lp, Index keep_rows,
+                                 std::span<const BasisStatus> basis, LpProblem* certificate_problem,
+                                 Int& total_lp_iters, double& total_work) {
+    std::vector<Index> rows(static_cast<std::size_t>(lp.numRows() - keep_rows));
+    std::iota(rows.begin(), rows.end(), keep_rows);
+    lp.removeRows(rows);
+    lp.setBasis(basis);
     const auto restored = lp.solve();
     total_lp_iters += restored.iterations;
     total_work += restored.work_units;
 
     if (certificate_problem != nullptr) {
-        for (Index r = 0; r < num_cuts; ++r) {
+        // The mirror gained the same rows, last, as the LP did.
+        const Index mirror_keep =
+            certificate_problem->matrix.numRows() - static_cast<Index>(rows.size());
+        while (certificate_problem->matrix.numRows() > mirror_keep) {
             certificate_problem->matrix.removeRow(certificate_problem->matrix.numRows() - 1);
             certificate_problem->row_lower.pop_back();
             certificate_problem->row_upper.pop_back();
@@ -5839,6 +5910,7 @@ void MipSolver::backOutCutRound(DualSimplexSolver& lp, Index num_cuts,
         }
         certificate_problem->num_rows = certificate_problem->matrix.numRows();
     }
+    return restored.status;
 }
 
 Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
@@ -5917,6 +5989,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     Int total_cuts = 0;
     Int rounds_done = 0;
     Real start_obj = lp.getObjective();
+    const Index initial_rows = lp.numRows();
+    const auto initial_basis = lp.getBasis();
     Int stagnation_rounds = 0;
     double cut_node_work = 0.0;
 
@@ -6082,8 +6156,18 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             // bounds). The cuts are valid, so a failed solve is numerical,
             // not a proof of infeasibility; the LP of the previous round is
             // the safe one to continue from.
-            backOutCutRound(lp, cuts_this_round, pre_round_basis, certificate_problem,
-                            total_lp_iters, total_work);
+            // Should the previous round's LP not re-solve either, go back to
+            // the LP the cuts started from, whose point the caller still has.
+            const Status restored =
+                backOutCutRows(lp, lp.numRows() - cuts_this_round, pre_round_basis,
+                               certificate_problem, total_lp_iters, total_work);
+            if (restored != Status::Optimal && total_cuts > 0) {
+                backOutCutRows(lp, initial_rows, initial_basis, certificate_problem, total_lp_iters,
+                               total_work);
+                total_cuts = 0;
+                rounds_done = 0;
+            }
+            ++cut_stats_.root_rounds_backed_out;
             if (verbose_) {
                 log_.log("  cut-round %d: LP status %d after adding cuts, round backed out\n",
                          round + 1, static_cast<int>(result.status));

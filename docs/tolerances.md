@@ -11,7 +11,7 @@ says what each one means, and records where each one is used (#236).
 | Name | Value | Meaning | Where it is defined |
 |---|---|---|---|
 | Primal feasibility | 1e-6, absolute | A point is feasible when every row and bound holds to 1e-6. Heuristics, the root check and the LP-free search accept points by this. | `heuristics/common.h` `kFeasTol`, `MipSolver::isFeasibleLp` |
-| LP primal tolerance | 1e-7, in the scaled LP | What the dual simplex accepts. A node LP point is accepted as an incumbent on this plus integrality. | `DualSimplexSolver::kPrimalTol` |
+| LP primal tolerance | 1e-7, in the scaled LP | What the dual simplex accepts. A node LP point is an LP answer, not yet an incumbent: it must also pass the 1e-6 primal feasibility test (#240). | `DualSimplexSolver::kPrimalTol` |
 | LP repair pivot | 1e-9, in the scaled LP | Below the 1e-7 pivot tolerance, the smallest entry either ratio test still takes when it decides the answer: it can repair the dual's leaving row, or it blocks the primal ray (or would be overshot by more than the primal tolerance). | `DualSimplexSolver::kRepairPivotTol` |
 | LP repair step | 1e9, in the scaled LP | A repair that moves a column further than this does not count, so the row still proves infeasibility and the ray stays unbounded. Past it the column's value is round-off. | `DualSimplexSolver::kRepairMaxStep` |
 | Integrality | 1e-6, absolute | A value is integral when it is within 1e-6 of an integer. | `MipSolver::kIntTol`, `isIntegral` |
@@ -64,8 +64,15 @@ answers, and changing them alters behaviour on every model:
 - The tree accepts any strict improvement as its incumbent, but the pool
   needs 1e-6. The pool's best can therefore lag the tree's incumbent by less
   than 1e-6.
-- Tree incumbents are accepted on the scaled LP tolerance. Their rows are
-  never re-checked in original units.
+- Every incumbent, a node's integral LP point included, must hold its
+  rows and bounds to 1e-6 in model units (`heuristic_detail::isFeasiblePoint`,
+  #240). The node LP holds them only to its scaled 1e-7, so an integral
+  point can fail. It is then re-solved with its integers fixed, cold; if
+  that point fails too, the node is fathomed as a tolerance call, as for a
+  model feasible only within tolerance.
+- A root cut round whose LP does not solve to optimality is removed again,
+  and the root LP goes back to the previous round's (#240). The cuts are
+  valid, so such an LP is a numerical failure, not a proof of infeasibility.
 - The dual simplex holds bounds to 1e-7 in its scaled space, and column
   scaling stretches that on a column of tiny coefficients. The LP audit
   (#237) saw basic columns past their bounds by up to 1e-3 in model units
