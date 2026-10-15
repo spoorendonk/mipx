@@ -28,12 +28,12 @@ bool SolutionPool::better(Sense sense, Real lhs, Real rhs) {
 
 bool SolutionPool::submit(HeuristicSolution solution, const char* source, Int thread_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (observer_) {
+        observer_(solution, source != nullptr ? source : "");
+    }
     if (!best_ || better(sense_, solution.objective, best_->solution.objective)) {
         best_ = Entry{std::move(solution), source != nullptr ? source : "", thread_id};
         ++update_count_;
-        if (observer_) {
-            observer_(best_->solution, best_->source);
-        }
         return true;
     }
     return false;

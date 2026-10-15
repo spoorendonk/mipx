@@ -51,8 +51,10 @@ public:
 
     bool submit(HeuristicSolution solution, const char* source = "", Int thread_id = -1);
 
-    /// Called with every submission that becomes the new best, under the
-    /// pool's lock, so calls are serialized.
+    /// Called with every submission, kept or not, under the pool's lock, so
+    /// calls are serialized. The pool keeps a submission only when it improves
+    /// by more than kObjectiveTol, but the tree takes any strict improvement
+    /// as its incumbent and submits it here too (#236).
     using Observer = std::function<void(const HeuristicSolution&, const std::string& source)>;
     void setObserver(Observer observer) { observer_ = std::move(observer); }
 

@@ -418,9 +418,11 @@ public:
     /// node propagation, and re-propagate the root domain against it whenever
     /// a new incumbent lowers the cutoff. Off by default until benchmarked.
     void setObjectivePropagationEnabled(bool enabled) { objective_propagation_enabled_ = enabled; }
-    /// Called with every solution that becomes the incumbent (from a
-    /// heuristic, an integral node LP or the root), postsolved to the loaded
-    /// model's columns, with the name of its source. For validity audits.
+    /// Called with every solution submitted as an incumbent (from a
+    /// heuristic, an integral node LP or the root), whether or not it improves
+    /// on the pool's best, and with the solution presolve finds when it
+    /// removes every column; postsolved to the loaded model's columns, with
+    /// the name of its source. For validity audits.
     using IncumbentObserver =
         std::function<void(const std::vector<Real>& x, const std::string& source)>;
     void setIncumbentObserver(IncumbentObserver observer) {

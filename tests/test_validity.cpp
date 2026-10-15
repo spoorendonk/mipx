@@ -340,7 +340,10 @@ struct ModelSpec {
     bool tiny_coefs = false;  // Rows may carry one coefficient of 1e-9 to 1e-6.
 };
 
-LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
+/// A random model; `anchor_out`, when given, receives the point its rows
+/// were drawn around (feasible unless a row's offset excludes it).
+LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
+                      std::vector<Real>* anchor_out = nullptr) {
     auto uniform = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
     auto chance = [&](double p) { return std::uniform_real_distribution<double>(0, 1)(rng) < p; };
     const std::vector<Real> int_coefs = {1, 2, 3, 5, 7, -1, -2, -3, -4, -7};
@@ -480,6 +483,9 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec) {
     lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
     if (chance(0.3)) {
         lp.obj_offset = 1.5;
+    }
+    if (anchor_out != nullptr) {
+        *anchor_out = std::move(anchor);
     }
     return lp;
 }
@@ -1398,6 +1404,7 @@ TEST_CASE("Validity: end-to-end solves under the opt-in families, every incumben
 
     std::mt19937 rng(235);
     std::vector<LpProblem> models;
+    std::vector<std::vector<Real>> anchors;
     for (int t = 0; t < 120; ++t) {
         ModelSpec spec;
         spec.min_int = 3;
@@ -1407,7 +1414,8 @@ TEST_CASE("Validity: end-to-end solves under the opt-in families, every incumben
         spec.continuous = t % 3 == 1;
         spec.tiny_coefs = t % 2 == 0;
         spec.symmetric = t % 7 == 3;
-        models.push_back(randomModel(rng, spec));
+        anchors.emplace_back();
+        models.push_back(randomModel(rng, spec, &anchors.back()));
     }
 
     Int judged = 0;
@@ -1441,7 +1449,12 @@ TEST_CASE("Validity: end-to-end solves under the opt-in families, every incumben
                 ++incumbents;
             }
             if (!e.feasible) {
-                // Infeasible at 1e-9 may still hold a point within kFeasTol.
+                // Infeasible at 1e-9 may still hold a point within kFeasTol,
+                // and does when the anchor is one: the solver must find it.
+                if (pointFeasible(lp, anchors[t], kFeasTol)) {
+                    INFO("anchor" << describe(anchors[t]) << " is feasible within kFeasTol");
+                    CHECK(result.status == Status::Optimal);
+                }
                 if (result.status == Status::Optimal) {
                     std::vector<Real> x(result.solution.begin(),
                                         result.solution.begin() + lp.num_cols);

@@ -4089,6 +4089,9 @@ MipResult MipSolver::solveMinimization() {
         if (did_presolve) {
             result.solution = presolver.postsolve({});
         }
+        if (incumbent_observer_) {
+            incumbent_observer_(result.solution, "presolve");
+        }
         return result;
     }
 
