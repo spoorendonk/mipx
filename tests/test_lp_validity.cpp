@@ -1,12 +1,43 @@
-// Regressions from the LP validity audit (#237): models the dual simplex
-// answered wrongly, fixed as literals, each answer checked without trusting
-// the solver.
+// LP validity audit for the dual simplex (#237).
+//
+// Every model is built around a known answer, so each result is checked
+// without trusting the solver:
+//
+//   - Optimal models are built from a KKT point: a primal point x*, row
+//     multipliers y and reduced costs d with the signs that make x* optimal,
+//     and the objective c = A^T y + d. The optimum is c^T x* plus the offset.
+//     The solver's own x and y are then checked as a certificate: primal
+//     feasibility, dual feasibility of y (with d recomputed here as
+//     c - A^T y) and a zero duality gap, term by term (complementary
+//     slackness).
+//   - Infeasible models add to a feasible one the row g^T x >= beta + delta,
+//     where g is a positive combination of rows whose sides bound g^T x by
+//     beta. The Farkas ray the solver returns is checked against the
+//     LpSolver::getDualRay() contract.
+//   - Unbounded models open a feasible one along a ray r (every row and
+//     bound that r moves towards is made infinite) and tilt c so c^T r < 0.
+//     The API exposes no primal ray, so only the status is checked (#238).
+//
+// Shapes: equality, ranged, one-sided and free rows; free, fixed, boxed and
+// half-bounded columns; degenerate points (zero multipliers on active rows
+// and bounds, more active rows than columns); row and column scalings that
+// spread the coefficients over 1e-9..1e9; minimize and maximize. Each optimal
+// model is also re-solved warm after bound changes, as branch-and-bound does,
+// and compared with a cold solve of the changed model.
+//
+// Multipliers follow the minimization convention after the sense is undone:
+// for min, y_i >= 0 where row i sits at its lower side and y_i <= 0 at its
+// upper; d_j likewise for column bounds. getDualValues() and
+// getReducedCosts() negate for maximize, so the same test applies to the
+// objective -c of the equivalent minimization.
 
 #include "mipx/dual_simplex.h"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
+#include <cstdint>
+#include <random>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -21,6 +52,343 @@ namespace {
 constexpr long double kPrimalRel = 1e-6L;
 constexpr long double kDualRel = 1e-6L;
 constexpr long double kObjRel = 1e-6L;
+// Warm rounds cut bounds at arbitrary points, so their optima often sit on
+// rows of mixed scale exactly at a bound; the scaled 1e-7 maps to a little
+// more than 1e-6 relative there (seen up to 2e-6).
+constexpr long double kWarmRel = 1e-5L;
+
+enum class Shape : std::uint8_t { Optimal, Infeasible, Unbounded };
+
+struct Generated {
+    LpProblem lp;
+    Shape shape = Shape::Optimal;
+    Real optimum = 0.0;  // in the model's own sense, offset included
+};
+
+class Rng {
+public:
+    explicit Rng(std::uint32_t seed) : gen_(seed) {}
+    Real uniform(Real lo, Real hi) { return std::uniform_real_distribution<Real>(lo, hi)(gen_); }
+    int pick(int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(gen_); }
+    bool coin(Real p) { return uniform(0.0, 1.0) < p; }
+    // A value with a few significant digits, so sums stay exact-ish.
+    Real value(Real lo, Real hi) { return std::round(uniform(lo, hi) * 8.0) / 8.0; }
+
+private:
+    std::mt19937 gen_;
+};
+
+// Column shapes and where x*_j sits in them.
+enum class ColKind : std::uint8_t { Boxed, Fixed, Free, LowerOnly, UpperOnly };
+// Row shapes.
+enum class RowKind : std::uint8_t { Equality, Lower, Upper, Ranged, Free };
+
+struct Options {
+    bool scaled = false;      // spread coefficients over 1e-9..1e9
+    bool degenerate = false;  // many active rows and zero multipliers
+    bool maximize = false;
+};
+
+// Build an LP with known optimum c^T x* (min convention) from a KKT point.
+Generated generateOptimal(Rng& rng, const Options& opt) {
+    const int n = rng.pick(2, 7);
+    const int m = rng.pick(1, opt.degenerate ? 9 : 6);
+
+    std::vector<Real> x(n), cl(n), cu(n), d(n, 0.0);
+    for (int j = 0; j < n; ++j) {
+        const auto kind = static_cast<ColKind>(rng.pick(0, 4));
+        x[j] = rng.value(-4.0, 4.0);
+        const Real w = rng.value(0.5, 5.0);
+        switch (kind) {
+            case ColKind::Boxed: {
+                const int at = rng.pick(0, 2);  // 0 lower, 1 upper, 2 interior
+                cl[j] = at == 0 ? x[j] : x[j] - w;
+                cu[j] = at == 1 ? x[j] : x[j] + w;
+                if (at == 0) {
+                    d[j] = rng.coin(opt.degenerate ? 0.5 : 0.2) ? 0.0 : rng.value(0.125, 3.0);
+                } else if (at == 1) {
+                    d[j] = rng.coin(opt.degenerate ? 0.5 : 0.2) ? 0.0 : -rng.value(0.125, 3.0);
+                }
+                break;
+            }
+            case ColKind::Fixed:
+                cl[j] = cu[j] = x[j];
+                d[j] = rng.value(-3.0, 3.0);
+                break;
+            case ColKind::Free:
+                cl[j] = -kInf;
+                cu[j] = kInf;
+                break;
+            case ColKind::LowerOnly:
+                cu[j] = kInf;
+                if (rng.coin(0.6)) {
+                    cl[j] = x[j];
+                    d[j] = rng.coin(opt.degenerate ? 0.5 : 0.2) ? 0.0 : rng.value(0.125, 3.0);
+                } else {
+                    cl[j] = x[j] - w;
+                }
+                break;
+            case ColKind::UpperOnly:
+                cl[j] = -kInf;
+                if (rng.coin(0.6)) {
+                    cu[j] = x[j];
+                    d[j] = rng.coin(opt.degenerate ? 0.5 : 0.2) ? 0.0 : -rng.value(0.125, 3.0);
+                } else {
+                    cu[j] = x[j] + w;
+                }
+                break;
+        }
+    }
+
+    std::vector<std::vector<Real>> a(m, std::vector<Real>(n, 0.0));
+    std::vector<Real> rl(m), ru(m), y(m, 0.0);
+    for (int i = 0; i < m; ++i) {
+        bool any = false;
+        for (int j = 0; j < n; ++j) {
+            if (rng.coin(0.6)) {
+                a[i][j] = rng.value(-5.0, 5.0);
+                any = any || a[i][j] != 0.0;
+            }
+        }
+        if (!any) {
+            a[i][rng.pick(0, n - 1)] = 1.0;
+        }
+        Real act = 0.0;
+        for (int j = 0; j < n; ++j) {
+            act += a[i][j] * x[j];
+        }
+        const auto kind = static_cast<RowKind>(rng.pick(0, 4));
+        const Real slack = rng.value(0.5, 4.0);
+        const bool active = rng.coin(opt.degenerate ? 0.85 : 0.6);
+        const Real zero_y = opt.degenerate ? 0.5 : 0.15;
+        switch (kind) {
+            case RowKind::Equality:
+                rl[i] = ru[i] = act;
+                y[i] = rng.value(-3.0, 3.0);
+                break;
+            case RowKind::Lower:
+                rl[i] = active ? act : act - slack;
+                ru[i] = kInf;
+                if (active && !rng.coin(zero_y)) {
+                    y[i] = rng.value(0.125, 3.0);
+                }
+                break;
+            case RowKind::Upper:
+                rl[i] = -kInf;
+                ru[i] = active ? act : act + slack;
+                if (active && !rng.coin(zero_y)) {
+                    y[i] = -rng.value(0.125, 3.0);
+                }
+                break;
+            case RowKind::Ranged: {
+                const int at = active ? rng.pick(0, 1) : 2;
+                rl[i] = at == 0 ? act : act - slack;
+                ru[i] = at == 1 ? act : act + slack;
+                if (at < 2 && !rng.coin(zero_y)) {
+                    y[i] = (at == 0 ? 1.0 : -1.0) * rng.value(0.125, 3.0);
+                }
+                break;
+            }
+            case RowKind::Free:
+                rl[i] = -kInf;
+                ru[i] = kInf;
+                break;
+        }
+    }
+
+    // c = A^T y + d, so x* with (y, d) satisfies the KKT conditions.
+    std::vector<Real> c(d);
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < n; ++j) {
+            c[j] += a[i][j] * y[i];
+        }
+    }
+
+    // Optional scaling: A' = R A S, x' = S^{-1} x, c' = S c, rows times R.
+    std::vector<Real> rs(m, 1.0), cs(n, 1.0);
+    if (opt.scaled) {
+        for (auto& v : rs) {
+            v = std::pow(10.0, rng.pick(-4, 4));
+        }
+        for (auto& v : cs) {
+            v = std::pow(10.0, rng.pick(-4, 4));
+        }
+    }
+
+    Generated g;
+    LpProblem& lp = g.lp;
+    lp.name = "lp_validity";
+    lp.num_cols = n;
+    lp.num_rows = m;
+    lp.obj_offset = rng.value(-10.0, 10.0);
+    lp.col_type.assign(n, VarType::Continuous);
+    lp.obj.resize(n);
+    lp.col_lower.resize(n);
+    lp.col_upper.resize(n);
+    Real opt_min = 0.0;
+    for (int j = 0; j < n; ++j) {
+        lp.obj[j] = c[j] * cs[j];
+        lp.col_lower[j] = cl[j] == -kInf ? -kInf : cl[j] / cs[j];
+        lp.col_upper[j] = cu[j] == kInf ? kInf : cu[j] / cs[j];
+        opt_min += c[j] * x[j];
+    }
+    std::vector<Triplet> entries;
+    lp.row_lower.resize(m);
+    lp.row_upper.resize(m);
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < n; ++j) {
+            if (a[i][j] != 0.0) {
+                entries.push_back({i, j, a[i][j] * rs[i] * cs[j]});
+            }
+        }
+        lp.row_lower[i] = rl[i] == -kInf ? -kInf : rl[i] * rs[i];
+        lp.row_upper[i] = ru[i] == kInf ? kInf : ru[i] * rs[i];
+    }
+    lp.matrix = SparseMatrix(m, n, std::move(entries));
+    if (opt.maximize) {
+        lp.sense = Sense::Maximize;
+        for (auto& v : lp.obj) {
+            v = -v;
+        }
+        g.optimum = -opt_min + lp.obj_offset;
+    } else {
+        g.optimum = opt_min + lp.obj_offset;
+    }
+    return g;
+}
+
+std::vector<std::vector<Real>> denseRows(const LpProblem& lp) {
+    std::vector<std::vector<Real>> a(lp.num_rows, std::vector<Real>(lp.num_cols, 0.0));
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            a[i][rv.indices[k]] += rv.values[k];
+        }
+    }
+    return a;
+}
+
+void setRows(LpProblem& lp, const std::vector<std::vector<Real>>& a) {
+    std::vector<Triplet> entries;
+    for (Index i = 0; i < static_cast<Index>(a.size()); ++i) {
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            if (a[i][j] != 0.0) {
+                entries.push_back({i, j, a[i][j]});
+            }
+        }
+    }
+    lp.num_rows = static_cast<Index>(a.size());
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(entries));
+}
+
+// Add g^T x >= beta + delta, where g = sum_i w_i sigma_i a_i over rows with the
+// side sigma_i finite, so every point meeting the rows has g^T x <= beta.
+Generated generateInfeasible(Rng& rng, const Options& opt) {
+    Generated g = generateOptimal(rng, opt);
+    LpProblem& lp = g.lp;
+    auto a = denseRows(lp);
+    std::vector<Real> gv(lp.num_cols, 0.0);
+    long double beta = 0.0L;
+    long double scale = 0.0L;
+    bool used = false;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const bool up = lp.row_upper[i] != kInf;
+        const bool lo = lp.row_lower[i] != -kInf;
+        if ((!up && !lo) || !rng.coin(0.7)) {
+            continue;
+        }
+        const Real sigma = up && (!lo || rng.coin(0.5)) ? 1.0 : -1.0;
+        const Real side = sigma > 0.0 ? lp.row_upper[i] : lp.row_lower[i];
+        // Weight by the row's size, so scaled rows contribute evenly.
+        Real rmax = 0.0;
+        for (Real v : a[i]) {
+            rmax = std::max(rmax, std::abs(v));
+        }
+        const Real w = rng.value(0.5, 3.0) / rmax;
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            gv[j] += w * sigma * a[i][j];
+        }
+        beta += static_cast<long double>(w) * sigma * side;
+        scale = std::max(scale, std::abs(static_cast<long double>(w) * side));
+        used = true;
+    }
+    if (!used) {
+        // No row qualified: contradict a column bound instead.
+        Index j = 0;
+        while (j < lp.num_cols && lp.col_upper[j] == kInf && lp.col_lower[j] == -kInf) {
+            ++j;
+        }
+        if (j == lp.num_cols) {
+            j = 0;
+            lp.col_upper[0] = lp.col_lower[0] = 0.0;
+        }
+        std::fill(gv.begin(), gv.end(), 0.0);
+        if (lp.col_upper[j] != kInf) {
+            gv[j] = 1.0;
+            beta = lp.col_upper[j];
+        } else {
+            gv[j] = -1.0;
+            beta = -lp.col_lower[j];
+        }
+        scale = std::abs(beta);
+    }
+    a.push_back(gv);
+    setRows(lp, a);
+    const long double delta = 1.0L + 0.1L * scale;
+    lp.row_lower.push_back(static_cast<Real>(beta + delta));
+    lp.row_upper.push_back(kInf);
+    g.shape = Shape::Infeasible;
+    return g;
+}
+
+// Open the optimal model along a ray r and tilt the objective along -r.
+Generated generateUnbounded(Rng& rng, const Options& opt) {
+    Generated g = generateOptimal(rng, opt);
+    LpProblem& lp = g.lp;
+    const Index n = lp.num_cols;
+    std::vector<Real> r(n, 0.0);
+    const int support = rng.pick(1, std::min<int>(3, n));
+    for (int k = 0; k < support; ++k) {
+        const Index j = rng.pick(0, n - 1);
+        r[j] = rng.value(0.25, 2.0) * (rng.coin(0.5) ? 1.0 : -1.0);
+        if (lp.col_lower[j] == lp.col_upper[j]) {
+            lp.col_lower[j] = -kInf;  // a fixed column cannot move; free it
+            lp.col_upper[j] = kInf;
+        }
+        if (r[j] > 0.0) {
+            lp.col_upper[j] = kInf;
+        } else {
+            lp.col_lower[j] = -kInf;
+        }
+    }
+    const auto a = denseRows(lp);
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        long double ar = 0.0L;
+        for (Index j = 0; j < n; ++j) {
+            ar += static_cast<long double>(a[i][j]) * r[j];
+        }
+        if (ar > 0.0L) {
+            lp.row_upper[i] = kInf;
+        } else if (ar < 0.0L) {
+            lp.row_lower[i] = -kInf;
+        }
+    }
+    // Minimization terms: c_min = obj (min) or -obj (max). Make c_min^T r < 0.
+    const Real s = lp.sense == Sense::Maximize ? -1.0 : 1.0;
+    long double cr = 0.0L;
+    long double rr = 0.0L;
+    for (Index j = 0; j < n; ++j) {
+        cr += static_cast<long double>(s * lp.obj[j]) * r[j];
+        rr += static_cast<long double>(r[j]) * r[j];
+    }
+    const long double t = (cr + 1.0L + 0.5L * std::abs(cr)) / rr;
+    for (Index j = 0; j < n; ++j) {
+        lp.obj[j] -= static_cast<Real>(s * t * r[j]);
+    }
+    g.shape = Shape::Unbounded;
+    return g;
+}
+
 // ---------------------------------------------------------------------------
 // Certificate checks, all in long double against the model as given.
 // ---------------------------------------------------------------------------
@@ -282,6 +650,237 @@ std::string checkFarkas(const LpProblem& lp, const std::vector<Real>& y, bool ma
     return {};
 }
 
+const char* statusName(Status s) {
+    switch (s) {
+        case Status::Optimal:
+            return "Optimal";
+        case Status::Infeasible:
+            return "Infeasible";
+        case Status::Unbounded:
+            return "Unbounded";
+        case Status::IterLimit:
+            return "IterLimit";
+        case Status::TimeLimit:
+            return "TimeLimit";
+        case Status::NodeLimit:
+            return "NodeLimit";
+        case Status::Error:
+            return "Error";
+    }
+    return "?";
+}
+
+struct Audit {
+    int models = 0;
+    // Warm rounds where the two solves differ only within tolerance: one
+    // proved the model infeasible up to tolerance and the other returned a
+    // point, or both optima hold to tolerance at different objectives.
+    int tolerance_calls = 0;
+    std::vector<std::string> failures;
+
+    void fail(const std::string& what, const LpProblem& lp) {
+        if (failures.size() < 8) {
+            failures.push_back(what + "\n" + describe(lp));
+        } else {
+            failures.emplace_back(what);
+        }
+    }
+};
+
+// Solve with the solver as branch-and-bound uses it and check the verdict.
+// Returns the status, so a caller can go on to warm starts.
+Status checkSolve(DualSimplexSolver& solver, const Generated& g, const std::string& tag,
+                  Audit& audit, bool check_known_optimum = true) {
+    const LpResult res = solver.solve();
+    const LpProblem& lp = g.lp;
+    const auto want = g.shape == Shape::Optimal      ? Status::Optimal
+                      : g.shape == Shape::Infeasible ? Status::Infeasible
+                                                     : Status::Unbounded;
+    if (res.status != want) {
+        audit.fail(tag + ": status " + statusName(res.status) + ", expected " + statusName(want),
+                   lp);
+        return res.status;
+    }
+    if (want == Status::Optimal) {
+        const std::string err =
+            checkOptimal(lp, solver.getPrimalValues(), solver.getDualValues(), res.objective);
+        if (!err.empty()) {
+            audit.fail(tag + ": optimal certificate: " + err, lp);
+        }
+        if (std::abs(res.objective - solver.getObjective()) >
+            kObjRel * std::max(1.0, std::abs(res.objective))) {
+            audit.fail(tag + ": LpResult.objective differs from getObjective()", lp);
+        }
+        if (check_known_optimum &&
+            std::abs(res.objective - g.optimum) > kObjRel * std::max(1.0, std::abs(g.optimum))) {
+            std::ostringstream os;
+            os.precision(17);
+            os << tag << ": objective " << res.objective << ", known optimum " << g.optimum;
+            audit.fail(os.str(), lp);
+        }
+    } else if (want == Status::Infeasible) {
+        const std::string err = checkFarkas(lp, solver.getDualRay());
+        if (!err.empty()) {
+            audit.fail(tag + ": Farkas ray: " + err, lp);
+        }
+    }
+    return res.status;
+}
+
+void report(const Audit& audit) {
+    INFO("models " << audit.models << ", tolerance calls " << audit.tolerance_calls << ", failures "
+                   << audit.failures.size());
+    for (const auto& f : audit.failures) {
+        UNSCOPED_INFO(f);
+    }
+    CHECK(audit.failures.empty());
+}
+
+Options optionsFor(int variant) {
+    return Options{.scaled = (variant & 1) != 0,
+                   .degenerate = (variant & 2) != 0,
+                   .maximize = (variant & 4) != 0};
+}
+
+std::string tagFor(const char* kind, std::uint32_t seed, int variant) {
+    const Options o = optionsFor(variant);
+    std::ostringstream os;
+    os << kind << " seed " << seed << (o.scaled ? " scaled" : "")
+       << (o.degenerate ? " degenerate" : "") << (o.maximize ? " max" : " min");
+    return os.str();
+}
+
+// 8 variants per seed. Sweeps of 60000 seeds (1.9M models) were run while
+// fixing #237; this many keeps the suite inside its time budget.
+constexpr std::uint32_t kSeeds = 300;
+
+// One model through rounds of branching-style bound changes, re-solved warm
+// each round and compared with a cold solve of the changed model.
+void auditWarm(std::uint32_t seed, int variant, Audit& audit) {
+    Rng rng(300000U + seed * 8U + static_cast<std::uint32_t>(variant));
+    Generated g = generateOptimal(rng, optionsFor(variant));
+    DualSimplexSolver warm;
+    warm.setVerbose(false);
+    warm.load(g.lp);
+    const std::string tag = tagFor("warm", seed, variant);
+    ++audit.models;
+    if (checkSolve(warm, g, tag, audit) != Status::Optimal) {
+        return;
+    }
+    for (int round = 0; round < 3; ++round) {
+        const auto x = warm.getPrimalValues();
+        const int changes = rng.pick(1, 2);
+        for (int k = 0; k < changes; ++k) {
+            const Index j = rng.pick(0, g.lp.num_cols - 1);
+            Real lo = g.lp.col_lower[j];
+            Real hi = g.lp.col_upper[j];
+            const Real step = std::max(1e-3, 0.25 * std::abs(x[j])) * rng.value(0.5, 2.0);
+            switch (rng.pick(0, 3)) {
+                case 0:  // down branch: cut x_j off from above
+                    hi = x[j] - step;
+                    break;
+                case 1:  // up branch
+                    lo = x[j] + step;
+                    break;
+                case 2:  // fix at the current value
+                    lo = hi = x[j];
+                    break;
+                default:  // relax back to free
+                    lo = -kInf;
+                    hi = kInf;
+                    break;
+            }
+            if (lo > hi) {
+                std::swap(lo, hi);  // keep the box nonempty
+            }
+            g.lp.col_lower[j] = lo;
+            g.lp.col_upper[j] = hi;
+            warm.setColBounds(j, lo, hi);
+        }
+        DualSimplexSolver cold;
+        cold.setVerbose(false);
+        cold.load(g.lp);
+        const LpResult cr = cold.solve();
+        const LpResult wr = warm.solve();
+        const std::string rtag = tag + " round " + std::to_string(round);
+        // Bounds cut at arbitrary points leave models that are feasible, or
+        // infeasible, only to within the solver's scaled tolerance. A ray
+        // valid up to tolerance on one side then makes a point from the
+        // other side a tolerance call rather than a wrong answer.
+        const bool split = (cr.status == Status::Optimal && wr.status == Status::Infeasible) ||
+                           (cr.status == Status::Infeasible && wr.status == Status::Optimal);
+        if (split) {
+            const auto& inf = wr.status == Status::Infeasible ? warm : cold;
+            if (checkFarkas(g.lp, inf.getDualRay(), true).empty()) {
+                ++audit.tolerance_calls;
+                return;
+            }
+        }
+        if (cr.status != wr.status) {
+            std::ostringstream os;
+            os.precision(17);
+            os << rtag << ": warm " << statusName(wr.status) << ", cold " << statusName(cr.status);
+            for (const auto* sv : {&warm, &cold}) {
+                if (sv->getStatus() == Status::Optimal) {
+                    os << "\n  " << (sv == &warm ? "warm" : "cold") << " obj " << sv->getObjective()
+                       << " certificate: "
+                       << checkOptimal(g.lp, sv->getPrimalValues(), sv->getDualValues(),
+                                       sv->getObjective());
+                    os << "\n  x:";
+                    for (Real v : sv->getPrimalValues()) {
+                        os << ' ' << v;
+                    }
+                } else if (sv->getStatus() == Status::Infeasible) {
+                    os << "\n  " << (sv == &warm ? "warm" : "cold")
+                       << " Farkas: " << checkFarkas(g.lp, sv->getDualRay(), true);
+                }
+            }
+            audit.fail(os.str(), g.lp);
+            return;
+        }
+        if (wr.status == Status::Optimal) {
+            const std::string err = checkOptimal(g.lp, warm.getPrimalValues(), warm.getDualValues(),
+                                                 wr.objective, kWarmRel);
+            if (!err.empty()) {
+                audit.fail(rtag + ": warm optimal certificate: " + err, g.lp);
+                return;
+            }
+            // Both optima hold to tolerance, so they may differ by as much
+            // as the tolerance moves the optimum; flag it only when the cold
+            // one fails its own certificate.
+            if (std::abs(wr.objective - cr.objective) >
+                    kObjRel * std::max(1.0, std::abs(cr.objective)) &&
+                checkOptimal(g.lp, cold.getPrimalValues(), cold.getDualValues(), cr.objective,
+                             kWarmRel)
+                    .empty()) {
+                ++audit.tolerance_calls;
+            } else if (std::abs(wr.objective - cr.objective) >
+                       kObjRel * std::max(1.0, std::abs(cr.objective))) {
+                std::ostringstream os;
+                os.precision(17);
+                os << rtag << ": warm objective " << wr.objective << ", cold " << cr.objective;
+                audit.fail(os.str(), g.lp);
+                return;
+            }
+        } else if (wr.status == Status::Infeasible) {
+            const std::string err = checkFarkas(g.lp, warm.getDualRay(), true);
+            if (!err.empty()) {
+                std::ostringstream os;
+                os.precision(17);
+                os << rtag << ": warm Farkas ray: " << err
+                   << " (cold ray: " << checkFarkas(g.lp, cold.getDualRay(), true) << ")\n  y:";
+                for (Real v : warm.getDualRay()) {
+                    os << ' ' << v;
+                }
+                audit.fail(os.str(), g.lp);
+            }
+            return;
+        } else {
+            return;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Models the audit found wrong answers on (#237), fixed as literals so they
 // do not depend on the generator or the standard library's distributions.
@@ -329,6 +928,64 @@ void requireCertifiedInfeasible(const LpProblem& lp) {
 }
 
 }  // namespace
+
+TEST_CASE("LP validity: optimal LPs give a valid primal-dual certificate", "[lp_validity]") {
+    Audit audit;
+    for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
+        for (int variant = 0; variant < 8; ++variant) {
+            Rng rng(seed * 8U + static_cast<std::uint32_t>(variant) + 1U);
+            const Generated g = generateOptimal(rng, optionsFor(variant));
+            DualSimplexSolver solver;
+            solver.setVerbose(false);
+            solver.load(g.lp);
+            ++audit.models;
+            checkSolve(solver, g, tagFor("optimal", seed, variant), audit);
+        }
+    }
+    report(audit);
+}
+
+TEST_CASE("LP validity: infeasible LPs give a valid Farkas ray", "[lp_validity]") {
+    Audit audit;
+    for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
+        for (int variant = 0; variant < 8; ++variant) {
+            Rng rng(100000U + seed * 8U + static_cast<std::uint32_t>(variant));
+            const Generated g = generateInfeasible(rng, optionsFor(variant));
+            DualSimplexSolver solver;
+            solver.setVerbose(false);
+            solver.load(g.lp);
+            ++audit.models;
+            checkSolve(solver, g, tagFor("infeasible", seed, variant), audit);
+        }
+    }
+    report(audit);
+}
+
+TEST_CASE("LP validity: unbounded LPs report Unbounded", "[lp_validity]") {
+    Audit audit;
+    for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
+        for (int variant = 0; variant < 8; ++variant) {
+            Rng rng(200000U + seed * 8U + static_cast<std::uint32_t>(variant));
+            const Generated g = generateUnbounded(rng, optionsFor(variant));
+            DualSimplexSolver solver;
+            solver.setVerbose(false);
+            solver.load(g.lp);
+            ++audit.models;
+            checkSolve(solver, g, tagFor("unbounded", seed, variant), audit);
+        }
+    }
+    report(audit);
+}
+
+TEST_CASE("LP validity: warm re-solves after bound changes match a cold solve", "[lp_validity]") {
+    Audit audit;
+    for (std::uint32_t seed = 0; seed < kSeeds; ++seed) {
+        for (int variant = 0; variant < 8; ++variant) {
+            auditWarm(seed, variant, audit);
+        }
+    }
+    report(audit);
+}
 
 TEST_CASE("Regression #237: an empty ratio test proves infeasibility without dual feasibility",
           "[lp_validity]") {

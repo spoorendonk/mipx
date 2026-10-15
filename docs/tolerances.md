@@ -12,6 +12,8 @@ says what each one means, and records where each one is used (#236).
 |---|---|---|---|
 | Primal feasibility | 1e-6, absolute | A point is feasible when every row and bound holds to 1e-6. Heuristics, the root check and the LP-free search accept points by this. | `heuristics/common.h` `kFeasTol`, `MipSolver::isFeasibleLp` |
 | LP primal tolerance | 1e-7, in the scaled LP | What the dual simplex accepts. A node LP point is accepted as an incumbent on this plus integrality. | `DualSimplexSolver::kPrimalTol` |
+| LP repair pivot | 1e-9, in the scaled LP | Below the 1e-7 pivot tolerance, the smallest entry either ratio test still takes when it decides the answer: it can repair the dual's leaving row, or it blocks the primal ray (or would be overshot by more than the primal tolerance). | `DualSimplexSolver::kRepairPivotTol` |
+| LP repair step | 1e9, in the scaled LP | A repair that moves a column further than this does not count, so the row still proves infeasibility and the ray stays unbounded. Past it the column's value is round-off. | `DualSimplexSolver::kRepairMaxStep` |
 | Integrality | 1e-6, absolute | A value is integral when it is within 1e-6 of an integer. | `MipSolver::kIntTol`, `isIntegral` |
 | Bound crossing | 1e-8, absolute | A column whose lower bound passes its upper by at most 1e-8 is not empty; keep the swapped (or clamped) interval. | `DomainPropagator::kTol`, `keepCrossingWithinTolerance` |
 | Row slack | 1e-8 times the row's magnitude | A row is violated only past 1e-8 times the largest of 1, its finite sides and its finite activity terms. Bounds derived from a row take the same slack. | `DomainPropagator::propagateRow`, `Presolver::rowTol` |
@@ -64,11 +66,21 @@ answers, and changing them alters behaviour on every model:
   than 1e-6.
 - Tree incumbents are accepted on the scaled LP tolerance. Their rows are
   never re-checked in original units.
+- The dual simplex holds bounds to 1e-7 in its scaled space, and column
+  scaling stretches that on a column of tiny coefficients. The LP audit
+  (#237) saw basic columns past their bounds by up to 1e-3 in model units
+  while every row held to its tolerance. Other solvers re-check the
+  unscaled point and re-solve when it fails; this one does not.
+- Models that are feasible, or infeasible, only within that tolerance can
+  be answered either way, and a warm and a cold solve of one model can
+  disagree. The LP audit counts these as tolerance calls, not failures.
 
 ## Checking it
 
 The validity audits in `tests/test_validity.cpp` enumerate small models and
-check the solver against them. The `Regression #236` cases there are the
+check the solver against them. `tests/test_lp_validity.cpp` does the same for
+the dual simplex, checking each answer with a certificate: a primal-dual
+pair, or a Farkas ray. The `Regression #236` cases there are the
 constructions that broke the rule: rows with terms near 1e9, and rows with a
 coefficient near 1e-9 to 1e-6. Each incumbent the search submits goes through
 `MipSolver::setIncumbentObserver` and is checked against the model as given.
