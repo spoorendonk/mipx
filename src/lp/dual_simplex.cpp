@@ -1321,6 +1321,9 @@ LpResult DualSimplexSolver::solve() {
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
     Int empty_candidate_retry_streak = 0;
+    // The row whose repair pivot (see the dual ratio test) was rejected as
+    // numerically zero, or -1; cleared by the next ordinary pivot.
+    Index repair_rejected_row = -1;
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
     Int iters_since_pinf_improve = 0;
@@ -2561,6 +2564,44 @@ LpResult DualSimplexSolver::solve() {
             collectCandidates(0, nnb);
         }
 
+        // An empty ratio test proves infeasibility only if the entries it
+        // skipped as too small (below kPivotTol, or rejected for relative
+        // size) cannot repair the row either. A free column with alpha 1e-8
+        // can close any violation; dropping it reported a feasible LP
+        // Infeasible (#237). Admit the skipped entries when, moved over their
+        // whole ranges, they could reach the violated bound.
+        bool repair_pivot = false;
+        if (bfrt_cands.empty() && leaving_row != repair_rejected_row) {
+            const Real violation =
+                sigma > 0.0 ? leaving_lb - leaving_val : leaving_val - leaving_ub;
+            Real repair = 0.0;
+            for (Index pos = 0; pos < nnb; ++pos) {
+                const Index k = nonbasic_[pos];
+                const Real alpha = pivot_row_alpha[k];
+                const BasisStatus st = var_status_[k];
+                if (std::abs(alpha) < kRepairPivotTol || st == BasisStatus::Fixed) {
+                    continue;
+                }
+                // The move that helps: x_k up when sigma * alpha < 0.
+                const bool up = sigma * alpha < 0.0;
+                if (st != BasisStatus::Free && (st == BasisStatus::AtLower) != up) {
+                    continue;
+                }
+                const Real lb = lowerBoundFast(k);
+                const Real ub = upperBoundFast(k);
+                const Real range =
+                    (st == BasisStatus::Free || lb == -kInf || ub == kInf) ? kInf : ub - lb;
+                repair += std::abs(alpha) * std::min(range, kRepairMaxStep);
+                const Real cnorm = col_norms[static_cast<std::size_t>(k)];
+                bfrt_cands.push_back({k, pos, std::abs(reducedCostForPricing(k) / alpha), alpha,
+                                      range, std::abs(alpha) / cnorm});
+            }
+            if (repair < violation) {
+                bfrt_cands.clear();
+            }
+            repair_pivot = !bfrt_cands.empty();
+        }
+
         if (bfrt_cands.empty()) {
             // No eligible entering variable for this leaving row can be caused
             // by numerical drift, stale factorization, or partial pricing
@@ -2619,6 +2660,9 @@ LpResult DualSimplexSolver::solve() {
             continue;
         }
         empty_candidate_retry_streak = 0;
+        if (!repair_pivot) {
+            repair_rejected_row = -1;
+        }
 
         auto cand_ratio_pos_less = [](const BfrtCand& a, const BfrtCand& b) {
             if (a.ratio != b.ratio) {
@@ -2798,8 +2842,15 @@ LpResult DualSimplexSolver::solve() {
             }
         }
 
+        // A pivot admitted only to repair the row is small by construction;
+        // rejecting it here again would refactorize and pick it forever.
         Real pivot_element = pivot_col[leaving_row];
-        if (std::abs(pivot_element) < kPivotTol) {
+        if (std::abs(pivot_element) < (repair_pivot ? kRepairPivotTol : kPivotTol)) {
+            // A repair pivot the fresh factors still reject is round-off, so
+            // the row's next empty ratio test stands as the proof.
+            if (repair_pivot) {
+                repair_rejected_row = leaving_row;
+            }
             // Numerically degenerate pivot. Refactorize and retry.
             try {
                 refactorize();

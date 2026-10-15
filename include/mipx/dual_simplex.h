@@ -386,6 +386,13 @@ private:
     static constexpr Real kDualTol = 1e-7;
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
+    // Smallest pivot the ratio test admits when no entry reaches kPivotTol
+    // but a small one, over its column's range, can still repair the row.
+    static constexpr Real kRepairPivotTol = 1e-9;
+    // Largest move (scaled units) a repair may count on. Reaching a bound
+    // only past it puts the column where round-off in its value exceeds the
+    // primal tolerance, so such a row still stands as a proof.
+    static constexpr Real kRepairMaxStep = 1e9;
     static constexpr Int kLogFrequency = 200;
 
     // Hyper-sparse pivot-row ("row price") switching constants (#131).
