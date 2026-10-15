@@ -90,9 +90,12 @@ bool ObjectivePropagator::propagate(Real cutoff, std::span<const Real> lower,
         if (!changed) {
             continue;
         }
+        // Round at the propagator's integer tolerance, not kTol: the division
+        // scales the sums' rounding by 1/|c|, and a candidate a few 1e-8 below
+        // an integer lost a whole unit, as it did in DomainPropagator (#235).
         if (col_type_[j] != VarType::Continuous) {
-            new_lower = std::ceil(new_lower - kTol);
-            new_upper = std::floor(new_upper + kTol);
+            new_lower = std::ceil(new_lower - DomainPropagator::kIntRoundTol);
+            new_upper = std::floor(new_upper + DomainPropagator::kIntRoundTol);
         }
         if (new_lower > new_upper + kTol) {
             return false;
