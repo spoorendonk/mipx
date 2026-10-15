@@ -2002,3 +2002,22 @@ TEST_CASE("Regression #244: presolve keeps a ranged row of an LP", "[validity]")
     lp.obj_offset = 4.5;
     requirePresolveAgrees(lp);
 }
+
+TEST_CASE("Regression #244: presolve keeps the rows of an all-integer MIP", "[validity]") {
+    constexpr auto I = VarType::Integer;
+    LpProblem lp =
+        makeModel(Sense::Maximize, {0, 2.8125000000000003e-05, 0.00040781250000000003, 0.53125},
+                  {-3750, 10000, -15000, 15}, {kInf, 10000, kInf, 15}, {I, I, I, I},
+                  {{-3.1250000000000001e-06, 0, 1.875e-06, 0.001},
+                   {-5.0000000000000001e-09, -2e-08, -8.7500000000000006e-09, 0},
+                   {1.5000000000000002e-08, 4.3750000000000005e-08, 0, 0},
+                   {0, 0.000175, -0.00036250000000000003, 0},
+                   {0, -1.3750000000000001e-08, 0, -1.8750000000000002e-05},
+                   {2.5000000000000004e-07, 0, 0, 0},
+                   {0, -0.1125, 0, 0}},
+                  {-kInf, -kInf, -kInf, 7.1875, -0.00041875000000000001, -kInf, -1125},
+                  {kInf, -0.00025625000000000002, 0.001, 7.1875, -0.00041875000000000001,
+                   0.0093749999999999997, -1125});
+    lp.obj_offset = 6.125;
+    requirePresolveAgrees(lp);
+}

@@ -1238,11 +1238,23 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
         //
         // The bound covers the columns the fixing loop below actually pins,
         // i.e. those with |a_ij| > kTol. A column whose coefficient in this row
-        // is at or below kTol is skipped by both loops, so no wrong fixing
-        // comes of it -- but the row is still removed while that column stays
-        // free, which loses the constraint it placed on it. That is a separate
-        // pre-existing defect, not one this guard can close; see issue #215 for
-        // the wider survey of reductions that substitute a bound for a value.
+        // is at or below kTol is not pinned, as its displacement g/|a_ij| is
+        // not small, and removing the row would then lose the constraint it
+        // places on that column (#244: x0 >= 37500 through a coefficient of
+        // -5e-9, every term of the row that small). Such a row stays.
+        bool unpinned_column = false;
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            const Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
+            if (!col_removed[j] && a != 0.0 && std::abs(a) <= kTol &&
+                lp.col_lower[j] != lp.col_upper[j]) {
+                unpinned_column = true;
+                break;
+            }
+        }
+        if (unpinned_column) {
+            continue;
+        }
         Real forcing_tol = kTol;
         for (Index k = 0; k < rv.size(); ++k) {
             const Index j = rv.indices[k];
