@@ -78,10 +78,14 @@ answers, and changing them alters behaviour on every model:
   slack into 0.05 through a coefficient of 4e6 (#244). The final point is
   therefore checked against the model as loaded, by the same test as every
   incumbent (`MipSolver::solveMinimization`). A point that fails is
-  re-solved with its integers fixed, cold. If that fails too, the model is
-  solved again without presolve in the time left, and if that answer fails
-  as well the status is `Error` with no solution. An incumbent found by
-  presolve alone is reported to the observer only when it passes.
+  re-solved with its integers fixed, cold. A MIP's repaired point keeps an
+  `Optimal` status only within the gap tolerance of the bound, since its
+  integers were optimal only for the reduced model. Failing that, the model
+  is solved again without presolve in the time and nodes left, and that
+  answer stands as it would with presolve off. With no limits left the
+  status is the limit hit, with the repaired point or none. An incumbent
+  found by presolve alone is reported to the observer only when it passes;
+  incumbents the tree reports are checked against the reduced model only.
 - Presolve does not eliminate a bounded column through a doubleton
   equality whose ratio is at most 1e-8, as its bounds cannot be projected
   onto the kept column, and it does not remove a forcing row while a live,

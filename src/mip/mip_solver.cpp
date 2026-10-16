@@ -3917,45 +3917,69 @@ MipResult MipSolver::solve() {
 // the model as loaded by far more (#244: a row removed as redundant at its
 // bounds, with a coefficient of 4e6 on a column 1.3e-8 past one). Check the
 // final point there, the gate every incumbent passes. A failing point is
-// re-solved with its integers fixed; if that fails too, the model is solved
-// again without presolve in the time left. No point that fails the gate is
-// returned.
+// re-solved with its integers fixed. If that fails too, or moves a MIP's
+// optimum off its bound, the model is solved again without presolve in the
+// limits left, and that answer stands as it would with presolve off.
 MipResult MipSolver::solveMinimization() {
+    const auto t0 = std::chrono::steady_clock::now();
     MipResult result = solveMinimizationOnce();
-    if (result.solution.empty() || isAcceptableIncumbent(result.solution)) {
+    // Without presolve the answer was never postsolved: every incumbent
+    // already passed the gate, and an LP answer holds what the LP holds.
+    if (!presolve_ || result.solution.empty() || isAcceptableIncumbent(result.solution)) {
         return result;
     }
     double repair_work = 0.0;
     auto repaired = integralNodeIncumbent(result.solution, result.objective, repair_work);
     result.work_units += repair_work;
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    result.time_seconds = std::max(result.time_seconds, elapsed);
     if (repaired.has_value()) {
+        const bool is_mip = std::ranges::any_of(problem_.col_type,
+                                                [](VarType t) { return t != VarType::Continuous; });
         result.solution = std::move(repaired->values);
         result.objective = repaired->objective;
+        if (!is_mip && result.status == Status::Optimal) {
+            // An LP's repair is a cold solve of the whole model.
+            result.best_bound = result.objective;
+        }
+        result.best_bound = std::min(result.best_bound, result.objective);
         if (result.best_bound > -kInf) {
             result.gap = computeGap(result.objective, result.best_bound);
         }
+        // A MIP's repair keeps the integers, which were optimal only for the
+        // reduced model: its optimum stands only within the gap of the bound.
+        if (result.status != Status::Optimal || result.gap <= gap_tol_) {
+            return result;
+        }
+    } else {
+        result.solution.clear();
+    }
+    const double time_left = time_limit_ - elapsed;
+    const Int nodes_left = node_limit_ - result.nodes;
+    if (time_left <= 0.0 || nodes_left <= 0) {
+        result.status = time_left <= 0.0 ? Status::TimeLimit : Status::NodeLimit;
         return result;
     }
-    const double time_left = time_limit_ - result.time_seconds;
-    if (presolve_ && time_left > 0.0) {
-        const double saved_time_limit = time_limit_;
-        presolve_ = false;
-        time_limit_ = time_left;
-        MipResult again = solveMinimizationOnce();
-        presolve_ = true;
-        time_limit_ = saved_time_limit;
-        again.nodes += result.nodes;
-        again.lp_iterations += result.lp_iterations;
-        again.work_units += result.work_units;
-        again.time_seconds += result.time_seconds;
-        if (again.solution.empty() || isAcceptableIncumbent(again.solution)) {
-            return again;
+    struct RestoreLimits {
+        MipSolver& solver;
+        double time_limit;
+        Int node_limit;
+        ~RestoreLimits() {
+            solver.presolve_ = true;
+            solver.time_limit_ = time_limit;
+            solver.node_limit_ = node_limit;
         }
-        result = std::move(again);
-    }
-    result.solution.clear();
-    result.status = Status::Error;
-    return result;
+    } restore{*this, time_limit_, node_limit_};
+    presolve_ = false;
+    time_limit_ = time_left;
+    node_limit_ = nodes_left;
+    MipResult again = solveMinimizationOnce();
+    again.nodes += result.nodes;
+    again.lp_iterations += result.lp_iterations;
+    again.work_units += result.work_units;
+    again.time_seconds += result.time_seconds;
+    return again;
 }
 
 MipResult MipSolver::solveMinimizationOnce() {
