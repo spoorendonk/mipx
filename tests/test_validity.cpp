@@ -2042,3 +2042,37 @@ TEST_CASE("Regression #244: presolve keeps a row of a mixed MIP", "[validity]") 
     lp.obj_offset = 6.125;
     requirePresolveAgrees(lp);
 }
+
+TEST_CASE("Regression #242: node propagation on unbounded integers stays bounded", "[validity]") {
+    // Presolved, a row of this model pushes x1 up and x3 down a unit at a
+    // time, without end. Unbounded, the second node's propagation ran out of
+    // 4 GB; bounded, 300 nodes take milliseconds, so the node limit is
+    // reached long before the time limit.
+    constexpr auto C = VarType::Continuous;
+    constexpr auto I = VarType::Integer;
+    LpProblem lp = makeModel(
+        Sense::Minimize, {-0.01328125, 37.34375, -12.03125, -0.00021875, -32.34375},
+        {237.5, -0.23749999999999999, -kInf, -kInf, -kInf},
+        {237.5, kInf, kInf, kInf, -0.025000000000000001}, {C, I, I, I, I},
+        {{-0.048750000000000002, -18.75, 20, 0.00027500000000000002, 0},
+         {38.75, 48750, 0, -0.35000000000000003, 0},
+         {-0.0038750000000000004, 0, 0, 4.250000000000001e-05, 0},
+         {-0.00125, 0, 5, 3.0000000000000008e-05, 0},
+         {0, 87.5, 237.5, -0.00125, 0},
+         {-3.1250000000000001e-06, -0.004875, 0.0038750000000000004, 0, 0.0038750000000000004},
+         {18.75, 27500, -21250, -0.17500000000000002, -37500},
+         {0, 0, -42.5, 0, 0}},
+        {-kInf, -4125, -kInf, 1.565625, 74.375, 0.00070625000000000006, 1843.75, -kInf},
+        {kInf, -1500, kInf, kInf, kInf, 0.00070625000000000006, kInf, kInf});
+    lp.obj_offset = -1.25;
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setNodeLimit(300);
+    solver.setTimeLimit(60.0);
+    solver.load(lp);
+    const auto result = solver.solve();
+    CHECK(result.status == Status::NodeLimit);
+    CHECK(result.nodes <= 300);
+}

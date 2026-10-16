@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 namespace mipx {
 
@@ -82,10 +84,15 @@ Real DomainPropagator::getUpper(Index col) const {
 
 bool DomainPropagator::propagate(Int max_iterations) {
     objective_infeasible_ = false;
+    if (max_iterations <= 0) {
+        const int64_t budget = int64_t{kMaxRowRounds} * std::max<Index>(num_rows_, 1);
+        max_iterations =
+            static_cast<Int>(std::min<int64_t>(budget, std::numeric_limits<Int>::max()));
+    }
     return propagate(max_iterations, 0);
 }
 
-bool DomainPropagator::propagate(Int max_iterations, Int objective_passes) {
+bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
     // If queue is empty, seed with all rows.
     if (queue_.empty()) {
         for (Index i = 0; i < num_rows_; ++i) {
@@ -96,8 +103,8 @@ bool DomainPropagator::propagate(Int max_iterations, Int objective_passes) {
 
     Int iterations = 0;
     while (!queue_.empty()) {
-        if (max_iterations > 0 && iterations >= max_iterations) {
-            break;
+        if (iterations >= iterations_left) {
+            return true;
         }
 
         Index row = queue_.back();
@@ -117,8 +124,9 @@ bool DomainPropagator::propagate(Int max_iterations, Int objective_passes) {
         }
         // If clique propagation changed bounds, re-run row propagation.
         if (!queue_.empty()) {
-            return propagate(max_iterations > 0 ? max_iterations - iterations : 0,
-                             objective_passes);
+            return iterations < iterations_left
+                       ? propagate(iterations_left - iterations, objective_passes)
+                       : true;
         }
     }
 
@@ -129,8 +137,9 @@ bool DomainPropagator::propagate(Int max_iterations, Int objective_passes) {
             return false;
         }
         if (!queue_.empty()) {
-            return propagate(max_iterations > 0 ? max_iterations - iterations : 0,
-                             objective_passes + 1);
+            return iterations < iterations_left
+                       ? propagate(iterations_left - iterations, objective_passes + 1)
+                       : true;
         }
     }
 

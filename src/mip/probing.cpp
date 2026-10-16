@@ -151,8 +151,9 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
         base_upper[j] = dp.getUpper(j);
     }
 
-    // Probe var=0. Propagate to fixpoint: probing depends on full propagation
-    // to discover cascading implications and fixings.
+    // Probe var=0. Propagate as far as the propagator's budget goes: probing
+    // finds cascading implications and fixings through it, and a row that
+    // tightens without end (#242) only yields fewer of them.
     dp.pushCheckpoint();
     dp.setBound(var, 0.0, 0.0);
     bool feasible_at_0 = dp.propagate();

@@ -20,6 +20,12 @@ public:
     static constexpr Real kTol = 1e-8;
     /// Integer column bounds round to the nearest integer within this.
     static constexpr Real kIntRoundTol = 1e-6;
+    /// Row propagations per propagate() call, in passes over the rows. Two
+    /// integer columns of one row can push each other a unit at a time for
+    /// ever when their other bounds are infinite, every step on the undo
+    /// stack (#242: 2e7 steps in 7 s, 3 GB). Like the objective cap, it only
+    /// stops tightening early.
+    static constexpr Int kMaxRowRounds = 100;
 
     /// Initialize with problem data.
     void load(const LpProblem& problem);
@@ -56,7 +62,8 @@ public:
     [[nodiscard]] Real getUpper(Index col) const;
 
     /// Run propagation. Returns false if infeasibility detected.
-    /// @param max_iterations  Maximum row propagation iterations (0 = unlimited).
+    /// @param max_iterations  Maximum row propagation iterations (0 = the
+    ///        default budget, kMaxRowRounds passes' worth over the rows).
     bool propagate(Int max_iterations = 0);
 
     /// Checkpoint/restore for tree search backtracking.
@@ -70,8 +77,9 @@ private:
     /// Propagate a single row. Returns false if infeasibility detected.
     bool propagateRow(Index row);
 
-    /// propagate() after `objective_passes` passes of the objective row.
-    bool propagate(Int max_iterations, Int objective_passes);
+    /// propagate() after `objective_passes` passes of the objective row,
+    /// with `iterations_left` (> 0) row propagations still allowed.
+    bool propagate(Int iterations_left, Int objective_passes);
 
     /// Propagate the objective cutoff row. Returns false if no point of the
     /// domain improves on the cutoff.

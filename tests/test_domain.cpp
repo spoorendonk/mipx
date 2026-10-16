@@ -229,3 +229,19 @@ TEST_CASE("DomainPropagator: clique table infers fixings rows cannot", "[domain]
         CHECK(dp.numTightened() >= 2);
     }
 }
+
+TEST_CASE("Domain: propagation stops on a row that tightens for ever", "[domain]") {
+    // x - y = 0.5 over integers x, y >= 0: x >= y + 0.5 rounds x up a unit,
+    // y >= x - 0.5 rounds y up a unit, without end (#242).
+    auto prob = makeProblem(2, 1, {{0, 0, 1.0}, {0, 1, -1.0}}, {0.5}, {0.5}, {0.0, 0.0},
+                            {kInf, kInf}, {VarType::Integer, VarType::Integer});
+    DomainPropagator dp;
+    dp.load(prob);
+    dp.pushCheckpoint();
+    CHECK(dp.propagate());
+    // Each row propagation tightens both columns at most once (plus rounding).
+    CHECK(dp.numTightened() <= 4 * DomainPropagator::kMaxRowRounds);
+    CHECK(dp.getLower(0) > 1.0);
+    dp.popCheckpoint();
+    CHECK(dp.getLower(0) == 0.0);
+}
