@@ -1050,8 +1050,8 @@ LpResult PdlpSolver::solve() {
 
 #ifdef MIPX_HAS_CUDA
     // GPU path: all iterate vectors stay on device.
-    bool should_use_gpu = options_.use_gpu && m >= options_.gpu_min_rows &&
-                          scaled_a_.numNonzeros() >= options_.gpu_min_nnz;
+    bool should_use_gpu = options_.use_gpu && !gpu_fallback_ && m >= options_.gpu_min_rows &&
+                          scaled_a_.numNonzeros() >= options_.gpu_min_nnz && gpuAvailable();
     if (should_use_gpu) {
         return solveGpu();
     }
@@ -1929,6 +1929,20 @@ inline bool cusparseOk(cusparseStatus_t code) {
 
 }  // namespace
 
+bool PdlpSolver::gpuAvailable() {
+    // A build for a GPU it has no device code for runs no kernel at all: each
+    // launch fails, the iterates stay zero and the solve ends with objective
+    // 0.0 (#192). Probe once, and fall back to the CPU path instead.
+    static const bool available = [] {
+        int count = 0;
+        const bool ok =
+            cudaGetDeviceCount(&count) == cudaSuccess && count > 0 && probeKernels() == cudaSuccess;
+        cudaGetLastError();  // leave no error behind for the next call
+        return ok;
+    }();
+    return available;
+}
+
 LpResult PdlpSolver::solveGpu() {
     auto t0 = std::chrono::steady_clock::now();
 
@@ -1938,6 +1952,7 @@ LpResult PdlpSolver::solveGpu() {
     const Index at_nnz = static_cast<Index>(at_values_.size());
 
     used_gpu_ = false;
+    cudaGetLastError();  // so the check after the loop sees only this solve's
 
     // Arena layout: 14n + 13m + 5 doubles.
     // Iterate vectors (8n + 7m):
@@ -1959,8 +1974,14 @@ LpResult PdlpSolver::solveGpu() {
 
     Real* d_arena = nullptr;
     if (!cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_arena), arena_doubles * sizeof(Real)))) {
-        // Fall back to CPU path by returning a sentinel.
-        return solve();  // Will skip GPU because used_gpu_ check won't re-enter.
+        // Fall back to the CPU path; gpu_fallback_ keeps solve() from coming
+        // straight back here.
+        struct ResetFallback {
+            bool& flag;
+            ~ResetFallback() { flag = false; }
+        } reset{gpu_fallback_};
+        gpu_fallback_ = true;
+        return solve();
     }
 
     // Pointers into arena.
@@ -2352,8 +2373,11 @@ LpResult PdlpSolver::solveGpu() {
                     cudaStreamEndCapture(stream, &graph);
                     if (graph == nullptr) {
                         // Graph capture failed permanently — fall back to
-                        // non-graph launches for remainder of solve.
+                        // non-graph launches for remainder of solve. Clear
+                        // the capture's error, or the check after the loop
+                        // takes it for a failed kernel.
                         graphCaptureFailed = true;
+                        cudaGetLastError();
                         cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
                                         cudaMemcpyHostToDevice, stream);
                         if (!launchBatch(batch)) {
@@ -2886,6 +2910,13 @@ LpResult PdlpSolver::solveGpu() {
         }
     }
 
+    // A failed kernel launch leaves its outputs untouched, and the loop goes
+    // on with them; whatever it reached is no answer (#192).
+    if (cudaGetLastError() != cudaSuccess) {
+        failGpuSolve(total_count);
+        goto cleanup;
+    }
+
     if (converged) {
         // Download solution.
         std::vector<Real> pdhg_x_host(sn);
@@ -3000,6 +3031,12 @@ cleanup:
     double work = static_cast<double>(total_count) *
                   (4.0 * static_cast<double>(nnz) + 2.0 * static_cast<double>(m + n));
     return {status_, objective_, iterations_, work};
+}
+
+#else
+
+bool PdlpSolver::gpuAvailable() {
+    return false;
 }
 
 #endif  // MIPX_HAS_CUDA

@@ -122,6 +122,10 @@ public:
     void setOptions(const PdlpOptions& options) { options_ = options; }
     [[nodiscard]] const PdlpOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    /// Whether solve() can take the GPU path: a CUDA build, a device, and
+    /// device code for it (#192). Checked once per process; false on a CPU
+    /// build. use_gpu falls back to the CPU path without it.
+    [[nodiscard]] static bool gpuAvailable();
 
 private:
     void buildScaledProblem();
@@ -167,6 +171,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     bool used_gpu_ = false;
+    bool gpu_fallback_ = false;  // solveGpu() could not start; solve() runs on the CPU
 
     // Warm-start (original/unscaled space).
     std::vector<Real> warm_start_x_;

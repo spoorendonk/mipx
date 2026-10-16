@@ -5,6 +5,10 @@
 #include "mipx/presolve.h"
 #include "test_paths.hpp"
 
+#ifdef MIPX_HAS_CUDA
+#include <cuda_runtime_api.h>
+#endif
+
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
@@ -15,22 +19,6 @@
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
-namespace {
-
-/// On a CUDA-enabled build the GPU path currently returns objective 0.0 -- it
-/// produces no solution at all rather than one that merely differs (#192).
-/// The GPU/CPU parity tests below skip on exactly that signature so the suite
-/// stays green and the pre-commit gate remains usable (#193).
-///
-/// This is deliberately narrow: any other GPU outcome still asserts, so a real
-/// parity regression is not masked, and the tests convert back to full coverage
-/// the moment #192 is fixed.
-template <typename ResultT>
-bool gpuResultUnusable(const ResultT& gpu, const ResultT& cpu) {
-    return gpu.objective == 0.0 && std::abs(cpu.objective) > 1e-6;
-}
-
-}  // namespace
 namespace fs = std::filesystem;
 
 namespace {
@@ -531,6 +519,25 @@ TEST_CASE("PdlpSolver: no false positive on feasible LP", "[pdlp]") {
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
 }
 
+TEST_CASE("PdlpSolver: a CUDA device present can run the PDLP kernels", "[pdlp][gpu]") {
+    // The parity tests skip without gpuAvailable(), which is also what a
+    // build without device code for the GPU gives: no kernel runs (#192).
+    // So a device that is present must pass the probe.
+#ifdef MIPX_HAS_CUDA
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess || count == 0) {
+        cudaGetLastError();
+        SKIP("No CUDA device found.");
+    }
+    INFO(
+        "CUDA device present but PdlpSolver::gpuAvailable() is false: is "
+        "CMAKE_CUDA_ARCHITECTURES (in CMakeCache.txt) one this GPU runs?");
+    CHECK(PdlpSolver::gpuAvailable());
+#else
+    CHECK_FALSE(PdlpSolver::gpuAvailable());
+#endif
+}
+
 TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") {
     auto lp = buildMediumLp();
 
@@ -553,15 +560,11 @@ TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") 
     auto gpu_result = gpu_solver.solve();
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
-    // If CUDA is available, confirm GPU was actually used.
-    // If not, both are CPU — test still passes.
-#ifdef MIPX_HAS_CUDA
     CHECK(gpu_solver.usedGpu());
-#endif
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-4));
 }
 
@@ -876,8 +879,8 @@ TEST_CASE("PdlpSolver: GPU with adaptive step matches CPU", "[pdlp][adaptive][gp
     auto gpu_result = solvePdlp(lp, gpu_opts);
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
@@ -894,8 +897,8 @@ TEST_CASE("PdlpSolver: GPU with rescaling matches CPU", "[pdlp][rescaling][gpu]"
     auto gpu_result = solvePdlp(lp, gpu_opts);
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
@@ -1091,8 +1094,8 @@ TEST_CASE("PdlpSolver: GPU with preconditioner refresh matches CPU",
     auto gpu_result = solvePdlp(lp, gpu_opts);
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
@@ -1384,8 +1387,8 @@ TEST_CASE("PdlpSolver: Anderson acceleration GPU matches CPU", "[pdlp][anderson]
     auto gpu_result = solvePdlp(lp, gpu_opts);
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));
@@ -1548,8 +1551,8 @@ TEST_CASE("PdlpSolver: polishing on GPU matches CPU", "[pdlp][polishing][gpu]") 
     auto gpu_result = solvePdlp(lp, gpu_opts);
 
     REQUIRE(cpu_result.status == Status::Optimal);
-    if (gpuResultUnusable(gpu_result, cpu_result)) {
-        SKIP("GPU path returns objective 0.0 on a CUDA-enabled build (#192).");
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
     }
     REQUIRE(gpu_result.status == Status::Optimal);
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-3));

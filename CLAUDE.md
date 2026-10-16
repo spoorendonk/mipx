@@ -311,11 +311,17 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 |---|---|---|
 | `MIPX_USE_TBB` | auto-detect | Parallel tree search (`apt install libtbb-dev`) |
 | `MIPX_USE_CUDA` | ON | GPU acceleration (barrier, PDLP) |
+| `CMAKE_CUDA_ARCHITECTURES` | `native` with a GPU, else `all-major` | CUDA device code; nvcc's own default may not run on the GPU at hand (#192) |
 | `MIPX_BUILD_PYTHON` | auto-detect | Build nanobind Python extension (ON when Python 3.12 dev is found) |
 | `MIPX_BUILD_CLI` | ON | Build `mipx-solve` CLI |
 | `MIPX_SIMD_ISA` | native | SIMD codegen: `off`, `avx2`, `native` |
 | `MIPX_STRICT_WARNINGS` | ON | `-Werror` |
 | `MIPX_USE_CCACHE` | ON | Use `ccache`/`sccache` as compiler launcher when installed |
+
+`CMAKE_CUDA_ARCHITECTURES` is cached at first configure, so a `build/` made
+before #192 keeps nvcc's default (75), whose code the driver cannot JIT for an
+sm_86 GPU. PDLP then skips the GPU and solves on the CPU, and the `[gpu]`
+tests skip. Reconfigure with `cmake -U CMAKE_CUDA_ARCHITECTURES -B build`.
 
 `MIPX_USE_CCACHE` is opportunistic — a no-op if neither tool is on PATH, and it
 never overrides a `CMAKE_CXX_COMPILER_LAUNCHER` you set yourself. It matters

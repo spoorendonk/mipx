@@ -94,4 +94,9 @@ void launchAxpby(Index n, Real alpha, const Real* x, Real beta, Real* y,
 
 void launchScale(Index n, Real alpha, Real* x, cudaStream_t stream);
 
+// Launch an empty kernel from this file and wait for it. The kernels here
+// either all load or all fail (no device code for the GPU, #192), so this
+// tells whether they can run at all.
+cudaError_t probeKernels();
+
 }  // namespace mipx

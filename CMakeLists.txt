@@ -79,6 +79,24 @@ set(MIPX_CUDA_BACKEND_ENABLED OFF)
 set(MIPX_HAS_CUDSS OFF)
 if(MIPX_USE_GPU)
     if(CUDAToolkit_FOUND)
+        # nvcc's own default architecture (75 for CUDA 13) may be one the
+        # driver cannot JIT for the GPU at hand, and then no kernel runs at
+        # all (#192). Build for the GPUs found here, or for every major
+        # architecture when nvidia-smi finds none.
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+            execute_process(COMMAND nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+                            RESULT_VARIABLE _mipx_smi_result
+                            OUTPUT_VARIABLE _mipx_gpu_caps
+                            OUTPUT_STRIP_TRAILING_WHITESPACE
+                            ERROR_QUIET)
+            if(_mipx_smi_result EQUAL 0 AND _mipx_gpu_caps)
+                set(_mipx_cuda_archs native)
+            else()
+                set(_mipx_cuda_archs all-major)
+            endif()
+            set(CMAKE_CUDA_ARCHITECTURES ${_mipx_cuda_archs} CACHE STRING
+                "CUDA architectures (default: native with a GPU, else all-major)")
+        endif()
         enable_language(CUDA)
         set(CMAKE_CUDA_STANDARD 17)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)

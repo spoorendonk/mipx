@@ -501,4 +501,17 @@ void launchScale(Index n, Real alpha, Real* x, cudaStream_t stream) {
     scaleKernel<<<gridSize(n), kBlockSize, 0, stream>>>(n, alpha, x);
 }
 
+// ---------------------------------------------------------------------------
+// Probe
+// ---------------------------------------------------------------------------
+
+__global__ void probeKernel() {}
+
+cudaError_t probeKernels() {
+    probeKernel<<<1, 1>>>();
+    const cudaError_t launched = cudaGetLastError();
+    const cudaError_t ran = cudaDeviceSynchronize();
+    return launched != cudaSuccess ? launched : ran;
+}
+
 }  // namespace mipx
