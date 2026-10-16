@@ -92,196 +92,195 @@ inline bool timeLimitReached(const std::chrono::steady_clock::time_point start_t
 // ---------------------------------------------------------------------------
 // Infeasibility / unboundedness certificate checks.
 //
-// Following the approach in Applegate et al. (2021) "Practical Large-Scale
-// Linear Programming using Primal-Dual Hybrid Gradient":
+// Following Applegate et al. (2021) "Practical Large-Scale Linear Programming
+// using Primal-Dual Hybrid Gradient" and Applegate et al. (2024)
+// "Infeasibility detection with primal-dual hybrid gradient for large-scale
+// linear programming": on an infeasible LP the dual iterates diverge along a
+// Farkas ray, on an unbounded one the primal iterates along a primal ray, and
+// so do the differences between iterates some steps apart. Both the iterates
+// and their differences are tried as candidates.
 //
-// Infeasibility (dual ray): given candidate y, check that
-//   (1) For each column j, the reduced cost r_j = c_j + (A^T y)_j satisfies:
-//       r_j >= 0 if lb_j > -inf, r_j <= 0 if ub_j < inf (both if finite box).
-//   (2) The dual ray objective  sum_i support(y_i, [rl_i, ru_i])  is negative
-//       (for minimization), where support is the support function of the
-//       constraint interval.
-//   We normalize y by its L2 norm and check (1) with tolerance, (2) strictly.
-//
-// Unboundedness (primal ray): given candidate x, check that
-//   (1) ||A x|| is small relative to ||x||.
-//   (2) c^T x < 0 (improving direction for minimization).
-//   (3) x_j >= 0 if lb_j is finite, x_j <= 0 if ub_j is finite.
+// A candidate decides the status, so the checks are those of the
+// LpSolver::getDualRay() and getPrimalRay() contracts, in the original space
+// and relative to the terms involved (#239). Absolute tolerances on a
+// normalized ray let rows and columns with tiny coefficients, scaled models
+// and free columns pass rays that prove nothing.
+//   - A sign-violating entry is dropped (set to zero) when it is below
+//     kRayZeroTol of the ray's largest entry, and refutes the ray otherwise.
+//     Dropping an entry changes the candidate, not the model, and the rest is
+//     checked on what remains.
+//   - An entry of A^T y (A r) that meets an infinite bound (side) must be
+//     below kRayRelTol of the terms that make it up. Treating it as zero is
+//     then exact for the model with that column's (row's) coefficients
+//     perturbed by that much.
+//   - The proof must hold by more than kRayMargin of its terms: alpha - beta
+//     for a Farkas ray, -c^T r for a primal ray.
 // ---------------------------------------------------------------------------
 
-/// Check whether the (unscaled, original-space) dual iterate forms an
-/// approximate Farkas infeasibility certificate.
-///
-/// \param y         Dual iterate in original space (length m).
-/// \param problem   The original LP problem.
-/// \param tol       Tolerance for reduced-cost sign feasibility.
-/// \return true if the certificate verifies.
-inline bool checkInfeasibilityCertificate(std::span<const Real> y, const LpProblem& problem,
-                                          Real tol) {
-    const Index m = problem.num_rows;
-    const Index n = problem.num_cols;
-    if (m == 0)
-        return false;
+constexpr Real kRayZeroTol = 1e-9;
+constexpr long double kRayRelTol = 1e-9L;
+constexpr long double kRayMargin = 1e-9L;
 
-    Real y_norm = l2Norm(y);
-    if (y_norm < 1e-15)
-        return false;
-
-    // Normalize to get the ray direction.
-    std::vector<Real> ray(y.begin(), y.end());
-    for (auto& v : ray)
-        v /= y_norm;
-
-    // Check dual ray sign feasibility for constraints:
-    // For <= constraint (row_upper finite, row_lower = -inf): y_i >= 0.
-    // For >= constraint (row_lower finite, row_upper = inf): y_i <= 0.
-    // For equality (row_lower == row_upper): y_i free.
-    // For ranged: both finite, y_i free.
-    for (Index i = 0; i < m; ++i) {
-        bool has_lower = std::isfinite(problem.row_lower[i]);
-        bool has_upper = std::isfinite(problem.row_upper[i]);
-        if (has_upper && !has_lower) {
-            // <= constraint: dual must be >= 0 (for min).
-            if (ray[i] < -tol)
-                return false;
-        } else if (has_lower && !has_upper) {
-            // >= constraint: dual must be <= 0 (for min).
-            if (ray[i] > tol)
-                return false;
+/// Copy of \p v with its sign-violating entries dropped, or empty when one
+/// is too large to drop or \p v is zero or not finite. \p violates(k, v_k)
+/// tells whether entry k may not have the sign of v_k.
+template <typename Violates>
+std::vector<Real> dropSignNoise(std::span<const Real> v, Violates violates) {
+    Real vmax = 0.0;
+    for (Real e : v) {
+        if (!std::isfinite(e))
+            return {};
+        vmax = std::max(vmax, std::abs(e));
+    }
+    if (vmax == 0.0)
+        return {};
+    std::vector<Real> out(v.begin(), v.end());
+    for (Index k = 0; k < static_cast<Index>(out.size()); ++k) {
+        if (out[k] != 0.0 && violates(k, out[k])) {
+            if (std::abs(out[k]) > kRayZeroTol * vmax)
+                return {};
+            out[k] = 0.0;
         }
-        // Equality or ranged: no sign restriction on ray.
     }
-
-    // Compute A^T * ray.
-    std::vector<Real> at_ray(static_cast<size_t>(n), 0.0);
-    problem.matrix.multiplyTranspose(ray, at_ray);
-
-    // Check reduced-cost sign feasibility:
-    // For variable with finite lower bound: (A^T y)_j >= -tol.
-    // For variable with finite upper bound: (A^T y)_j <= tol.
-    // (We ignore c here — the Farkas certificate is about A^T y, not c + A^T y.)
-    for (Index j = 0; j < n; ++j) {
-        Real rj = at_ray[j];
-        bool has_lb = std::isfinite(problem.col_lower[j]);
-        bool has_ub = std::isfinite(problem.col_upper[j]);
-        if (has_lb && rj < -tol)
-            return false;
-        if (has_ub && rj > tol)
-            return false;
-    }
-
-    // Compute dual ray objective:
-    // sum_i ray_i * bound_i, where we pick the bound that makes the product
-    // most negative. For the problem to be infeasible, this must be negative.
-    //   If ray_i > 0 and finite upper bound: contributes ray_i * ru_i.
-    //   If ray_i < 0 and finite lower bound: contributes ray_i * rl_i.
-    //   For equality: contributes ray_i * (rl_i = ru_i).
-    Real ray_obj = 0.0;
-    for (Index i = 0; i < m; ++i) {
-        Real rl = problem.row_lower[i];
-        Real ru = problem.row_upper[i];
-        if (rl == ru) {
-            // Equality constraint.
-            ray_obj += ray[i] * rl;
-        } else if (ray[i] > 0.0 && std::isfinite(ru)) {
-            ray_obj += ray[i] * ru;
-        } else if (ray[i] < 0.0 && std::isfinite(rl)) {
-            ray_obj += ray[i] * rl;
-        }
-        // If ray[i] > 0 and no upper bound, the dual sign check above
-        // should have already rejected this (for <= constraints only).
-    }
-
-    // Also add contribution from variable bounds via A^T ray:
-    // For columns with finite bounds and nonzero A^T ray, the support
-    // function adds: max(0, (A^T ray)_j) * ub_j + min(0, (A^T ray)_j) * lb_j.
-    Real col_support = 0.0;
-    for (Index j = 0; j < n; ++j) {
-        Real rj = at_ray[j];
-        if (rj > 0.0 && std::isfinite(problem.col_lower[j]))
-            col_support += rj * problem.col_lower[j];
-        else if (rj < 0.0 && std::isfinite(problem.col_upper[j]))
-            col_support += rj * problem.col_upper[j];
-    }
-
-    // The Farkas condition: b^T y - (column support) < 0.
-    // Equivalently: the dual ray objective must be strictly negative.
-    Real farkas_val = ray_obj - col_support;
-    return farkas_val < -tol;
+    return out;
 }
 
-/// Check whether the (unscaled, original-space) primal iterate forms an
-/// approximate unboundedness certificate (primal ray).
-///
-/// \param x         Primal iterate in original space (length n).
-/// \param problem   The original LP problem.
-/// \param tol       Tolerance for feasibility of the ray.
-/// \return true if the certificate verifies.
-inline bool checkUnboundednessCertificate(std::span<const Real> x, const LpProblem& problem,
-                                          Real tol) {
+/// Whether \p y_in (original space, y_i > 0 towards row_upper_i) is a Farkas
+/// certificate of infeasibility in the sense of LpSolver::getDualRay().
+inline bool checkInfeasibilityCertificate(std::span<const Real> y_in, const LpProblem& problem) {
     const Index m = problem.num_rows;
     const Index n = problem.num_cols;
-    if (n == 0)
+    if (m == 0 || static_cast<Index>(y_in.size()) != m)
+        return false;
+    const std::vector<Real> y = dropSignNoise(y_in, [&](Index i, Real v) {
+        return v > 0.0 ? !isFinite(problem.row_upper[i]) : !isFinite(problem.row_lower[i]);
+    });
+    if (y.empty())
         return false;
 
-    Real x_norm = l2Norm(x);
-    if (x_norm < 1e-15)
-        return false;
-
-    // Normalize.
-    std::vector<Real> ray(x.begin(), x.end());
-    for (auto& v : ray)
-        v /= x_norm;
-
-    // Check sign consistency with variable bounds:
-    // If lb_j is finite (> -inf): ray_j >= -tol.
-    // If ub_j is finite (< inf): ray_j <= tol.
-    for (Index j = 0; j < n; ++j) {
-        if (std::isfinite(problem.col_lower[j]) && ray[j] < -tol)
-            return false;
-        if (std::isfinite(problem.col_upper[j]) && ray[j] > tol)
-            return false;
-    }
-
-    // Check ||A * ray|| is small.
-    std::vector<Real> a_ray(static_cast<size_t>(m), 0.0);
-    problem.matrix.multiply(ray, a_ray);
-
-    // The constraint residual must respect constraint types:
-    // For each row i, A_i * ray must be consistent with the constraint type.
-    // For <= constraint: A_i * ray <= tol.
-    // For >= constraint: A_i * ray >= -tol.
-    // For equality: |A_i * ray| <= tol.
-    // For ranged: we just check |A_i * ray| <= tol since rays in both
-    // directions are bounded.
+    long double beta = 0.0L;
+    long double mag = 0.0L;
+    std::vector<long double> d(static_cast<size_t>(n), 0.0L);
+    std::vector<long double> d_terms(static_cast<size_t>(n), 0.0L);
     for (Index i = 0; i < m; ++i) {
-        Real ar = a_ray[i];
-        bool has_lower = std::isfinite(problem.row_lower[i]);
-        bool has_upper = std::isfinite(problem.row_upper[i]);
-        if (has_lower && has_upper) {
-            // Ranged or equality: ray must be zero in this direction.
-            if (std::abs(ar) > tol)
-                return false;
-        } else if (has_upper && !has_lower) {
-            // <= constraint: ray must not increase lhs.
-            if (ar > tol)
-                return false;
-        } else if (has_lower && !has_upper) {
-            // >= constraint: ray must not decrease lhs.
-            if (ar < -tol)
-                return false;
+        const long double yi = y[i];
+        if (yi == 0.0L)
+            continue;
+        const long double side = yi > 0.0L ? problem.row_upper[i] : problem.row_lower[i];
+        beta += yi * side;
+        mag += std::abs(yi * side);
+        const auto rv = problem.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const long double t = static_cast<long double>(rv.values[k]) * yi;
+            d[rv.indices[k]] += t;
+            d_terms[rv.indices[k]] += std::abs(t);
         }
-        // Free row: any direction is fine.
     }
 
-    // Check improving direction: c^T ray < 0 for minimization.
-    Real obj_sign = (problem.sense == Sense::Minimize) ? 1.0 : -1.0;
-    Real c_dot_ray = 0.0;
+    // alpha = min of d^T x over the column bounds.
+    long double alpha = 0.0L;
     for (Index j = 0; j < n; ++j) {
-        c_dot_ray += problem.obj[j] * ray[j];
+        if (d[j] == 0.0L)
+            continue;
+        const Real bound = d[j] > 0.0L ? problem.col_lower[j] : problem.col_upper[j];
+        if (isFinite(bound)) {
+            alpha += d[j] * bound;
+            mag += std::abs(d[j] * bound);
+        } else if (std::abs(d[j]) > kRayRelTol * d_terms[j]) {
+            return false;
+        }
     }
-    return obj_sign * c_dot_ray < -tol;
+    return alpha - beta > kRayMargin * mag && alpha - beta > 0.0L;
 }
+
+/// Whether \p x_in (original space) is a primal ray in the sense of
+/// LpSolver::getPrimalRay().
+inline bool checkUnboundednessCertificate(std::span<const Real> x_in, const LpProblem& problem) {
+    const Index m = problem.num_rows;
+    const Index n = problem.num_cols;
+    if (n == 0 || static_cast<Index>(x_in.size()) != n)
+        return false;
+    const std::vector<Real> r = dropSignNoise(x_in, [&](Index j, Real v) {
+        return v > 0.0 ? isFinite(problem.col_upper[j]) : isFinite(problem.col_lower[j]);
+    });
+    if (r.empty())
+        return false;
+
+    const long double sense = problem.sense == Sense::Minimize ? 1.0L : -1.0L;
+    long double cr = 0.0L;
+    long double c_terms = 0.0L;
+    for (Index j = 0; j < n; ++j) {
+        const long double t = sense * static_cast<long double>(problem.obj[j]) * r[j];
+        cr += t;
+        c_terms += std::abs(t);
+    }
+    if (!(cr < -kRayMargin * c_terms))
+        return false;
+
+    for (Index i = 0; i < m; ++i) {
+        long double q = 0.0L;
+        long double q_terms = 0.0L;
+        const auto rv = problem.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const long double t = static_cast<long double>(rv.values[k]) * r[rv.indices[k]];
+            q += t;
+            q_terms += std::abs(t);
+        }
+        const bool blocked = (q > 0.0L && isFinite(problem.row_upper[i])) ||
+                             (q < 0.0L && isFinite(problem.row_lower[i]));
+        if (blocked && std::abs(q) > kRayRelTol * q_terms)
+            return false;
+    }
+    return true;
+}
+
+/// Ray detection over the iterates, mapped to the original space by the
+/// caller. Keeps the iterates of the previous check for their differences.
+class RayDetector {
+public:
+    /// Status::Infeasible or Status::Unbounded when \p x or \p y (or its
+    /// difference from the previous call) certifies it, with the ray in
+    /// \p ray; Status::Error otherwise.
+    Status check(const LpProblem& problem, std::span<const Real> x, std::span<const Real> y,
+                 std::vector<Real>& ray) {
+        Status found = Status::Error;
+        if (tryCandidates(y, prev_y_, ray, [&](std::span<const Real> c) {
+                return checkInfeasibilityCertificate(c, problem);
+            })) {
+            found = Status::Infeasible;
+        } else if (tryCandidates(x, prev_x_, ray, [&](std::span<const Real> c) {
+                       return checkUnboundednessCertificate(c, problem);
+                   })) {
+            found = Status::Unbounded;
+        }
+        prev_x_.assign(x.begin(), x.end());
+        prev_y_.assign(y.begin(), y.end());
+        return found;
+    }
+
+private:
+    template <typename Check>
+    static bool tryCandidates(std::span<const Real> cur, const std::vector<Real>& prev,
+                              std::vector<Real>& ray, Check check) {
+        if (check(cur)) {
+            ray.assign(cur.begin(), cur.end());
+            return true;
+        }
+        if (prev.size() != cur.size())
+            return false;
+        std::vector<Real> diff(cur.size());
+        for (size_t k = 0; k < cur.size(); ++k)
+            diff[k] = cur[k] - prev[k];
+        if (check(diff)) {
+            ray = std::move(diff);
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<Real> prev_x_;
+    std::vector<Real> prev_y_;
+};
 
 // Anderson acceleration (Type-I, safeguarded) for restart extrapolation.
 //
@@ -955,6 +954,7 @@ LpResult PdlpSolver::solve() {
     const Real bound_norm = termination_norms.bounds;
 
     bool converged = false;
+    RayDetector ray_detector;
 
     // Anderson acceleration state.
     AndersonAccelerator aa;
@@ -1229,35 +1229,26 @@ LpResult PdlpSolver::solve() {
         // to avoid overhead. We unscale iterates to original space and
         // verify certificates.
         if (total_count >= 10 * N && total_count % (10 * N) == 0) {
-            // Unscale dual iterate to original space.
+            // Unscale the iterates to the original space. The dual ray does
+            // not depend on the objective, so unlike the dual values it does
+            // not take obj_sign_: with it, no maximization was ever found
+            // infeasible (#239).
             std::vector<Real> y_orig(static_cast<size_t>(m));
             Real inv_obj_sc = 1.0 / objective_scale_;
             for (Index i = 0; i < m; ++i) {
-                y_orig[i] = obj_sign_ * pdhg_y[i] * row_scale_[i] * inv_obj_sc;
+                y_orig[i] = pdhg_y[i] * row_scale_[i] * inv_obj_sc;
             }
-            if (checkInfeasibilityCertificate(y_orig, original_, 1e-6)) {
-                status_ = Status::Infeasible;
-                iterations_ = total_count;
-                dual_orig_ = std::move(y_orig);
-                double seconds =
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-                double work = static_cast<double>(total_count) *
-                              (4.0 * static_cast<double>(scaled_a_.numNonzeros()) +
-                               2.0 * static_cast<double>(m + n));
-                work += seconds * 1e-6;
-                return {status_, 0.0, iterations_, work};
-            }
-
-            // Unscale primal iterate to original space.
             std::vector<Real> x_orig(static_cast<size_t>(n));
             Real inv_con_sc = 1.0 / constraint_scale_;
             for (Index j = 0; j < n; ++j) {
                 x_orig[j] = pdhg_x[j] * col_scale_[j] * inv_con_sc;
             }
-            if (checkUnboundednessCertificate(x_orig, original_, 1e-6)) {
-                status_ = Status::Unbounded;
+            std::vector<Real> ray;
+            const Status found = ray_detector.check(original_, x_orig, y_orig, ray);
+            if (found != Status::Error) {
+                status_ = found;
                 iterations_ = total_count;
-                primal_orig_ = std::move(x_orig);
+                (found == Status::Infeasible ? dual_orig_ : primal_orig_) = std::move(ray);
                 double seconds =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 double work = static_cast<double>(total_count) *
@@ -2085,6 +2076,7 @@ LpResult PdlpSolver::solveGpu() {
     const Real bound_norm = termination_norms.bounds;
 
     bool converged = false;
+    RayDetector ray_detector;
 
     // Anderson acceleration state (GPU path: AA runs on host at restart).
     AndersonAccelerator gpu_aa;
@@ -2320,29 +2312,24 @@ LpResult PdlpSolver::solveGpu() {
             cudaMemcpy(pdhg_x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
             cudaMemcpy(pdhg_y_host.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
 
-            // Unscale dual iterate to original space.
+            // Unscale the iterates to the original space; the dual ray takes
+            // no obj_sign_ (see the CPU path).
             std::vector<Real> y_orig(sm);
             Real inv_obj_sc = 1.0 / objective_scale_;
             for (Index i = 0; i < m; ++i) {
-                y_orig[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i] * inv_obj_sc;
+                y_orig[i] = pdhg_y_host[i] * row_scale_[i] * inv_obj_sc;
             }
-            if (checkInfeasibilityCertificate(y_orig, original_, 1e-6)) {
-                status_ = Status::Infeasible;
-                iterations_ = total_count;
-                dual_orig_ = std::move(y_orig);
-                goto cleanup;
-            }
-
-            // Unscale primal iterate to original space.
             std::vector<Real> x_orig(sn);
             Real inv_con_sc = 1.0 / constraint_scale_;
             for (Index j = 0; j < n; ++j) {
                 x_orig[j] = pdhg_x_host[j] * col_scale_[j] * inv_con_sc;
             }
-            if (checkUnboundednessCertificate(x_orig, original_, 1e-6)) {
-                status_ = Status::Unbounded;
+            std::vector<Real> ray;
+            const Status found = ray_detector.check(original_, x_orig, y_orig, ray);
+            if (found != Status::Error) {
+                status_ = found;
                 iterations_ = total_count;
-                primal_orig_ = std::move(x_orig);
+                (found == Status::Infeasible ? dual_orig_ : primal_orig_) = std::move(ray);
                 goto cleanup;
             }
         }

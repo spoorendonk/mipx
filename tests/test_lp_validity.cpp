@@ -36,6 +36,7 @@
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
+#include "mipx/pdlp.h"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -1199,6 +1200,19 @@ void checkStatus(LpSolver& solver, const Generated& g, const std::string& tag, R
     }
 }
 
+// PDLP gets a fixed iteration budget, not a time limit, so the audit does not
+// depend on the machine.
+constexpr std::uint32_t kPdlpSeeds = 100;
+
+PdlpOptions pdlpOptions() {
+    PdlpOptions opts;
+    opts.use_gpu = false;
+    opts.verbose = false;
+    opts.max_iter = 20000;
+    opts.polish_max_iter = 20000;
+    return opts;
+}
+
 constexpr Shape kShapes[] = {Shape::Optimal, Shape::Infeasible, Shape::Unbounded};
 
 const char* shapeName(Shape shape) {
@@ -1565,4 +1579,37 @@ TEST_CASE("LP validity: barrier gives no wrong status on generated LPs", "[lp_va
         }
     }
     report(audit);
+}
+
+TEST_CASE("LP validity: PDLP proves no wrong infeasibility or unboundedness", "[lp_validity]") {
+    // Rays were accepted on absolute tolerances: Optimal and Unbounded
+    // models came back Infeasible or Unbounded, and the dual ray took the
+    // objective's sign, so no maximization was found infeasible (#239).
+    Audit audit;
+    int proved = 0;
+    for (const Shape shape : kShapes) {
+        for (std::uint32_t seed = 0; seed < kPdlpSeeds; ++seed) {
+            for (int variant = 0; variant < 8; ++variant) {
+                const Generated g = generate(shape, seed, variant);
+                PdlpSolver solver;
+                solver.setOptions(pdlpOptions());
+                solver.load(g.lp);
+                ++audit.models;
+                const std::string tag = tagFor(shapeName(shape), seed, variant);
+                const Status st = solver.solve().status;
+                if (st == Status::Infeasible || st == Status::Unbounded) {
+                    if ((st == Status::Infeasible) != (g.shape == Shape::Infeasible) ||
+                        (st == Status::Unbounded) != (g.shape == Shape::Unbounded)) {
+                        audit.fail(tag + ": status " + statusName(st), g.lp);
+                    } else {
+                        ++proved;
+                    }
+                }
+            }
+        }
+    }
+    report(audit);
+    // At least 3 in 4 of the infeasible and unbounded models are proved
+    // within the budget (1504 of 1600 when written).
+    CHECK(proved >= static_cast<int>(kPdlpSeeds) * 12);
 }
