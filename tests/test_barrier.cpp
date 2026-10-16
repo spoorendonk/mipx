@@ -236,7 +236,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: equality rows and a dependent row converg
     // Issue #204. A balanced transportation LP: all supply and demand rows
     // are equalities and one of them is implied by the others. Equality rows
     // split into two inequalities left the feasible set without an interior,
-    // and the IPM stalled. A ranged row is added so that path is covered too.
+    // and the IPM stalled. A ranged and a lower-only row cover those paths.
     // Crossover is off, so the interior point itself must be optimal.
     const std::vector<Real> supply = {20.0, 30.0, 25.0};
     const std::vector<Real> demand = {10.0, 35.0, 30.0};
@@ -273,7 +273,13 @@ TEST_CASE("BarrierSolver CPU Cholesky: equality rows and a dependent row converg
     trips.push_back({ns + nd, nd + 1, 1.0});
     lp.row_lower.push_back(5.0);
     lp.row_upper.push_back(15.0);
-    lp.num_rows = ns + nd + 1;
+    // Lower-only, on supplier 2's two dearest arcs so that it binds:
+    // x20 + x22 >= 12.
+    trips.push_back({ns + nd + 1, 2 * nd, 1.0});
+    trips.push_back({ns + nd + 1, 2 * nd + 2, 1.0});
+    lp.row_lower.push_back(12.0);
+    lp.row_upper.push_back(kInf);
+    lp.num_rows = ns + nd + 2;
     for (Index r = 0; r < lp.num_rows; ++r) {
         lp.row_names.push_back("r" + std::to_string(r));
     }

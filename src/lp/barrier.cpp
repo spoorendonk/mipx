@@ -195,8 +195,9 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
     std::vector<Real> dy(m);
     std::vector<Real> ds(n);
 
-    // With z = s = 1 the Newton matrix is A A' (+ reg I).
-    if (!solver.factorize(ones, ones, reg)) {
+    // With z = s = 1 the Newton matrix is A A' (+ reg I). Retry with boosted
+    // regularization, as the main loop does.
+    if (!solver.factorize(ones, ones, reg) && !solver.factorize(ones, ones, reg * 100.0)) {
         return false;
     }
     // rp = b, rd = rc = 0 gives dz = A'(AA')^{-1} b, the least-norm z.
@@ -794,10 +795,11 @@ bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) cons
         }
     }
 
-    // A row's tolerance scales with the magnitude of its terms, not with a
-    // fixed 1e-5: large terms cancelling leave a rounding-size residual, while
-    // a row of tiny terms can be badly violated well inside 1e-5 (a generated
-    // infeasible LP passed that way once the IPM converged on it, #204).
+    // A row's tolerance is 1e-6 times the magnitude of its terms, floored at
+    // 1e-6 absolute. Large terms cancelling leave a rounding-size residual,
+    // and the old fixed 1e-5 let a row of tiny terms be badly violated: a
+    // generated infeasible LP passed that way once the IPM converged on it
+    // (#204).
     constexpr Real kRowTol = 1e-6;
     for (Index i = 0; i < original_.num_rows; ++i) {
         const auto rv = original_.matrix.row(i);
@@ -1174,7 +1176,11 @@ bool BarrierSolver::runCrossover() {
 
     auto cold_result = ds_cold.solve();
     crossover_iters_ += cold_result.iterations;
-    crossover_status_ = cold_result.status;
+    // Keep a warm run's proof of infeasibility or unboundedness: a cold run
+    // that only hits its iteration limit must not hide the contradiction.
+    if (crossover_status_ != Status::Infeasible && crossover_status_ != Status::Unbounded) {
+        crossover_status_ = cold_result.status;
+    }
 
     if (cold_result.status == Status::Optimal) {
         primal_orig_ = ds_cold.getPrimalValues();

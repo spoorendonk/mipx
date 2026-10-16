@@ -129,7 +129,8 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     Int crossover_iters_ = 0;
-    Status crossover_status_ = Status::Error;  // final simplex status of the last crossover
+    Status crossover_status_ =
+        Status::Error;  // Infeasible/Unbounded if either crossover run proved it
     bool used_gpu_ = false;
     std::string last_error_;
 };
