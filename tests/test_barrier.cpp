@@ -9,6 +9,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <filesystem>
+#include <string>
+#include <utility>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -227,6 +229,116 @@ TEST_CASE("BarrierSolver CPU Cholesky: triangle LP", "[barrier][cpu-cholesky]") 
     auto x = solver.getPrimalValues();
     REQUIRE(x.size() == 3);
     CHECK_THAT(x[0] + x[1] + x[2], WithinAbs(7.5, 1e-4));
+}
+
+TEST_CASE("BarrierSolver CPU Cholesky: equality rows and a dependent row converge",
+          "[barrier][cpu-cholesky]") {
+    // Issue #204. A balanced transportation LP: all supply and demand rows
+    // are equalities and one of them is implied by the others. Equality rows
+    // split into two inequalities left the feasible set without an interior,
+    // and the IPM stalled. A ranged row is added so that path is covered too.
+    // Crossover is off, so the interior point itself must be optimal.
+    const std::vector<Real> supply = {20.0, 30.0, 25.0};
+    const std::vector<Real> demand = {10.0, 35.0, 30.0};
+    const std::vector<std::vector<Real>> cost = {{8, 6, 10}, {9, 12, 13}, {14, 9, 16}};
+    const Index ns = 3;
+    const Index nd = 3;
+
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = ns * nd;
+    lp.col_lower.assign(static_cast<size_t>(lp.num_cols), 0.0);
+    lp.col_upper.assign(static_cast<size_t>(lp.num_cols), kInf);
+    lp.col_type.assign(static_cast<size_t>(lp.num_cols), VarType::Continuous);
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < ns; ++i) {
+        for (Index j = 0; j < nd; ++j) {
+            const Index col = i * nd + j;
+            lp.obj.push_back(cost[i][j]);
+            lp.col_names.push_back("x" + std::to_string(col));
+            trips.push_back({i, col, 1.0});
+            trips.push_back({ns + j, col, 1.0});
+        }
+    }
+    for (Index i = 0; i < ns; ++i) {
+        lp.row_lower.push_back(supply[i]);
+        lp.row_upper.push_back(supply[i]);
+    }
+    for (Index j = 0; j < nd; ++j) {
+        lp.row_lower.push_back(demand[j]);
+        lp.row_upper.push_back(demand[j]);
+    }
+    // Ranged: 5 <= x00 + x11 <= 15.
+    trips.push_back({ns + nd, 0, 1.0});
+    trips.push_back({ns + nd, nd + 1, 1.0});
+    lp.row_lower.push_back(5.0);
+    lp.row_upper.push_back(15.0);
+    lp.num_rows = ns + nd + 1;
+    for (Index r = 0; r < lp.num_rows; ++r) {
+        lp.row_names.push_back("r" + std::to_string(r));
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
+
+    DualSimplexSolver ds;
+    ds.setVerbose(false);
+    ds.load(lp);
+    auto ref = ds.solve();
+    REQUIRE(ref.status == Status::Optimal);
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.crossover = false;
+    opts.presolve = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(ref.objective, 1e-5 * std::abs(ref.objective)));
+    auto x = solver.getPrimalValues();
+    REQUIRE(x.size() == static_cast<size_t>(lp.num_cols));
+    std::vector<Real> act(static_cast<size_t>(lp.num_rows), 0.0);
+    lp.matrix.multiply(x, act);
+    for (Index r = 0; r < lp.num_rows; ++r) {
+        CHECK(act[r] >= lp.row_lower[r] - 1e-5);
+        CHECK(act[r] <= lp.row_upper[r] + 1e-5);
+    }
+}
+
+TEST_CASE("BarrierSolver CPU Cholesky: small Netlib LPs converge without crossover",
+          "[barrier][cpu-cholesky][netlib]") {
+    // Issue #204: the CPU normal-equations IPM solved none of these. Crossover
+    // is off, so a cold dual-simplex fallback cannot stand in for the IPM.
+    using Case = std::pair<const char*, Real>;
+    auto [name, expected] =
+        GENERATE(Case{"adlittle", 2.2549496316e+05}, Case{"afiro", -4.6475314286e+02},
+                 Case{"blend", -3.0812149846e+01}, Case{"kb2", -1.7499001299e+03},
+                 Case{"sc50a", -6.4575077059e+01}, Case{"sc50b", -7.0000000000e+01},
+                 Case{"sc105", -5.2202061212e+01}, Case{"sc205", -5.2202061212e+01},
+                 Case{"share1b", -7.6589318579e+04}, Case{"share2b", -4.1573224074e+02},
+                 Case{"stocfor1", -4.1131976219e+04});
+    const bool presolve = GENERATE(false, true);
+    INFO(name << " barrier presolve " << presolve);
+    std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance " + std::string(name) + " not downloaded");
+    }
+    auto lp = readMps(path);
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.crossover = false;
+    opts.presolve = presolve;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
 }
 
 // ============================================================================
@@ -1373,8 +1485,8 @@ TEST_CASE("Barrier presolve: singleton column postsolve splits a rounding gap",
 }
 
 TEST_CASE("Barrier presolve: Netlib reduced LP keeps the optimum", "[barrier][presolve][netlib]") {
-    // Issue #203. The barrier IPM itself does not yet converge on these (#204),
-    // so the reduction is checked through dual simplex: the reduced LP must
+    // Issue #203. The reduction is checked through dual simplex, independent
+    // of the IPM: the reduced LP must
     // have the original optimum, and postsolving its solution must give a
     // point of the original LP with that objective.
     // vtp-base and capri carry free column singletons with a cost.
@@ -1439,9 +1551,7 @@ TEST_CASE("Barrier presolve: Netlib reduced LP keeps the optimum", "[barrier][pr
 
 TEST_CASE("Barrier presolve: Netlib barrier objective matches presolve off",
           "[barrier][presolve][netlib]") {
-    // Issue #203. Where the IPM converges without barrier presolve, it must
-    // converge to the same objective with it. Instances on which the IPM does
-    // not yet converge at all (#204) skip until it does.
+    // Issue #203: the barrier objective must not depend on barrier presolve.
     auto name = GENERATE(as<std::string>{}, "afiro", "blend", "sc50a", "sc105", "sc205", "share2b",
                          "stocfor1");
     INFO(name);
@@ -1463,9 +1573,7 @@ TEST_CASE("Barrier presolve: Netlib barrier objective matches presolve off",
     };
 
     auto off = solve(false);
-    if (off.status != Status::Optimal) {
-        SKIP("The IPM does not converge on " + name + " even without presolve (#204)");
-    }
+    REQUIRE(off.status == Status::Optimal);
     auto on = solve(true);
     REQUIRE(on.status == Status::Optimal);
     Real scale = std::max(1.0, std::abs(off.objective));

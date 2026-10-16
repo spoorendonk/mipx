@@ -178,17 +178,87 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
 // Shared Mehrotra predictor-corrector IPM loop
 // ============================================================================
 
-bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
-                    std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
-                    std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s, Int& iters) {
+// Mehrotra's starting point (Mehrotra 1992, sec. 7; Wright, "Primal-Dual
+// Interior-Point Methods", ch. 10): the least-squares solutions of A z = b and
+// A'y + s = c, shifted to be positive and then centred. A start at z = s = 1
+// ignores b and c, so on badly scaled models the first steps are tiny and mu
+// grows instead of shrinking (#204).
+bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::span<const Real> c,
+                           Real reg, std::vector<Real>& z, std::vector<Real>& y,
+                           std::vector<Real>& s) {
+    const auto m = b.size();
+    const auto n = c.size();
+    const std::vector<Real> ones(n, 1.0);
+    const std::vector<Real> zero_m(m, 0.0);
+    const std::vector<Real> zero_n(n, 0.0);
+    std::vector<Real> dz(n);
+    std::vector<Real> dy(m);
+    std::vector<Real> ds(n);
+
+    // With z = s = 1 the Newton matrix is A A' (+ reg I).
+    if (!solver.factorize(ones, ones, reg)) {
+        return false;
+    }
+    // rp = b, rd = rc = 0 gives dz = A'(AA')^{-1} b, the least-norm z.
+    if (!solver.solveNewton(b, zero_n, zero_n, dz, dy, ds)) {
+        return false;
+    }
+    z = dz;
+    // rp = rc = 0, rd = c gives dy = (AA')^{-1} A c and ds = c - A'dy.
+    if (!solver.solveNewton(zero_m, c, zero_n, dz, dy, ds)) {
+        return false;
+    }
+    y = dy;
+    s = ds;
+
+    Real min_z = 0.0;
+    Real min_s = 0.0;
+    for (size_t j = 0; j < n; ++j) {
+        min_z = std::min(min_z, z[j]);
+        min_s = std::min(min_s, s[j]);
+    }
+    const Real shift_z = -1.5 * min_z;
+    const Real shift_s = -1.5 * min_s;
+    Real sum_z = 0.0;
+    Real sum_s = 0.0;
+    Real zs = 0.0;
+    for (size_t j = 0; j < n; ++j) {
+        z[j] += shift_z;
+        s[j] += shift_s;
+        sum_z += z[j];
+        sum_s += s[j];
+        zs += z[j] * s[j];
+    }
+    // The centring shifts are undefined when z or s is zero everywhere
+    // (b = 0 or c in the row space of A); fall back to a unit start then.
+    if (!(sum_z > 0.0) || !(sum_s > 0.0) || !(zs > 0.0) || !std::isfinite(zs)) {
+        z.assign(n, 1.0);
+        s.assign(n, 1.0);
+        y.assign(m, 0.0);
+        return true;
+    }
+    const Real centre_z = 0.5 * zs / sum_s;
+    const Real centre_s = 0.5 * zs / sum_z;
+    for (size_t j = 0; j < n; ++j) {
+        z[j] += centre_z;
+        s[j] += centre_s;
+    }
+    return true;
+}
+
+// A run that stops short of primal_dual_tol (stall, iteration limit, failed
+// factorization) still hands its best iterate on when every measure is within
+// this tolerance. Such a point is only ever used as a crossover start, which
+// proves optimality by simplex, so it need not meet primal_dual_tol itself.
+constexpr Real kNearOptimalTol = 1e-6;
+
+BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
+                                 std::span<const Real> b, std::span<const Real> c,
+                                 const BarrierOptions& opts, Real obj_offset, std::vector<Real>& z,
+                                 std::vector<Real>& y, std::vector<Real>& s, Int& iters) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const Real reg = std::max(opts.regularization, 1e-12);
-
-    // Mehrotra starting point.
-    z.assign(static_cast<size_t>(n), 1.0);
-    y.assign(static_cast<size_t>(m), 0.0);
-    s.assign(static_cast<size_t>(n), 1.0);
 
     std::vector<Real> az(static_cast<size_t>(m));
     std::vector<Real> at_y(static_cast<size_t>(n));
@@ -203,6 +273,27 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
     std::vector<Real> dy_aff(static_cast<size_t>(m));
     std::vector<Real> ds_aff(static_cast<size_t>(n));
 
+    if (!mehrotraStartingPoint(solver, b, c, reg, z, y, s)) {
+        iters = 0;
+        return BarrierIpmOutcome::Failed;
+    }
+
+    // Best iterate seen, by the largest of the three termination measures.
+    Real best_err = std::numeric_limits<Real>::infinity();
+    std::vector<Real> best_z;
+    std::vector<Real> best_y;
+    std::vector<Real> best_s;
+    auto stopShort = [&](Int iter) {
+        iters = iter;
+        if (best_err > kNearOptimalTol) {
+            return BarrierIpmOutcome::Failed;
+        }
+        z = std::move(best_z);
+        y = std::move(best_y);
+        s = std::move(best_s);
+        return BarrierIpmOutcome::NearOptimal;
+    };
+
     // Stall detection: track previous gap.
     Real prev_gap = 1e30;
     Int stall_count = 0;
@@ -214,7 +305,7 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
     for (Int iter = 0; iter < opts.max_iter; ++iter) {
         if (opts.stop_flag != nullptr && opts.stop_flag->load(std::memory_order_relaxed)) {
             iters = iter;
-            return false;
+            return BarrierIpmOutcome::Failed;
         }
 
         // Residuals.
@@ -243,15 +334,22 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
             gap < opts.primal_dual_tol) {
             iters = iter;
-            return true;
+            return BarrierIpmOutcome::Optimal;
+        }
+
+        const Real err = std::max({pinf, dinf, gap});
+        if (err < best_err) {
+            best_err = err;
+            best_z = z;
+            best_y = y;
+            best_s = s;
         }
 
         // Stall detection.
         if (gap >= prev_gap * 0.999) {
             ++stall_count;
             if (stall_count >= max_stall) {
-                iters = iter;
-                return false;
+                return stopShort(iter);
             }
         } else {
             stall_count = 0;
@@ -262,8 +360,7 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
         if (!solver.factorize(z, s, reg)) {
             // Retry with boosted regularization.
             if (!solver.factorize(z, s, reg * 100.0)) {
-                iters = iter;
-                return false;
+                return stopShort(iter);
             }
         }
 
@@ -272,8 +369,7 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
             rc[j] = -z[j] * s[j];
         }
         if (!solver.solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff)) {
-            iters = iter;
-            return false;
+            return stopShort(iter);
         }
 
         Real alpha_aff_p = maxStepToBoundary(z, dz_aff, 1.0);
@@ -293,8 +389,7 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
             rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
         }
         if (!solver.solveNewton(rp, rd, rc, dz, dy, ds)) {
-            iters = iter;
-            return false;
+            return stopShort(iter);
         }
 
         // Step to boundary.
@@ -321,8 +416,7 @@ bool runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const
         }
     }
 
-    iters = opts.max_iter;
-    return false;
+    return stopShort(opts.max_iter);
 }
 
 }  // anonymous namespace
@@ -424,48 +518,61 @@ bool BarrierSolver::buildStandardForm() {
         col_expr_[j] = expr;
     }
 
+    // One standard-form row per original row. An equality row gets no slack:
+    // splitting it into two inequalities would force both slacks to zero and
+    // leave the feasible set without an interior, which pins the barrier
+    // parameter and stalls the IPM (#204). A ranged row gets a slack bounded
+    // by the range through a second row, as a bounded column does.
     std::vector<std::pair<Index, Real>> entries;
     for (Index i = 0; i < prob.num_rows; ++i) {
-        auto rv = prob.matrix.row(i);
-
-        if (isFinite(prob.row_upper[i])) {
-            entries.clear();
-            Real rhs = prob.row_upper[i];
-            for (Index k = 0; k < rv.size(); ++k) {
-                Index j = rv.indices[k];
-                Real a = rv.values[k];
-                const auto& e = col_expr_[j];
-                rhs -= a * e.offset;
-                if (e.col_a >= 0) {
-                    entries.push_back({e.col_a, a * e.coeff_a});
-                }
-                if (e.col_b >= 0) {
-                    entries.push_back({e.col_b, a * e.coeff_b});
-                }
-            }
-            Index s = addStdCol(0.0);
-            entries.push_back({s, 1.0});
-            addEqRow(entries, rhs);
+        const Real rl = prob.row_lower[i];
+        const Real ru = prob.row_upper[i];
+        const bool rl_finite = isFinite(rl);
+        const bool ru_finite = isFinite(ru);
+        if (!rl_finite && !ru_finite) {
+            continue;
+        }
+        if (rl_finite && ru_finite && ru < rl - 1e-12) {
+            transformed_infeasible_ = true;
+            return false;
         }
 
-        if (isFinite(prob.row_lower[i])) {
-            entries.clear();
-            Real rhs = -prob.row_lower[i];
-            for (Index k = 0; k < rv.size(); ++k) {
-                Index j = rv.indices[k];
-                Real a = rv.values[k];
-                const auto& e = col_expr_[j];
-                rhs += a * e.offset;
-                if (e.col_a >= 0) {
-                    entries.push_back({e.col_a, -a * e.coeff_a});
-                }
-                if (e.col_b >= 0) {
-                    entries.push_back({e.col_b, -a * e.coeff_b});
-                }
+        // Rows with only a lower bound are negated into upper-bound form.
+        const Real sign = ru_finite ? 1.0 : -1.0;
+        Real rhs = ru_finite ? ru : -rl;
+        entries.clear();
+        auto rv = prob.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Real a = sign * rv.values[k];
+            const auto& e = col_expr_[rv.indices[k]];
+            rhs -= a * e.offset;
+            if (e.col_a >= 0) {
+                entries.push_back({e.col_a, a * e.coeff_a});
             }
-            Index s = addStdCol(0.0);
-            entries.push_back({s, 1.0});
+            if (e.col_b >= 0) {
+                entries.push_back({e.col_b, a * e.coeff_b});
+            }
+        }
+
+        const bool equality = rl_finite && ru_finite && ru - rl <= 1e-12;
+        if (equality) {
+            if (entries.empty()) {
+                // An empty equality row is either 0 = 0 or infeasible.
+                if (std::abs(rhs) > 1e-9) {
+                    transformed_infeasible_ = true;
+                    return false;
+                }
+                continue;
+            }
             addEqRow(entries, rhs);
+            continue;
+        }
+        Index slack = addStdCol(0.0);
+        entries.push_back({slack, 1.0});
+        addEqRow(entries, rhs);
+        if (rl_finite && ru_finite) {
+            Index t = addStdCol(0.0);
+            addEqRow({{slack, 1.0}, {t, 1.0}}, ru - rl);
         }
     }
 
@@ -687,13 +794,25 @@ bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) cons
         }
     }
 
-    std::vector<Real> ax(static_cast<size_t>(original_.num_rows), 0.0);
-    original_.matrix.multiply(x, ax);
+    // A row's tolerance scales with the magnitude of its terms, not with a
+    // fixed 1e-5: large terms cancelling leave a rounding-size residual, while
+    // a row of tiny terms can be badly violated well inside 1e-5 (a generated
+    // infeasible LP passed that way once the IPM converged on it, #204).
+    constexpr Real kRowTol = 1e-6;
     for (Index i = 0; i < original_.num_rows; ++i) {
-        if (isFinite(original_.row_lower[i]) && ax[i] < original_.row_lower[i] - tol) {
+        const auto rv = original_.matrix.row(i);
+        Real act = 0.0;
+        Real magnitude = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Real term = rv.values[k] * x[rv.indices[k]];
+            act += term;
+            magnitude += std::abs(term);
+        }
+        const Real row_tol = kRowTol * std::max(1.0, magnitude);
+        if (isFinite(original_.row_lower[i]) && act < original_.row_lower[i] - row_tol) {
             return false;
         }
-        if (isFinite(original_.row_upper[i]) && ax[i] > original_.row_upper[i] + tol) {
+        if (isFinite(original_.row_upper[i]) && act > original_.row_upper[i] + row_tol) {
             return false;
         }
     }
@@ -704,8 +823,8 @@ bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) cons
 // solveStandardForm — dispatch + shared IPM
 // ============================================================================
 
-bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
-                                      std::vector<Real>& s, Int& iters) {
+BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
+                                                   std::vector<Real>& s, Int& iters) {
     const Index m = aeq_.numRows();
     const Index n = aeq_.numCols();
     if (n == 0) {
@@ -713,7 +832,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
         y.assign(static_cast<size_t>(m), 0.0);
         s.clear();
         iters = 0;
-        return true;
+        return BarrierIpmOutcome::Optimal;
     }
     if (m == 0) {
         z.assign(static_cast<size_t>(n), 0.0);
@@ -721,11 +840,11 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
         s = cstd_;
         for (Index j = 0; j < n; ++j) {
             if (s[j] < -1e-12) {
-                return false;
+                return BarrierIpmOutcome::Failed;
             }
         }
         iters = 0;
-        return true;
+        return BarrierIpmOutcome::Optimal;
     }
 
     // Ruiz equilibration.
@@ -750,6 +869,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
     }
 
     bool ok = false;
+    BarrierIpmOutcome outcome = BarrierIpmOutcome::Failed;
     std::string gpu_fallback_error;
 
 #ifdef MIPX_HAS_CUDSS
@@ -761,6 +881,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
                              s, iters, &gpu_error);
         if (ok) {
             used_gpu_ = true;
+            outcome = BarrierIpmOutcome::Optimal;
         } else {
             gpu_fallback_error = gpu_error.empty() ? "Barrier GPU solve failed." : gpu_error;
             if (options_.verbose && !gpu_error.empty()) {
@@ -776,7 +897,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
                     use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
             } else {
                 last_error_ = gpu_fallback_error;
-                return false;
+                return BarrierIpmOutcome::Failed;
             }
         }
     }
@@ -806,9 +927,11 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
             if (last_error_.empty()) {
                 last_error_ = "Barrier backend setup failed.";
             }
-            return false;
+            return BarrierIpmOutcome::Failed;
         }
-        ok = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s, iters);
+        outcome =
+            runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s, iters);
+        ok = outcome != BarrierIpmOutcome::Failed;
         if (!ok && last_error_.empty() &&
             !(options_.stop_flag != nullptr &&
               options_.stop_flag->load(std::memory_order_relaxed))) {
@@ -838,7 +961,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
         }
     }
 
-    return ok;
+    return outcome;
 }
 
 // ============================================================================
@@ -846,6 +969,7 @@ bool BarrierSolver::solveStandardForm(std::vector<Real>& z, std::vector<Real>& y
 // ============================================================================
 
 bool BarrierSolver::runCrossover() {
+    crossover_status_ = Status::Error;
     const Index ncols = original_.num_cols;
     const Index nrows = original_.num_rows;
     const Real tol = 1e-6;
@@ -1019,6 +1143,7 @@ bool BarrierSolver::runCrossover() {
 
     auto result = ds.solve();
     crossover_iters_ = result.iterations;
+    crossover_status_ = result.status;
 
     if (result.status == Status::Optimal) {
         primal_orig_ = ds.getPrimalValues();
@@ -1049,6 +1174,7 @@ bool BarrierSolver::runCrossover() {
 
     auto cold_result = ds_cold.solve();
     crossover_iters_ += cold_result.iterations;
+    crossover_status_ = cold_result.status;
 
     if (cold_result.status == Status::Optimal) {
         primal_orig_ = ds_cold.getPrimalValues();
@@ -1083,9 +1209,9 @@ LpResult BarrierSolver::solve() {
     std::vector<Real> z, y, s;
     Int iters = 0;
 
-    bool ok = solveStandardForm(z, y, s, iters);
+    const BarrierIpmOutcome outcome = solveStandardForm(z, y, s, iters);
 
-    if (!ok) {
+    if (outcome == BarrierIpmOutcome::Failed) {
         if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
             status_ = Status::IterLimit;
             objective_ = 0.0;
@@ -1106,15 +1232,26 @@ LpResult BarrierSolver::solve() {
     }
 
     reconstructOriginalPrimals(z);
-    if (!checkOriginalPrimalFeasibility(primal_orig_)) {
+    const bool near_optimal = outcome == BarrierIpmOutcome::NearOptimal;
+    const bool feasible = checkOriginalPrimalFeasibility(primal_orig_);
+    // A point short of tolerance, or one that misses an original row once
+    // unscaled, can still start crossover, which then proves optimality by
+    // simplex. Without crossover it is an error.
+    const bool needs_crossover = near_optimal || !feasible;
+    auto fail = [&](const char* reason) {
         dual_eq_.clear();
         reduced_costs_std_.clear();
         primal_orig_.clear();
+        basis_orig_.clear();
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
-        last_error_ = "Barrier produced a primal-infeasible solution.";
-        return {status_, objective_, iterations_, 0.0};
+        last_error_ = reason;
+        return LpResult{status_, objective_, iterations_, 0.0};
+    };
+    if (needs_crossover && !options_.crossover) {
+        return fail(near_optimal ? "Barrier stopped short of tolerance and crossover is disabled."
+                                 : "Barrier produced a primal-infeasible solution.");
     }
 
     dual_eq_ = y;
@@ -1128,6 +1265,17 @@ LpResult BarrierSolver::solve() {
     // Run crossover to extract a basic feasible solution.
     if (options_.crossover) {
         if (!runCrossover()) {
+            if (crossover_status_ == Status::Infeasible || crossover_status_ == Status::Unbounded) {
+                // Simplex on the same LP contradicts the barrier's optimum,
+                // so neither verdict is reported.
+                return fail("Barrier optimum contradicted by crossover's simplex.");
+            }
+            if (needs_crossover) {
+                return fail(near_optimal
+                                ? "Barrier stopped short of tolerance and crossover failed."
+                                : "Barrier produced a primal-infeasible solution and crossover "
+                                  "failed.");
+            }
             // Crossover failed but barrier itself converged.
             // Keep barrier solution with empty basis.
             basis_orig_.clear();

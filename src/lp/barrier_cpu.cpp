@@ -969,6 +969,10 @@ private:
 
         // Dense Cholesky LL' factorization (in-place, lower triangle).
         // L is stored in the lower triangle of ne_dense_.
+        std::vector<Real> diag_orig(static_cast<size_t>(m));
+        for (Index j = 0; j < m; ++j) {
+            diag_orig[j] = ne_dense_[j + j * m];
+        }
         for (Index j = 0; j < m; ++j) {
             // Diagonal: L[j,j] = sqrt(M[j,j] - sum_{k<j} L[j,k]^2)
             Real sum = 0.0;
@@ -978,9 +982,16 @@ private:
             }
             Real diag = ne_dense_[j + j * m] - sum;
 
-            // Pivot perturbation if needed.
-            if (diag < 1e-12) {
-                diag = std::max(diag + reg_, reg_);
+            // A pivot that cancels to (near) zero relative to its diagonal
+            // marks a row linearly dependent on the earlier ones (or a row
+            // whose columns all sit at their bounds). Perturbing it to a tiny
+            // positive value makes dy blow up along that row, so it is set
+            // huge instead: the solve then leaves that component of dy at
+            // zero, which drops the dependent row from the step (the
+            // "Cholesky-infinity" rule of PCx and Wright's primal-dual book).
+            // M carries reg on its diagonal, so the test is net of reg.
+            if (diag - reg_ <= kDependentPivotTol * (diag_orig[j] - reg_) || diag < 1e-30) {
+                diag = kInfinitePivot;
             }
 
             ne_dense_[j + j * m] = std::sqrt(diag);
@@ -1024,6 +1035,9 @@ private:
             b[j] /= ne_dense_[j + j * m];
         }
     }
+
+    static constexpr Real kDependentPivotTol = 1e-13;
+    static constexpr Real kInfinitePivot = 1e128;
 
     const SparseMatrix* a_ = nullptr;
     Index m_ = 0, n_ = 0;

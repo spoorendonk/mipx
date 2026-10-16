@@ -27,6 +27,14 @@ enum class BarrierOrdering {
     CuDSS,  // cuDSS internal ordering (GPU only).
 };
 
+// How an interior-point run ended. NearOptimal is a run that stopped short of
+// primal_dual_tol but whose best iterate is close enough to start crossover.
+enum class BarrierIpmOutcome {
+    Optimal,
+    NearOptimal,
+    Failed,
+};
+
 struct BarrierOptions {
     Int max_iter = 100;
     Real primal_dual_tol = 1e-8;
@@ -87,8 +95,8 @@ private:
 
     bool buildStandardForm();
     void rebuildTransform();
-    bool solveStandardForm(std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
-                           Int& iters);
+    BarrierIpmOutcome solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
+                                        std::vector<Real>& s, Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
     bool runCrossover();
@@ -121,6 +129,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     Int crossover_iters_ = 0;
+    Status crossover_status_ = Status::Error;  // final simplex status of the last crossover
     bool used_gpu_ = false;
     std::string last_error_;
 };
