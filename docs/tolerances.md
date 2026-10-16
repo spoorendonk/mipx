@@ -72,6 +72,21 @@ answers, and changing them alters behaviour on every model:
   split at the point's value, so the rest of its subtree is still searched.
   Only a node with every integer fixed, whose completion fails, is fathomed
   as a tolerance call, as for a model feasible only within tolerance.
+- Presolve holds its reductions to its own tolerances, so the postsolved
+  answer can miss a row of the model as loaded by far more than 1e-6: a
+  row dropped as redundant while tight at its bounds turns 1.3e-8 of bound
+  slack into 0.05 through a coefficient of 4e6 (#244). The final point is
+  therefore checked against the model as loaded, by the same test as every
+  incumbent (`MipSolver::solveMinimization`). A point that fails is
+  re-solved with its integers fixed, cold. If that fails too, the model is
+  solved again without presolve in the time left, and if that answer fails
+  as well the status is `Error` with no solution. An incumbent found by
+  presolve alone is reported to the observer only when it passes.
+- Presolve does not eliminate a bounded column through a doubleton
+  equality whose ratio is at most 1e-8, as its bounds cannot be projected
+  onto the kept column, and it does not remove a forcing row while a live,
+  unfixed column has a coefficient of at most 1e-8 in it, as that column is
+  not pinned (#244). Both used to lose a constraint.
 - A root cut round whose LP does not solve to optimality is removed again,
   and the root LP goes back to the previous round's (#240). The cuts are
   valid, so such an LP is a numerical failure, not a proof of infeasibility.
