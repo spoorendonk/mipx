@@ -3949,11 +3949,18 @@ MipResult MipSolver::solveMinimization() {
         }
         // A MIP's repair keeps the integers, which were optimal only for the
         // reduced model: its optimum stands only within the gap of the bound.
-        if (result.status != Status::Optimal || result.gap <= gap_tol_) {
+        if (result.status != Status::Optimal || result.gap < gap_tol_) {
+            if (result.status == Status::Optimal && result.gap > 0.0) {
+                result.gap_limit_reached = true;
+            }
             return result;
         }
     } else {
+        // No point of this run holds: report it as one without an incumbent.
         result.solution.clear();
+        result.objective = kInf;
+        result.gap = kInf;
+        result.gap_limit_reached = false;
     }
     const double time_left = time_limit_ - elapsed;
     const Int nodes_left = node_limit_ - result.nodes;
@@ -3979,6 +3986,19 @@ MipResult MipSolver::solveMinimization() {
     again.lp_iterations += result.lp_iterations;
     again.work_units += result.work_units;
     again.time_seconds += result.time_seconds;
+    // The repaired point is feasible for the model as loaded; keep it when
+    // the re-solve found none, or a worse one, in the limits left. Its bound
+    // is the re-solve's: the first run's came from the reduced model.
+    if (!result.solution.empty() &&
+        (again.solution.empty() || result.objective < again.objective)) {
+        again.solution = std::move(result.solution);
+        again.objective = result.objective;
+        if (again.status == Status::Infeasible) {
+            again.status = Status::Error;
+        }
+        again.gap = again.best_bound > -kInf ? computeGap(again.objective, again.best_bound) : kInf;
+        again.gap_limit_reached = again.status == Status::Optimal && again.gap > 0.0;
+    }
     return again;
 }
 
