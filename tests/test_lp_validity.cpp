@@ -34,6 +34,7 @@
 // objective -c of the equivalent minimization.
 
 #include "mipx/dual_simplex.h"
+#include "mipx/mip_solver.h"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -1442,4 +1443,53 @@ TEST_CASE("Regression #243: a row repaired exactly to its bound is not a Farkas 
          {5, 4, -1.2500000000000001e-06},
          {6, 0, -2.125},
          {6, 1, -75000000}}));
+}
+
+TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
+    // A model of the #244 sweep: presolved, its root LP incumbent held the
+    // reduced model but missed row 2 of this one by 1.24e-6.
+    const std::uint32_t seed = 14373;
+    const int variant = 5;
+    Rng rng(500000U + seed * 8U + static_cast<std::uint32_t>(variant));
+    Generated g = generateOptimal(rng, optionsFor(variant));
+    for (Index j = 0; j < g.lp.num_cols; ++j) {
+        if (rng.coin(0.6)) {
+            g.lp.col_type[j] = VarType::Integer;
+        }
+    }
+    const LpProblem& lp = g.lp;
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setNodeLimit(300);
+    solver.setTimeLimit(60.0);
+    Int observed = 0;
+    // The gate's own test: every bound and row to 1e-6, integers to 1e-6.
+    constexpr Real kTol = 1e-6;
+    solver.setIncumbentObserver([&](const std::vector<Real>& x, const std::string& source) {
+        ++observed;
+        INFO("source " << source);
+        REQUIRE(static_cast<Index>(x.size()) == lp.num_cols);
+        for (Index j = 0; j < lp.num_cols; ++j) {
+            CHECK(x[j] >= lp.col_lower[j] - kTol);
+            CHECK(x[j] <= lp.col_upper[j] + kTol);
+            if (lp.col_type[j] != VarType::Continuous) {
+                CHECK(std::abs(x[j] - std::round(x[j])) <= kTol);
+            }
+        }
+        for (Index i = 0; i < lp.num_rows; ++i) {
+            const auto row = lp.matrix.row(i);
+            Real activity = 0.0;
+            for (Index k = 0; k < row.size(); ++k) {
+                activity += row.values[k] * x[row.indices[k]];
+            }
+            INFO("row " << i << " activity " << activity);
+            CHECK(activity >= lp.row_lower[i] - kTol);
+            CHECK(activity <= lp.row_upper[i] + kTol);
+        }
+    });
+    solver.load(lp);
+    const auto result = solver.solve();
+    CHECK(result.status == Status::Optimal);
+    CHECK(observed > 0);
 }

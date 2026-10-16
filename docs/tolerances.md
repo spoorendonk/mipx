@@ -83,9 +83,11 @@ answers, and changing them alters behaviour on every model:
   integers were optimal only for the reduced model. Failing that, the model
   is solved again without presolve in the time and nodes left, and that
   answer stands as it would with presolve off. With no limits left the
-  status is the limit hit, with the repaired point or none. An incumbent
-  found by presolve alone is reported to the observer only when it passes;
-  incumbents the tree reports are checked against the reduced model only.
+  status is the limit hit, with the repaired point or none. The observer
+  sees the same gate (#245): an incumbent of the search, accepted against
+  the reduced model, is postsolved and checked against the model as loaded
+  before it is reported. If it fails, the observer gets its repair with the
+  integers fixed, or no report. The search keeps the point it accepted.
 - Presolve does not eliminate a bounded column through a doubleton
   equality whose ratio is at most 1e-8, as its bounds cannot be projected
   onto the kept column, and it does not remove a forcing row while a live,

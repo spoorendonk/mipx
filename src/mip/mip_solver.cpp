@@ -1812,17 +1812,27 @@ bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
 std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<const Real> x,
                                                                   Real node_obj,
                                                                   double& work_units) const {
-    if (isAcceptableIncumbent(x)) {
+    return completeIncumbent(problem_, x, node_obj, work_units);
+}
+
+std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& model,
+                                                              std::span<const Real> x,
+                                                              Real node_obj, double& work_units) {
+    const auto acceptable = [&model](std::span<const Real> point) {
+        return static_cast<Index>(point.size()) == model.num_cols &&
+               heuristic_detail::isFeasiblePoint(model, point);
+    };
+    if (acceptable(x)) {
         return HeuristicSolution{{x.begin(), x.end()}, node_obj};
     }
-    if (static_cast<Index>(x.size()) != problem_.num_cols) {
+    if (static_cast<Index>(x.size()) != model.num_cols) {
         return std::nullopt;
     }
-    LpProblem fixed = problem_;
+    LpProblem fixed = model;
     std::vector<Real> point(x.begin(), x.end());
     bool any_continuous = false;
-    for (Index j = 0; j < problem_.num_cols; ++j) {
-        if (!heuristic_detail::isIntegerVar(problem_.col_type[j])) {
+    for (Index j = 0; j < model.num_cols; ++j) {
+        if (!heuristic_detail::isIntegerVar(model.col_type[j])) {
             any_continuous = true;
             continue;
         }
@@ -1833,8 +1843,7 @@ std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<cons
     if (any_continuous) {
         DualSimplexSolver completion;
         completion.setVerbose(false);
-        completion.setIterationLimit(
-            std::max<Int>(1000, 2 * (problem_.num_rows + problem_.num_cols)));
+        completion.setIterationLimit(std::max<Int>(1000, 2 * (model.num_rows + model.num_cols)));
         completion.load(fixed);
         const auto result = completion.solve();
         work_units += result.work_units;
@@ -1842,16 +1851,16 @@ std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<cons
             return std::nullopt;
         }
         const auto values = completion.getPrimalValues();
-        for (Index j = 0; j < problem_.num_cols; ++j) {
-            if (!heuristic_detail::isIntegerVar(problem_.col_type[j])) {
+        for (Index j = 0; j < model.num_cols; ++j) {
+            if (!heuristic_detail::isIntegerVar(model.col_type[j])) {
                 point[j] = values[j];
             }
         }
     }
-    if (!isAcceptableIncumbent(point)) {
+    if (!acceptable(point)) {
         return std::nullopt;
     }
-    const Real obj = heuristic_detail::computeObjective(problem_, point);
+    const Real obj = heuristic_detail::computeObjective(model, point);
     return HeuristicSolution{std::move(point), obj};
 }
 
@@ -4308,6 +4317,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     std::vector<Real> rc_root_saved_lower;
     std::vector<Real> rc_root_saved_upper;
 
+    bool problem_restored = false;
     auto restoreProblem = [&]() {
         if (!rc_root_saved_lower.empty()) {
             problem_.col_lower = std::move(rc_root_saved_lower);
@@ -4319,6 +4329,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             return;
         }
         problem_ = std::move(original_problem);
+        problem_restored = true;
         refreshTreePresolveProfile();
     };
 
@@ -4337,9 +4348,20 @@ MipResult MipSolver::solveMinimizationOnce() {
         if (!incumbent_observer_) {
             return;
         }
+        // The pool checks its points against the reduced model, and a
+        // postsolved point can still miss the model as loaded (#245). Report
+        // it checked there, repaired with its integers fixed, or not at all.
+        // The repair's work is the observer's, not the search's.
         pool.setObserver([&](const HeuristicSolution& solution, const std::string& source) {
-            incumbent_observer_(
-                did_presolve ? presolver.postsolve(solution.values) : solution.values, source);
+            const LpProblem& loaded =
+                using_transformed_problem && !problem_restored ? original_problem : problem_;
+            std::vector<Real> x =
+                did_presolve ? presolver.postsolve(solution.values) : solution.values;
+            double observer_work = 0.0;
+            auto checked = completeIncumbent(loaded, x, solution.objective, observer_work);
+            if (checked.has_value()) {
+                incumbent_observer_(checked->values, source);
+            }
         });
     };
 

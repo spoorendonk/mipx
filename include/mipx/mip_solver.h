@@ -425,7 +425,9 @@ public:
     /// heuristic, an integral node LP or the root), whether or not it improves
     /// on the pool's best, and with the solution presolve finds when it
     /// removes every column; postsolved to the loaded model's columns, with
-    /// the name of its source. For validity audits.
+    /// the name of its source. Each reported point holds the model as loaded
+    /// to the incumbent gate: a point that fails it is reported repaired
+    /// with its integers fixed, or not at all (#245). For validity audits.
     using IncumbentObserver =
         std::function<void(const std::vector<Real>& x, const std::string& source)>;
     void setIncumbentObserver(IncumbentObserver observer) {
@@ -573,6 +575,11 @@ private:
     // passes, else nothing. The completion's work is added to work_units.
     std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x, Real node_obj,
                                                            double& work_units) const;
+    /// integralNodeIncumbent() against `model`, the gate being
+    /// heuristic_detail::isFeasiblePoint on it.
+    static std::optional<HeuristicSolution> completeIncumbent(const LpProblem& model,
+                                                              std::span<const Real> x,
+                                                              Real node_obj, double& work_units);
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;
