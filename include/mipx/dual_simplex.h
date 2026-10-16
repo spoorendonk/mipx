@@ -197,6 +197,8 @@ public:
     std::vector<Real> getPrimalRay() const override;
 
     std::vector<BasisStatus> getBasis() const override;
+    /// Ignored, keeping the current basis, unless it has one entry per
+    /// column and row and exactly one Basic entry per row.
     void setBasis(std::span<const BasisStatus> basis) override;
 
     void addRows(std::span<const Index> starts, std::span<const Index> indices,

@@ -33,6 +33,7 @@
 // getReducedCosts() negate for maximize, so the same test applies to the
 // objective -c of the equivalent minimization.
 
+#include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
 
@@ -1155,6 +1156,57 @@ void requireCertifiedInfeasible(const LpProblem& lp) {
     CHECK(checkFarkas(lp, solver.getDualRay()) == "");
 }
 
+// The interior-point backends on the same generators (#239). They return no
+// rays, so the audit checks the status against the known one: a limit or
+// Error is allowed, any other wrong status is not. An Optimal must also
+// match the known optimum.
+Generated generate(Shape shape, std::uint32_t seed, int variant) {
+    const Options opt = optionsFor(variant);
+    const auto v = static_cast<std::uint32_t>(variant);
+    switch (shape) {
+        case Shape::Optimal: {
+            Rng rng(seed * 8U + v + 1U);
+            return generateOptimal(rng, opt);
+        }
+        case Shape::Infeasible: {
+            Rng rng(100000U + seed * 8U + v);
+            return generateInfeasible(rng, opt);
+        }
+        case Shape::Unbounded:
+            break;
+    }
+    Rng rng(200000U + seed * 8U + v);
+    return generateUnbounded(rng, opt);
+}
+
+void checkStatus(LpSolver& solver, const Generated& g, const std::string& tag, Real obj_rel,
+                 Audit& audit) {
+    const LpResult res = solver.solve();
+    const auto want = g.shape == Shape::Optimal      ? Status::Optimal
+                      : g.shape == Shape::Infeasible ? Status::Infeasible
+                                                     : Status::Unbounded;
+    const bool definite = res.status == Status::Optimal || res.status == Status::Infeasible ||
+                          res.status == Status::Unbounded;
+    if (definite && res.status != want) {
+        audit.fail(tag + ": status " + statusName(res.status) + ", expected " + statusName(want),
+                   g.lp);
+    } else if (res.status == Status::Optimal &&
+               std::abs(res.objective - g.optimum) > obj_rel * std::max(1.0, std::abs(g.optimum))) {
+        std::ostringstream os;
+        os.precision(17);
+        os << tag << ": objective " << res.objective << ", known optimum " << g.optimum;
+        audit.fail(os.str(), g.lp);
+    }
+}
+
+constexpr Shape kShapes[] = {Shape::Optimal, Shape::Infeasible, Shape::Unbounded};
+
+const char* shapeName(Shape shape) {
+    return shape == Shape::Optimal      ? "optimal"
+           : shape == Shape::Infeasible ? "infeasible"
+                                        : "unbounded";
+}
+
 }  // namespace
 
 TEST_CASE("LP validity: optimal LPs give a valid primal-dual certificate", "[lp_validity]") {
@@ -1492,4 +1544,25 @@ TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_
     const auto result = solver.solve();
     CHECK(result.status == Status::Optimal);
     CHECK(observed > 0);
+}
+
+TEST_CASE("LP validity: barrier gives no wrong status on generated LPs", "[lp_validity]") {
+    // Seeds 83 (variant 5) and 90 (variant 6) of the optimal shape crashed
+    // in crossover (#239).
+    Audit audit;
+    for (const Shape shape : kShapes) {
+        for (std::uint32_t seed = 0; seed < 100; ++seed) {
+            for (int variant = 0; variant < 8; ++variant) {
+                const Generated g = generate(shape, seed, variant);
+                BarrierSolver solver;
+                BarrierOptions opts;
+                opts.verbose = false;
+                solver.setOptions(opts);
+                solver.load(g.lp);
+                ++audit.models;
+                checkStatus(solver, g, tagFor(shapeName(shape), seed, variant), kObjRel, audit);
+            }
+        }
+    }
+    report(audit);
 }

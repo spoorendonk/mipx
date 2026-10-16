@@ -3720,6 +3720,12 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     if (static_cast<Index>(basis.size()) != n) {
         return;
     }
+    // A basis has exactly one basic variable per row. Any other count would
+    // install a basis matrix that is not square, which the factorization and
+    // every solve with it index past (#239); keep the current basis instead.
+    if (std::count(basis.begin(), basis.end(), BasisStatus::Basic) != num_rows_) {
+        return;
+    }
 
     // Fast path: identical basis status vector already installed.
     if (has_basis_ && static_cast<Index>(var_status_.size()) == n &&
