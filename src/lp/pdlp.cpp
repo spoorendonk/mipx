@@ -794,6 +794,103 @@ Real PdlpSolver::estimateSpectralNorm() const {
 }
 
 // ---------------------------------------------------------------------------
+// acceptsPoint — the pointwise test an Optimal point must also pass (#205)
+//
+// The termination test compares norms of the residual vectors with norms of
+// c and of the row sides. One large entry of c or side hides an absolute
+// violation elsewhere: forplan stopped 5.6% from its optimum, and an
+// unbounded LP (#239) passed with a dual residual of 5e-6 relative to
+// |c| = 1e5. A point is accepted only if, besides that test,
+//   - every row holds to primal_tol relative to its own terms, |a_i||x| and
+//     the side it violates;
+//   - every column's reduced cost meets an infinite bound only by dual_tol
+//     relative to its own terms, |c_j| and |a_j||y|; a finite bound takes
+//     any reduced cost into the dual objective, so only these make the dual
+//     bound invalid;
+//   - the relative gap holds at the point given (polishing never tests it),
+//     with sum_i |y_i| * violation_i added to it: y prices the row
+//     violations into the objective. forplan's rows held to 6e-6 of their
+//     terms, and its duals made that an objective 7e-4 from the optimum.
+//     The reported objective is c^T x with the true c, so the reduced costs
+//     the column test allows move only the dual bound, which the gap
+//     already measures; pricing them by x as well rejected accurate points
+//     (modszk1, whose free columns sit far from zero).
+// A row or column whose terms are all tiny would hold its round-off to its
+// own size (brandy: a reduced cost of 1e-14 against terms of 1e-14), so each
+// test also allows kPointFloor of the largest row's (column's) terms.
+// The ratios do not change under the row, column and objective scaling, so
+// they are computed on the scaled problem. The iterates keep x within its
+// bounds and y sign-feasible by projection, so neither needs a test.
+// ---------------------------------------------------------------------------
+
+constexpr Real kPointFloor = 1e-4;
+
+bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) const {
+    const Index m = scaled_a_.numRows();
+    const Index n = scaled_a_.numCols();
+    std::vector<Real> row_viol(static_cast<size_t>(m), 0.0);
+    std::vector<Real> row_terms(static_cast<size_t>(m), 0.0);
+    std::vector<Real> at_y(static_cast<size_t>(n), 0.0);
+    std::vector<Real> col_terms(cscaled_.size());
+    for (Index j = 0; j < n; ++j)
+        col_terms[j] = std::abs(cscaled_[j]);
+    Real dobj_row = 0.0;
+    for (Index i = 0; i < m; ++i) {
+        const auto row = scaled_a_.row(i);
+        Real ax = 0.0;
+        Real ax_terms = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            const Real ax_k = row.values[k] * x[row.indices[k]];
+            ax += ax_k;
+            ax_terms += std::abs(ax_k);
+            at_y[row.indices[k]] += row.values[k] * y[i];
+            col_terms[row.indices[k]] += std::abs(row.values[k] * y[i]);
+        }
+        const Real side = std::clamp(ax, scaled_row_lower_[i], scaled_row_upper_[i]);
+        row_viol[i] = std::abs(ax - side);
+        row_terms[i] = ax_terms + std::abs(side);
+        if (y[i] > 0.0)
+            dobj_row -= y[i] * scaled_row_upper_[i];
+        else if (y[i] < 0.0)
+            dobj_row -= y[i] * scaled_row_lower_[i];
+    }
+
+    // How far the row violations the test allows can move the objective, to
+    // first order: y is the optimum's sensitivity to the row sides.
+    Real slack = 0.0;
+    const Real row_floor = kPointFloor * infNorm(row_terms);
+    for (Index i = 0; i < m; ++i) {
+        if (row_viol[i] > options_.primal_tol * (row_terms[i] + row_floor))
+            return false;
+        slack += std::abs(y[i]) * row_viol[i];
+    }
+
+    Real pobj_scaled = 0.0;
+    Real dobj_col = 0.0;
+    const Real col_floor = kPointFloor * infNorm(col_terms);
+    for (Index j = 0; j < n; ++j) {
+        pobj_scaled += cscaled_[j] * x[j];
+        const Real grad = cscaled_[j] + at_y[j];
+        const Real lb = scaled_col_lower_[j];
+        const Real ub = scaled_col_upper_[j];
+        if ((grad > 0.0 && !isFinite(lb)) || (grad < 0.0 && !isFinite(ub))) {
+            if (std::abs(grad) > options_.dual_tol * (col_terms[j] + col_floor))
+                return false;
+        } else if (grad > 0.0) {
+            dobj_col += grad * lb;
+        } else if (grad < 0.0) {
+            dobj_col += grad * ub;
+        }
+    }
+
+    const Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
+    const Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+    const Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
+    return std::abs(pobj - dobj) + slack * obj_unscale <=
+           options_.optimality_tol * (1.0 + std::abs(pobj) + std::abs(dobj));
+}
+
+// ---------------------------------------------------------------------------
 // solve — Halpern PDHG
 // ---------------------------------------------------------------------------
 
@@ -1219,7 +1316,7 @@ LpResult PdlpSolver::solve() {
         }
 
         if (rel_primal_term <= options_.primal_tol && rel_dual_term <= options_.dual_tol &&
-            rel_gap <= options_.optimality_tol) {
+            rel_gap <= options_.optimality_tol && acceptsPoint(pdhg_x, pdhg_y)) {
             converged = true;
             break;
         }
@@ -1450,6 +1547,9 @@ LpResult PdlpSolver::solve() {
             if (options_.verbose) {
                 std::printf("PDLP polish: entering polish phase  pinf=% .2e  dinf=% .2e\n", rp, rd);
             }
+            // The converged point, kept unless polishing ends at a better one.
+            const std::vector<Real> converged_x = pdhg_x;
+            const std::vector<Real> converged_y = pdhg_y;
 
             // Continue PDHG from current iterate with polish tolerances.
             // Restart state is set from pdhg_x / pdhg_y.
@@ -1668,6 +1768,14 @@ LpResult PdlpSolver::solve() {
             if (options_.verbose) {
                 std::printf("PDLP polish: %s after %d iterations\n",
                             polish_converged ? "converged" : "exhausted budget", polish_count);
+            }
+            // Polishing tests the residuals only, and a budget it exhausts
+            // leaves wherever it got to: forplan ended 7.7% from its
+            // optimum (#205). Keep its point only if it passes everything
+            // the converged point did.
+            if (!polish_converged || !acceptsPoint(pdhg_x, pdhg_y)) {
+                pdhg_x = converged_x;
+                pdhg_y = converged_y;
             }
         }
     }
@@ -2263,8 +2371,13 @@ LpResult PdlpSolver::solveGpu() {
 
         if (rel_primal_term <= options_.primal_tol && rel_dual_term <= options_.dual_tol &&
             rel_gap <= options_.optimality_tol) {
-            converged = true;
-            break;
+            std::vector<Real> x_host(sn), y_host(sm);
+            cudaMemcpy(x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+            cudaMemcpy(y_host.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+            if (acceptsPoint(x_host, y_host)) {
+                converged = true;
+                break;
+            }
         }
 
         // --- Adaptive step size (GPU path) ---
@@ -2514,6 +2627,11 @@ LpResult PdlpSolver::solveGpu() {
                     "dinf=% .2e  [GPU]\n",
                     rp_gpu, rd_gpu);
             }
+            // The converged point, kept unless polishing ends at a better
+            // one (see the CPU path).
+            std::vector<Real> converged_x(sn), converged_y(sm);
+            cudaMemcpy(converged_x.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+            cudaMemcpy(converged_y.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
 
             // Restart iterates from current pdhg solution.
             launchRestartCopy(n, m, d_pdhg_x, d_pdhg_y, d_initial_x, d_initial_y, d_current_x,
@@ -2665,6 +2783,17 @@ LpResult PdlpSolver::solveGpu() {
             if (options_.verbose) {
                 std::printf("PDLP polish: %s after %d iterations  [GPU]\n",
                             polish_converged ? "converged" : "exhausted budget", polish_count);
+            }
+            bool keep_polished = polish_converged;
+            if (keep_polished) {
+                std::vector<Real> x_host(sn), y_host(sm);
+                cudaMemcpy(x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
+                cudaMemcpy(y_host.data(), d_pdhg_y, sm * sizeof(Real), cudaMemcpyDeviceToHost);
+                keep_polished = acceptsPoint(x_host, y_host);
+            }
+            if (!keep_polished) {
+                cudaMemcpy(d_pdhg_x, converged_x.data(), sn * sizeof(Real), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_pdhg_y, converged_y.data(), sm * sizeof(Real), cudaMemcpyHostToDevice);
             }
         }
     }

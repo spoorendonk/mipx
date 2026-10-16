@@ -48,7 +48,9 @@ regression, and `disagree` is a bug to file, not a class to accept.
 
 The lists currently cover the instances the unit tests already gate: dual
 simplex on nine Netlib LPs, and barrier and PDLP on a four-instance smoke subset
-(barrier is `dnf` throughout, see #204). The MIP list covers flugpl, gen, gt2
+(barrier is `dnf` throughout, see #204). PDLP also runs forplan, greenbeb and
+bnl2, which it once reported Optimal up to 7.7% from the optimum (#205): `dnf`
+is expected there, and the gate fails if they disagree again. The MIP list covers flugpl, gen, gt2
 and p0201. Widening them to the full sets is a benchmark-scale run,
 tracked in #223. The gate records no timings; timing baselines belong to
 #213.

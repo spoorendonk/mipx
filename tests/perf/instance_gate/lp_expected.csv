@@ -10,7 +10,10 @@ afiro,dual,match_1e-6
 afiro,pdlp,match_1e-6
 blend,barrier,dnf
 blend,dual,match_1e-6
-blend,pdlp,match_1e-4
+blend,pdlp,match_1e-6
+bnl2,pdlp,dnf
+forplan,pdlp,dnf
+greenbeb,pdlp,dnf
 sc105,dual,match_1e-6
 sc205,dual,match_1e-6
 sc50a,barrier,dnf

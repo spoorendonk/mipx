@@ -128,6 +128,7 @@ private:
     void buildTransposeCSR();
     void refreshPreconditioner(Real primal_weight);
     Real estimateSpectralNorm() const;
+    bool acceptsPoint(std::span<const Real> x, std::span<const Real> y) const;
 #ifdef MIPX_HAS_CUDA
     LpResult solveGpu();
 #endif

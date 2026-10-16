@@ -1180,8 +1180,8 @@ Generated generate(Shape shape, std::uint32_t seed, int variant) {
     return generateUnbounded(rng, opt);
 }
 
-void checkStatus(LpSolver& solver, const Generated& g, const std::string& tag, Real obj_rel,
-                 Audit& audit) {
+Status checkStatus(LpSolver& solver, const Generated& g, const std::string& tag, Real obj_rel,
+                   Audit& audit) {
     const LpResult res = solver.solve();
     const auto want = g.shape == Shape::Optimal      ? Status::Optimal
                       : g.shape == Shape::Infeasible ? Status::Infeasible
@@ -1198,11 +1198,14 @@ void checkStatus(LpSolver& solver, const Generated& g, const std::string& tag, R
         os << tag << ": objective " << res.objective << ", known optimum " << g.optimum;
         audit.fail(os.str(), g.lp);
     }
+    return res.status;
 }
 
 // PDLP gets a fixed iteration budget, not a time limit, so the audit does not
-// depend on the machine.
+// depend on the machine. Its Optimal is held to 1e-4, the accuracy its
+// default tolerances promise (#205).
 constexpr std::uint32_t kPdlpSeeds = 100;
+constexpr Real kPdlpObjRel = 1e-4;
 
 PdlpOptions pdlpOptions() {
     PdlpOptions opts;
@@ -1581,10 +1584,12 @@ TEST_CASE("LP validity: barrier gives no wrong status on generated LPs", "[lp_va
     report(audit);
 }
 
-TEST_CASE("LP validity: PDLP proves no wrong infeasibility or unboundedness", "[lp_validity]") {
+TEST_CASE("LP validity: PDLP gives no wrong status on generated LPs", "[lp_validity]") {
     // Rays were accepted on absolute tolerances: Optimal and Unbounded
     // models came back Infeasible or Unbounded, and the dual ray took the
     // objective's sign, so no maximization was found infeasible (#239).
+    // Termination compared residual norms with the norm of c, which hid the
+    // dual infeasibility of an unbounded model (#239, #205).
     Audit audit;
     int proved = 0;
     for (const Shape shape : kShapes) {
@@ -1595,15 +1600,11 @@ TEST_CASE("LP validity: PDLP proves no wrong infeasibility or unboundedness", "[
                 solver.setOptions(pdlpOptions());
                 solver.load(g.lp);
                 ++audit.models;
-                const std::string tag = tagFor(shapeName(shape), seed, variant);
-                const Status st = solver.solve().status;
-                if (st == Status::Infeasible || st == Status::Unbounded) {
-                    if ((st == Status::Infeasible) != (g.shape == Shape::Infeasible) ||
-                        (st == Status::Unbounded) != (g.shape == Shape::Unbounded)) {
-                        audit.fail(tag + ": status " + statusName(st), g.lp);
-                    } else {
-                        ++proved;
-                    }
+                const Status st = checkStatus(solver, g, tagFor(shapeName(shape), seed, variant),
+                                              kPdlpObjRel, audit);
+                if (g.shape != Shape::Optimal &&
+                    st == (g.shape == Shape::Infeasible ? Status::Infeasible : Status::Unbounded)) {
+                    ++proved;
                 }
             }
         }
