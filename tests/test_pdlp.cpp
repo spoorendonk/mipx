@@ -1574,3 +1574,72 @@ TEST_CASE("PdlpSolver: an empty row that excludes 0 makes a column-free LP infea
         CHECK(solver.solve().status == (upper < 0.0 ? Status::Infeasible : Status::Optimal));
     }
 }
+
+TEST_CASE("PdlpSolver: an infeasible LP with an improving ray is not unbounded", "[pdlp]") {
+    // Each LP is infeasible but has an improving ray. The ray alone proves
+    // nothing without a feasible point (#246). A large objective makes the
+    // primal iterates run off along the ray before the dual ones prove
+    // infeasibility.
+    //   - "apart": x2 >= 1 and x2 <= 0, off the ray x1 = x3 = 1 of min -x1,
+    //     plus x1 - x3 = 0.
+    //   - "on ray": x1 - x3 >= 1 and x1 - x3 <= 0, the rows the same ray
+    //     runs along, plus x2 >= 1 sitting at its bound: a point found by
+    //     moving back along the ray only as far as the bounds allow stays
+    //     where the iterate is.
+    //   - "noise": free columns, x1 >= 1, x1 + x2 - x3 <= 0 and x3 - x2 <= 0
+    //     with min -x2 - x3. A ray (1e-12, 1, 1) moves the first row clear of
+    //     its violation, but only by noise; mending it breaks the second.
+    struct Case {
+        const char* name;
+        std::vector<Real> obj, row_lower, row_upper, col_lower;
+        std::vector<Triplet> trips;
+    };
+    const Case cases[] = {
+        {"apart",
+         {-1.0, 0.0, 0.0},
+         {1.0, -kInf, 0.0},
+         {kInf, 0.0, 0.0},
+         {0.0, -kInf, 0.0},
+         {{0, 1, 1.0}, {1, 1, 1.0}, {2, 0, 1.0}, {2, 2, -1.0}}},
+        {"on ray",
+         {-1.0, 0.0, 0.0},
+         {1.0, -kInf, -kInf},
+         {kInf, 0.0, kInf},
+         {0.0, 1.0, 0.0},
+         {{0, 0, 1.0}, {0, 2, -1.0}, {1, 0, 1.0}, {1, 2, -1.0}, {2, 1, 1.0}}},
+        {"noise",
+         {0.0, -1.0, -1.0},
+         {1.0, -kInf, -kInf},
+         {kInf, 0.0, 0.0},
+         {-kInf, -kInf, -kInf},
+         {{0, 0, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}, {1, 2, -1.0}, {2, 1, -1.0}, {2, 2, 1.0}}},
+    };
+    for (const Case& c : cases) {
+        for (const Real cost : {1.0, 1e3, 1e6}) {
+            LpProblem lp;
+            lp.num_cols = 3;
+            lp.obj = c.obj;
+            for (Real& cj : lp.obj)
+                cj *= cost;
+            lp.col_lower = c.col_lower;
+            lp.col_upper = {kInf, kInf, kInf};
+            lp.col_type.assign(3, VarType::Continuous);
+            lp.col_names = {"x1", "x2", "x3"};
+            lp.num_rows = 3;
+            lp.row_lower = c.row_lower;
+            lp.row_upper = c.row_upper;
+            lp.row_names = {"r0", "r1", "r2"};
+            lp.matrix = SparseMatrix(3, 3, std::vector<Triplet>(c.trips));
+            PdlpSolver solver;
+            PdlpOptions opts;
+            opts.verbose = false;
+            opts.use_gpu = false;
+            solver.setOptions(opts);
+            solver.load(lp);
+            const Status st = solver.solve().status;
+            INFO(c.name << ", cost " << cost << ", status " << static_cast<int>(st));
+            CHECK(st != Status::Unbounded);
+            CHECK(st != Status::Optimal);
+        }
+    }
+}

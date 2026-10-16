@@ -234,22 +234,108 @@ inline bool checkUnboundednessCertificate(std::span<const Real> x_in, const LpPr
     return true;
 }
 
+/// Whether the LP has a point that holds every row to \p primal_tol, found
+/// from the iterate \p x that diverges along the ray \p r_in (#246).
+///
+/// A ray proves unboundedness only together with a feasible point; an
+/// infeasible LP whose recession cone has an improving direction has the
+/// ray and no point. \p x itself is no witness: it runs off as x0 + t*r, so
+/// the terms of its rows grow with t while their violations stay, and any
+/// test relative to those terms passes in the end. The point is built from
+/// p = x - alpha*r instead, with alpha the component of x along r, projected
+/// onto the column bounds. Nothing else limits alpha: a limit taken from a
+/// bound or row that holds at x drops to zero at an active one, and p is x
+/// again. So p is bounded, but it may break a row the ray moves towards its
+/// infinite side; the point tested is p + beta*r, with beta the least that
+/// mends every such row (each entry of r points to an infinite column
+/// bound, so the columns stay in theirs). Every row must hold there to
+/// primal_tol relative to its terms at p and its side. The terms are those
+/// at p, not p + beta*r: a ray entry or row move at noise level needs a huge
+/// beta, which must not excuse the other rows. Neither is there a floor
+/// relative to the largest row (as acceptsPoint() has), which would let one
+/// row with large terms excuse all the others.
+bool boundedPointHolds(std::span<const Real> x, std::span<const Real> r_in,
+                       const LpProblem& problem, Real primal_tol) {
+    const Index m = problem.num_rows;
+    const Index n = problem.num_cols;
+    const std::vector<Real> r = dropSignNoise(r_in, [&](Index j, Real v) {
+        return v > 0.0 ? isFinite(problem.col_upper[j]) : isFinite(problem.col_lower[j]);
+    });
+    if (r.empty())
+        return false;
+
+    long double xr = 0.0L;
+    long double rr = 0.0L;
+    for (Index j = 0; j < n; ++j) {
+        xr += static_cast<long double>(x[j]) * r[j];
+        rr += static_cast<long double>(r[j]) * r[j];
+    }
+    const Real alpha = static_cast<Real>(xr / rr);
+    std::vector<Real> p(static_cast<size_t>(n));
+    for (Index j = 0; j < n; ++j) {
+        p[j] = std::max(problem.col_lower[j], std::min(problem.col_upper[j], x[j] - alpha * r[j]));
+    }
+
+    // Row activity, its terms and the ray's move at p.
+    std::vector<long double> ap(static_cast<size_t>(m));
+    std::vector<long double> allow(static_cast<size_t>(m));
+    std::vector<long double> q(static_cast<size_t>(m));
+    long double beta = 0.0L;
+    for (Index i = 0; i < m; ++i) {
+        long double a = 0.0L;
+        long double terms = 0.0L;
+        long double qi = 0.0L;
+        const auto rv = problem.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const long double s = static_cast<long double>(rv.values[k]) * p[rv.indices[k]];
+            a += s;
+            terms += std::abs(s);
+            qi += static_cast<long double>(rv.values[k]) * r[rv.indices[k]];
+        }
+        const long double lo = problem.row_lower[i];
+        const long double up = problem.row_upper[i];
+        const long double side = a < lo ? lo : (a > up ? up : a);
+        ap[i] = a;
+        q[i] = qi;
+        allow[i] = primal_tol * (terms + std::abs(side));
+        const long double viol = a < lo ? lo - a : (a > up ? a - up : 0.0L);
+        if (viol <= allow[i])
+            continue;
+        if (a < lo && qi > 0.0L)
+            beta = std::max(beta, viol / qi);
+        else if (a > up && qi < 0.0L)
+            beta = std::max(beta, viol / -qi);
+        else
+            return false;
+    }
+    for (Index i = 0; i < m; ++i) {
+        const long double a = ap[i] + beta * q[i];
+        const long double viol = std::max(
+            {0.0L, problem.row_lower[i] - a, a - static_cast<long double>(problem.row_upper[i])});
+        if (!(viol <= allow[i]))
+            return false;
+    }
+    return true;
+}
+
 /// Ray detection over the iterates, mapped to the original space by the
 /// caller. Keeps the iterates of the previous check for their differences.
 class RayDetector {
 public:
     /// Status::Infeasible or Status::Unbounded when \p x or \p y (or its
     /// difference from the previous call) certifies it, with the ray in
-    /// \p ray; Status::Error otherwise.
+    /// \p ray; Status::Error otherwise. A primal ray counts only with a
+    /// point that holds the rows to \p primal_tol (boundedPointHolds()).
     Status check(const LpProblem& problem, std::span<const Real> x, std::span<const Real> y,
-                 std::vector<Real>& ray) {
+                 Real primal_tol, std::vector<Real>& ray) {
         Status found = Status::Error;
         if (tryCandidates(y, prev_y_, ray, [&](std::span<const Real> c) {
                 return checkInfeasibilityCertificate(c, problem);
             })) {
             found = Status::Infeasible;
         } else if (tryCandidates(x, prev_x_, ray, [&](std::span<const Real> c) {
-                       return checkUnboundednessCertificate(c, problem);
+                       return checkUnboundednessCertificate(c, problem) &&
+                              boundedPointHolds(x, c, problem, primal_tol);
                    })) {
             found = Status::Unbounded;
         }
@@ -1341,7 +1427,8 @@ LpResult PdlpSolver::solve() {
                 x_orig[j] = pdhg_x[j] * col_scale_[j] * inv_con_sc;
             }
             std::vector<Real> ray;
-            const Status found = ray_detector.check(original_, x_orig, y_orig, ray);
+            const Status found =
+                ray_detector.check(original_, x_orig, y_orig, options_.primal_tol, ray);
             if (found != Status::Error) {
                 status_ = found;
                 iterations_ = total_count;
@@ -2438,7 +2525,8 @@ LpResult PdlpSolver::solveGpu() {
                 x_orig[j] = pdhg_x_host[j] * col_scale_[j] * inv_con_sc;
             }
             std::vector<Real> ray;
-            const Status found = ray_detector.check(original_, x_orig, y_orig, ray);
+            const Status found =
+                ray_detector.check(original_, x_orig, y_orig, options_.primal_tol, ray);
             if (found != Status::Error) {
                 status_ = found;
                 iterations_ = total_count;

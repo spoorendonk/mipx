@@ -1611,6 +1611,7 @@ TEST_CASE("LP validity: PDLP gives no wrong status on generated LPs", "[lp_valid
     }
     report(audit);
     // At least 3 in 4 of the infeasible and unbounded models are proved
-    // within the budget (1504 of 1600 when written).
+    // within the budget (1504 of 1600 when written; 1490 since a primal ray
+    // also needs a feasible point, #246).
     CHECK(proved >= static_cast<int>(kPdlpSeeds) * 12);
 }
