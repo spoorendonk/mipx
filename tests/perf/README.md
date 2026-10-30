@@ -161,7 +161,7 @@ SOTA guard policy for dual-simplex work:
 - Do not accept speedups from numerically weaker legacy shortcuts.
 - Treat status/objective mismatches as correctness failures before perf claims.
 
-## Presolve Matrix (Light CI + Internal)
+## Presolve Matrix (Smoke + Internal)
 
 Run presolve correctness/performance comparisons against HiGHS across a matrix
 of LP/MIP solver settings. This uses `run_presolve_compare.py` under the hood
@@ -170,7 +170,7 @@ and emits:
 - `presolve_matrix_summary.csv`
 - `presolve_matrix_summary.md`
 
-Lightweight smoke profile (suitable for optional CI checks):
+Lightweight smoke profile (quick enough to run by hand):
 
 ```bash
 python3 tests/perf/run_presolve_matrix.py \

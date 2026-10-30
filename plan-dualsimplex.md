@@ -12,7 +12,8 @@ primary Netlib scorecard.
 
 ## Current Status
 - Infrastructure
-  - Dual perf gate is implemented and wired into CI.
+  - Dual perf gate is implemented (`tests/perf/run_dual_perf_gate.sh`), run
+    by hand; local CI (the pre-push hook) is the only gate on main.
   - Stored dual baselines and the LPopt-style curated LP corpus are in place.
 - Solver changes already landed on this branch
   - Preserve Devex weights across pure LU reinversion.

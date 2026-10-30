@@ -29,7 +29,7 @@ This is a preference, not a prohibition. Shelling out to `grep`/`rg` is fine whe
 plan (non-trivial) → implement → test → /review → push to main
 ```
 
-`.githooks/pre-commit` checks and does not fix: it runs `clang-format --dry-run -Werror` over every *tracked* C/C++ file, not just the staged ones, plus `ruff` and `mypy` through `uv run` where they can be run (a tool that cannot is reported and skipped). A commit is refused while any tracked file has drifted from `.clang-format`, and `--no-verify` is not the answer. Run `clang-format -i` on the files it names and commit that reflow as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate: it refuses merge commits on main and a push without a review receipt (see Agent Self-Review), then runs the `## Build & Test` blocks in a fresh worktree as a local CI.
+`.githooks/pre-commit` checks and does not fix: it runs `clang-format --dry-run -Werror` over every *tracked* C/C++ file, not just the staged ones, plus `ruff` and `mypy` through `uv run` where they can be run (a tool that cannot is reported and skipped). A commit is refused while any tracked file has drifted from `.clang-format`, and `--no-verify` is not the answer. Run `clang-format -i` on the files it names and commit that reflow as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate: it refuses merge commits on main and a push without a review receipt (see Agent Self-Review), then runs the `## Build & Test` blocks in a fresh worktree as a local CI. That local CI is the only gate: there are no GitHub Actions workflows, and any future one runs at most weekly (`schedule`) or by hand (`workflow_dispatch`), never on push or pull request.
 
 ## Git Workflow
 
@@ -69,8 +69,7 @@ wcp --help                                                # the commands; `wcp <
 
 Git hooks live in `.githooks/` (`core.hooksPath`, set to the relative `.githooks`) and are the only hooks in this repo. They were installed by [wcp](https://github.com/spoorendonk/wcp) (`wcp init`) and are committed like any other file; they call no wcp, so a clone without it is still gated once `core.hooksPath` is set. A wrong or too-strict hook is fixed here, and said upstream if wcp's default was wrong for everyone. See Running wcp for the `# wcp:` provenance line each one carries.
 
-`.claude/` is untracked and carries no hooks. Don't add Claude Code hooks to it: agent-side hooks duplicated the git hooks' job while being invisible to anyone not running Claude Code, and the branch-creation one could not be satisfied from a git worktree at all. Enforcement belongs in `.githooks/`, where every contributor and CI runs it.
-
+`.claude/` is untracked and carries no hooks. Don't add Claude Code hooks to it: agent-side hooks duplicated the git hooks' job while being invisible to anyone not running Claude Code, and the branch-creation one could not be satisfied from a git worktree at all. Enforcement belongs in `.githooks/`, where every contributor and the local CI run it.
 - **Don't work around a failing hook by weakening it.** Fix the cause, or change the hook deliberately and say why in the commit.
 - **Never use `git push --no-verify` or `git commit --no-verify`** unless explicitly asked. A failing hook is a signal.
 

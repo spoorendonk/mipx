@@ -8,7 +8,7 @@ produces:
 - `presolve_matrix_summary.md`: human-readable summary table
 
 Profiles:
-- `ci-smoke`: lightweight, intended for optional CI smoke validation
+- `ci-smoke`: lightweight smoke validation, quick enough to run by hand
 - `internal`: broader matrix for local optimization work
 """
 
