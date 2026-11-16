@@ -434,6 +434,18 @@ TEST_CASE("Column changes: addCols on a maximize LP and an unsolved LP", "[colum
         const std::vector<Real> nan_value = {std::nan("")};
         CHECK_THROWS_AS(solver.addCols(starts, indices, nan_value, obj, lower, upper),
                         std::invalid_argument);
+        const std::vector<Real> inf_value = {kInf};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, inf_value, obj, lower, upper),
+                        std::invalid_argument);
+        const std::vector<Real> inf_cost = {kInf};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, values, inf_cost, lower, upper),
+                        std::invalid_argument);
+        const std::vector<Real> minus_inf_upper = {-kInf};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, values, obj, lower, minus_inf_upper),
+                        std::invalid_argument);
+        const std::vector<Real> nan_bound = {std::nan("")};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, values, obj, nan_bound, upper),
+                        std::invalid_argument);
         const std::vector<Index> bad_col = {2};
         CHECK_THROWS_AS(solver.removeCols(bad_col), std::invalid_argument);
         CHECK(solver.numCols() == 2);
@@ -478,6 +490,13 @@ TEST_CASE("Column changes: barrier and PDLP solve the changed LP", "[column_chan
         const auto r = apply(barrier);
         REQUIRE(r.status == Status::Optimal);
         CHECK_THAT(r.objective, WithinRel(expect, 1e-6));
+
+        // A change that leaves no transform leaves no solution to read.
+        barrier.setColBounds(k, 5.0, 3.0);
+        CHECK(barrier.solve().status != Status::Optimal);
+        const auto n = static_cast<std::size_t>(run.master.num_cols);
+        CHECK(barrier.getPrimalValues() == std::vector<Real>(n, 0.0));
+        CHECK(barrier.getReducedCosts() == std::vector<Real>(n, 0.0));
     }
     SECTION("PDLP") {
         PdlpSolver pdlp;

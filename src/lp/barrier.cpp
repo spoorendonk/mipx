@@ -601,6 +601,7 @@ void BarrierSolver::rebuildTransform() {
         if (presolver_.isInfeasible()) {
             transformed_ok_ = false;
             transformed_infeasible_ = true;
+            clearTransformedSolution();
             return;
         }
         if (presolved_.num_cols < original_.num_cols || presolved_.num_rows < original_.num_rows) {
@@ -611,6 +612,19 @@ void BarrierSolver::rebuildTransform() {
         }
     }
     transformed_ok_ = buildStandardForm();
+    if (!transformed_ok_) {
+        clearTransformedSolution();
+    }
+}
+
+// A model change that leaves no transform also leaves no solution: nothing
+// from the previous model may be read back against this one.
+void BarrierSolver::clearTransformedSolution() {
+    col_expr_.clear();
+    dual_eq_.clear();
+    reduced_costs_std_.clear();
+    basis_orig_.clear();
+    primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
 }
 
 std::vector<Real> BarrierSolver::getPrimalValues() const {

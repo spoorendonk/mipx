@@ -307,8 +307,7 @@ private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
 
-    // Build the augmented matrix [A | I].
-    /// [A | -I], the matrix the basis is factorized from.
+    /// Build augmented_ = [A | -I], the matrix the basis is factorized from.
     void buildBasisMatrixSource();
     /// Swap each basic column in @p cols for a row's logical (removeCols).
     /// False, with the basis unchanged in meaning, when it cannot be done.
