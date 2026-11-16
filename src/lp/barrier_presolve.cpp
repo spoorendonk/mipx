@@ -644,7 +644,10 @@ LpProblem BarrierPresolver::buildReducedProblem(const LpProblem& lp,
         reduced.obj[jj] = lp.obj[j];
         reduced.col_lower[jj] = lp.col_lower[j];
         reduced.col_upper[jj] = lp.col_upper[j];
-        reduced.col_type[jj] = lp.col_type[j];
+        // An LP built in code may carry no types (all continuous), as it may
+        // carry no names.
+        reduced.col_type[jj] =
+            (j < static_cast<Index>(lp.col_type.size())) ? lp.col_type[j] : VarType::Continuous;
         if (j < static_cast<Index>(lp.col_names.size())) {
             reduced.col_names[jj] = lp.col_names[j];
         }

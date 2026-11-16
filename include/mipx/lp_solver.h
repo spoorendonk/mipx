@@ -111,9 +111,34 @@ public:
                          std::span<const Real> upper) = 0;
     virtual void removeRows(std::span<const Index> rows) = 0;
 
+    /// Incremental column changes (for column generation).
+    ///
+    /// addCols appends k = obj.size() columns, given column-wise: column t
+    /// has the entries indices[starts[t] .. end_t) (row indices) and values,
+    /// where end_t is starts[t + 1], or indices.size() for the last column.
+    /// starts has k entries, or k + 1 with starts[k] == indices.size(). The
+    /// new columns take indices num_cols .. num_cols + k - 1, and obj, lower
+    /// and upper (k entries each) are in the model's own sense and units. A
+    /// solver that keeps a basis keeps it: the new columns enter nonbasic at
+    /// a finite bound (the lower one when it has one), so a basis that was
+    /// primal feasible stays so. Throws std::invalid_argument on malformed
+    /// input, changing nothing.
+    virtual void addCols(std::span<const Index> starts, std::span<const Index> indices,
+                         std::span<const Real> values, std::span<const Real> obj,
+                         std::span<const Real> lower, std::span<const Real> upper) = 0;
+    /// Remove columns; the survivors keep their relative order. A solver that
+    /// keeps a basis keeps it, with a row's logical in place of each removed
+    /// basic column. Throws std::invalid_argument on an index out of range,
+    /// changing nothing.
+    virtual void removeCols(std::span<const Index> cols) = 0;
+
     /// Bound and objective changes.
     virtual void setColBounds(Index col, Real lower, Real upper) = 0;
+    /// Row bounds lower <= a_row^T x <= upper, in the model's units.
+    virtual void setRowBounds(Index row, Real lower, Real upper) = 0;
     virtual void setObjective(std::span<const Real> obj) = 0;
+    /// One column's objective coefficient, in the model's sense and units.
+    virtual void setColObjective(Index col, Real cost) = 0;
 };
 
 }  // namespace mipx

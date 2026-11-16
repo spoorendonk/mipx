@@ -215,8 +215,26 @@ public:
     /// old problem.
     void removeRows(std::span<const Index> rows) override;
 
+    /// See LpSolver::addCols(). Each new column is scaled on its own, to a
+    /// largest entry of 1 against the current row scaling; the rest of the
+    /// model keeps its scaling. The factors stay valid (the basis matrix does
+    /// not change), and the next solve() starts from the kept basis.
+    void addCols(std::span<const Index> starts, std::span<const Index> indices,
+                 std::span<const Real> values, std::span<const Real> obj,
+                 std::span<const Real> lower, std::span<const Real> upper) override;
+    /// See LpSolver::removeCols(). Each removed basic column is swapped for
+    /// the logical of a row on which its basis row of B^{-1} is largest, one
+    /// Forrest-Tomlin update at a time, so the basis stays nonsingular. When
+    /// the current basis cannot be factorized there is no basis afterwards,
+    /// as after removeRows().
+    ///
+    /// Postcondition: re-solve before reading a solution.
+    void removeCols(std::span<const Index> cols) override;
+
     void setColBounds(Index col, Real lower, Real upper) override;
+    void setRowBounds(Index row, Real lower, Real upper) override;
     void setObjective(std::span<const Real> obj) override;
+    void setColObjective(Index col, Real cost) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
     [[nodiscard]] Int getIterationLimit() const { return iter_limit_; }
@@ -291,6 +309,13 @@ private:
 
     // Build the augmented matrix [A | I].
     void buildAugmentedMatrix();
+    /// [A | -I], the matrix the basis is factorized from.
+    void buildBasisMatrixSource();
+    /// Swap each basic column in @p cols for a row's logical (removeCols).
+    /// False, with the basis unchanged in meaning, when it cannot be done.
+    bool swapOutBasicColumns(std::span<const Index> cols);
+    /// Drop the basis, sizing every per-variable vector to the model.
+    void dropBasis();
 
     // Set up initial basis (all slacks basic).
     void setupInitialBasis();
@@ -330,6 +355,8 @@ private:
     Real varLower(Index k) const;
     /// Bring one nonbasic variable's status and value in line with its bounds.
     void reconcileNonbasicStatus(Index k);
+    /// The same against the given bounds (internal units, unperturbed).
+    void reconcileNonbasicStatus(Index k, Real lo, Real up);
     Real varUpper(Index k) const;
     Real varCost(Index k) const;
 

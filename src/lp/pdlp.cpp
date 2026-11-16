@@ -3154,4 +3154,46 @@ void PdlpSolver::setObjective(std::span<const Real> obj) {
     buildScaledProblem();
 }
 
+void PdlpSolver::addCols(std::span<const Index> starts, std::span<const Index> indices,
+                         std::span<const Real> values, std::span<const Real> obj,
+                         std::span<const Real> lower, std::span<const Real> upper) {
+    if (!loaded_) {
+        return;
+    }
+    if (checkColumnBatch(original_.num_rows, starts, indices, values, obj, lower, upper) == 0) {
+        return;
+    }
+    appendColumns(original_, starts, indices, values, obj, lower, upper);
+    buildScaledProblem();
+}
+
+void PdlpSolver::removeCols(std::span<const Index> cols) {
+    if (!loaded_) {
+        return;
+    }
+    const std::vector<Index> sorted = sortedColumnSet(original_.num_cols, cols);
+    if (sorted.empty()) {
+        return;
+    }
+    removeColumns(original_, sorted);
+    buildScaledProblem();
+}
+
+void PdlpSolver::setRowBounds(Index row, Real lower, Real upper) {
+    if (!loaded_ || row < 0 || row >= original_.num_rows) {
+        return;
+    }
+    original_.row_lower[row] = lower;
+    original_.row_upper[row] = upper;
+    buildScaledProblem();
+}
+
+void PdlpSolver::setColObjective(Index col, Real cost) {
+    if (!loaded_ || col < 0 || col >= original_.num_cols) {
+        return;
+    }
+    original_.obj[col] = cost;
+    buildScaledProblem();
+}
+
 }  // namespace mipx

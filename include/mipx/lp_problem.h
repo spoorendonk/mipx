@@ -4,6 +4,7 @@
 #include "mipx/sparse_matrix.h"
 
 #include <limits>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,39 @@ LpProblem linearizeModelFeatures(const LpProblem& problem);
 /// rounded bounds cross, i.e. it has no integer value and the model is
 /// infeasible. Semi columns are left alone: their domain is not an interval.
 bool roundIntegerBounds(LpProblem& problem, Real tol = 1e-6);
+
+/// Check a batch of columns given column-wise, as LpSolver::addCols takes it,
+/// against a model with @p num_rows rows, and return the number of columns.
+/// Throws std::invalid_argument when obj, lower and upper differ in size,
+/// indices and values differ in size, starts has neither k nor k + 1 entries
+/// (then with starts[k] == indices.size()), starts is not nondecreasing
+/// within [0, indices.size()], or a row index is out of range. Entries of
+/// one column on the same row add up.
+Index checkColumnBatch(Index num_rows, std::span<const Index> starts,
+                       std::span<const Index> indices, std::span<const Real> values,
+                       std::span<const Real> obj, std::span<const Real> lower,
+                       std::span<const Real> upper);
+
+/// End of column @p t of a batch that checkColumnBatch accepted.
+[[nodiscard]] inline Index columnBatchEnd(std::span<const Index> starts, Index t,
+                                          Index num_entries) {
+    return (t + 1 < static_cast<Index>(starts.size())) ? starts[t + 1] : num_entries;
+}
+
+/// Append a batch that checkColumnBatch accepted to @p problem, as
+/// continuous unnamed columns.
+void appendColumns(LpProblem& problem, std::span<const Index> starts,
+                   std::span<const Index> indices, std::span<const Real> values,
+                   std::span<const Real> obj, std::span<const Real> lower,
+                   std::span<const Real> upper);
+
+/// The columns of @p cols sorted and without repeats. Throws
+/// std::invalid_argument on one outside [0, num_cols).
+std::vector<Index> sortedColumnSet(Index num_cols, std::span<const Index> cols);
+
+/// Remove the columns @p sorted_cols (as sortedColumnSet returns them) from
+/// @p problem; the survivors keep their order.
+void removeColumns(LpProblem& problem, std::span<const Index> sorted_cols);
 
 /// True when column @p j is a 0/1 variable by the problem's own bounds: typed
 /// VarType::Binary, or VarType::Integer with bounds exactly [0, 1]. The MPS

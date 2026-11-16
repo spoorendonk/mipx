@@ -295,4 +295,136 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
     return out;
 }
 
+Index checkColumnBatch(Index num_rows, std::span<const Index> starts,
+                       std::span<const Index> indices, std::span<const Real> values,
+                       std::span<const Real> obj, std::span<const Real> lower,
+                       std::span<const Real> upper) {
+    const auto k = obj.size();
+    if (lower.size() != k || upper.size() != k) {
+        throw std::invalid_argument("addCols: obj, lower and upper differ in size");
+    }
+    if (indices.size() != values.size()) {
+        throw std::invalid_argument("addCols: indices and values differ in size");
+    }
+    const auto nnz = static_cast<Index>(indices.size());
+    if (starts.size() != k && starts.size() != k + 1) {
+        throw std::invalid_argument("addCols: starts needs one entry per column, or one more");
+    }
+    if (starts.size() == k + 1 && starts[k] != nnz) {
+        throw std::invalid_argument("addCols: the last start is not the number of entries");
+    }
+    Index prev = 0;
+    for (std::size_t t = 0; t < k; ++t) {
+        if (starts[t] < prev || starts[t] > nnz) {
+            throw std::invalid_argument("addCols: starts out of order or out of range");
+        }
+        prev = starts[t];
+    }
+    for (const Index i : indices) {
+        if (i < 0 || i >= num_rows) {
+            throw std::invalid_argument("addCols: row index out of range");
+        }
+    }
+    return static_cast<Index>(k);
+}
+
+void appendColumns(LpProblem& problem, std::span<const Index> starts,
+                   std::span<const Index> indices, std::span<const Real> values,
+                   std::span<const Real> obj, std::span<const Real> lower,
+                   std::span<const Real> upper) {
+    const auto k = static_cast<Index>(obj.size());
+    const auto nnz = static_cast<Index>(indices.size());
+    const Index first = problem.num_cols;
+    std::vector<Triplet> trips = extractTriplets(problem);
+    trips.reserve(trips.size() + indices.size());
+    for (Index t = 0; t < k; ++t) {
+        for (Index p = starts[t]; p < columnBatchEnd(starts, t, nnz); ++p) {
+            trips.push_back({indices[p], first + t, values[p]});
+        }
+    }
+    // The optional per-column vectors grow only when they are kept for every
+    // column, so a problem that carries none stays without them.
+    const auto sized = [&](const auto& v) { return static_cast<Index>(v.size()) == first; };
+    const bool types = sized(problem.col_type);
+    const bool names = sized(problem.col_names);
+    const bool semi = sized(problem.col_semi_lower);
+    for (Index t = 0; t < k; ++t) {
+        problem.obj.push_back(obj[t]);
+        problem.col_lower.push_back(lower[t]);
+        problem.col_upper.push_back(upper[t]);
+        if (types) {
+            problem.col_type.push_back(VarType::Continuous);
+        }
+        if (names) {
+            problem.col_names.emplace_back();
+        }
+        if (semi) {
+            problem.col_semi_lower.push_back(0.0);
+        }
+    }
+    problem.num_cols += k;
+    problem.matrix = SparseMatrix(problem.num_rows, problem.num_cols, std::move(trips));
+}
+
+std::vector<Index> sortedColumnSet(Index num_cols, std::span<const Index> cols) {
+    std::vector<Index> sorted(cols.begin(), cols.end());
+    std::ranges::sort(sorted);
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    if (!sorted.empty() && (sorted.front() < 0 || sorted.back() >= num_cols)) {
+        throw std::invalid_argument("removeCols: column index out of range");
+    }
+    return sorted;
+}
+
+void removeColumns(LpProblem& problem, std::span<const Index> sorted_cols) {
+    if (sorted_cols.empty()) {
+        return;
+    }
+    if (!problem.sos_constraints.empty() || !problem.indicator_constraints.empty()) {
+        throw std::invalid_argument("removeCols: SOS and indicator constraints name columns");
+    }
+    const Index old_cols = problem.num_cols;
+    std::vector<Index> col_map(static_cast<std::size_t>(old_cols), 0);
+    Index next = 0;
+    std::size_t r = 0;
+    for (Index j = 0; j < old_cols; ++j) {
+        if (r < sorted_cols.size() && sorted_cols[r] == j) {
+            col_map[j] = -1;
+            ++r;
+        } else {
+            col_map[j] = next++;
+        }
+    }
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(problem.matrix.numNonzeros()));
+    for (Index i = 0; i < problem.num_rows; ++i) {
+        auto row = problem.matrix.row(i);
+        for (Index p = 0; p < row.size(); ++p) {
+            const Index j = col_map[row.indices[p]];
+            if (j >= 0) {
+                trips.push_back({i, j, row.values[p]});
+            }
+        }
+    }
+    const auto compact = [&](auto& v) {
+        if (static_cast<Index>(v.size()) != old_cols) {
+            return;
+        }
+        for (Index j = 0; j < old_cols; ++j) {
+            if (col_map[j] >= 0 && col_map[j] != j) {
+                v[col_map[j]] = std::move(v[j]);
+            }
+        }
+        v.resize(static_cast<std::size_t>(next));
+    };
+    compact(problem.obj);
+    compact(problem.col_lower);
+    compact(problem.col_upper);
+    compact(problem.col_type);
+    compact(problem.col_names);
+    compact(problem.col_semi_lower);
+    problem.num_cols = next;
+    problem.matrix = SparseMatrix(problem.num_rows, problem.num_cols, std::move(trips));
+}
+
 }  // namespace mipx

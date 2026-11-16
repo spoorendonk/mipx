@@ -69,6 +69,24 @@ public:
 
     void setObjective(std::span<const Real> obj) override { obj_.assign(obj.begin(), obj.end()); }
 
+    void addCols(std::span<const Index> /*starts*/, std::span<const Index> /*indices*/,
+                 std::span<const Real> /*values*/, std::span<const Real> obj,
+                 std::span<const Real> /*lower*/, std::span<const Real> /*upper*/) override {
+        num_cols_ += static_cast<Index>(obj.size());
+    }
+
+    void removeCols(std::span<const Index> cols) override {
+        num_cols_ -= static_cast<Index>(cols.size());
+    }
+
+    void setRowBounds(Index /*row*/, Real /*lower*/, Real /*upper*/) override {}
+
+    void setColObjective(Index col, Real cost) override {
+        if (col >= 0 && col < static_cast<Index>(obj_.size())) {
+            obj_[col] = cost;
+        }
+    }
+
     // Accessors for test inspection.
     bool loaded() const { return loaded_; }
     Index rowsAdded() const { return rows_added_; }
