@@ -587,6 +587,14 @@ bool BarrierSolver::buildStandardForm() {
 
 void BarrierSolver::rebuildTransform() {
     presolve_active_ = false;
+    // Column changes resize the model; the solution vector, which postsolve
+    // and the feasibility checks index by column, follows it.
+    if (static_cast<Index>(primal_orig_.size()) != original_.num_cols) {
+        primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
+    }
+    if (static_cast<Index>(basis_orig_.size()) != original_.num_cols + original_.num_rows) {
+        basis_orig_.clear();
+    }
     if (options_.presolve) {
         presolver_ = BarrierPresolver{};
         presolved_ = presolver_.presolve(original_);
@@ -736,6 +744,48 @@ void BarrierSolver::setObjective(std::span<const Real> obj) {
         return;
     }
     original_.obj.assign(obj.begin(), obj.end());
+    rebuildTransform();
+}
+
+void BarrierSolver::addCols(std::span<const Index> starts, std::span<const Index> indices,
+                            std::span<const Real> values, std::span<const Real> obj,
+                            std::span<const Real> lower, std::span<const Real> upper) {
+    if (!loaded_) {
+        return;
+    }
+    if (checkColumnBatch(original_.num_rows, starts, indices, values, obj, lower, upper) == 0) {
+        return;
+    }
+    appendColumns(original_, starts, indices, values, obj, lower, upper);
+    rebuildTransform();
+}
+
+void BarrierSolver::removeCols(std::span<const Index> cols) {
+    if (!loaded_) {
+        return;
+    }
+    const std::vector<Index> sorted = sortedColumnSet(original_.num_cols, cols);
+    if (sorted.empty()) {
+        return;
+    }
+    removeColumns(original_, sorted);
+    rebuildTransform();
+}
+
+void BarrierSolver::setRowBounds(Index row, Real lower, Real upper) {
+    if (!loaded_ || row < 0 || row >= original_.num_rows) {
+        return;
+    }
+    original_.row_lower[row] = lower;
+    original_.row_upper[row] = upper;
+    rebuildTransform();
+}
+
+void BarrierSolver::setColObjective(Index col, Real cost) {
+    if (!loaded_ || col < 0 || col >= original_.num_cols) {
+        return;
+    }
+    original_.obj[col] = cost;
     rebuildTransform();
 }
 

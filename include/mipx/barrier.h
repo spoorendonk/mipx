@@ -75,9 +75,15 @@ public:
                  std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
     void removeRows(std::span<const Index> rows) override;
+    void addCols(std::span<const Index> starts, std::span<const Index> indices,
+                 std::span<const Real> values, std::span<const Real> obj,
+                 std::span<const Real> lower, std::span<const Real> upper) override;
+    void removeCols(std::span<const Index> cols) override;
 
     void setColBounds(Index col, Real lower, Real upper) override;
+    void setRowBounds(Index row, Real lower, Real upper) override;
     void setObjective(std::span<const Real> obj) override;
+    void setColObjective(Index col, Real cost) override;
 
     void setOptions(const BarrierOptions& options) { options_ = options; }
     [[nodiscard]] const BarrierOptions& options() const { return options_; }
