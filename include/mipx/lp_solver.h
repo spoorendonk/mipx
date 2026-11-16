@@ -120,9 +120,12 @@ public:
     /// new columns take indices num_cols .. num_cols + k - 1, and obj, lower
     /// and upper (k entries each) are in the model's own sense and units. A
     /// solver that keeps a basis keeps it: the new columns enter nonbasic at
-    /// a finite bound (the lower one when it has one), so a basis that was
-    /// primal feasible stays so. Throws std::invalid_argument on malformed
-    /// input, changing nothing.
+    /// a finite bound (the lower one when it has one, else 0 when free). A
+    /// primal feasible basis stays primal feasible when those values are 0
+    /// (the usual x >= 0 column), since the row activities do not move;
+    /// otherwise the basic values shift by the new columns' contribution.
+    /// Throws std::invalid_argument on malformed input (see
+    /// checkColumnBatch), changing nothing.
     virtual void addCols(std::span<const Index> starts, std::span<const Index> indices,
                          std::span<const Real> values, std::span<const Real> obj,
                          std::span<const Real> lower, std::span<const Real> upper) = 0;

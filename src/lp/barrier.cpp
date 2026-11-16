@@ -624,6 +624,11 @@ std::vector<Real> BarrierSolver::getDualValues() const {
 std::vector<Real> BarrierSolver::getReducedCosts() const {
     const auto& prob = presolve_active_ ? presolved_ : original_;
     const Real sense_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
+    // No transform for this model (presolve proved a changed model
+    // infeasible before building one): nothing to map back.
+    if (static_cast<Index>(col_expr_.size()) != prob.num_cols) {
+        return std::vector<Real>(static_cast<size_t>(original_.num_cols), 0.0);
+    }
 
     // Compute reduced costs in the presolved/original space.
     std::vector<Real> rc_prob(static_cast<size_t>(prob.num_cols), 0.0);

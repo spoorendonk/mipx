@@ -325,6 +325,17 @@ Index checkColumnBatch(Index num_rows, std::span<const Index> starts,
             throw std::invalid_argument("addCols: row index out of range");
         }
     }
+    for (std::size_t t = 0; t < k; ++t) {
+        if (std::isnan(obj[t]) || std::isnan(lower[t]) || std::isnan(upper[t]) ||
+            std::isinf(obj[t]) || lower[t] == kInf || upper[t] == -kInf) {
+            throw std::invalid_argument("addCols: NaN, infinite cost or bound on the wrong side");
+        }
+    }
+    for (const Real v : values) {
+        if (!std::isfinite(v)) {
+            throw std::invalid_argument("addCols: coefficient not finite");
+        }
+    }
     return static_cast<Index>(k);
 }
 
