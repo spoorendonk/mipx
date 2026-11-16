@@ -103,9 +103,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
         col_scale_.assign(num_cols_, 1.0);
     }
 
-    // Build augmented matrix [A | -I].
-    buildBasisMatrixSource();
-
+    // [A | -I] is built where it is factorized (solveFromCurrentBasis).
     status_ = Status::Error;
     iterations_ = 0;
     has_basis_ = false;
@@ -569,110 +567,9 @@ void DualSimplexSolver::setupInitialBasis() {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::computePrimals() {
-    // Compute rhs = b_eff - sum over nonbasic j: a_j * x_j
-    // where b_eff for each row is the slack value contribution.
-    // Actually: the system is A_aug * x = 0 style? No.
-    // The augmented system: [A | I] * [x; s] has no explicit rhs.
-    // The constraint is: A*x + s = something? No.
-    // With slacks: row i is row_lower_i <= a_i^T x <= row_upper_i.
-    // We define slack s_i = a_i^T x. So a_i^T x - s_i = 0, i.e., [A | -I][x; s] = 0.
-    // But we used [A | I] for the augmented matrix. Let me reconsider.
-    //
-    // The augmented approach: we have variables x_1..x_n, s_1..s_m.
-    // The basis equation: B * x_B = -N * x_N + some rhs?
-    //
-    // Actually, the standard approach: the constraints are encoded as
-    // A*x = b has no single rhs. The row bounds define row_lower <= Ax <= row_upper.
-    // The slack s_i represents the activity of row i. Constraint: s_i = a_i^T x.
-    // Written as: A*x - s = 0, so [A | -I][x; s] = 0.
-    // Total: [A | -I]*[x; s] = 0.
-    //
-    // With augmented = [A | I], we'd have [A|I][x; s] = 2*something... that's wrong.
-    //
-    // Let me use the standard formulation. The constraint system is:
-    //   For each row: a_i^T x = s_i   (slack = activity)
-    //   row_lower_i <= s_i <= row_upper_i
-    //   col_lower_j <= x_j <= col_upper_j
-    //
-    // So the "constraint" for the basis is: A*x - s = 0, but we have [A | -I] as the
-    // "augmented" matrix. However our augmented_ is [A | I].
-    //
-    // For the basis matrix approach: we pick m variables from {x_1,...,x_n, s_1,...,s_m}.
-    // The equality is: sum over all vars k of a_augmented_col_k * var_k = 0
-    //   where for structural vars, a_augmented_col_j = A's column j
-    //         for slack s_i, a_augmented_col_{n+i} = -e_i (negative identity)
-    //
-    // BUT our augmented_ has +I for slacks. So the equation is:
-    //   A*x + I*s = 0 would be wrong. We need A*x = s, i.e., A*x - s = 0.
-    //
-    // Two options: (1) use [A | -I] or (2) keep [A | I] and handle the sign.
-    // Since SparseLU::factorize takes the matrix and basis_cols, and extracts those columns,
-    // let's just use [A | -I]. Let me rebuild the augmented matrix.
-    //
-    // Actually wait. Let's think about it differently. With [A | I] and the equation
-    // [A | I] * [x; s] = rhs, what is rhs? It's not 0.
-    // We have a_i^T x = activity. If s_i is the slack = activity, then:
-    //   a_i^T x + 0*s_i = activity = s_i... that's circular.
-    //
-    // The standard LP formulation is: the constraints A*x = b (equality form).
-    // For ranged rows: we introduce slacks and have A*x + s = b_upper (or similar).
-    //
-    // The simplest correct approach: define the "activity" of row i as:
-    //   act_i = a_i^T x
-    // And we want row_lower_i <= act_i <= row_upper_i.
-    //
-    // We can add slack: act_i = a_i^T x, with row_lower_i <= act_i <= row_upper_i.
-    // Treat act_i as a variable bounded by [row_lower_i, row_upper_i].
-    //
-    // The basis system: select m of the (n+m) variables. The linear system is:
-    //   B * x_B = -N * x_N
-    // where the "augmented" constraint is A_aug * x = 0, with A_aug being the m x (n+m) matrix.
-    //
-    // For structural column j: the j-th column of A_aug is a_j (the j-th column of A).
-    // For slack column (n+i): the column should be -e_i (so that a_i^T x - s_i = 0).
-    //
-    // So A_aug = [A | -I]. Then A_aug * [x; s] = A*x - s = 0 means s = A*x. Correct.
-    //
-    // So the B*x_B + N*x_N = 0 decomposition gives x_B = -B^{-1} * N * x_N.
-    // Actually: A_aug * x_all = 0 => B * x_B + N * x_N = 0 => x_B = -(B^{-1}) * N * x_N.
-    //
-    // Wait but B^{-1} * N * x_N involves the full N which is expensive. The standard
-    // approach is to compute: x_B = B^{-1} * b where b = -N * x_N.
-    //
-    // For each nonbasic variable k with value x_k:
-    //   b -= a_augmented_col_k * x_k
-    //
-    // Then x_B = B^{-1} * (-b) actually. Let me be more careful.
-    //
-    // A_aug * x = 0
-    // Sum_{k in B} a_k * x_k + Sum_{k in N} a_k * x_k = 0
-    // B * x_B = - Sum_{k in N} a_k * x_k
-    // x_B = B^{-1} * (- Sum_{k in N} a_k * x_k)
-    //
-    // For structural var j nonbasic: a_k = column j of A (the j-th col of augmented_).
-    //   Contribution = -a_j * x_j.
-    // For slack var (n+i) nonbasic: a_k = -e_i (col n+i of A_aug = [A|-I]).
-    //   Contribution = -(-e_i) * x_{n+i} = e_i * x_{n+i}.
-    //
-    // But we built augmented_ as [A | I], not [A | -I]. So col n+i of augmented_ is +e_i.
-    // We need col n+i of A_aug to be -e_i.
-    //
-    // Fix: rebuild augmented as [A | -I], or handle the sign in the rhs computation.
-    // Let me handle the sign:
-    //   rhs_i = -Sum_{nonbasic structural j} A_{i,j} * x_j + Sum_{nonbasic slack (n+k)} x_{n+k} *
-    //   delta_{i,k}
-    // and for basis factorization, the slack basis columns also need -e_i.
-    //
-    // Actually, the simplest correct approach used in practice: don't use [A|I] at all.
-    // Instead, the basis is always m columns from the "extended" matrix where:
-    //  - Structural columns: columns of A
-    //  - Slack columns: -e_i
-    //
-    // When factorizing, SparseLU::factorize takes a SparseMatrix and column indices.
-    // So we need a matrix that has the right columns. If we use [A | -I], then
-    // SparseLU::factorize(augmented_neg, basis_cols) works directly.
-    //
-    // Let me rebuild augmented_ as [A | -I].
+    // Row i's logical is its activity s_i = a_i^T x, so [A | -I][x; s] = 0
+    // and B x_B = -N x_N, where column k of [A | -I] (augmented_) is a
+    // column of A for a structural and -e_i for the logical of row i.
 
     // rhs = - sum_{k in N} a_k * x_k
     // where a_k is column k of A_aug = [A | -I].

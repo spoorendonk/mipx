@@ -101,6 +101,7 @@ private:
 
     bool buildStandardForm();
     void rebuildTransform();
+    void clearTransformedSolution();
     BarrierIpmOutcome solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
                                         std::vector<Real>& s, Int& iters);
     void reconstructOriginalPrimals(const std::vector<Real>& z);
