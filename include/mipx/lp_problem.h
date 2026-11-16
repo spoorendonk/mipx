@@ -85,7 +85,9 @@ bool roundIntegerBounds(LpProblem& problem, Real tol = 1e-6);
 /// Throws std::invalid_argument when obj, lower and upper differ in size,
 /// indices and values differ in size, starts has neither k nor k + 1 entries
 /// (then with starts[k] == indices.size()), starts is not nondecreasing
-/// within [0, indices.size()], or a row index is out of range. Entries of
+/// within [0, indices.size()], a row index is out of range, a cost, bound or
+/// coefficient is NaN, a cost or coefficient is infinite, or a lower bound is
+/// +inf or an upper bound -inf. Entries of
 /// one column on the same row add up.
 Index checkColumnBatch(Index num_rows, std::span<const Index> starts,
                        std::span<const Index> indices, std::span<const Real> values,

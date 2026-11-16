@@ -428,6 +428,12 @@ TEST_CASE("Column changes: addCols on a maximize LP and an unsolved LP", "[colum
         const std::vector<Index> bad_starts = {0, 2};
         CHECK_THROWS_AS(solver.addCols(bad_starts, indices, values, obj, lower, upper),
                         std::invalid_argument);
+        const std::vector<Real> inf_lower = {kInf};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, values, obj, inf_lower, upper),
+                        std::invalid_argument);
+        const std::vector<Real> nan_value = {std::nan("")};
+        CHECK_THROWS_AS(solver.addCols(starts, indices, nan_value, obj, lower, upper),
+                        std::invalid_argument);
         const std::vector<Index> bad_col = {2};
         CHECK_THROWS_AS(solver.removeCols(bad_col), std::invalid_argument);
         CHECK(solver.numCols() == 2);

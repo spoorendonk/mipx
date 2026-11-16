@@ -103,8 +103,8 @@ void DualSimplexSolver::load(const LpProblem& problem) {
         col_scale_.assign(num_cols_, 1.0);
     }
 
-    // Build augmented matrix [A | I].
-    buildAugmentedMatrix();
+    // Build augmented matrix [A | -I].
+    buildBasisMatrixSource();
 
     status_ = Status::Error;
     iterations_ = 0;
@@ -434,25 +434,8 @@ void DualSimplexSolver::unscaleResults() {
 }
 
 // ---------------------------------------------------------------------------
-//  Build augmented matrix [A | I]
+//  Build augmented matrix [A | -I]
 // ---------------------------------------------------------------------------
-
-void DualSimplexSolver::buildAugmentedMatrix() {
-    // Build [A | I] as a sparse matrix with num_rows rows and (num_cols + num_rows) cols.
-    std::vector<Triplet> triplets;
-    triplets.reserve(matrix_.numNonzeros() + num_rows_);
-
-    for (Index i = 0; i < num_rows_; ++i) {
-        auto rv = matrix_.row(i);
-        for (Index k = 0; k < rv.size(); ++k) {
-            triplets.push_back({i, rv.indices[k], rv.values[k]});
-        }
-        // Identity column for slack.
-        triplets.push_back({i, num_cols_ + i, 1.0});
-    }
-
-    augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
-}
 
 void DualSimplexSolver::buildBasisMatrixSource() {
     std::vector<Triplet> triplets;

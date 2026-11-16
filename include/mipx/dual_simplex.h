@@ -308,7 +308,6 @@ private:
     Index numVars() const { return num_cols_ + num_rows_; }
 
     // Build the augmented matrix [A | I].
-    void buildAugmentedMatrix();
     /// [A | -I], the matrix the basis is factorized from.
     void buildBasisMatrixSource();
     /// Swap each basic column in @p cols for a row's logical (removeCols).
@@ -371,7 +370,7 @@ private:
     std::vector<Real> row_lower_;   // size num_rows
     std::vector<Real> row_upper_;   // size num_rows
     SparseMatrix matrix_{0, 0};     // original constraint matrix
-    SparseMatrix augmented_{0, 0};  // [A | I]
+    SparseMatrix augmented_{0, 0};  // [A | -I]
 
     // Scaling factors.
     std::vector<Real> row_scale_;  // size num_rows
