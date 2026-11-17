@@ -13,6 +13,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace mipx;
@@ -275,6 +276,19 @@ TEST_CASE("Column changes: column generation on a kept basis reaches the arc-flo
     CHECK_THAT(solver.getObjective(), WithinRel(arcFlowOptimum(net), 1e-9));
     // The point of keeping the basis.
     CHECK(run.warm_iterations < run.cold_iterations);
+}
+
+TEST_CASE("Column changes: primal Devex re-solves reach the same optima", "[column_changes]") {
+    DualSimplexOptions options;
+    options.enable_primal_devex = true;
+    for (const auto& [w, h] : {std::pair<Index, Index>{4, 4}, {6, 5}}) {
+        const Network net = gridNetwork(w, h);
+        DualSimplexSolver solver;
+        solver.setOptions(options);
+        const CgRun run = runColumnGeneration(net, solver);
+        CHECK_THAT(solver.getObjective(), WithinRel(arcFlowOptimum(net), 1e-9));
+        CHECK(run.warm_iterations < run.cold_iterations);
+    }
 }
 
 TEST_CASE("Column changes: removing nonbasic and basic columns re-solves warm as cold",

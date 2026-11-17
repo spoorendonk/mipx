@@ -1411,6 +1411,20 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // score(k) = rc(k)^2 / col_norm(k), where slacks have norm 1.
     // Reuse col_norms which stores ||a_k||_2 (same data dual_phase_col_norm_sq used).
     std::vector<Real>& dual_phase_col_norm_sq = col_norms;
+    // Primal Devex (#266, opt-in): reference weights w_k for the primal
+    // pivots of the primal-feasible phase, priced by rc^2 / w_k and updated
+    // from the pivot row (Forrest & Goldfarb 1992, after Harris 1973). It is
+    // what re-solves after addCols spend their pivots on.
+    const bool use_primal_devex = options_.enable_primal_devex;
+    std::vector<Real> primal_devex_w(use_primal_devex ? static_cast<std::size_t>(numVars()) : 0,
+                                     1.0);
+    auto primalEnteringScore = [&](Index k, Real rc) -> Real {
+        const auto kk = static_cast<std::size_t>(k);
+        if (use_primal_devex) {
+            return (rc * rc) / primal_devex_w[kk];
+        }
+        return use_dual_phase_norm_weight ? (rc * rc) / dual_phase_col_norm_sq[kk] : std::abs(rc);
+    };
 
     // Maintained sparse infeasible-row tracking for CHUZR.
     // infeasible_rows holds indices of rows currently primal-infeasible.
@@ -2000,37 +2014,33 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
                 tbb::enumerable_thread_specific<DualScanBest> locals;
                 const Index grain = std::max<Index>(1, options_.sip_parallel_grain);
-                tbb::parallel_for(
-                    tbb::blocked_range<Index>(0, nnb, grain),
-                    [&](const tbb::blocked_range<Index>& range) {
-                        DualScanBest local;
-                        for (Index pos = range.begin(); pos < range.end(); ++pos) {
-                            Index k = nonbasic_[pos];
-                            Real rc = reducedCostForPricing(k);
-                            BasisStatus st = var_status_[k];
-                            bool dual_inf = (st == BasisStatus::AtLower && rc < -kDualTol) ||
-                                            (st == BasisStatus::AtUpper && rc > kDualTol) ||
-                                            (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                            if (!dual_inf) {
-                                continue;
-                            }
-                            const Real score =
-                                use_dual_phase_norm_weight
-                                    ? (rc * rc) /
-                                          dual_phase_col_norm_sq[static_cast<std::size_t>(k)]
-                                    : std::abs(rc);
-                            DualScanBest cand{k, pos, rc, score};
-                            if (better(cand, local)) {
-                                local = cand;
-                            }
-                        }
-                        if (local.var >= 0) {
-                            auto& slot = locals.local();
-                            if (better(local, slot)) {
-                                slot = local;
-                            }
-                        }
-                    });
+                tbb::parallel_for(tbb::blocked_range<Index>(0, nnb, grain),
+                                  [&](const tbb::blocked_range<Index>& range) {
+                                      DualScanBest local;
+                                      for (Index pos = range.begin(); pos < range.end(); ++pos) {
+                                          Index k = nonbasic_[pos];
+                                          Real rc = reducedCostForPricing(k);
+                                          BasisStatus st = var_status_[k];
+                                          bool dual_inf =
+                                              (st == BasisStatus::AtLower && rc < -kDualTol) ||
+                                              (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                                              (st == BasisStatus::Free && std::abs(rc) > kDualTol);
+                                          if (!dual_inf) {
+                                              continue;
+                                          }
+                                          const Real score = primalEnteringScore(k, rc);
+                                          DualScanBest cand{k, pos, rc, score};
+                                          if (better(cand, local)) {
+                                              local = cand;
+                                          }
+                                      }
+                                      if (local.var >= 0) {
+                                          auto& slot = locals.local();
+                                          if (better(local, slot)) {
+                                              slot = local;
+                                          }
+                                      }
+                                  });
 
                 DualScanBest best;
                 for (const auto& local : locals) {
@@ -2055,10 +2065,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     if (!dual_inf) {
                         continue;
                     }
-                    const Real score =
-                        use_dual_phase_norm_weight
-                            ? (rc * rc) / dual_phase_col_norm_sq[static_cast<std::size_t>(k)]
-                            : std::abs(rc);
+                    const Real score = primalEnteringScore(k, rc);
                     if (score > best_entering_score) {
                         best_entering_score = score;
                         worst_rc = rc;
@@ -2463,6 +2470,31 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
             reduced_cost_[entering_p] = 0.0;
             reduced_cost_[leaving_var_p] = -theta_d_p;
+
+            // Devex: w_k >= (alpha_rk / alpha_rq)^2 w_q for the nonbasics,
+            // and the leaving variable takes w_q / alpha_rq^2 (at least 1).
+            // The reference framework restarts when a weight outgrows it.
+            if (use_primal_devex) {
+                const Real wq = primal_devex_w[static_cast<std::size_t>(entering_p)];
+                bool reset = false;
+                for (Index k : nonbasic_) {
+                    if (k == entering_p) {
+                        continue;
+                    }
+                    const Real a = pivot_row_alpha[k];
+                    if (std::abs(a) > kZeroTol) {
+                        const Real ratio = a / pivot_elem;
+                        Real& wk = primal_devex_w[static_cast<std::size_t>(k)];
+                        wk = std::max(wk, ratio * ratio * wq);
+                        reset = reset || wk > kPrimalDevexResetWeight;
+                    }
+                }
+                primal_devex_w[static_cast<std::size_t>(leaving_var_p)] =
+                    std::max(wq / (pivot_elem * pivot_elem), 1.0);
+                if (reset) {
+                    std::ranges::fill(primal_devex_w, 1.0);
+                }
+            }
 
             // Update duals.
             axpyInPlace(std::span<Real>(dual_.data(), static_cast<std::size_t>(num_rows_)),

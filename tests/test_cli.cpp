@@ -223,7 +223,8 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
          {"--probing", "--no-probing", "--probing-rounds", "--probing-probes", "--probing-time",
           "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
           "--presolve-probing-probes", "--presolve-probing-time", "--clique-table",
-          "--no-clique-table", "--plunge-depth", "--no-plunge", "--plunge-bound-quotient"}) {
+          "--no-clique-table", "--plunge-depth", "--no-plunge", "--plunge-bound-quotient",
+          "--dual-primal-devex", "--dual-no-primal-devex"}) {
         INFO(flag);
         CHECK(run.mentions(flag));
     }
@@ -285,6 +286,16 @@ TEST_CASE("CLI: --plunge-depth reaches the tree search", "[cli]") {
     // All of them still solve the model.
     for (const auto* run : {&off, &on, &toggled}) {
         CHECK(run->mentions("Objective: -2.2000000000e+01"));
+    }
+}
+
+TEST_CASE("CLI: --dual-primal-devex is accepted and solves the LP", "[cli]") {
+    for (const char* flag : {"--dual-primal-devex", "--dual-no-primal-devex"}) {
+        INFO(flag);
+        const auto run =
+            runSolver("'" + testDataDir() + "/lp_format.lp' --dual --quiet " + std::string(flag));
+        CHECK(run.exit_code == 0);
+        CHECK(run.mentions("Objective: 3.0000000000e+00"));
     }
 }
 

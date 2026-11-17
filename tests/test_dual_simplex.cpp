@@ -218,7 +218,8 @@ TEST_CASE("DualSimplex: unbounded LP", "[dual_simplex]") {
 // ---------------------------------------------------------------------------
 // Netlib helpers
 // ---------------------------------------------------------------------------
-static void testNetlib(const std::string& name, Real expected_obj, Real rel_tol = 1e-6) {
+static void testNetlib(const std::string& name, Real expected_obj, Real rel_tol = 1e-6,
+                       const DualSimplexOptions& options = {}) {
     std::string path = testDataDir() + "/netlib/" + name + ".mps.gz";
     if (!fs::exists(path)) {
         SKIP("Netlib instance " + name + " not downloaded");
@@ -226,6 +227,7 @@ static void testNetlib(const std::string& name, Real expected_obj, Real rel_tol 
 
     auto lp = readMps(path);
     DualSimplexSolver solver;
+    solver.setOptions(options);
     solver.load(lp);
     auto result = solver.solve();
 
@@ -253,6 +255,15 @@ TEST_CASE("DualSimplex: netlib blend", "[dual_simplex][netlib]") {
 
 TEST_CASE("DualSimplex: netlib adlittle", "[dual_simplex][netlib]") {
     testNetlib("adlittle", 2.2549496316e+05);
+}
+
+TEST_CASE("DualSimplex: primal Devex reaches the netlib optima", "[dual_simplex][netlib]") {
+    DualSimplexOptions options;
+    options.enable_primal_devex = true;
+    testNetlib("afiro", -4.6475314286e+02, 1e-6, options);
+    testNetlib("sc50a", -6.4575077059e+01, 1e-6, options);
+    testNetlib("blend", -3.0812149846e+01, 1e-6, options);
+    testNetlib("adlittle", 2.2549496316e+05, 1e-6, options);
 }
 
 TEST_CASE("DualSimplex: netlib larger known-optimal LPs", "[dual_simplex][netlib][large]") {

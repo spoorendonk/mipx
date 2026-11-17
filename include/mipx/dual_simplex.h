@@ -54,6 +54,11 @@ struct DualSimplexOptions {
     Int dse_exact_init_max_dim = 1000;
 
     // Pricing controls.
+    // Devex pricing for the primal pivots taken once the basis is primal
+    // feasible (re-solves after addCols spend their pivots there), in place
+    // of |rc| or the static column-norm score. Off pending a benchmark
+    // (#266, #268).
+    bool enable_primal_devex = false;
     bool enable_partial_pricing = false;
     bool enable_bfrt = false;
     bool enable_adaptive_bfrt = true;
@@ -414,6 +419,9 @@ private:
     std::vector<Real> devex_weights_;
     Int devex_reset_count_ = 0;
     static constexpr Int kDevexResetFreq = 200;  // reset every N pivots
+    // Primal Devex restarts its reference framework when a weight grows past
+    // this (the weights are only bounds on the true norms, and drift up).
+    static constexpr Real kPrimalDevexResetWeight = 1e6;
 
     // DSE state.
     bool dse_active_ = false;        // true when using DSE pricing

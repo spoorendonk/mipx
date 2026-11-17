@@ -84,9 +84,10 @@ Key options:
 | `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |
 | `--plunge-depth <n>` / `--no-plunge` | 0 (off) | Maximum consecutive dives after a branch; serial search only |
 | `--plunge-bound-quotient <q>` | 0.05 | Decline a dive whose bound is this far (relative) behind the best |
+| `--dual-primal-devex` / `--dual-no-primal-devex` | off | LP solves (`--dual`): Devex pricing for the simplex's primal pivots once the basis is primal feasible, as after added columns (`DualSimplexOptions::enable_primal_devex`) |
 
-Run `./build/mipx-solve --help` for the full list. The probing, clique-table
-and plunging switches are off by default until benchmarks decide otherwise;
+Run `./build/mipx-solve --help` for the full list. The probing, clique-table,
+plunging and primal-Devex switches are off by default until benchmarks decide otherwise;
 leaving a flag out keeps the solver's own default.
 
 ## Python API

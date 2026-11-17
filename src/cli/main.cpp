@@ -59,6 +59,7 @@ void printUsage(FILE* out) {
                  "[--exact-max-rounds N] [--exact-repair-passes N] "
                  "[--exact-rational-scale S] "
                  "[--dual-idiot-crash|--dual-no-idiot-crash] "
+                 "[--dual-primal-devex|--dual-no-primal-devex] "
                  "[--dual-bfrt|--dual-no-bfrt] "
                  "[--dual-lu-update-limit N] "
                  "[--dual-lu-ft-drop-tol T] "
@@ -152,6 +153,7 @@ int main(int argc, char* argv[]) {
     mipx::Int exact_repair_passes = 2;
     double exact_rational_scale = 1.0e6;
     bool dual_idiot_crash = false;
+    bool dual_primal_devex = false;
     int dual_bfrt_override = -1;
     mipx::Int dual_lu_update_limit = std::numeric_limits<mipx::Int>::min();
     mipx::Real dual_lu_ft_drop_tolerance = std::numeric_limits<mipx::Real>::quiet_NaN();
@@ -344,6 +346,10 @@ int main(int argc, char* argv[]) {
             dual_idiot_crash = true;
         } else if (arg == "--dual-no-idiot-crash") {
             dual_idiot_crash = false;
+        } else if (arg == "--dual-primal-devex") {
+            dual_primal_devex = true;
+        } else if (arg == "--dual-no-primal-devex") {
+            dual_primal_devex = false;
         } else if (arg == "--dual-bfrt") {
             dual_bfrt_override = 1;
         } else if (arg == "--dual-no-bfrt") {
@@ -707,6 +713,7 @@ int main(int argc, char* argv[]) {
                 solver.setVerbose(verbose);
                 mipx::DualSimplexOptions dopts = solver.getOptions();
                 dopts.enable_idiot_crash = dual_idiot_crash;
+                dopts.enable_primal_devex = dual_primal_devex;
                 if (dual_bfrt_override >= 0) {
                     if (dual_bfrt_override != 0) {
                         dopts.enable_bfrt = true;
