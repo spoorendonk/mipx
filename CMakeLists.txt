@@ -156,6 +156,40 @@ if(MIPX_BUILD_CLI)
     mipx_set_compiler_flags(mipx-lpseq-replay)
 endif()
 
+# --- Bench-only HiGHS comparator (#268) ---
+#
+# mipx-lpseq-replay-highs replays the same LP sequences on HiGHS through its
+# API (warm as well as cold), for comparison benches. Opt-in and OFF by
+# default; the mipx library never links HiGHS (CLAUDE.md, "No external
+# solver dependencies": bench targets only). HiGHS is the v1.16.0 release
+# archive, pinned by hash, built static with HiPO (needs a BLAS, e.g.
+# libopenblas-dev).
+option(MIPX_BENCH_HIGHS "Build mipx-lpseq-replay-highs, fetching HiGHS v1.16.0 (bench only)" OFF)
+if(MIPX_BENCH_HIGHS)
+    function(mipx_fetch_highs)
+        # HiGHS's own build options, scoped to this function.
+        set(BUILD_SHARED_LIBS OFF)
+        set(BUILD_TESTING OFF)
+        set(BUILD_EXAMPLES OFF)
+        set(BUILD_CXX_EXE OFF)
+        set(FAST_BUILD ON)
+        set(HIPO ON)
+        # HiPO's extras statically in libhighs: as a shared extras library
+        # they can go unresolved at run time, and HiGHS then falls back to
+        # dual simplex while still reporting "hipo".
+        set(BUILD_SHARED_EXTRAS_LIB OFF)
+        FetchContent_Declare(highs
+            URL https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.16.0.tar.gz
+            URL_HASH SHA256=0fa9da512955fb08c6cca7bfb274ca12e8a0e8a12e44189bd6e0c355ce7701bc
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+        FetchContent_MakeAvailable(highs)
+    endfunction()
+    mipx_fetch_highs()
+    add_executable(mipx-lpseq-replay-highs tests/perf/lpseq_replay_highs.cpp)
+    target_link_libraries(mipx-lpseq-replay-highs PRIVATE highs::highs)
+    target_compile_features(mipx-lpseq-replay-highs PRIVATE cxx_std_23)
+endif()
+
 # --- Python extension ---
 
 if(MIPX_BUILD_PYTHON)

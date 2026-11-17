@@ -1,26 +1,12 @@
-// mipx-lpseq-replay: replay an LP sequence written in the "mcf-lpseq 1"
-// format (tinnet-ai/mcf#205, mcf's recording LP backend) on mipx's LP
-// solvers, and check every solve's objective against the recorded one (#267).
-//
-// A sequence directory holds manifest.txt (key = value lines, first
-// `format = mcf-lpseq 1`), master_0000.mps (the LP at its first solve, free
-// MPS, rows r<i> and columns c<j> by index) and ops.txt: one op per line,
-// indices as of the LP it applies to, applied in order:
-//
-//   add_cols <k>  then k lines  <cost> <lb> <ub> <nnz> <row> <val> ...
-//   del_cols <k> <j1> ...       (indices before the delete)
-//   add_rows <k>  then k lines  <lb> <ub> <nnz> <col> <val> ...
-//   del_rows <k> <i1> ...
-//   col_bounds <k> <j> <lb> <ub> ...
-//   row_bounds <k> <i> <lb> <ub> ...
-//   col_costs <k> <j> <cost> ...
-//   coeffs <k> <i> <j> <val> ...  (0 removes the entry)
-//   solve <seq> <status> <obj> <iters> <secs>
+// mipx-lpseq-replay: replay an LP sequence in mcf's "mcf-lpseq 1" format
+// (tinnet-ai/mcf#205, mcf's recording LP backend; see lpseq_format.h and
+// tests/perf/README.md) on mipx's LP solvers, and check every solve's
+// objective against the recorded one (#267).
 //
 // Arms: dual-warm keeps one DualSimplexSolver and applies the ops to it (its
 // basis carries over); dual-cold, barrier and pdlp load the LP afresh for
 // each solve. A coeffs op, which LpSolver has no call for, makes dual-warm
-// reload the LP at that point (counted as a reload).
+// reload the LP at that point, keeping its basis (counted as a reload).
 //
 // Output: one CSV line per (solve, arm) on stdout, or to --csv FILE:
 //   seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded
@@ -29,26 +15,20 @@
 // pdlp --pdlp-rel-tol, 1e-4), 1 when one does not, 2 on a usage or format
 // error.
 
+#include "lpseq_format.h"
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/pdlp.h"
 
-#include <algorithm>
-#include <charconv>
 #include <chrono>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <sstream>
-#include <stdexcept>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -56,117 +36,15 @@ using namespace mipx;
 
 namespace {
 
-[[noreturn]] void formatError(const std::string& what) {
-    throw std::runtime_error("lpseq: " + what);
-}
-
-// from_chars reads %.17g back exactly, subnormals and inf/-inf included
-// (stod would throw out_of_range on a subnormal). A literal past double's
-// range (1e400) leaves the value unset, so it is an error, not 0.
-Real parseReal(const std::string& s) {
-    const char* first = s.data();
-    if (!s.empty() && s[0] == '+') {
-        ++first;  // from_chars takes no leading '+'
-    }
-    Real v = 0.0;
-    const auto [end, ec] = std::from_chars(first, s.data() + s.size(), v);
-    if (end != s.data() + s.size() || ec != std::errc() || std::isnan(v)) {
-        formatError("not a number: " + s);
-    }
-    return v;
-}
-
-std::string trim(std::string_view s) {
-    const auto b = s.find_first_not_of(" \t");
-    if (b == std::string_view::npos) {
-        return {};
-    }
-    const auto e = s.find_last_not_of(" \t\r");
-    return std::string(s.substr(b, e - b + 1));
-}
-
-Index parseIndex(const std::string& s) {
-    Index v = 0;
-    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
-    if (ec != std::errc() || end != s.data() + s.size() || v < 0) {
-        formatError("not an index: " + s);
-    }
-    return v;
-}
-
-// An index the op addresses, checked against the LP it applies to.
-Index parseIndexBelow(const std::string& s, Index bound, const char* what) {
-    const Index v = parseIndex(s);
-    if (v >= bound) {
-        formatError(std::string(what) + " index " + s + " out of range (" + std::to_string(bound) +
-                    ")");
-    }
-    return v;
-}
-
-// The master as mipx reads it, with rows and columns in the recorder's
-// order. mipx's reader drops every N row after the objective; the recorder
-// writes a row with both sides infinite as one, which would shift the rows
-// after it, so such a master is refused rather than replayed wrong.
 LpProblem readMaster(const std::string& path) {
     LpProblem lp = readMps(path);
-    for (Index i = 0; i < lp.num_rows; ++i) {
-        if (i >= static_cast<Index>(lp.row_names.size()) ||
-            lp.row_names[i] != "r" + std::to_string(i)) {
-            formatError(path + ": row " + std::to_string(i) + " is not r" + std::to_string(i) +
-                        " (a free row, written as N, is not supported)");
-        }
-    }
-    for (Index j = 0; j < lp.num_cols; ++j) {
-        if (j >= static_cast<Index>(lp.col_names.size()) ||
-            lp.col_names[j] != "c" + std::to_string(j)) {
-            formatError(path + ": column " + std::to_string(j) + " is not c" + std::to_string(j));
-        }
-    }
+    lpseq::checkNames(lp.row_names, lp.num_rows, 'r', path);
+    lpseq::checkNames(lp.col_names, lp.num_cols, 'c', path);
     if (lp.sense != Sense::Minimize) {
-        formatError(path + ": the format minimises");
+        lpseq::fail(path + ": the format minimises");
     }
     return lp;
 }
-
-void checkManifest(const std::string& dir) {
-    std::ifstream in(dir + "/manifest.txt");
-    if (!in) {
-        formatError(dir + "/manifest.txt: cannot open");
-    }
-    // key = value lines; the format must be exactly "mcf-lpseq 1", and the
-    // replay compares objectives of a minimised LP without a constant.
-    std::string line;
-    bool format = false;
-    while (std::getline(in, line)) {
-        const auto eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        const std::string_view whole(line);
-        const std::string key = trim(whole.substr(0, eq));
-        const std::string value = trim(whole.substr(eq + 1));
-        if (key == "format") {
-            if (value != "mcf-lpseq 1") {
-                formatError("unsupported format: " + value);
-            }
-            format = true;
-        } else if (key == "sense" && value != "min") {
-            formatError("unsupported sense: " + value);
-        } else if (key == "obj_offset" && parseReal(value) != 0.0) {
-            formatError("unsupported obj_offset: " + value);
-        }
-    }
-    if (!format) {
-        formatError(dir + "/manifest.txt: no format line");
-    }
-}
-
-// Row-wise and column-wise batches, as the LpSolver calls take them.
-struct Batch {
-    std::vector<Index> starts, indices;
-    std::vector<Real> values, a, b, c;  // cols: cost, lb, ub; rows: lb, ub
-};
 
 void rebuild(LpProblem& lp, std::vector<Triplet> trips) {
     lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
@@ -184,31 +62,29 @@ std::vector<Triplet> triplets(const LpProblem& lp) {
     return t;
 }
 
-void mirrorAddRows(LpProblem& lp, const Batch& rows) {
+// The mirror: the LP as the ops leave it, for the cold arms and reloads.
+void mirrorAddRows(LpProblem& lp, const lpseq::Op& op) {
     auto t = triplets(lp);
-    const auto k = static_cast<Index>(rows.a.size());
+    const auto k = static_cast<Index>(op.lower.size());
     for (Index r = 0; r < k; ++r) {
-        const Index end =
-            (r + 1 < k) ? rows.starts[r + 1] : static_cast<Index>(rows.indices.size());
-        for (Index p = rows.starts[r]; p < end; ++p) {
-            t.push_back({lp.num_rows + r, rows.indices[p], rows.values[p]});
+        const Index end = (r + 1 < k) ? op.starts[r + 1] : static_cast<Index>(op.indices.size());
+        for (Index p = op.starts[r]; p < end; ++p) {
+            t.push_back({lp.num_rows + r, op.indices[p], op.values[p]});
         }
-        lp.row_lower.push_back(rows.a[r]);
-        lp.row_upper.push_back(rows.b[r]);
+        lp.row_lower.push_back(op.lower[r]);
+        lp.row_upper.push_back(op.upper[r]);
         lp.row_names.push_back("r" + std::to_string(lp.num_rows + r));
     }
     lp.num_rows += k;
     rebuild(lp, std::move(t));
 }
 
-void mirrorDelRows(LpProblem& lp, std::vector<Index> rows) {
-    std::ranges::sort(rows);
-    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+void mirrorDelRows(LpProblem& lp, const std::vector<Index>& sorted_rows) {
     std::vector<Index> map(static_cast<std::size_t>(lp.num_rows), 0);
     Index next = 0;
     std::size_t r = 0;
     for (Index i = 0; i < lp.num_rows; ++i) {
-        if (r < rows.size() && rows[r] == i) {
+        if (r < sorted_rows.size() && sorted_rows[r] == i) {
             map[i] = -1;
             ++r;
         } else {
@@ -235,23 +111,21 @@ void mirrorDelRows(LpProblem& lp, std::vector<Index> rows) {
     rebuild(lp, std::move(t));
 }
 
-// One pass: drop the entries at the changed positions, then add the changes
-// that are not 0 (each position once per op, as the format says).
-void mirrorSetCoeffs(LpProblem& lp, const std::vector<Triplet>& changes) {
+// One pass: drop the entries at the changed positions (unique per op, which
+// readOp checks), then add the changes that are not 0.
+void mirrorSetCoeffs(LpProblem& lp, const lpseq::Op& op) {
     const auto key = [&](Index i, Index j) {
         return static_cast<std::int64_t>(i) * static_cast<std::int64_t>(lp.num_cols) + j;
     };
     std::unordered_set<std::int64_t> changed;
-    for (const auto& c : changes) {
-        if (!changed.insert(key(c.row, c.col)).second || !std::isfinite(c.val)) {
-            formatError("coeffs: a position twice in one op, or a value not finite");
-        }
+    for (std::size_t t = 0; t < op.at.size(); ++t) {
+        changed.insert(key(op.at[t], op.col[t]));
     }
     auto t = triplets(lp);
     std::erase_if(t, [&](const Triplet& e) { return changed.contains(key(e.row, e.col)); });
-    for (const auto& c : changes) {
-        if (c.val != 0.0) {
-            t.push_back(c);
+    for (std::size_t c = 0; c < op.at.size(); ++c) {
+        if (op.values[c] != 0.0) {
+            t.push_back({op.at[c], op.col[c], op.values[c]});
         }
     }
     rebuild(lp, std::move(t));
@@ -263,6 +137,7 @@ struct Arm {
     ArmKind kind;
     std::string name;
     std::unique_ptr<DualSimplexSolver> warm;  // DualWarm only
+    bool stale = false;                       // a coeffs op since its last solve
 };
 
 struct Options {
@@ -293,8 +168,107 @@ const char* statusName(Status s) {
     }
 }
 
+std::unique_ptr<LpSolver> coldSolver(ArmKind kind, const Options& opt) {
+    if (kind == ArmKind::DualCold) {
+        auto d = std::make_unique<DualSimplexSolver>();
+        d->setVerbose(false);
+        d->setOptions(dualOptions(opt));
+        return d;
+    }
+    if (kind == ArmKind::Barrier) {
+        auto b = std::make_unique<BarrierSolver>();
+        BarrierOptions bo;
+        bo.verbose = false;
+        b->setOptions(bo);
+        return b;
+    }
+    auto p = std::make_unique<PdlpSolver>();
+    PdlpOptions po;
+    po.verbose = false;
+    p->setOptions(po);
+    return p;
+}
+
+// Apply a change to the mirror and to every warm solver.
+void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms) {
+    using lpseq::OpKind;
+    switch (op.kind) {
+        case OpKind::AddCols:
+            appendColumns(lp, op.starts, op.indices, op.values, op.cost, op.lower, op.upper);
+            break;
+        case OpKind::AddRows:
+            mirrorAddRows(lp, op);
+            break;
+        case OpKind::DelCols:
+            removeColumns(lp, op.indices);
+            break;
+        case OpKind::DelRows:
+            mirrorDelRows(lp, op.indices);
+            break;
+        case OpKind::ColBounds:
+        case OpKind::RowBounds:
+            for (std::size_t t = 0; t < op.at.size(); ++t) {
+                auto& lo = op.kind == OpKind::ColBounds ? lp.col_lower : lp.row_lower;
+                auto& up = op.kind == OpKind::ColBounds ? lp.col_upper : lp.row_upper;
+                lo[op.at[t]] = op.lower[t];
+                up[op.at[t]] = op.upper[t];
+            }
+            break;
+        case OpKind::ColCosts:
+            for (std::size_t t = 0; t < op.at.size(); ++t) {
+                lp.obj[op.at[t]] = op.cost[t];
+            }
+            break;
+        case OpKind::Coeffs:
+            mirrorSetCoeffs(lp, op);
+            break;
+        case OpKind::Solve:
+            return;
+    }
+    for (auto& arm : arms) {
+        if (!arm.warm) {
+            continue;
+        }
+        DualSimplexSolver& s = *arm.warm;
+        switch (op.kind) {
+            case OpKind::AddCols:
+                s.addCols(op.starts, op.indices, op.values, op.cost, op.lower, op.upper);
+                break;
+            case OpKind::AddRows:
+                s.addRows(op.starts, op.indices, op.values, op.lower, op.upper);
+                break;
+            case OpKind::DelCols:
+                s.removeCols(op.indices);
+                break;
+            case OpKind::DelRows:
+                s.removeRows(op.indices);
+                break;
+            case OpKind::ColBounds:
+                for (std::size_t t = 0; t < op.at.size(); ++t) {
+                    s.setColBounds(op.at[t], op.lower[t], op.upper[t]);
+                }
+                break;
+            case OpKind::RowBounds:
+                for (std::size_t t = 0; t < op.at.size(); ++t) {
+                    s.setRowBounds(op.at[t], op.lower[t], op.upper[t]);
+                }
+                break;
+            case OpKind::ColCosts:
+                for (std::size_t t = 0; t < op.at.size(); ++t) {
+                    s.setColObjective(op.at[t], op.cost[t]);
+                }
+                break;
+            case OpKind::Coeffs:
+                arm.stale = true;
+                break;
+            case OpKind::Solve:
+                break;
+        }
+    }
+}
+
 int run(const Options& opt) {
-    checkManifest(opt.dir);
+    lpseq::checkManifest(opt.dir);
     LpProblem lp = readMaster(opt.dir + "/master_0000.mps");
 
     std::vector<Arm> arms;
@@ -326,7 +300,7 @@ int run(const Options& opt) {
     if (!opt.csv.empty()) {
         csv_file.open(opt.csv);
         if (!csv_file) {
-            formatError(opt.csv + ": cannot write");
+            lpseq::fail(opt.csv + ": cannot write");
         }
         out = &csv_file;
     }
@@ -334,219 +308,48 @@ int run(const Options& opt) {
 
     std::ifstream ops(opt.dir + "/ops.txt");
     if (!ops) {
-        formatError(opt.dir + "/ops.txt: cannot open");
+        lpseq::fail(opt.dir + "/ops.txt: cannot open");
     }
     bool all_match = true;
-    std::vector<char> warm_stale(arms.size(), 0);  // a coeffs op since the last solve
-    std::string line;
-    auto readBatch = [&](Index k, bool cols) {
-        Batch b;
-        for (Index t = 0; t < k; ++t) {
-            if (!std::getline(ops, line)) {
-                formatError("ops.txt: batch cut short");
-            }
-            std::istringstream ls(line);
-            std::string x, y, z, n;
-            ls >> x >> y;
-            if (cols) {
-                ls >> z;
-            }
-            ls >> n;
-            if (cols) {
-                b.a.push_back(parseReal(x));
-                b.b.push_back(parseReal(y));
-                b.c.push_back(parseReal(z));
-            } else {
-                b.a.push_back(parseReal(x));
-                b.b.push_back(parseReal(y));
-            }
-            const Index nnz = parseIndex(n);
-            b.starts.push_back(static_cast<Index>(b.indices.size()));
-            for (Index p = 0; p < nnz; ++p) {
-                std::string idx, val;
-                if (!(ls >> idx >> val)) {
-                    formatError("ops.txt: entry list cut short: " + line);
-                }
-                b.indices.push_back(parseIndex(idx));
-                b.values.push_back(parseReal(val));
-            }
-        }
-        return b;
-    };
-
-    while (std::getline(ops, line)) {
-        std::istringstream ls(line);
-        std::string op;
-        if (!(ls >> op)) {
+    lpseq::Op op;
+    while (lpseq::readOp(ops, lp.num_rows, lp.num_cols, op)) {
+        if (op.kind != lpseq::OpKind::Solve) {
+            apply(op, lp, arms);
             continue;
         }
-        if (op == "solve") {
-            std::string seq, status, obj;
-            ls >> seq >> status >> obj;
-            const Real recorded = parseReal(obj);
-            for (std::size_t a = 0; a < arms.size(); ++a) {
-                Arm& arm = arms[a];
-                std::unique_ptr<LpSolver> cold;
-                LpSolver* s = arm.warm.get();
-                bool reloaded = false;
-                if (arm.kind == ArmKind::DualWarm && warm_stale[a] != 0) {
-                    // The dimensions are the same, so the basis carries over.
-                    const auto basis = arm.warm->getBasis();
-                    arm.warm->load(lp);
-                    arm.warm->setBasis(basis);
-                    warm_stale[a] = 0;
-                    reloaded = true;
-                }
-                if (s == nullptr) {
-                    if (arm.kind == ArmKind::DualCold) {
-                        auto d = std::make_unique<DualSimplexSolver>();
-                        d->setVerbose(false);
-                        d->setOptions(dualOptions(opt));
-                        cold = std::move(d);
-                    } else if (arm.kind == ArmKind::Barrier) {
-                        auto b = std::make_unique<BarrierSolver>();
-                        BarrierOptions bo;
-                        bo.verbose = false;
-                        b->setOptions(bo);
-                        cold = std::move(b);
-                    } else {
-                        auto p = std::make_unique<PdlpSolver>();
-                        PdlpOptions po;
-                        po.verbose = false;
-                        p->setOptions(po);
-                        cold = std::move(p);
-                    }
-                    cold->load(lp);
-                    s = cold.get();
-                }
-                const auto t0 = std::chrono::steady_clock::now();
-                const LpResult r = s->solve();
-                const double secs =
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-                const Real err =
-                    std::abs(r.objective - recorded) / std::max<Real>(1.0, std::abs(recorded));
-                // PDLP is a first-order method: it stops at its own, looser
-                // relative gap, so it is held to --pdlp-rel-tol.
-                const Real tol = arm.kind == ArmKind::Pdlp ? opt.pdlp_rel_tol : opt.rel_tol;
-                const bool match =
-                    status == statusName(r.status) && (status != "optimal" || err <= tol);
-                all_match = all_match && match;
-                char buf[256];
-                std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%d,%.6f,%d\n",
-                              seq.c_str(), arm.name.c_str(), statusName(r.status), r.objective,
-                              recorded, err, r.iterations, secs, reloaded ? 1 : 0);
-                *out << buf;
+        for (Arm& arm : arms) {
+            std::unique_ptr<LpSolver> cold;
+            LpSolver* s = arm.warm.get();
+            bool reloaded = false;
+            if (arm.warm && arm.stale) {
+                // The dimensions are the same, so the basis carries over
+                // (none before the first solve).
+                const auto basis = arm.warm->getBasis();
+                arm.warm->load(lp);
+                arm.warm->setBasis(basis);
+                arm.stale = false;
+                reloaded = true;
             }
-            continue;
-        }
-        std::string count;
-        ls >> count;
-        const Index k = parseIndex(count);
-        if (op == "add_cols") {
-            const Batch b = readBatch(k, true);
-            checkColumnBatch(lp.num_rows, b.starts, b.indices, b.values, b.a, b.b, b.c);
-            appendColumns(lp, b.starts, b.indices, b.values, b.a, b.b, b.c);
-            for (auto& arm : arms) {
-                if (arm.warm) {
-                    arm.warm->addCols(b.starts, b.indices, b.values, b.a, b.b, b.c);
-                }
+            if (s == nullptr) {
+                cold = coldSolver(arm.kind, opt);
+                cold->load(lp);
+                s = cold.get();
             }
-        } else if (op == "add_rows") {
-            const Batch b = readBatch(k, false);
-            for (const Index j : b.indices) {
-                if (j >= lp.num_cols) {
-                    formatError("add_rows: column index " + std::to_string(j) + " out of range");
-                }
-            }
-            for (const Real v : b.values) {
-                if (!std::isfinite(v)) {
-                    formatError("add_rows: coefficient not finite");
-                }
-            }
-            for (std::size_t r = 0; r < b.a.size(); ++r) {
-                if (b.a[r] == kInf || b.b[r] == -kInf) {
-                    formatError("add_rows: bound on the wrong side");
-                }
-            }
-            mirrorAddRows(lp, b);
-            for (auto& arm : arms) {
-                if (arm.warm) {
-                    arm.warm->addRows(b.starts, b.indices, b.values, b.a, b.b);
-                }
-            }
-        } else if (op == "del_cols" || op == "del_rows") {
-            std::vector<Index> idx;
-            for (Index t = 0; t < k; ++t) {
-                std::string x;
-                ls >> x;
-                idx.push_back(op == "del_cols" ? parseIndexBelow(x, lp.num_cols, "del_cols")
-                                               : parseIndexBelow(x, lp.num_rows, "del_rows"));
-            }
-            if (op == "del_cols") {
-                removeColumns(lp, sortedColumnSet(lp.num_cols, idx));
-            } else {
-                mirrorDelRows(lp, idx);
-            }
-            for (auto& arm : arms) {
-                if (arm.warm) {
-                    if (op == "del_cols") {
-                        arm.warm->removeCols(idx);
-                    } else {
-                        arm.warm->removeRows(idx);
-                    }
-                }
-            }
-        } else if (op == "col_bounds" || op == "row_bounds") {
-            for (Index t = 0; t < k; ++t) {
-                std::string x, lo, up;
-                ls >> x >> lo >> up;
-                const Index i = op == "col_bounds" ? parseIndexBelow(x, lp.num_cols, "col_bounds")
-                                                   : parseIndexBelow(x, lp.num_rows, "row_bounds");
-                const Real l = parseReal(lo);
-                const Real u = parseReal(up);
-                if (op == "col_bounds") {
-                    lp.col_lower[i] = l;
-                    lp.col_upper[i] = u;
-                } else {
-                    lp.row_lower[i] = l;
-                    lp.row_upper[i] = u;
-                }
-                for (auto& arm : arms) {
-                    if (arm.warm) {
-                        if (op == "col_bounds") {
-                            arm.warm->setColBounds(i, l, u);
-                        } else {
-                            arm.warm->setRowBounds(i, l, u);
-                        }
-                    }
-                }
-            }
-        } else if (op == "col_costs") {
-            for (Index t = 0; t < k; ++t) {
-                std::string x, c;
-                ls >> x >> c;
-                const Index j = parseIndexBelow(x, lp.num_cols, "col_costs");
-                lp.obj[j] = parseReal(c);
-                for (auto& arm : arms) {
-                    if (arm.warm) {
-                        arm.warm->setColObjective(j, lp.obj[j]);
-                    }
-                }
-            }
-        } else if (op == "coeffs") {
-            std::vector<Triplet> changes;
-            for (Index t = 0; t < k; ++t) {
-                std::string i, j, v;
-                ls >> i >> j >> v;
-                changes.push_back({parseIndexBelow(i, lp.num_rows, "coeffs row"),
-                                   parseIndexBelow(j, lp.num_cols, "coeffs column"), parseReal(v)});
-            }
-            mirrorSetCoeffs(lp, changes);
-            for (std::size_t a = 0; a < arms.size(); ++a) {
-                warm_stale[a] = arms[a].warm ? 1 : 0;
-            }
-        } else {
-            formatError("ops.txt: unknown op " + op);
+            const auto t0 = std::chrono::steady_clock::now();
+            const LpResult r = s->solve();
+            const double secs =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            // PDLP is a first-order method: it stops at its own, looser
+            // relative gap, so it is held to --pdlp-rel-tol.
+            const Real tol = arm.kind == ArmKind::Pdlp ? opt.pdlp_rel_tol : opt.rel_tol;
+            Real err = 0.0;
+            all_match =
+                lpseq::matches(op, statusName(r.status), r.objective, tol, err) && all_match;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%d,%.6f,%d\n",
+                          op.seq.c_str(), arm.name.c_str(), statusName(r.status), r.objective,
+                          op.recorded, err, r.iterations, secs, reloaded ? 1 : 0);
+            *out << buf;
         }
     }
     return all_match ? 0 : 1;

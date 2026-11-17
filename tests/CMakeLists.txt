@@ -72,6 +72,13 @@ if(TARGET mipx-lpseq-replay)
             COMMAND mipx-lpseq-replay ${_args} --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_${devex}.csv")
     endforeach()
 endif()
+# The same sequence on HiGHS, in bench builds only (MIPX_BENCH_HIGHS).
+if(TARGET mipx-lpseq-replay-highs)
+    add_test(NAME "LP sequence replay (HiGHS): grid1 masters"
+        COMMAND mipx-lpseq-replay-highs "${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
+            --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold
+            --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_highs.csv")
+endif()
 
 # Fast correctness suite -- the default, and what the git hooks run.
 catch_discover_tests(mipx-tests

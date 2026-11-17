@@ -419,5 +419,9 @@ Regression gates and benchmark scripts for Netlib LP, MIPLIB MIP, Mittelman, and
 - Forrest-Tomlin LU updates, not product-form inverse.
 - Dual simplex uses Devex pricing + bound flipping ratio test (BFRT).
 - Debug builds enable ASan + UBSan automatically.
-- No external solver dependencies — everything from scratch.
+- No external solver dependencies — everything from scratch. One exception,
+  for bench targets only and opt-in: `-DMIPX_BENCH_HIGHS=ON` (OFF by default)
+  fetches HiGHS (a release tag, pinned by hash) for `mipx-lpseq-replay-highs`,
+  the HiGHS side of the LP sequence comparison (#268; Simon, 2026-11-17). The
+  mipx library, CLI and tests never link it, and the gates build without it.
 - CUDA code lives alongside CPU code in the same directories (`.cu` files).

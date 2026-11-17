@@ -1,0 +1,290 @@
+// mipx-lpseq-replay-highs: replay an LP sequence in mcf's "mcf-lpseq 1"
+// format on HiGHS, through its API, so it can run warm (#268). An opt-in
+// bench target (MIPX_BENCH_HIGHS, OFF by default); the mipx library never
+// links HiGHS. It reads the ops with the same parser as mipx-lpseq-replay
+// (lpseq_format.h) and writes the same CSV:
+//   seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded
+//
+// Arms: simplex-warm (dual simplex) and primal-warm (primal simplex) keep
+// one Highs object across the changes, as mcf's HiGHS backend does;
+// simplex-cold, ipx-cold and hipo-cold solve each LP on a fresh Highs
+// (interior points without crossover). One thread, presolve off unless
+// --presolve. Exit 0 when every solve matches the recorded status and
+// objective (simplex --rel-tol 1e-6, interior point --ipm-rel-tol 1e-5),
+// 1 when one does not, 2 on a usage or format error.
+
+#include "lpseq_format.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <Highs.h>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+// The parser's index vectors go to HiGHS as they are.
+static_assert(sizeof(HighsInt) == sizeof(int), "HiGHS built with 64-bit HighsInt");
+
+struct Arm {
+    std::string name;
+    bool warm = false;
+    std::string solver;  // HiGHS "solver" option: simplex, ipx, hipo
+    int strategy = 1;    // simplex_strategy: 1 dual, 4 primal
+    std::unique_ptr<Highs> highs;
+};
+
+struct Options {
+    std::string dir;
+    std::vector<Arm> arms;
+    bool presolve = false;
+    double rel_tol = 1e-6;
+    double ipm_rel_tol = 1e-5;
+    std::string csv;
+};
+
+void configure(Highs& h, const Arm& arm, bool presolve) {
+    const bool ok = h.setOptionValue("output_flag", false) == HighsStatus::kOk &&
+                    h.setOptionValue("threads", 1) == HighsStatus::kOk &&
+                    h.setOptionValue("presolve", presolve ? "on" : "off") == HighsStatus::kOk &&
+                    h.setOptionValue("solver", arm.solver) == HighsStatus::kOk &&
+                    h.setOptionValue("simplex_strategy", arm.strategy) == HighsStatus::kOk &&
+                    h.setOptionValue("run_crossover", "off") == HighsStatus::kOk;
+    if (!ok) {
+        lpseq::fail("HiGHS refused an option of arm " + arm.name);
+    }
+}
+
+const char* statusName(HighsModelStatus s) {
+    switch (s) {
+        case HighsModelStatus::kOptimal:
+            return "optimal";
+        case HighsModelStatus::kInfeasible:
+            return "infeasible";
+        case HighsModelStatus::kUnbounded:
+            return "unbounded";
+        default:
+            return "error";
+    }
+}
+
+double highsBound(double v) {
+    return v == lpseq::kInf ? kHighsInf : (v == -lpseq::kInf ? -kHighsInf : v);
+}
+
+std::vector<double> highsBounds(const std::vector<double>& v) {
+    std::vector<double> out(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        out[i] = highsBound(v[i]);
+    }
+    return out;
+}
+
+void check(HighsStatus s, const char* what) {
+    if (s == HighsStatus::kError) {
+        lpseq::fail(std::string("HiGHS refused ") + what);
+    }
+}
+
+// Apply a change to `h` (the mirror or a warm arm).
+void apply(const lpseq::Op& op, Highs& h) {
+    using lpseq::OpKind;
+    const auto k = static_cast<HighsInt>(op.kind == OpKind::AddCols || op.kind == OpKind::AddRows
+                                             ? op.lower.size()
+                                             : op.indices.size());
+    const auto nnz = static_cast<HighsInt>(op.indices.size());
+    switch (op.kind) {
+        case OpKind::AddCols: {
+            const auto lo = highsBounds(op.lower);
+            const auto up = highsBounds(op.upper);
+            check(h.addCols(k, op.cost.data(), lo.data(), up.data(), nnz, op.starts.data(),
+                            op.indices.data(), op.values.data()),
+                  "add_cols");
+            break;
+        }
+        case OpKind::AddRows: {
+            const auto lo = highsBounds(op.lower);
+            const auto up = highsBounds(op.upper);
+            check(h.addRows(k, lo.data(), up.data(), nnz, op.starts.data(), op.indices.data(),
+                            op.values.data()),
+                  "add_rows");
+            break;
+        }
+        case OpKind::DelCols:
+            check(h.deleteCols(k, op.indices.data()), "del_cols");
+            break;
+        case OpKind::DelRows:
+            check(h.deleteRows(k, op.indices.data()), "del_rows");
+            break;
+        case OpKind::ColBounds:
+        case OpKind::RowBounds:
+            for (std::size_t t = 0; t < op.at.size(); ++t) {
+                const double lo = highsBound(op.lower[t]);
+                const double up = highsBound(op.upper[t]);
+                check(op.kind == OpKind::ColBounds ? h.changeColBounds(op.at[t], lo, up)
+                                                   : h.changeRowBounds(op.at[t], lo, up),
+                      "bounds");
+            }
+            break;
+        case OpKind::ColCosts:
+            for (std::size_t t = 0; t < op.at.size(); ++t) {
+                check(h.changeColCost(op.at[t], op.cost[t]), "col_costs");
+            }
+            break;
+        case OpKind::Coeffs:
+            for (std::size_t t = 0; t < op.at.size(); ++t) {
+                check(h.changeCoeff(op.at[t], op.col[t], op.values[t]), "coeffs");
+            }
+            break;
+        case OpKind::Solve:
+            break;
+    }
+}
+
+int run(Options& opt) {
+    lpseq::checkManifest(opt.dir);
+    // The mirror: a Highs that only holds the LP, given to the cold arms.
+    Highs model;
+    model.setOptionValue("output_flag", false);
+    const std::string master = opt.dir + "/master_0000.mps";
+    if (model.readModel(master) == HighsStatus::kError) {
+        lpseq::fail(master + ": HiGHS cannot read it");
+    }
+    const HighsLp& lp = model.getLp();
+    lpseq::checkNames(lp.row_names_, static_cast<int>(lp.num_row_), 'r', master);
+    lpseq::checkNames(lp.col_names_, static_cast<int>(lp.num_col_), 'c', master);
+    if (lp.sense_ != ObjSense::kMinimize) {
+        lpseq::fail(master + ": the format minimises");
+    }
+    for (Arm& arm : opt.arms) {
+        if (arm.warm) {
+            arm.highs = std::make_unique<Highs>();
+            configure(*arm.highs, arm, opt.presolve);
+            check(arm.highs->passModel(lp), "the master");
+        }
+    }
+
+    std::ofstream csv_file;
+    std::ostream* out = &std::cout;
+    if (!opt.csv.empty()) {
+        csv_file.open(opt.csv);
+        if (!csv_file) {
+            lpseq::fail(opt.csv + ": cannot write");
+        }
+        out = &csv_file;
+    }
+    *out << "seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded\n";
+
+    std::ifstream ops(opt.dir + "/ops.txt");
+    if (!ops) {
+        lpseq::fail(opt.dir + "/ops.txt: cannot open");
+    }
+    bool all_match = true;
+    lpseq::Op op;
+    while (lpseq::readOp(ops, static_cast<int>(model.getNumRow()),
+                         static_cast<int>(model.getNumCol()), op)) {
+        if (op.kind != lpseq::OpKind::Solve) {
+            apply(op, model);
+            for (Arm& arm : opt.arms) {
+                if (arm.warm) {
+                    apply(op, *arm.highs);
+                }
+            }
+            continue;
+        }
+        for (Arm& arm : opt.arms) {
+            std::unique_ptr<Highs> cold;
+            Highs* h = arm.highs.get();
+            if (!arm.warm) {
+                cold = std::make_unique<Highs>();
+                configure(*cold, arm, opt.presolve);
+                check(cold->passModel(model.getLp()), "the LP");
+                h = cold.get();
+            }
+            const auto t0 = std::chrono::steady_clock::now();
+            h->run();
+            const double secs =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            const HighsInfo& info = h->getInfo();
+            const double tol = arm.solver == "simplex" ? opt.rel_tol : opt.ipm_rel_tol;
+            double err = 0.0;
+            const char* status = statusName(h->getModelStatus());
+            all_match =
+                lpseq::matches(op, status, info.objective_function_value, tol, err) && all_match;
+            const long iterations =
+                static_cast<long>(std::max<HighsInt>(0, info.simplex_iteration_count)) +
+                std::max<HighsInt>(0, info.ipm_iteration_count);
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%ld,%.6f,0\n",
+                          op.seq.c_str(), arm.name.c_str(), status, info.objective_function_value,
+                          op.recorded, err, iterations, secs);
+            *out << buf;
+        }
+    }
+    return all_match ? 0 : 1;
+}
+
+void usage() {
+    std::cerr << "usage: mipx-lpseq-replay-highs DIR "
+                 "[--arm simplex-warm|primal-warm|simplex-cold|ipx-cold|hipo-cold]... "
+                 "[--presolve] [--rel-tol T] [--ipm-rel-tol T] [--csv FILE]\n";
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Options opt;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--arm" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            Arm arm;
+            arm.name = v;
+            if (v == "simplex-warm") {
+                arm = {v, true, "simplex", 1, nullptr};
+            } else if (v == "primal-warm") {
+                arm = {v, true, "simplex", 4, nullptr};
+            } else if (v == "simplex-cold") {
+                arm = {v, false, "simplex", 1, nullptr};
+            } else if (v == "ipx-cold") {
+                arm = {v, false, "ipx", 1, nullptr};
+            } else if (v == "hipo-cold") {
+                arm = {v, false, "hipo", 1, nullptr};
+            } else {
+                usage();
+                return 2;
+            }
+            opt.arms.push_back(std::move(arm));
+        } else if (a == "--presolve") {
+            opt.presolve = true;
+        } else if (a == "--rel-tol" && i + 1 < argc) {
+            opt.rel_tol = std::atof(argv[++i]);
+        } else if (a == "--ipm-rel-tol" && i + 1 < argc) {
+            opt.ipm_rel_tol = std::atof(argv[++i]);
+        } else if (a == "--csv" && i + 1 < argc) {
+            opt.csv = argv[++i];
+        } else if (!a.empty() && a[0] != '-' && opt.dir.empty()) {
+            opt.dir = a;
+        } else {
+            usage();
+            return 2;
+        }
+    }
+    if (opt.dir.empty()) {
+        usage();
+        return 2;
+    }
+    if (opt.arms.empty()) {
+        opt.arms.push_back({"simplex-warm", true, "simplex", 1, nullptr});
+    }
+    try {
+        return run(opt);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        return 2;
+    }
+}

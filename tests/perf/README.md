@@ -442,6 +442,23 @@ row, which the MPS reader drops) is refused rather than replayed shifted.
 HiGHS simplex, 9 masters); ctest replays it on all four arms with primal
 Devex off and on.
 
+**The HiGHS side** (#268): configure with `-DMIPX_BENCH_HIGHS=ON` (OFF by
+default; fetches HiGHS v1.16.0 with HiPO, needs a BLAS such as
+libopenblas-dev) to build `mipx-lpseq-replay-highs`. It reads the ops with
+the same parser (`lpseq_format.h`) and writes the same CSV, on HiGHS
+through its API, one thread:
+
+```bash
+./build/mipx-lpseq-replay-highs tests/data/lpseq/grid1 \
+    --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold \
+    [--presolve] [--csv out.csv]
+```
+
+`simplex-warm` (dual) and `primal-warm` keep one `Highs` across the changes,
+as mcf's HiGHS backend does; the `-cold` arms solve each LP on a fresh one
+(IPX and HiPO without crossover, held to `--ipm-rel-tol` 1e-5). Presolve is
+off unless `--presolve`, as mcf runs it. The mipx library never links HiGHS.
+
 ## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
 
 For LP barrier-focused comparisons (CPU/GPU and cross-solver):
