@@ -36,8 +36,10 @@
 #include "mipx/pdlp.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -46,6 +48,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace mipx;
@@ -56,28 +59,39 @@ namespace {
     throw std::runtime_error("lpseq: " + what);
 }
 
+// from_chars reads %.17g back exactly, subnormals and inf/-inf included
+// (stod would throw out_of_range on a subnormal).
 Real parseReal(const std::string& s) {
-    if (s == "inf" || s == "+inf") {
-        return kInf;
+    const char* first = s.data();
+    if (!s.empty() && s[0] == '+') {
+        ++first;  // from_chars takes no leading '+'
     }
-    if (s == "-inf") {
-        return -kInf;
-    }
-    std::size_t used = 0;
-    const Real v = std::stod(s, &used);
-    if (used != s.size()) {
+    Real v = 0.0;
+    const auto [end, ec] = std::from_chars(first, s.data() + s.size(), v);
+    if (end != s.data() + s.size() || (ec != std::errc() && ec != std::errc::result_out_of_range) ||
+        std::isnan(v)) {
         formatError("not a number: " + s);
     }
     return v;
 }
 
 Index parseIndex(const std::string& s) {
-    std::size_t used = 0;
-    const long v = std::stol(s, &used);
-    if (used != s.size() || v < 0) {
+    Index v = 0;
+    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    if (ec != std::errc() || end != s.data() + s.size() || v < 0) {
         formatError("not an index: " + s);
     }
-    return static_cast<Index>(v);
+    return v;
+}
+
+// An index the op addresses, checked against the LP it applies to.
+Index parseIndexBelow(const std::string& s, Index bound, const char* what) {
+    const Index v = parseIndex(s);
+    if (v >= bound) {
+        formatError(std::string(what) + " index " + s + " out of range (" + std::to_string(bound) +
+                    ")");
+    }
+    return v;
 }
 
 // The master as mipx reads it, with rows and columns in the recorder's
@@ -110,16 +124,36 @@ void checkManifest(const std::string& dir) {
     if (!in) {
         formatError(dir + "/manifest.txt: cannot open");
     }
+    // key = value lines; the format must be exactly "mcf-lpseq 1", and the
+    // replay compares objectives of a minimised LP without a constant.
     std::string line;
+    bool format = false;
     while (std::getline(in, line)) {
-        if (line.rfind("format", 0) == 0) {
-            if (line.find("mcf-lpseq 1") == std::string::npos) {
-                formatError("unsupported format: " + line);
+        const auto eq = line.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        auto trim = [](std::string s) {
+            const auto b = s.find_first_not_of(" \t");
+            const auto e = s.find_last_not_of(" \t\r");
+            return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
+        };
+        const std::string key = trim(line.substr(0, eq));
+        const std::string value = trim(line.substr(eq + 1));
+        if (key == "format") {
+            if (value != "mcf-lpseq 1") {
+                formatError("unsupported format: " + value);
             }
-            return;
+            format = true;
+        } else if (key == "sense" && value != "min") {
+            formatError("unsupported sense: " + value);
+        } else if (key == "obj_offset" && parseReal(value) != 0.0) {
+            formatError("unsupported obj_offset: " + value);
         }
     }
-    formatError(dir + "/manifest.txt: no format line");
+    if (!format) {
+        formatError(dir + "/manifest.txt: no format line");
+    }
 }
 
 // Row-wise and column-wise batches, as the LpSolver calls take them.
@@ -195,21 +229,23 @@ void mirrorDelRows(LpProblem& lp, std::vector<Index> rows) {
     rebuild(lp, std::move(t));
 }
 
+// One pass: drop the entries at the changed positions, then add the changes
+// that are not 0 (each position once per op, as the format says).
 void mirrorSetCoeffs(LpProblem& lp, const std::vector<Triplet>& changes) {
-    auto t = triplets(lp);
+    const auto key = [&](Index i, Index j) {
+        return static_cast<std::int64_t>(i) * static_cast<std::int64_t>(lp.num_cols) + j;
+    };
+    std::unordered_set<std::int64_t> changed;
     for (const auto& c : changes) {
-        bool found = false;
-        for (auto& e : t) {
-            if (e.row == c.row && e.col == c.col) {
-                e.val = c.val;
-                found = true;
-            }
-        }
-        if (!found) {
+        changed.insert(key(c.row, c.col));
+    }
+    auto t = triplets(lp);
+    std::erase_if(t, [&](const Triplet& e) { return changed.contains(key(e.row, e.col)); });
+    for (const auto& c : changes) {
+        if (c.val != 0.0) {
             t.push_back(c);
         }
     }
-    std::erase_if(t, [](const Triplet& e) { return e.val == 0.0; });
     rebuild(lp, std::move(t));
 }
 
@@ -346,7 +382,10 @@ int run(const Options& opt) {
                 LpSolver* s = arm.warm.get();
                 bool reloaded = false;
                 if (arm.kind == ArmKind::DualWarm && warm_stale[a] != 0) {
+                    // The dimensions are the same, so the basis carries over.
+                    const auto basis = arm.warm->getBasis();
                     arm.warm->load(lp);
+                    arm.warm->setBasis(basis);
                     warm_stale[a] = 0;
                     reloaded = true;
                 }
@@ -397,6 +436,7 @@ int run(const Options& opt) {
         const Index k = parseIndex(count);
         if (op == "add_cols") {
             const Batch b = readBatch(k, true);
+            checkColumnBatch(lp.num_rows, b.starts, b.indices, b.values, b.a, b.b, b.c);
             appendColumns(lp, b.starts, b.indices, b.values, b.a, b.b, b.c);
             for (auto& arm : arms) {
                 if (arm.warm) {
@@ -405,6 +445,11 @@ int run(const Options& opt) {
             }
         } else if (op == "add_rows") {
             const Batch b = readBatch(k, false);
+            for (const Index j : b.indices) {
+                if (j >= lp.num_cols) {
+                    formatError("add_rows: column index " + std::to_string(j) + " out of range");
+                }
+            }
             mirrorAddRows(lp, b);
             for (auto& arm : arms) {
                 if (arm.warm) {
@@ -416,7 +461,8 @@ int run(const Options& opt) {
             for (Index t = 0; t < k; ++t) {
                 std::string x;
                 ls >> x;
-                idx.push_back(parseIndex(x));
+                idx.push_back(op == "del_cols" ? parseIndexBelow(x, lp.num_cols, "del_cols")
+                                               : parseIndexBelow(x, lp.num_rows, "del_rows"));
             }
             if (op == "del_cols") {
                 removeColumns(lp, sortedColumnSet(lp.num_cols, idx));
@@ -436,7 +482,8 @@ int run(const Options& opt) {
             for (Index t = 0; t < k; ++t) {
                 std::string x, lo, up;
                 ls >> x >> lo >> up;
-                const Index i = parseIndex(x);
+                const Index i = op == "col_bounds" ? parseIndexBelow(x, lp.num_cols, "col_bounds")
+                                                   : parseIndexBelow(x, lp.num_rows, "row_bounds");
                 const Real l = parseReal(lo);
                 const Real u = parseReal(up);
                 if (op == "col_bounds") {
@@ -460,7 +507,7 @@ int run(const Options& opt) {
             for (Index t = 0; t < k; ++t) {
                 std::string x, c;
                 ls >> x >> c;
-                const Index j = parseIndex(x);
+                const Index j = parseIndexBelow(x, lp.num_cols, "col_costs");
                 lp.obj[j] = parseReal(c);
                 for (auto& arm : arms) {
                     if (arm.warm) {
@@ -473,7 +520,8 @@ int run(const Options& opt) {
             for (Index t = 0; t < k; ++t) {
                 std::string i, j, v;
                 ls >> i >> j >> v;
-                changes.push_back({parseIndex(i), parseIndex(j), parseReal(v)});
+                changes.push_back({parseIndexBelow(i, lp.num_rows, "coeffs row"),
+                                   parseIndexBelow(j, lp.num_cols, "coeffs column"), parseReal(v)});
             }
             mirrorSetCoeffs(lp, changes);
             for (std::size_t a = 0; a < arms.size(); ++a) {

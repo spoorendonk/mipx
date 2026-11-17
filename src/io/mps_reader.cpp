@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -461,25 +462,37 @@ Real parseReal(std::string_view s) {
 // sections of #254); its data lines are ignored, as before.
 enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, Endata, Skipped };
 
-Section parseSection(std::string_view line);
+Section keywordSection(std::string_view s);
 
-// A section header starts in column 1 with a section keyword. Free MPS also
-// lets data lines start in column 1 (mcf's LP recorder writes them so, as
-// HiGHS reads them): such a line, whose first token is no keyword, is data
-// of the current section, not an unknown header that drops the rest.
-bool isSection(std::string_view line) {
+// The section a line opens, or nullopt for a data line. A header starts in
+// column 1. Free MPS also lets data lines start there (mcf's LP recorder
+// writes them so, as HiGHS reads them), so a column-1 line is a header only
+// when it is a section keyword with at most one more token (NAME and
+// OBJSENSE take any), e.g. "RHS" or "OBJSENSE MAX"; a data line has more
+// tokens, so an RHS set named RHS or a column named BOUNDS stays data. A
+// lone unknown word is an unknown section, skipped as before; under
+// OBJSENSE a lone word is the sense.
+std::optional<Section> headerOf(std::string_view line, const Tokens& tokens, Section current) {
     if (line.empty() || std::isspace(static_cast<unsigned char>(line[0]))) {
-        return false;
+        return std::nullopt;
     }
-    return parseSection(line) != Section::None;
-}
-
-Section parseSection(std::string_view line) {
-    auto tokens = tokenize(line);
     if (tokens.n == 0) {
+        return std::nullopt;
+    }
+    const Section s = keywordSection(tokens[0]);
+    if (s == Section::Name || s == Section::ObjSense) {
+        return s;
+    }
+    if (s != Section::None && tokens.n <= 2) {
+        return s;
+    }
+    if (s == Section::None && tokens.n == 1 && current != Section::ObjSense) {
         return Section::None;
     }
-    auto s = tokens[0];
+    return std::nullopt;
+}
+
+Section keywordSection(std::string_view s) {
     if (s == "NAME") {
         return Section::Name;
     }
@@ -656,8 +669,9 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
             }
         }
 
-        if (isSection(line)) {
-            section = parseSection(line);
+        auto tokens = tokenize(line);
+        if (const auto header = headerOf(line, tokens, section)) {
+            section = *header;
             // Only headers that are exclusive to MPS count as evidence that
             // this really is an MPS file. NAME carries no model data, and
             // BOUNDS is a section keyword in CPLEX LP too -- counting either
@@ -667,18 +681,12 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                                     section == Section::Endata)) {
                 diag->saw_format_section = true;
             }
-            if (section == Section::Name) {
-                auto tokens = tokenize(line);
-                if (tokens.n >= 2) {
-                    prob.name = std::string(tokens[1]);
-                }
+            if (section == Section::Name && tokens.n >= 2) {
+                prob.name = std::string(tokens[1]);
             }
             // Free MPS may put the sense on the section line itself.
-            if (section == Section::ObjSense) {
-                auto tokens = tokenize(line);
-                if (tokens.n >= 2) {
-                    prob.sense = parseObjSense(tokens[1]);
-                }
+            if (section == Section::ObjSense && tokens.n >= 2) {
+                prob.sense = parseObjSense(tokens[1]);
             }
             if (section == Section::Endata) {
                 break;
@@ -686,7 +694,6 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
             continue;
         }
 
-        auto tokens = tokenize(line);
         if (tokens.n == 0) {
             continue;
         }
