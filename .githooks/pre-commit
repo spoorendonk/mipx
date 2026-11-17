@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-commit base=c1bc4d446e37
+# wcp: pre-commit base=7c9a87877f23
 # Format, lint and type-check the Python half, and check the C++ half's format,
 # before the commit is made.
 #
@@ -9,85 +9,510 @@
 # the type recorded for this repository, and this is the union of the Python and
 # C++ ones rather than either.
 #
-# **Fails open, loudly.** git reads any non-zero exit as a refusal, so a hook
-# that insisted on a toolchain would refuse every commit in a clone that has not
-# run `uv sync`, or on a machine without clang — worse than an ungated commit,
-# and unfixable without the very commit it is refusing. Each missing tool, and
-# a clang-format of another major version than the project pins, is announced
-# on stderr and the commit proceeds. The push gate and the review still stand
-# behind it.
+# **Fails open, loudly, for a tool the project does not declare; closed for
+# one it does (#650).** git reads any non-zero exit as a refusal, so a hook that
+# insisted on a tool nobody asked to have installed would refuse every commit
+# in a clone without it, or on a machine without clang — worse than an ungated
+# commit. So a missing clang-format, one of another version than the project
+# pins, and a Python tool the project configures and does not declare (a fresh
+# `wcp init` scaffold configures ruff and mypy and installs neither) are
+# announced on stderr, and the commit proceeds. A Python tool it declares is
+# different: a clone that cannot run it, or not at its pin, has skipped the
+# `uv sync` that installs it, which needs no commit, and skipping the check let
+# commits land unchecked. That refuses the commit and says what to run, unless a
+# marker leaves the tool out on this host, where the sync would change nothing:
+# announced too (#652). The push gate and the review still stand behind them all.
 #
-# **Format only, for C++ (#178).** clang-tidy runs in the push gate, where its
-# passes are cached and a changed header is tidied once, on its own; tidying
-# here as well ran a header's every includer at commit and again at push. The
-# gate, and the scheduled full lint, are where clang-tidy's findings block.
+# **Format only, for C++ (#178).** Tidying here ran a header's every includer at
+# commit and again at push. Where the project registers its `clang_tidy:` tests,
+# clang-tidy runs in the push gate, from the `ctest` of its `lint` block or, with
+# none, of its `test` block, where its passes are cached and a changed header is
+# tidied once, on its own; its findings block there and in the full lint,
+# `ctest -R '^clang_tidy:'` run uncached, on the project's schedule where it has
+# one, else by hand (#668). A project without them has no hook that runs
+# clang-tidy.
 #
 # **Both halves run.** A binding is two languages that have to agree, and a
 # commit that formats one of them is a commit that half-checked itself. Neither
 # half's failure stops the other from being reported.
+#
+# **`--precheck` fails closed (#636).** The skip that suits a commit would let a
+# gate pass having checked nothing, so CLAUDE.md's `precheck` block runs this as
+# `sh .githooks/pre-commit --precheck`: a configured ruff or mypy that cannot be
+# run, a missing clang-format or one of another version than the pin is then a
+# failure, naming it. A tool the project does not configure is still skipped.
+# It takes its Python tools from an environment holding the locked dependencies
+# and not the project, so the project's extension is not compiled for it (a
+# workspace member or a path dependency still is: pass `--no-install-workspace`
+# or `--no-install-local` for that one; see "The
+# precheck's environment" below); any arguments after `--precheck` go to that
+# environment's `uv sync`, `--extra cpu` say (a `--locked` or `--frozen` there
+# replaces the `--frozen` it adds). git runs this hook with none.
+#
+# **A tool a marker leaves out fails a precheck too (#653).** A project that
+# excludes a host from a tool has excluded it from the gate. And `sync_installs`
+# can read a tool as left out when it is not: a commit can afford that, with this
+# gate behind it, and this gate cannot, with nothing behind it. A host that has
+# to push anyway does what the failure says.
 
 set -u
 
+precheck=''
+case ${1-} in
+--precheck)
+	precheck=1
+	shift
+	;;
+esac
+if [ -z "$precheck" ] && [ $# -gt 0 ]; then
+	printf 'pre-commit: unknown argument "%s"; the one this hook takes is --precheck, followed by any arguments for uv sync.\n' "$1" >&2
+	exit 2
+fi
+
 status=0
+
+# What a linked worktree's precheck installs of the project: none of it. That
+# would compile its extension; ruff needs none of it and mypy only the
+# dependencies (commit a `.pyi` stub for an extension, and let mypy find the
+# package in the tree).
+sync_project=--no-install-project
 
 # ------------------------------------------------------------------- Python
 #
-# The whole tree, not the staged files: `ruff` and `mypy` are configured for the
-# project in `pyproject.toml`, and mypy in particular cannot type-check a file
-# without the modules it imports.
+# Only the tools the project configures: a `[tool.ruff]` or `[tool.mypy]` table
+# in `pyproject.toml`, or the tool's own config file. Without them it would run
+# with its defaults, which the code was never written to meet.
+#
+# The whole tree, not the staged files: mypy in particular cannot type-check a
+# file without the modules it imports.
+#
+# **An environment's own tools, never `uv run` and never PATH (#650).**
+# `uv run` syncs the project first, so after any change to `pyproject.toml` it
+# reinstalls it, and a project with a compiled extension rebuilt that inside
+# the hook, outside the host's build budget. Where that build failed, every
+# later commit retried it, and the failure read as a missing tool: ruff and
+# mypy were skipped and commits landed unchecked. And `uv run` falls back to
+# PATH, where a ruff or mypy of another version may be. So each tool is run as
+# a path, from the first of these that has it at its pin:
+#
+# - in a precheck that has an environment of its own, that alone (below);
+# - otherwise `$UV_PROJECT_ENVIRONMENT/bin` when that is set, as uv would;
+# - else this checkout's `.venv/bin`, then, from a linked worktree, the main
+#   checkout's: the directory holding the common git directory, when that is a
+#   `.git` (not a submodule's, or a bare repository elsewhere); then
+#   `$VIRTUAL_ENV/bin`, or `$CONDA_PREFIX/bin` without it, the environment a
+#   project without uv activates.
+#
+# A commit syncs nothing: `uv sync` keeps an environment current.
+#
+# **The pin** is the version `uv.lock` locks the tool at (any of them, where it
+# locks several), else the `X` of a `"NAME==X"` requirement in `pyproject.toml`
+# (`X.*` taking any release of `X`), else none; it is compared with the second
+# field of `NAME --version` (`ruff 0.9.1`, `mypy 1.14.1 (compiled: yes)`),
+# trailing `.0`s aside. A tool that reports no version does not run: it is
+# broken, a dead shebang say, and the next candidate may not be.
+#
+# **Declared** means a requirement in `pyproject.toml` (see `requirements`)
+# names the tool, or `uv.lock` locks it: then a tool that cannot be run here
+# refuses the commit, as the header says, where a sync would install it (see
+# `sync_installs`).
 
 run() {
 	printf 'pre-commit: %s\n' "$*" >&2
 	"$@" || status=1
 }
 
-# Can this tool be run at all?
-#
-# `command -v uv` says only that uv is here. A project scaffolded by `wcp init`
-# has `[tool.ruff]` and `[tool.mypy]` configured and neither tool installed —
-# which is the *default* state of a fresh scaffold, not an edge case — and there
-# `uv run ruff` exits 2 with "Failed to spawn". Read as a lint failure that
-# refuses every commit in the project, including the commit that would add the
-# dependency. Asked once per tool, so a missing one is a skip and a real failure
-# is still a failure.
-#
-# It cannot tell a missing tool from an environment uv will not build — an
-# unresolvable lock, an offline index, a local dependency that fails to
-# compile. The message below says so rather than sending the reader to `uv add`
-# for a problem that is not a missing dependency, and uv's own error is shown
-# once so the reader has something to act on.
-have() {
-	probe=$(uv run --quiet "$1" --version 2>&1)
-	if [ $? -eq 0 ]; then
+# Does the project configure this tool? `$1` is the tool, the rest its own
+# config files; `file:section` counts only when the file has that `[section]`.
+# A `[tool.<name>]` table, any of its subtables or an array of them counts,
+# spaces inside the brackets allowed; a quoted key or an inline table under
+# `[tool]` is not recognised, and the tool is then skipped, never wrongly run.
+configured() {
+	named=$1
+	shift
+	s='[[:space:]]*'
+	if [ -f pyproject.toml ] &&
+		grep -Eq "^$s\[\[?${s}tool$s\.$s$named$s[].]" pyproject.toml; then
 		return 0
 	fi
-	printf 'pre-commit: could not run %s: %s\n' "$1" "$(printf '%s' "$probe" | head -n 1)" >&2
+	for spec in "$@"; do
+		case $spec in
+		*:*) grep -q "^\[${spec#*:}\]" "${spec%%:*}" 2>/dev/null && return 0 ;;
+		*) [ -f "$spec" ] && return 0 ;;
+		esac
+	done
 	return 1
 }
 
-skipped() {
-	printf 'pre-commit: %s could not be run here; %s skipped.\n' "$1" "$2" >&2
+unconfigured() {
+	printf 'pre-commit: the project does not configure %s; %s skipped.\n' "$1" "$2" >&2
 }
 
-if ! command -v uv >/dev/null 2>&1; then
-	echo "pre-commit: uv is not on PATH; format, lint and type checks were skipped." >&2
-else
-	if have ruff; then
-		run uv run ruff format --check .
-		run uv run ruff check .
-	else
-		skipped ruff "the format and lint checks were"
+# The requirements `pyproject.toml` declares, one string per line: those of
+# `project.dependencies`, of each array under `project.optional-dependencies`
+# and `dependency-groups`, and of `tool.uv.dev-dependencies`. A walk over the
+# TOML, not over its lines: a requirement is a string in such an array, so a
+# name in a description, a keyword or a comment is none, a nested array is not
+# a table, an inline table is a table, and an `{ include-group = "x" }` entry
+# is passed over.
+requirements() {
+	[ -f pyproject.toml ] || return 0
+	awk -v sq="'" '
+		BEGIN {
+			wanted = "^(project\\.dependencies|project\\.optional-dependencies\\.[^.]*"
+			wanted = wanted "|dependency-groups\\.[^.]*|tool\\.uv\\.dev-dependencies)$"
+		}
+		{
+			sub(/\r$/, "")
+			i = 1
+			if (q == "" && !depth && !brace) {
+				if ($0 ~ /^[ \t]*\[/) {
+					t = $0
+					sub(/#.*/, "", t)
+					gsub(/[ \t"]/, "", t)
+					gsub(sq, "", t)
+					gsub(/\[/, "", t)
+					gsub(/\]/, "", t)
+					table = t "."
+					next
+				}
+				key = 1
+				path = table
+			}
+			for (; i <= length($0); i++) {
+				c = substr($0, i, 1)
+				if (q != "") {
+					if (c == "\\" && substr(q, 1, 1) != sq) {
+						s = s substr($0, i, 2)
+						i++
+					} else if (substr($0, i, length(q)) == q) {
+						i += length(q) - 1
+						q = ""
+						if (key)
+							path = path s
+						else if (keep && depth && !item)
+							print s
+					} else
+						s = s c
+				} else if (c == "#") {
+					break
+				} else if (c == "\"" || c == sq) {
+					q = substr($0, i, 3) == c c c ? c c c : c
+					i += length(q) - 1
+					s = ""
+				} else if (c == "}") {
+					key = 0
+					if (item)
+						item--
+					else if (brace)
+						path = under[brace--]
+				} else if (key) {
+					if (c == "=") {
+						key = 0
+						keep = path ~ wanted
+					} else if (c != " " && c != "\t") {
+						path = path c
+					}
+				} else if (c == "[") {
+					depth++
+				} else if (c == "]") {
+					depth--
+				} else if (c == "{") {
+					if (depth) {
+						item++
+					} else {
+						under[++brace] = path
+						path = path "."
+						key = 1
+					}
+				} else if (c == "," && brace && !depth) {
+					path = under[brace] "."
+					key = 1
+				}
+			}
+		}' pyproject.toml
+}
+
+# The versions `uv.lock` locks package `$1` at, one per line.
+locked() {
+	[ -f uv.lock ] || return 0
+	awk -v want="name = \"$1\"" '
+		{ sub(/\r$/, "") }
+		/^\[\[package\]\]/ { here = 0; next }
+		$0 == want { here = 1; next }
+		here && /^version = "/ {
+			v = $0
+			sub(/^version = "/, "", v)
+			sub(/".*/, "", v)
+			print v
+			here = 0
+		}' uv.lock
+}
+
+# The requirements of `pyproject.toml` that name tool `$1`.
+naming() {
+	requirements | grep -Ei "^[[:space:]]*$1([[:space:]=<>~!;@(]|\\[|\$)"
+}
+
+# Does the project declare tool `$1`?
+declared() {
+	[ -n "$(naming "$1")" ] || [ -n "$(locked "$1")" ]
+}
+
+# Would `uv sync` install declared tool `$1` on this host (#652)? If not, says
+# why in `absent`: a marker can leave a tool out, and then the sync succeeds and
+# changes nothing, so it is no fix to name. A requirement without a marker is
+# installed on any host. For one with a marker, or a tool only `uv.lock` names,
+# which it holds whatever its markers say, uv answers: it alone reads a lock's
+# markers against this host's interpreter and platform. `uv tree` lists what this
+# host takes of every workspace member, group and extra: a `uv sync --dry-run
+# --all-extras` fails on conflicting extras and on an extra this host cannot
+# install. `--locked` makes its exit 1 say the lock lags `pyproject.toml`: the
+# sync would relock, so the lock is no answer, and `uv sync` is a fix to name.
+# It writes nothing, uses no network and builds nothing, though a project with
+# dynamic metadata has its backend asked for that. Where uv cannot answer, for
+# want of a lock or of uv or by failing otherwise, a marker fails open: the host
+# may well be one it leaves out. A tool only a lock names stays refused. Says
+# in `remedy` what a host the tool does run on can do (#653).
+sync_installs() {
+	asked=$(naming "$1")
+	if [ -n "$asked" ] && printf '%s\n' "$asked" | grep -qv ';'; then
+		return 0
 	fi
-	if have mypy; then
-		run uv run mypy .
+	if [ -f uv.lock ] && command -v uv >/dev/null 2>&1; then
+		said=$(uv tree --locked --offline --no-python-downloads --color never --all-groups 2>/dev/null)
+		case $? in
+		0)
+			absent='`uv sync` would not install it on this host'
+			remedy='drop the marker'
+			[ -n "$asked" ] || remedy="declare it, with \`uv add --dev $1\`"
+			printf '%s\n' "$said" | grep -Eiq "[[:space:]]$1(\\[[^]]*\\])? v[0-9]"
+			return
+			;;
+		1) return 0 ;;
+		esac
+	fi
+	absent='its requirement has a marker, and uv could not say whether this host is one it covers'
+	remedy='install it, with `uv sync` and the extras or groups that hold it, or activate the environment that holds it'
+	[ -z "$synced" ] || remedy='pass the extras or groups that hold it after --precheck'
+	[ -z "$asked" ]
+}
+
+# Version `$1` without its trailing `.0`s: `==0.9` is 0.9.0's pin.
+released() {
+	printf '%s\n' "$1" | sed 's/\(\.0\)*$//'
+}
+
+# Is version `$1` one of the newline-separated pins `$2`? A subshell, so that its
+# `exit` cannot leave the hook under a shell that runs a pipeline's last stage in
+# the current process.
+at_pin() {
+	printf '%s\n' "$2" | (
+		while IFS= read -r p; do
+			case $p in
+			'') ;;
+			*.\*) case $1 in "${p%??}" | "${p%??}".*) exit 0 ;; esac ;;
+			*) [ "$(released "$1")" != "$(released "$p")" ] || exit 0 ;;
+			esac
+		done
+		exit 1
+	)
+}
+
+# The main checkout's `.venv/bin`, from a linked worktree; empty in the main
+# checkout itself, whose own comes first anyway.
+main_bin=''
+if common=$(git rev-parse --git-common-dir 2>/dev/null) &&
+	common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd) &&
+	[ "${common%/.git}" != "$common" ] && [ -d "${common%/.git}/.venv/bin" ] &&
+	[ "${common%/.git}" != "$PWD" ]; then
+	main_bin="${common%/.git}/.venv/bin"
+fi
+
+# Sets `tool` to `$1` in the first of the directories after it that reports a
+# version, at its pin; else says what it found, on stderr, and returns 1. An
+# environment `as_it_is` has no pin.
+find_tool() {
+	name=$1
+	shift
+	pins=$(locked "$name")
+	from='uv.lock locks it'
+	if [ -z "$pins" ]; then
+		pins=$(requirements | tr '[:upper:]' '[:lower:]' |
+			sed -n "s/^[[:space:]]*$name\(\[[^]]*\]\)\{0,1\}[[:space:]]*(\{0,1\}[[:space:]]*=\{2,3\}[[:space:]]*\([^;,)[:space:]]*\).*/\2/p")
+		from='pyproject.toml pins it'
+	fi
+	[ -z "$as_it_is" ] || pins=''
+	tool=''
+	places=''
+	rejected=''
+	for dir in "$@"; do
+		[ -n "$dir" ] || continue
+		places="${places:+$places or }$dir"
+		[ -x "$dir/$name" ] || continue
+		got=$("$dir/$name" --version 2>/dev/null | awk '{ print $2; exit }')
+		if [ -z "$got" ]; then
+			rejected="$rejected; $dir/$name does not report a version"
+		elif [ -z "$pins" ] || at_pin "$got" "$pins"; then
+			tool=$dir/$name
+			return 0
+		else
+			rejected="$rejected; $dir/$name is $got"
+		fi
+	done
+	if [ -z "$rejected" ]; then
+		printf 'pre-commit: could not run %s: there is none in %s\n' "$name" "${places:-no environment}" >&2
+	elif [ -z "$pins" ]; then
+		printf 'pre-commit: could not run %s: %s\n' "$name" "${rejected#; }" >&2
 	else
-		skipped mypy "the type check was"
+		printf 'pre-commit: could not run %s: none at %s, as %s%s\n' \
+			"$name" "$(printf '%s\n' "$pins" | tr '\n' ' ' | sed 's/ $//')" "$from" "$rejected" >&2
+	fi
+	return 1
+}
+
+# Sets `tool` to the tool `$1` this hook runs, or returns 1 having said why not.
+locate() {
+	if [ -n "$precheck_env" ]; then
+		find_tool "$1" "$precheck_env/bin"
+	elif [ -n "${UV_PROJECT_ENVIRONMENT:-}" ]; then
+		find_tool "$1" "$UV_PROJECT_ENVIRONMENT/bin"
+	else
+		active=${VIRTUAL_ENV:-${CONDA_PREFIX:-}}
+		active=${active:+$active/bin}
+		case $active in
+		"$PWD/.venv/bin" | "$main_bin") active='' ;;
+		esac
+		find_tool "$1" "$PWD/.venv/bin" "$main_bin" "$active"
+	fi
+}
+
+# A configured tool `$1` that could not be run; `$2` is what that leaves out.
+not_run() {
+	if [ -n "$precheck" ]; then
+		printf 'pre-commit: %s could not be run here, which fails a precheck; %s not run.\n' "$1" "$2" >&2
+		if ! declared "$1"; then
+			printf 'pre-commit: the project does not declare %s: `uv add --dev %s` installs it, or activate the environment that holds it.\n' "$1" "$1" >&2
+		elif ! sync_installs "$1"; then
+			printf 'pre-commit: the project declares %s, but %s: a precheck needs a host that runs it, so push from one. Where the tool does run on this host, %s; otherwise `git config hooks.localCi off` lets this clone push with its whole local CI off, tests included.\n' "$1" "$absent" "$remedy" >&2
+		elif [ -n "$synced" ]; then
+			printf 'pre-commit: the project declares %s: pass the extras or groups that hold it after --precheck.\n' "$1" >&2
+		else
+			printf 'pre-commit: the project declares %s: run `uv sync`, with the extras or groups that hold it.\n' "$1" >&2
+		fi
+		status=1
+	elif declared "$1" && sync_installs "$1"; then
+		printf 'pre-commit: %s could not be run here, and the project declares it, which refuses the commit; %s not run. Run `uv sync`, with the extras or groups that hold it, here or in the main checkout, and commit again; where that fails building the project, `uv sync --inexact --no-install-project` installs the tools without it. A project without uv activates the environment that holds the tool.\n' \
+			"$1" "$2" >&2
+		status=1
+	elif declared "$1"; then
+		printf 'pre-commit: %s could not be run here; %s skipped. The project declares it, but %s.\n' \
+			"$1" "$2" "$absent" >&2
+	else
+		printf 'pre-commit: %s could not be run here; %s skipped. The project configures it and does not declare it: `uv add --dev %s` installs it.\n' \
+			"$1" "$2" "$1" >&2
+	fi
+}
+
+# **The precheck's environment** (#636). A precheck runs the tools of an
+# environment holding the locked dependencies, with or without the project as
+# `sync_project` above says, and falls back on a commit's places where a sync
+# has no business:
+#
+# - `UV_PROJECT_ENVIRONMENT` when the caller sets one, as it is: not held to the
+#   pin either, since nothing here syncs it and a lock bump would wedge it;
+# - in a main checkout, a commit's places, as they are: the developer's, never
+#   synced here;
+# - in a linked worktree of a project not on uv, a commit's places too: with no
+#   `uv.lock`, either it declares no tool or there is no uv to sync with, and
+#   its tools are in the environment it activated (pip's, say);
+# - in any other linked worktree (the local CI's, a merge queue's, `git worktree add`),
+#   whose `.venv` is missing (it is untracked), stale (kept current only by the
+#   `test` block that runs after the precheck), or one of another flavour that
+#   must not be re-synced, an environment of the precheck's own in the
+#   worktree's git directory, which git removes with the worktree. Synced on
+#   every run (a fraction of a second from uv's cache), `--frozen` where there
+#   is a `uv.lock`, so its tools follow the commit's lock in a worktree kept
+#   between pushes; a sync that fails, or no uv to run it, fails the precheck.
+#
+# Made only when the project configures a Python tool. Sets `precheck_env`,
+# empty where a commit's places stand.
+precheck_env=''
+as_it_is=''
+synced=''
+precheck_environment() {
+	configured ruff ruff.toml .ruff.toml || configured mypy mypy.ini .mypy.ini setup.cfg:mypy || return 0
+	precheck_env=${UV_PROJECT_ENVIRONMENT:-}
+	if [ -n "$precheck_env" ]; then
+		as_it_is=1
+		return 0
+	fi
+	if ! gitdir=$(git rev-parse --absolute-git-dir 2>/dev/null) ||
+		! common=$(git rev-parse --git-common-dir 2>/dev/null) ||
+		! gitdir=$(CDPATH='' cd -- "$gitdir" 2>/dev/null && pwd -P) ||
+		! common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd -P); then
+		echo "pre-commit: git could not name this checkout's git directory, so the precheck has no environment." >&2
+		return 1
+	fi
+	[ "$gitdir" != "$common" ] || return 0
+	if [ ! -f uv.lock ]; then
+		command -v uv >/dev/null 2>&1 || return 0
+		declared ruff || declared mypy || return 0
+	fi
+	if ! command -v uv >/dev/null 2>&1; then
+		echo "pre-commit: uv is not on PATH, so a linked worktree's precheck has no environment." >&2
+		return 1
+	fi
+	precheck_env=$gitdir/precheck-venv
+	# The caller's `--locked` or `--frozen` stands instead: uv refuses either
+	# beside `--frozen`.
+	frozen=''
+	[ ! -f uv.lock ] || frozen=--frozen
+	for arg in "$@"; do
+		case $arg in
+		--locked | --frozen) frozen='' ;;
+		esac
+	done
+	printf 'pre-commit: uv sync%s%s%s, into %s\n' \
+		"${frozen:+ $frozen}" "${sync_project:+ $sync_project}" "${*:+ $*}" "$precheck_env" >&2
+	# shellcheck disable=SC2086 # `$frozen` and `$sync_project` are one word or none.
+	if ! UV_PROJECT_ENVIRONMENT=$precheck_env uv sync --quiet $frozen $sync_project "$@"; then
+		echo "pre-commit: uv sync failed, so the precheck has no environment." >&2
+		return 1
+	fi
+	synced=1
+}
+
+if [ -n "$precheck" ] && ! precheck_environment "$@"; then
+	echo "pre-commit: the Python format, lint and type checks were not run." >&2
+	status=1
+else
+	if ! configured ruff ruff.toml .ruff.toml; then
+		unconfigured ruff "the format and lint checks were"
+	elif locate ruff; then
+		run "$tool" format --check .
+		run "$tool" check .
+	else
+		not_run ruff "the format and lint checks were"
+	fi
+	if ! configured mypy mypy.ini .mypy.ini setup.cfg:mypy; then
+		unconfigured mypy "the type check was"
+	elif locate mypy; then
+		run "$tool" .
+	else
+		not_run mypy "the type check was"
 	fi
 fi
 
 # ---------------------------------------------------------------------- C++
 #
-# Tracked files, not staged ones: a commit is checked as the tree it leaves.
+# Every tracked file as the working tree has it, not the staged blobs: a
+# partially staged file is checked as it is on disk, so an unstaged violation
+# refuses the commit and an unstaged fix lets it through.
+
+# The precheck's environment holds what the commit's lock declares, a pinned
+# clang-format among it perhaps: after the `.venv`s below, before PATH.
+[ -z "$precheck_env" ] || PATH="$precheck_env/bin:$PATH"
 
 # Prefer the project's pinned clang tools in `.venv/bin`, when it has them, over
 # whatever is on PATH: clang-format's output changes between major versions. A
@@ -103,29 +528,42 @@ if common=$(git rev-parse --git-common-dir 2>/dev/null) &&
 fi
 [ ! -d .venv/bin ] || PATH="$PWD/.venv/bin:$PATH"
 
-# **The pinned major version, when the project declares one**: the first line
-# of `.clang-format-version`, `22` or `22.1.8`, of which only the major is
-# compared. A clang-format of another major formats differently and would
-# report violations in files the commit never touched, so it is not run: the
-# format check is skipped, loudly, as for a missing tool. Without the file,
-# whichever clang-format is found is used.
-pin_major=''
+# **The pinned version, when the project declares one**: the leading
+# `N[.N...]` of the first line of `.clang-format-version`, compared in as many
+# components as it names (#616): `22` takes any 22.x, `22.1.8` only 22.1.8,
+# not 22.1.7 or 22.1.80. It is the version `clang-format --version` prints,
+# not a wheel's: `22.1.8.1` would match no clang-format at all. A clang-format
+# of another version formats differently and would report violations in files
+# the commit never touched, so it is not run: the format check is skipped,
+# loudly, as for a missing tool, and a precheck fails. pre-push's lint holds
+# clang-tidy to the same pin. Without the file, whichever clang-format is found
+# is used.
+pin=''
 if [ -f .clang-format-version ]; then
-	pin=$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' .clang-format-version)
-	pin_major=${pin%%.*}
-	case $pin_major in
+	line=$(sed -n '1{s/^[[:space:]]*//;s/[[:space:]]*$//;p;}' .clang-format-version)
+	case ${line%%.*} in
 	'' | *[!0-9]*)
 		printf 'pre-commit: .clang-format-version does not begin with a version ("%s"); the clang-format version was not checked.\n' \
-			"$pin" >&2
-		pin_major=''
+			"$line" >&2
 		;;
+	*) pin=$(printf '%s\n' "$line" | sed 's/^\([0-9][0-9]*\(\.[0-9][0-9]*\)*\).*/\1/') ;;
 	esac
 fi
-# The major version of the clang-format on PATH, or nothing when its
+# The version of the clang-format on PATH, `22.1.8`, or nothing when its
 # `--version` line cannot be read.
-format_major() {
+format_version() {
 	clang-format --version 2>/dev/null |
-		sed -n 's/.*clang-format version \([0-9][0-9]*\).*/\1/p' | sed -n 1p
+		sed -n 's/.*clang-format version \([0-9][0-9]*\(\.[0-9][0-9]*\)*\).*/\1/p' | sed -n 1p
+}
+# Is version `$1` pin `$2`, in every component the pin names?
+pinned() {
+	case $1 in "$2" | "$2".*) return 0 ;; esac
+	return 1
+}
+# What to install for pin `$1`: a full version as it is, a partial one as a
+# wildcard (`==22` would take 22.0.0 alone).
+pin_spec() {
+	case $1 in *.*.*) printf '%s' "$1" ;; *) printf '%s.*' "$1" ;; esac
 }
 
 # Newline-separated paths on stdin, run as `xargs -0 ARGS... PATHS`: a path
@@ -134,17 +572,32 @@ format_major() {
 each_path() { grep -v '^$' | tr '\n' '\000' | xargs -0 "$@"; }
 
 # quotePath off, so a non-ASCII path is listed as itself rather than C-quoted.
-sources=$(git -c core.quotePath=false ls-files -- '*.c' '*.cc' '*.cpp' '*.cxx' 2>/dev/null)
-headers=$(git -c core.quotePath=false ls-files -- '*.h' '*.hh' '*.hpp' '*.hxx' 2>/dev/null)
+# Module units (`.cppm`, `.ixx`, `.mxx`) count as sources; inline and template
+# bodies (`.inl`, `.ipp`, `.tpp`, `.tcc`) and CUDA headers as headers. Not
+# `.inc` or `.def`: those are often X-macro tables, which clang-format mangles.
+sources=$(git -c core.quotePath=false ls-files -- '*.c' '*.cc' '*.cpp' '*.cxx' '*.cppm' '*.ixx' '*.mxx' 2>/dev/null)
+headers=$(git -c core.quotePath=false ls-files -- '*.h' '*.hh' '*.hpp' '*.hxx' '*.inl' '*.ipp' '*.tpp' '*.tcc' '*.cuh' 2>/dev/null)
 formattable=$(printf '%s\n%s\n' "$sources" "$headers" | grep -v '^$')
 
+# A format check that cannot be run, for the reason `$1`, with the advice `$2`:
+# skipped, saying so; under `--precheck` a failure, when there is a file to
+# check (#636).
+format_not_run() {
+	if [ -n "$precheck" ] && [ -n "$formattable" ]; then
+		printf 'pre-commit: %s, which fails a precheck; the format check was not run.%s\n' "$1" "$2" >&2
+		status=1
+	else
+		printf 'pre-commit: %s; the format check was skipped.%s\n' "$1" "$2" >&2
+	fi
+}
+
 if ! command -v clang-format >/dev/null 2>&1; then
-	echo "pre-commit: clang-format is not on PATH; the format check was skipped." >&2
+	format_not_run "clang-format is not on PATH" ''
 elif [ -z "$formattable" ]; then
 	: # nothing to format
-elif [ -n "$pin_major" ] && found=$(format_major) && [ "$found" != "$pin_major" ]; then
-	printf 'pre-commit: %s is clang-format %s, not %s as .clang-format-version pins; the format check was skipped. Put clang-format %s first on PATH, or in .venv/bin.\n' \
-		"$(command -v clang-format)" "${found:-of an unknown version}" "$pin_major" "$pin_major" >&2
+elif [ -n "$pin" ] && found=$(format_version) && ! pinned "$found" "$pin"; then
+	format_not_run "$(command -v clang-format) is clang-format ${found:-of an unknown version}, not $pin as .clang-format-version pins" \
+		" Put clang-format $pin first on PATH, or in .venv/bin: uv tool install clang-format==$(pin_spec "$pin"), say."
 else
 	echo "pre-commit: clang-format --dry-run -Werror" >&2
 	# One process over every tracked file (xargs splits only at the argument
@@ -152,7 +605,9 @@ else
 	printf '%s\n' "$formattable" | each_path clang-format --dry-run -Werror -- || status=1
 fi
 
-if [ "$status" -ne 0 ]; then
+if [ "$status" -ne 0 ] && [ -n "$precheck" ]; then
+	echo "Precheck failed: fix the failures above." >&2
+elif [ "$status" -ne 0 ]; then
 	echo "Commit blocked: fix the failures above and commit again." >&2
 fi
 exit "$status"
