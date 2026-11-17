@@ -407,6 +407,41 @@ Artifacts:
 - `sweep_summary.csv`
 - `sweep_summary.md`
 
+## LP Sequence Replay (column-generation masters, #267)
+
+`mipx-lpseq-replay` (built with the CLI) replays a sequence of LPs written by
+mcf's LP recorder ([tinnet-ai/mcf#205](https://github.com/tinnet-ai/mcf/issues/205);
+`mcf <instance> --method cg --cg-set lp_dump=DIR`, one `DIR/lp_NNNN/` per
+master) on mipx's LP solvers, and checks every solve against the objective
+mcf recorded.
+
+```bash
+./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
+    --arm dual-warm --arm dual-cold --arm barrier --arm pdlp [--primal-devex] [--csv out.csv]
+```
+
+Format (`format = mcf-lpseq 1` in `manifest.txt`; specified in mcf's
+`include/mcf/lp/lp_recorder.h`): `master_0000.mps`, the LP at its first solve
+in free MPS with rows `r<i>` and columns `c<j>` by index and data lines from
+column 1; and `ops.txt`, one change or solve per line with indices as of the
+LP it applies to (`add_cols`, `del_cols`, `add_rows`, `del_rows`,
+`col_bounds`, `row_bounds`, `col_costs`, `coeffs`, `solve <seq> <status>
+<obj> <iters> <secs>`), numbers in `%.17g`.
+
+Arms: `dual-warm` keeps one dual simplex and applies each change to it, so its
+basis carries over (a `coeffs` change, which `LpSolver` has no call for,
+reloads it, flagged in the `reloaded` column); `dual-cold`, `barrier` and
+`pdlp` load the LP afresh for every solve. One CSV line per solve and arm:
+`seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded`.
+Exit 0 when every solve matches the recorded status and objective (relative
+to max(1, |recorded|), `--rel-tol` 1e-6, `--pdlp-rel-tol` 1e-4), 1 when one
+does not, 2 on a format error. A master with a free row (written as an `N`
+row, which the MPS reader drops) is refused rather than replayed shifted.
+
+`tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
+HiGHS simplex, 9 masters); ctest replays it on all four arms with primal
+Devex off and on.
+
 ## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
 
 For LP barrier-focused comparisons (CPU/GPU and cross-solver):

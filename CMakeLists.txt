@@ -149,6 +149,11 @@ if(MIPX_BUILD_CLI)
     add_executable(mipx-solve src/cli/main.cpp)
     target_link_libraries(mipx-solve PRIVATE mipx)
     mipx_set_compiler_flags(mipx-solve)
+
+    # Replays LP sequences in mcf's "mcf-lpseq 1" format (#267).
+    add_executable(mipx-lpseq-replay tests/perf/lpseq_replay.cpp)
+    target_link_libraries(mipx-lpseq-replay PRIVATE mipx)
+    mipx_set_compiler_flags(mipx-lpseq-replay)
 endif()
 
 # --- Python extension ---

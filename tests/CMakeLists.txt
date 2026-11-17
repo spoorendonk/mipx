@@ -58,6 +58,21 @@ if(TARGET mipx-solve)
     add_dependencies(mipx-tests mipx-solve)
 endif()
 
+# LP sequence replay (#267): column generation's masters on the public
+# CommaLab grid1, as mcf's LP recorder wrote them, replayed on every LP solver
+# warm and cold; each solve must reach the recorded objective. Seconds.
+if(TARGET mipx-lpseq-replay)
+    foreach(devex off on)
+        set(_args "${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
+            --arm dual-warm --arm dual-cold --arm barrier --arm pdlp)
+        if(devex STREQUAL "on")
+            list(APPEND _args --primal-devex)
+        endif()
+        add_test(NAME "LP sequence replay: grid1 masters, primal Devex ${devex}"
+            COMMAND mipx-lpseq-replay ${_args} --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_${devex}.csv")
+    endforeach()
+endif()
+
 # Fast correctness suite -- the default, and what the git hooks run.
 catch_discover_tests(mipx-tests
     TEST_SPEC "~[benchmark]~[miplib]~[netlib]"
