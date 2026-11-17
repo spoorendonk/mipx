@@ -304,7 +304,7 @@ int run(const Options& opt) {
         }
         out = &csv_file;
     }
-    *out << "seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded\n";
+    *out << lpseq::kCsvHeader;
 
     std::ifstream ops(opt.dir + "/ops.txt");
     if (!ops) {
@@ -345,11 +345,8 @@ int run(const Options& opt) {
             Real err = 0.0;
             all_match =
                 lpseq::matches(op, statusName(r.status), r.objective, tol, err) && all_match;
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%d,%.6f,%d\n",
-                          op.seq.c_str(), arm.name.c_str(), statusName(r.status), r.objective,
-                          op.recorded, err, r.iterations, secs, reloaded ? 1 : 0);
-            *out << buf;
+            lpseq::writeRow(*out, op, arm.name, statusName(r.status), r.objective, err,
+                            r.iterations, secs, reloaded);
         }
     }
     return all_match ? 0 : 1;

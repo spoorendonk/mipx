@@ -25,6 +25,8 @@
 #include <string>
 #include <vector>
 
+namespace lpseq = mipx::lpseq;
+
 namespace {
 
 // The parser's index vectors go to HiGHS as they are.
@@ -72,18 +74,6 @@ const char* statusName(HighsModelStatus s) {
     }
 }
 
-double highsBound(double v) {
-    return v == lpseq::kInf ? kHighsInf : (v == -lpseq::kInf ? -kHighsInf : v);
-}
-
-std::vector<double> highsBounds(const std::vector<double>& v) {
-    std::vector<double> out(v.size());
-    for (std::size_t i = 0; i < v.size(); ++i) {
-        out[i] = highsBound(v[i]);
-    }
-    return out;
-}
-
 void check(HighsStatus s, const char* what) {
     if (s == HighsStatus::kError) {
         lpseq::fail(std::string("HiGHS refused ") + what);
@@ -98,22 +88,16 @@ void apply(const lpseq::Op& op, Highs& h) {
                                              : op.indices.size());
     const auto nnz = static_cast<HighsInt>(op.indices.size());
     switch (op.kind) {
-        case OpKind::AddCols: {
-            const auto lo = highsBounds(op.lower);
-            const auto up = highsBounds(op.upper);
-            check(h.addCols(k, op.cost.data(), lo.data(), up.data(), nnz, op.starts.data(),
-                            op.indices.data(), op.values.data()),
+        case OpKind::AddCols:
+            check(h.addCols(k, op.cost.data(), op.lower.data(), op.upper.data(), nnz,
+                            op.starts.data(), op.indices.data(), op.values.data()),
                   "add_cols");
             break;
-        }
-        case OpKind::AddRows: {
-            const auto lo = highsBounds(op.lower);
-            const auto up = highsBounds(op.upper);
-            check(h.addRows(k, lo.data(), up.data(), nnz, op.starts.data(), op.indices.data(),
-                            op.values.data()),
+        case OpKind::AddRows:
+            check(h.addRows(k, op.lower.data(), op.upper.data(), nnz, op.starts.data(),
+                            op.indices.data(), op.values.data()),
                   "add_rows");
             break;
-        }
         case OpKind::DelCols:
             check(h.deleteCols(k, op.indices.data()), "del_cols");
             break;
@@ -123,8 +107,8 @@ void apply(const lpseq::Op& op, Highs& h) {
         case OpKind::ColBounds:
         case OpKind::RowBounds:
             for (std::size_t t = 0; t < op.at.size(); ++t) {
-                const double lo = highsBound(op.lower[t]);
-                const double up = highsBound(op.upper[t]);
+                const double lo = op.lower[t];
+                const double up = op.upper[t];
                 check(op.kind == OpKind::ColBounds ? h.changeColBounds(op.at[t], lo, up)
                                                    : h.changeRowBounds(op.at[t], lo, up),
                       "bounds");
@@ -146,6 +130,11 @@ void apply(const lpseq::Op& op, Highs& h) {
 }
 
 int run(Options& opt) {
+    // Bounds pass to HiGHS as the parser gives them: its kHighsInf (not
+    // constexpr) is the same IEEE infinity.
+    if (kHighsInf != lpseq::kInf) {
+        lpseq::fail("this HiGHS's infinity is not IEEE infinity");
+    }
     lpseq::checkManifest(opt.dir);
     // The mirror: a Highs that only holds the LP, given to the cold arms.
     Highs model;
@@ -177,7 +166,7 @@ int run(Options& opt) {
         }
         out = &csv_file;
     }
-    *out << "seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded\n";
+    *out << lpseq::kCsvHeader;
 
     std::ifstream ops(opt.dir + "/ops.txt");
     if (!ops) {
@@ -212,17 +201,20 @@ int run(Options& opt) {
             const HighsInfo& info = h->getInfo();
             const double tol = arm.solver == "simplex" ? opt.rel_tol : opt.ipm_rel_tol;
             double err = 0.0;
-            const char* status = statusName(h->getModelStatus());
+            std::string status = statusName(h->getModelStatus());
+            // An interior point arm must have run one: HiGHS can fall back
+            // to dual simplex (e.g. HiPO without its extras) and still solve.
+            // Such a solve is reported as an error, not as the method's.
+            if (arm.solver != "simplex" && info.ipm_iteration_count <= 0) {
+                status = "error";
+            }
             all_match =
                 lpseq::matches(op, status, info.objective_function_value, tol, err) && all_match;
             const long iterations =
                 static_cast<long>(std::max<HighsInt>(0, info.simplex_iteration_count)) +
                 std::max<HighsInt>(0, info.ipm_iteration_count);
-            char buf[256];
-            std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%ld,%.6f,0\n",
-                          op.seq.c_str(), arm.name.c_str(), status, info.objective_function_value,
-                          op.recorded, err, iterations, secs);
-            *out << buf;
+            lpseq::writeRow(*out, op, arm.name, status, info.objective_function_value, err,
+                            iterations, secs, false);
         }
     }
     return all_match ? 0 : 1;
@@ -243,7 +235,6 @@ int main(int argc, char** argv) {
         if (a == "--arm" && i + 1 < argc) {
             const std::string v = argv[++i];
             Arm arm;
-            arm.name = v;
             if (v == "simplex-warm") {
                 arm = {v, true, "simplex", 1, nullptr};
             } else if (v == "primal-warm") {

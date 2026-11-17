@@ -71,13 +71,26 @@ if(TARGET mipx-lpseq-replay)
         add_test(NAME "LP sequence replay: grid1 masters, primal Devex ${devex}"
             COMMAND mipx-lpseq-replay ${_args} --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_${devex}.csv")
     endforeach()
+    # A hand-written sequence with known optima for the ops grid1 has none
+    # of (bounds, costs, coefficients, an infeasible solve), and one whose
+    # out-of-range index must be a format error.
+    add_test(NAME "LP sequence replay: bound, cost and coefficient edits"
+        COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/edits"
+            --arm dual-warm --arm dual-cold --arm barrier
+            --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_edits.csv")
+    add_test(NAME "LP sequence replay: an out-of-range index is a format error"
+        COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/malformed")
+    set_tests_properties("LP sequence replay: an out-of-range index is a format error"
+        PROPERTIES PASS_REGULAR_EXPRESSION "col_costs: index 5 out of range")
 endif()
-# The same sequence on HiGHS, in bench builds only (MIPX_BENCH_HIGHS).
+# The same sequences on HiGHS, in bench builds only (MIPX_BENCH_HIGHS).
 if(TARGET mipx-lpseq-replay-highs)
-    add_test(NAME "LP sequence replay (HiGHS): grid1 masters"
-        COMMAND mipx-lpseq-replay-highs "${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
-            --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold
-            --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_highs.csv")
+    foreach(seq grid1 edits)
+        add_test(NAME "LP sequence replay (HiGHS): ${seq}"
+            COMMAND mipx-lpseq-replay-highs "${PROJECT_SOURCE_DIR}/tests/data/lpseq/${seq}"
+                --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold
+                --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_${seq}_highs.csv")
+    endforeach()
 endif()
 
 # Fast correctness suite -- the default, and what the git hooks run.

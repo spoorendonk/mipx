@@ -14,9 +14,11 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <istream>
 #include <limits>
+#include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,7 +26,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace lpseq {
+namespace mipx::lpseq {
 
 inline constexpr double kInf = std::numeric_limits<double>::infinity();
 
@@ -151,15 +153,40 @@ struct Op {
 
 namespace detail {
 
+// Values the solvers would read differently are refused, so both replays
+// solve the same LP: HiGHS drops entries |v| <= 1e-9 (small_matrix_value)
+// that mipx keeps, and takes bounds >= 1e20 (infinite_bound) as infinite.
+inline constexpr double kSmallestEntry = 1e-9;
+inline constexpr double kLargestBound = 1e20;
+
+inline void checkBound(double v, const char* what) {
+    if (std::isfinite(v) && std::abs(v) >= kLargestBound) {
+        fail(std::string(what) + ": a finite bound past 1e20, which HiGHS reads as infinite");
+    }
+}
+
 inline void checkBounds(double lo, double up, const char* what) {
     if (lo == kInf || up == -kInf) {
         fail(std::string(what) + ": bound on the wrong side");
     }
+    checkBound(lo, what);
+    checkBound(up, what);
 }
 
 inline void checkValue(double v, const char* what) {
     if (!std::isfinite(v)) {
         fail(std::string(what) + ": coefficient not finite");
+    }
+    if (v != 0.0 && std::abs(v) <= kSmallestEntry) {
+        fail(std::string(what) + ": a coefficient below 1e-9, which HiGHS drops");
+    }
+}
+
+// Nothing may follow the fields an op line holds.
+inline void checkEnd(std::istringstream& ls, const std::string& line) {
+    std::string extra;
+    if (ls >> extra) {
+        fail("ops.txt: more on the line than its count says: " + line);
     }
 }
 
@@ -191,15 +218,21 @@ inline void readBatch(std::istream& in, int k, bool cols, int bound, Op& op) {
         ls >> n;
         const int nnz = parseIndex(n, std::numeric_limits<int>::max(), what);
         op.starts.push_back(static_cast<int>(op.indices.size()));
+        std::unordered_set<int> seen;
         for (int p = 0; p < nnz; ++p) {
             std::string idx, val;
             if (!(ls >> idx >> val)) {
                 fail(std::string(what) + ": entry list cut short: " + line);
             }
             op.indices.push_back(parseIndex(idx, bound, what));
+            // mipx would sum a repeat, HiGHS refuses it.
+            if (!seen.insert(op.indices.back()).second) {
+                fail(std::string(what) + ": an index twice in one item: " + line);
+            }
             op.values.push_back(parseReal(val));
             checkValue(op.values.back(), what);
         }
+        checkEnd(ls, line);
     }
 }
 
@@ -217,11 +250,18 @@ inline bool readOp(std::istream& in, int num_rows, int num_cols, Op& op) {
             continue;
         }
         if (name == "solve") {
+            // solve <seq> <status> <obj> <iters> <secs>; the last two are
+            // the recording backend's, only informative.
             std::string obj;
             ls >> op.seq >> op.status >> obj;
             op.kind = OpKind::Solve;
             op.recorded = parseReal(obj);
             return true;
+        }
+        static constexpr const char* kOps[] = {"add_cols",   "add_rows",   "del_cols",  "del_rows",
+                                               "col_bounds", "row_bounds", "col_costs", "coeffs"};
+        if (std::find(std::begin(kOps), std::end(kOps), name) == std::end(kOps)) {
+            fail("ops.txt: unknown op " + name);
         }
         std::string count;
         ls >> count;
@@ -236,7 +276,9 @@ inline bool readOp(std::istream& in, int num_rows, int num_cols, Op& op) {
         if (name == "add_cols" || name == "add_rows") {
             const bool cols = name == "add_cols";
             op.kind = cols ? OpKind::AddCols : OpKind::AddRows;
+            detail::checkEnd(ls, line);
             detail::readBatch(in, k, cols, cols ? num_rows : num_cols, op);
+            return true;
         } else if (name == "del_cols" || name == "del_rows") {
             const bool cols = name == "del_cols";
             op.kind = cols ? OpKind::DelCols : OpKind::DelRows;
@@ -279,9 +321,8 @@ inline bool readOp(std::istream& in, int num_rows, int num_cols, Op& op) {
                 op.values.push_back(parseReal(field("coeffs")));
                 detail::checkValue(op.values.back(), "coeffs");
             }
-        } else {
-            fail("ops.txt: unknown op " + name);
         }
+        detail::checkEnd(ls, line);
         return true;
     }
     return false;
@@ -295,4 +336,18 @@ inline bool matches(const Op& solve, const std::string& status, double objective
     return status == solve.status && (status != "optimal" || rel_err <= rel_tol);
 }
 
-}  // namespace lpseq
+// The CSV both replays write, one row per (solve, arm).
+inline constexpr const char* kCsvHeader =
+    "seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded\n";
+
+inline void writeRow(std::ostream& out, const Op& solve, const std::string& arm,
+                     const std::string& status, double objective, double rel_err, long iterations,
+                     double seconds, bool reloaded) {
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%ld,%.6f,%d\n", solve.seq.c_str(),
+                  arm.c_str(), status.c_str(), objective, solve.recorded, rel_err, iterations,
+                  seconds, reloaded ? 1 : 0);
+    out << buf;
+}
+
+}  // namespace mipx::lpseq

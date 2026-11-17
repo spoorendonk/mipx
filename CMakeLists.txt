@@ -187,7 +187,11 @@ if(MIPX_BENCH_HIGHS)
     mipx_fetch_highs()
     add_executable(mipx-lpseq-replay-highs tests/perf/lpseq_replay_highs.cpp)
     target_link_libraries(mipx-lpseq-replay-highs PRIVATE highs::highs)
-    target_compile_features(mipx-lpseq-replay-highs PRIVATE cxx_std_23)
+    # mipx's warnings and sanitizers on this file and the shared parser;
+    # HiGHS's own headers as system ones, which those flags do not cover.
+    get_target_property(_highs_includes highs INTERFACE_INCLUDE_DIRECTORIES)
+    target_include_directories(mipx-lpseq-replay-highs SYSTEM PRIVATE ${_highs_includes})
+    mipx_set_compiler_flags(mipx-lpseq-replay-highs)
 endif()
 
 # --- Python extension ---

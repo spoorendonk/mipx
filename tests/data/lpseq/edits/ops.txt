@@ -1,0 +1,11 @@
+solve 0 optimal 2 -1 0
+col_bounds 1 0 1 inf
+solve 1 optimal 2 -1 0
+row_bounds 1 0 3 inf
+solve 2 optimal 3 -1 0
+coeffs 1 0 0 2
+solve 3 optimal 1.5 -1 0
+col_costs 1 1 0.25
+solve 4 optimal 1.25 -1 0
+col_bounds 2 0 1 1 1 0 0
+solve 5 infeasible 0 -1 0
