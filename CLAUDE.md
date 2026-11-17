@@ -254,8 +254,14 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```
 
 ```test
-ctest --test-dir build --output-on-failure -LE solver-regression -j$(nproc) && { pytest --tb=short -q || test $? -eq 5; }
+ctest --test-dir build --output-on-failure -LE solver-regression -j$(nproc) && { uv run --extra test pytest --tb=short -q || test $? -eq 5; }
 ```
+
+pytest runs through `uv run --extra test`, which builds the bindings from
+the checkout it runs in into that checkout's `.venv` and tests those, so the
+gate's fresh worktree tests the pushed tree. A gate host needs only `uv` on
+its PATH, nothing installed. A pytest that cannot run fails the gate; only
+exit 5 (no tests collected) passes.
 
 The commit and push gates run **correctness tests only**, and should stay fast
 (~4s). The instance-driven Netlib/MIPLIB tests are labelled
