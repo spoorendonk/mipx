@@ -464,29 +464,40 @@ enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, E
 
 Section keywordSection(std::string_view s);
 
+bool isObjSenseWord(std::string_view s) {
+    return s == "MAX" || s == "MIN" || s == "MAXIMIZE" || s == "MINIMIZE";
+}
+
+bool isNumber(std::string_view s) {
+    double v = 0.0;
+    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    return end == s.data() + s.size() && ec != std::errc::invalid_argument;
+}
+
 // The section a line opens, or nullopt for a data line. A header starts in
 // column 1. Free MPS also lets data lines start there (mcf's LP recorder
 // writes them so, as HiGHS reads them), so a column-1 line is a header only
-// when it is a section keyword with at most one more token (NAME and
-// OBJSENSE take any), e.g. "RHS" or "OBJSENSE MAX"; a data line has more
-// tokens, so an RHS set named RHS or a column named BOUNDS stays data. A
-// lone unknown word is an unknown section, skipped as before; under
-// OBJSENSE a lone word is the sense.
+// when it is a section keyword with at most one more token, not a number:
+// "RHS", "OBJSENSE MAX", "OBJNAME obj". A data line has more tokens, or a
+// value second (a row named BOUNDS in an RHS without a set name), so an RHS
+// set named RHS or a column named BOUNDS stays data. NAME is a header only
+// before any section (it may carry a name with spaces). A lone unknown word
+// is an unknown section, skipped as before, except a sense under OBJSENSE.
+// The caller has skipped empty lines, so tokens.n >= 1 here.
 std::optional<Section> headerOf(std::string_view line, const Tokens& tokens, Section current) {
-    if (line.empty() || std::isspace(static_cast<unsigned char>(line[0]))) {
-        return std::nullopt;
-    }
-    if (tokens.n == 0) {
+    if (std::isspace(static_cast<unsigned char>(line[0]))) {
         return std::nullopt;
     }
     const Section s = keywordSection(tokens[0]);
-    if (s == Section::Name || s == Section::ObjSense) {
+    if (s == Section::Name && current == Section::None) {
         return s;
     }
-    if (s != Section::None && tokens.n <= 2) {
+    if (s != Section::None && s != Section::Name &&
+        (tokens.n == 1 || (tokens.n == 2 && !isNumber(tokens[1])))) {
         return s;
     }
-    if (s == Section::None && tokens.n == 1 && current != Section::ObjSense) {
+    if (s == Section::None && tokens.n == 1 &&
+        !(current == Section::ObjSense && isObjSenseWord(tokens[0]))) {
         return Section::None;
     }
     return std::nullopt;

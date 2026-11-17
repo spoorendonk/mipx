@@ -201,6 +201,7 @@ public:
     /// ratio test that found nothing blocking.
     std::vector<Real> getPrimalRay() const override;
 
+    /// Empty before the first solve or setBasis after a load().
     std::vector<BasisStatus> getBasis() const override;
     /// Ignored, keeping the current basis, unless it has one entry per
     /// column and row and exactly one Basic entry per row.

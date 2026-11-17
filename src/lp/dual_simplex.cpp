@@ -3610,6 +3610,11 @@ std::vector<Real> DualSimplexSolver::getReducedCosts() const {
 }
 
 std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
+    // Before any solve or setBasis, load() has not sized the statuses:
+    // return none rather than read past them.
+    if (static_cast<Index>(var_status_.size()) < numVars()) {
+        return {};
+    }
     return std::vector<BasisStatus>(var_status_.begin(),
                                     var_status_.begin() + num_cols_ + num_rows_);
 }

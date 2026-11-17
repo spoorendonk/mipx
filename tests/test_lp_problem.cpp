@@ -179,8 +179,9 @@ TEST_CASE("MPS reader: an objective-row RHS is the negated constant", "[io][mps]
 TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") {
     // As mcf's LP recorder writes it (and HiGHS reads it): only a line whose
     // first token is a section keyword is a header. Read as headers, these
-    // lines left a 0 x 0 model that solved to 0 (#267). An RHS set named RHS
-    // and a bound set named BOUNDS are data (more tokens than a header); the
+    // lines left a 0 x 0 model that solved to 0 (#267). A column named
+    // BOUNDS, an RHS set named RHS and a bound set named BOUNDS are data
+    // (more tokens than a header); the
     // SOS section (#254) and an unknown one (SCENARIOS) are still skipped,
     // their lines not taken for bounds.
     const std::string path = testDataDir() + "/free_unindented.mps";
@@ -197,6 +198,7 @@ TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") 
                "c0 obj 1 r0 1\n"
                "c1 obj 2 r0 1\n"
                "c1 r1 1\n"
+               "BOUNDS obj 3 r1 1\n"
                "RHS\n"
                "RHS r0 3 r1 2\n"
                "BOUNDS\n"
@@ -212,9 +214,10 @@ TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") 
     std::filesystem::remove(path);
 
     REQUIRE(lp.num_rows == 2);
-    REQUIRE(lp.num_cols == 2);
+    REQUIRE(lp.num_cols == 3);
+    CHECK(lp.col_names[2] == "BOUNDS");
     CHECK(lp.sense == Sense::Maximize);
-    CHECK(lp.obj == std::vector<Real>{1.0, 2.0});
+    CHECK(lp.obj == std::vector<Real>{1.0, 2.0, 3.0});
     CHECK(lp.row_lower[0] == 3.0);
     CHECK(lp.row_upper[1] == 2.0);
     CHECK(lp.col_upper[0] == 2.5);

@@ -48,6 +48,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -60,7 +61,8 @@ namespace {
 }
 
 // from_chars reads %.17g back exactly, subnormals and inf/-inf included
-// (stod would throw out_of_range on a subnormal).
+// (stod would throw out_of_range on a subnormal). A literal past double's
+// range (1e400) leaves the value unset, so it is an error, not 0.
 Real parseReal(const std::string& s) {
     const char* first = s.data();
     if (!s.empty() && s[0] == '+') {
@@ -68,11 +70,19 @@ Real parseReal(const std::string& s) {
     }
     Real v = 0.0;
     const auto [end, ec] = std::from_chars(first, s.data() + s.size(), v);
-    if (end != s.data() + s.size() || (ec != std::errc() && ec != std::errc::result_out_of_range) ||
-        std::isnan(v)) {
+    if (end != s.data() + s.size() || ec != std::errc() || std::isnan(v)) {
         formatError("not a number: " + s);
     }
     return v;
+}
+
+std::string trim(std::string_view s) {
+    const auto b = s.find_first_not_of(" \t");
+    if (b == std::string_view::npos) {
+        return {};
+    }
+    const auto e = s.find_last_not_of(" \t\r");
+    return std::string(s.substr(b, e - b + 1));
 }
 
 Index parseIndex(const std::string& s) {
@@ -133,13 +143,9 @@ void checkManifest(const std::string& dir) {
         if (eq == std::string::npos) {
             continue;
         }
-        auto trim = [](std::string s) {
-            const auto b = s.find_first_not_of(" \t");
-            const auto e = s.find_last_not_of(" \t\r");
-            return b == std::string::npos ? std::string() : s.substr(b, e - b + 1);
-        };
-        const std::string key = trim(line.substr(0, eq));
-        const std::string value = trim(line.substr(eq + 1));
+        const std::string_view whole(line);
+        const std::string key = trim(whole.substr(0, eq));
+        const std::string value = trim(whole.substr(eq + 1));
         if (key == "format") {
             if (value != "mcf-lpseq 1") {
                 formatError("unsupported format: " + value);
@@ -237,7 +243,9 @@ void mirrorSetCoeffs(LpProblem& lp, const std::vector<Triplet>& changes) {
     };
     std::unordered_set<std::int64_t> changed;
     for (const auto& c : changes) {
-        changed.insert(key(c.row, c.col));
+        if (!changed.insert(key(c.row, c.col)).second || !std::isfinite(c.val)) {
+            formatError("coeffs: a position twice in one op, or a value not finite");
+        }
     }
     auto t = triplets(lp);
     std::erase_if(t, [&](const Triplet& e) { return changed.contains(key(e.row, e.col)); });
@@ -448,6 +456,16 @@ int run(const Options& opt) {
             for (const Index j : b.indices) {
                 if (j >= lp.num_cols) {
                     formatError("add_rows: column index " + std::to_string(j) + " out of range");
+                }
+            }
+            for (const Real v : b.values) {
+                if (!std::isfinite(v)) {
+                    formatError("add_rows: coefficient not finite");
+                }
+            }
+            for (std::size_t r = 0; r < b.a.size(); ++r) {
+                if (b.a[r] == kInf || b.b[r] == -kInf) {
+                    formatError("add_rows: bound on the wrong side");
                 }
             }
             mirrorAddRows(lp, b);
