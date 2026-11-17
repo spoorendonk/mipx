@@ -176,6 +176,45 @@ TEST_CASE("MPS reader: an objective-row RHS is the negated constant", "[io][mps]
     CHECK(reread.obj_offset == 2.0);
 }
 
+TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") {
+    // As mcf's LP recorder writes it (and HiGHS reads it): only a line whose
+    // first token is a section keyword is a header. Read as headers, these
+    // lines left a 0 x 0 model that solved to 0 (#267). The SOS section is
+    // still skipped (#254), its lines not taken for bounds.
+    const std::string path = testDataDir() + "/free_unindented.mps";
+    {
+        std::ofstream out(path);
+        out << "NAME lp\n"
+               "ROWS\n"
+               "N obj\n"
+               "G r0\n"
+               "L r1\n"
+               "COLUMNS\n"
+               "c0 obj 1 r0 1\n"
+               "c1 obj 2 r0 1\n"
+               "c1 r1 1\n"
+               "RHS\n"
+               "rhs r0 3 r1 2\n"
+               "BOUNDS\n"
+               "UP bnd c0 2.5\n"
+               "SOS\n"
+               "S1 SOS s1 1\n"
+               "c0 1\n"
+               "ENDATA\n";
+    }
+    auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    REQUIRE(lp.num_rows == 2);
+    REQUIRE(lp.num_cols == 2);
+    CHECK(lp.obj == std::vector<Real>{1.0, 2.0});
+    CHECK(lp.row_lower[0] == 3.0);
+    CHECK(lp.row_upper[1] == 2.0);
+    CHECK(lp.col_upper[0] == 2.5);
+    CHECK(lp.col_upper[1] == kInf);
+    CHECK(lp.matrix.coeff(1, 1) == 1.0);
+}
+
 TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][mps]") {
     // Two things a round trip used to lose: digits past the sixth (the stream
     // default precision), and the objective when a constraint is itself named

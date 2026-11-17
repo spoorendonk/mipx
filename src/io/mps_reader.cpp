@@ -457,14 +457,22 @@ Real parseReal(std::string_view s) {
     return val;
 }
 
+// Skipped: a header this reader knows but does not read (the extension
+// sections of #254); its data lines are ignored, as before.
+enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, Endata, Skipped };
+
+Section parseSection(std::string_view line);
+
+// A section header starts in column 1 with a section keyword. Free MPS also
+// lets data lines start in column 1 (mcf's LP recorder writes them so, as
+// HiGHS reads them): such a line, whose first token is no keyword, is data
+// of the current section, not an unknown header that drops the rest.
 bool isSection(std::string_view line) {
-    if (line.empty()) {
+    if (line.empty() || std::isspace(static_cast<unsigned char>(line[0]))) {
         return false;
     }
-    return !std::isspace(static_cast<unsigned char>(line[0]));
+    return parseSection(line) != Section::None;
 }
-
-enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, Endata };
 
 Section parseSection(std::string_view line) {
     auto tokens = tokenize(line);
@@ -498,6 +506,13 @@ Section parseSection(std::string_view line) {
     }
     if (s == "ENDATA") {
         return Section::Endata;
+    }
+    for (const std::string_view skipped :
+         {"OBJNAME", "SOS", "INDICATORS", "QUADOBJ", "QSECTION", "QMATRIX", "QCMATRIX", "CSECTION",
+          "PWLOBJ", "GENCONS", "REFROW", "BRANCH"}) {
+        if (s == skipped) {
+            return Section::Skipped;
+        }
     }
     return Section::None;
 }
