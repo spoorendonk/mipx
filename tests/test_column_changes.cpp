@@ -298,7 +298,9 @@ TEST_CASE("Column changes: primal Devex re-solves reach the same optima", "[colu
     const CgRun devex_run = runColumnGeneration(net, devex);
     DualSimplexSolver plain;
     const CgRun plain_run = runColumnGeneration(net, plain);
-    CHECK_THAT(devex.getObjective(), WithinRel(plain.getObjective(), 1e-9));
+    CHECK_THAT(devex.getObjective(), WithinRel(arcFlowOptimum(net), 1e-9));
+    CHECK_THAT(plain.getObjective(), WithinRel(arcFlowOptimum(net), 1e-9));
+    CHECK(devex_run.warm_iterations < devex_run.cold_iterations);
     CHECK(devex_run.warm_iterations != plain_run.warm_iterations);
 }
 

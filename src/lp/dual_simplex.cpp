@@ -1416,10 +1416,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // pivots on (Harris 1973; Forrest & Goldfarb 1992, sec. 3). A reference
     // framework R, the nonbasics at a reset, carries weights w_k ~ the norm
     // of column k's tableau entries on R (plus 1 when k is in R); a column is
-    // priced by rc^2 / w_k. The entering column's weight is recomputed
-    // exactly from its FTRAN, and R restarts when the kept one is off by
-    // more than kPrimalDevexErrorRatio either way, which also catches
-    // weights the dual phase's pivots left stale.
+    // priced by rc^2 / w_k (squared norms throughout). The entering column's
+    // weight is recomputed exactly from its FTRAN, and R restarts when the
+    // kept one is off by more than kPrimalDevexErrorRatio either way. Only
+    // the entering column is checked: a stale or inflated weight elsewhere,
+    // e.g. one the dual phase's pivots left, is caught when that column
+    // enters, as in the reference.
     const bool use_primal_devex = options_.enable_primal_devex;
     const auto devex_size = use_primal_devex ? static_cast<std::size_t>(numVars()) : 0;
     std::vector<Real> primal_devex_w(devex_size, 1.0);
@@ -2480,7 +2482,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (use_primal_devex) {
                 const auto q = static_cast<std::size_t>(entering_p);
                 Real exact = primal_devex_ref[q] != 0 ? 1.0 : 0.0;
-                for (Index i = 0; i < num_rows_; ++i) {
+                for (Index i : pivot_col_nz) {
                     if (primal_devex_ref[static_cast<std::size_t>(basis_[i])] != 0) {
                         exact += pivot_col[i] * pivot_col[i];
                     }
