@@ -48,6 +48,18 @@ include = [
   "README.md",
 ]
 
+# `uv run` rebuilds the editable bindings only when one of these changes; the
+# default (pyproject.toml alone) would test stale bindings after a C++ edit.
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "CMakeLists.txt" },
+  { file = "cmake/**" },
+  { file = "include/**" },
+  { file = "src/**" },
+  { file = "python/**" },
+]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 

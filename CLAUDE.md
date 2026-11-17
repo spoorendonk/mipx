@@ -254,17 +254,22 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```
 
 ```test
-ctest --test-dir build --output-on-failure -LE solver-regression -j$(nproc) && { uv run --extra test pytest --tb=short -q || test $? -eq 5; }
+ctest --test-dir build --output-on-failure -LE solver-regression -j$(nproc) && { uv run --locked --extra test pytest --tb=short -q || test $? -eq 5; }
 ```
 
-pytest runs through `uv run --extra test`, which builds the bindings from
-the checkout it runs in into that checkout's `.venv` and tests those, so the
-gate's fresh worktree tests the pushed tree. A gate host needs only `uv` on
-its PATH, nothing installed. A pytest that cannot run fails the gate; only
-exit 5 (no tests collected) passes.
+pytest runs through `uv run --locked --extra test`, which builds the bindings
+from the checkout it runs in (scikit-build-core, into `build/{wheel_tag}` and
+that checkout's `.venv`) and tests those, so the gate's fresh worktree tests
+the pushed tree. `[tool.uv] cache-keys` in `pyproject.toml` makes a kept
+`.venv` rebuild after a C++ or bindings edit. `--locked` fails on a `uv.lock`
+that no longer matches `pyproject.toml` instead of rewriting it. A gate host
+needs only `uv` on its PATH (and network for the build requirements on a cold
+uv cache). A pytest that cannot run fails the gate; only exit 5 (no tests
+collected) passes. This build is the pyproject's configuration (no TBB, no
+GPU, portable SIMD), separate from the CMake build above.
 
-The commit and push gates run **correctness tests only**, and should stay fast
-(~4s). The instance-driven Netlib/MIPLIB tests are labelled
+The commit and push gates run **correctness tests only**. The tests themselves
+take ~4s; the pytest step adds the bindings' build. The instance-driven Netlib/MIPLIB tests are labelled
 `solver-regression` and excluded: they assert objectives under wall-clock
 limits, so they gate on the machine and the build type as much as on the code.
 Run them deliberately:
