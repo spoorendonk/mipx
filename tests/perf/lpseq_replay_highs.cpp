@@ -16,6 +16,7 @@
 #include "lpseq_format.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -49,8 +50,30 @@ struct Options {
     std::string csv;
 };
 
+// HiGHS reads an LP through limits mipx has none of: bounds and costs past
+// infinite_bound / infinite_cost (1e20) are infinite, entries below
+// small_matrix_value (1e-9) dropped, entries past large_matrix_value (1e15)
+// refused. Widened to their ends, so HiGHS reads the LP mipx reads; what it
+// would still drop, entries in (0, kHighsSmallestEntry], is refused instead.
+constexpr double kHighsSmallestEntry = 1e-12;
+
+bool widenLimits(Highs& h) {
+    return h.setOptionValue("infinite_bound", kHighsInf) == HighsStatus::kOk &&
+           h.setOptionValue("infinite_cost", kHighsInf) == HighsStatus::kOk &&
+           h.setOptionValue("large_matrix_value", kHighsInf) == HighsStatus::kOk &&
+           h.setOptionValue("small_matrix_value", kHighsSmallestEntry) == HighsStatus::kOk;
+}
+
+void checkEntries(const std::vector<double>& values, const std::string& what) {
+    for (const double v : values) {
+        if (v != 0.0 && std::abs(v) <= kHighsSmallestEntry) {
+            lpseq::fail(what + ": a coefficient below 1e-12, which HiGHS drops");
+        }
+    }
+}
+
 void configure(Highs& h, const Arm& arm, bool presolve) {
-    const bool ok = h.setOptionValue("output_flag", false) == HighsStatus::kOk &&
+    const bool ok = widenLimits(h) && h.setOptionValue("output_flag", false) == HighsStatus::kOk &&
                     h.setOptionValue("threads", 1) == HighsStatus::kOk &&
                     h.setOptionValue("presolve", presolve ? "on" : "off") == HighsStatus::kOk &&
                     h.setOptionValue("solver", arm.solver) == HighsStatus::kOk &&
@@ -138,12 +161,15 @@ int run(Options& opt) {
     lpseq::checkManifest(opt.dir);
     // The mirror: a Highs that only holds the LP, given to the cold arms.
     Highs model;
-    model.setOptionValue("output_flag", false);
+    if (!widenLimits(model) || model.setOptionValue("output_flag", false) != HighsStatus::kOk) {
+        lpseq::fail("HiGHS refused an option of the reader");
+    }
     const std::string master = opt.dir + "/master_0000.mps";
     if (model.readModel(master) == HighsStatus::kError) {
         lpseq::fail(master + ": HiGHS cannot read it");
     }
     const HighsLp& lp = model.getLp();
+    checkEntries(lp.a_matrix_.value_, master);
     lpseq::checkNames(lp.row_names_, static_cast<int>(lp.num_row_), 'r', master);
     lpseq::checkNames(lp.col_names_, static_cast<int>(lp.num_col_), 'c', master);
     if (lp.sense_ != ObjSense::kMinimize) {
@@ -177,6 +203,7 @@ int run(Options& opt) {
     while (lpseq::readOp(ops, static_cast<int>(model.getNumRow()),
                          static_cast<int>(model.getNumCol()), op)) {
         if (op.kind != lpseq::OpKind::Solve) {
+            checkEntries(op.values, "ops.txt");
             apply(op, model);
             for (Arm& arm : opt.arms) {
                 if (arm.warm) {
@@ -202,10 +229,12 @@ int run(Options& opt) {
             const double tol = arm.solver == "simplex" ? opt.rel_tol : opt.ipm_rel_tol;
             double err = 0.0;
             std::string status = statusName(h->getModelStatus());
-            // An interior point arm must have run one: HiGHS can fall back
-            // to dual simplex (e.g. HiPO without its extras) and still solve.
-            // Such a solve is reported as an error, not as the method's.
-            if (arm.solver != "simplex" && info.ipm_iteration_count <= 0) {
+            // With crossover off, simplex iterations on an interior point
+            // arm mean HiGHS fell back to simplex (e.g. HiPO without its
+            // extras, or an imprecise IPM finished by simplex): reported as
+            // an error, not booked as the method's. A solve presolve or the
+            // trivial cases settle (no iterations of either) stands.
+            if (arm.solver != "simplex" && info.simplex_iteration_count > 0) {
                 status = "error";
             }
             all_match =

@@ -181,16 +181,16 @@ if(MIPX_BENCH_HIGHS)
         FetchContent_Declare(highs
             URL https://github.com/ERGO-Code/HiGHS/archive/refs/tags/v1.16.0.tar.gz
             URL_HASH SHA256=0fa9da512955fb08c6cca7bfb274ca12e8a0e8a12e44189bd6e0c355ce7701bc
-            DOWNLOAD_EXTRACT_TIMESTAMP FALSE)
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+            # Its headers as system ones for consumers, outside mipx's
+            # warnings.
+            SYSTEM)
         FetchContent_MakeAvailable(highs)
     endfunction()
     mipx_fetch_highs()
     add_executable(mipx-lpseq-replay-highs tests/perf/lpseq_replay_highs.cpp)
     target_link_libraries(mipx-lpseq-replay-highs PRIVATE highs::highs)
-    # mipx's warnings and sanitizers on this file and the shared parser;
-    # HiGHS's own headers as system ones, which those flags do not cover.
-    get_target_property(_highs_includes highs INTERFACE_INCLUDE_DIRECTORIES)
-    target_include_directories(mipx-lpseq-replay-highs SYSTEM PRIVATE ${_highs_includes})
+    # mipx's warnings and sanitizers on this file and the shared parser.
     mipx_set_compiler_flags(mipx-lpseq-replay-highs)
 endif()
 

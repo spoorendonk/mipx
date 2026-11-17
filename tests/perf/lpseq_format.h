@@ -14,7 +14,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
+#include <format>
 #include <fstream>
 #include <istream>
 #include <limits>
@@ -153,32 +153,18 @@ struct Op {
 
 namespace detail {
 
-// Values the solvers would read differently are refused, so both replays
-// solve the same LP: HiGHS drops entries |v| <= 1e-9 (small_matrix_value)
-// that mipx keeps, and takes bounds >= 1e20 (infinite_bound) as infinite.
-inline constexpr double kSmallestEntry = 1e-9;
-inline constexpr double kLargestBound = 1e20;
-
-inline void checkBound(double v, const char* what) {
-    if (std::isfinite(v) && std::abs(v) >= kLargestBound) {
-        fail(std::string(what) + ": a finite bound past 1e20, which HiGHS reads as infinite");
-    }
-}
-
+// Only what no LP can hold is refused here; a solver's own reading limits
+// are its replay's business (the HiGHS one widens HiGHS's and refuses what
+// HiGHS would still read differently).
 inline void checkBounds(double lo, double up, const char* what) {
     if (lo == kInf || up == -kInf) {
         fail(std::string(what) + ": bound on the wrong side");
     }
-    checkBound(lo, what);
-    checkBound(up, what);
 }
 
 inline void checkValue(double v, const char* what) {
     if (!std::isfinite(v)) {
         fail(std::string(what) + ": coefficient not finite");
-    }
-    if (v != 0.0 && std::abs(v) <= kSmallestEntry) {
-        fail(std::string(what) + ": a coefficient below 1e-9, which HiGHS drops");
     }
 }
 
@@ -195,6 +181,7 @@ inline void checkEnd(std::istringstream& ls, const std::string& line) {
 inline void readBatch(std::istream& in, int k, bool cols, int bound, Op& op) {
     const char* what = cols ? "add_cols" : "add_rows";
     std::string line;
+    std::unordered_set<int> seen;  // one item's indices, reused across items
     for (int t = 0; t < k; ++t) {
         if (!std::getline(in, line)) {
             fail(std::string(what) + ": batch cut short");
@@ -218,7 +205,7 @@ inline void readBatch(std::istream& in, int k, bool cols, int bound, Op& op) {
         ls >> n;
         const int nnz = parseIndex(n, std::numeric_limits<int>::max(), what);
         op.starts.push_back(static_cast<int>(op.indices.size()));
-        std::unordered_set<int> seen;
+        seen.clear();
         for (int p = 0; p < nnz; ++p) {
             std::string idx, val;
             if (!(ls >> idx >> val)) {
@@ -251,11 +238,20 @@ inline bool readOp(std::istream& in, int num_rows, int num_cols, Op& op) {
         }
         if (name == "solve") {
             // solve <seq> <status> <obj> <iters> <secs>; the last two are
-            // the recording backend's, only informative.
-            std::string obj;
-            ls >> op.seq >> op.status >> obj;
+            // the recording backend's, only informative, but must be there.
+            std::string obj, iters, secs;
+            if (!(ls >> op.seq >> op.status >> obj >> iters >> secs)) {
+                fail("solve: line cut short: " + line);
+            }
+            if (op.status != "optimal" && op.status != "infeasible" && op.status != "unbounded" &&
+                op.status != "error") {
+                fail("solve: unknown status " + op.status);
+            }
             op.kind = OpKind::Solve;
             op.recorded = parseReal(obj);
+            parseReal(iters);
+            parseReal(secs);
+            detail::checkEnd(ls, line);
             return true;
         }
         static constexpr const char* kOps[] = {"add_cols",   "add_rows",   "del_cols",  "del_rows",
@@ -321,6 +317,9 @@ inline bool readOp(std::istream& in, int num_rows, int num_cols, Op& op) {
                 op.values.push_back(parseReal(field("coeffs")));
                 detail::checkValue(op.values.back(), "coeffs");
             }
+        } else {
+            // A name kOps lists that no branch handles.
+            fail("ops.txt: op " + name + " has no handler");
         }
         detail::checkEnd(ls, line);
         return true;
@@ -343,11 +342,9 @@ inline constexpr const char* kCsvHeader =
 inline void writeRow(std::ostream& out, const Op& solve, const std::string& arm,
                      const std::string& status, double objective, double rel_err, long iterations,
                      double seconds, bool reloaded) {
-    char buf[512];
-    std::snprintf(buf, sizeof(buf), "%s,%s,%s,%.17g,%.17g,%.3e,%ld,%.6f,%d\n", solve.seq.c_str(),
-                  arm.c_str(), status.c_str(), objective, solve.recorded, rel_err, iterations,
-                  seconds, reloaded ? 1 : 0);
-    out << buf;
+    // %.17g round-trips a double; std::format has no fixed buffer to cut.
+    out << std::format("{},{},{},{:.17g},{:.17g},{:.3e},{},{:.6f},{}\n", solve.seq, arm, status,
+                       objective, solve.recorded, rel_err, iterations, seconds, reloaded ? 1 : 0);
 }
 
 }  // namespace mipx::lpseq
