@@ -430,6 +430,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     opts.stall_restart_pivots = 1234;
     opts.stall_restart_max_restarts = 4;
     opts.enable_idiot_crash = true;
+    opts.enable_primal_devex = true;
     opts.idiot_crash_passes = 3;
     opts.idiot_crash_max_flips = 128;
     opts.idiot_crash_min_gain = 1e-7;
@@ -485,6 +486,7 @@ TEST_CASE("DualSimplex: runtime options can toggle pricing/refactorization paths
     CHECK(applied.stall_restart_pivots == 1234);
     CHECK(applied.stall_restart_max_restarts == 4);
     CHECK(applied.enable_idiot_crash);
+    CHECK(applied.enable_primal_devex);
     CHECK(applied.idiot_crash_passes == 3);
     CHECK(applied.idiot_crash_max_flips == 128);
     CHECK(applied.idiot_crash_min_gain == 1e-7);

@@ -1411,13 +1411,28 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // score(k) = rc(k)^2 / col_norm(k), where slacks have norm 1.
     // Reuse col_norms which stores ||a_k||_2 (same data dual_phase_col_norm_sq used).
     std::vector<Real>& dual_phase_col_norm_sq = col_norms;
-    // Primal Devex (#266, opt-in): reference weights w_k for the primal
-    // pivots of the primal-feasible phase, priced by rc^2 / w_k and updated
-    // from the pivot row (Forrest & Goldfarb 1992, after Harris 1973). It is
-    // what re-solves after addCols spend their pivots on.
+    // Primal Devex (#266, opt-in) for the primal pivots of the
+    // primal-feasible phase, which re-solves after addCols spend their
+    // pivots on (Harris 1973; Forrest & Goldfarb 1992, sec. 3). A reference
+    // framework R, the nonbasics at a reset, carries weights w_k ~ the norm
+    // of column k's tableau entries on R (plus 1 when k is in R); a column is
+    // priced by rc^2 / w_k. The entering column's weight is recomputed
+    // exactly from its FTRAN, and R restarts when the kept one is off by
+    // more than kPrimalDevexErrorRatio either way, which also catches
+    // weights the dual phase's pivots left stale.
     const bool use_primal_devex = options_.enable_primal_devex;
-    std::vector<Real> primal_devex_w(use_primal_devex ? static_cast<std::size_t>(numVars()) : 0,
-                                     1.0);
+    const auto devex_size = use_primal_devex ? static_cast<std::size_t>(numVars()) : 0;
+    std::vector<Real> primal_devex_w(devex_size, 1.0);
+    std::vector<char> primal_devex_ref(devex_size, 0);
+    auto resetPrimalDevex = [&]() {
+        std::ranges::fill(primal_devex_w, 1.0);
+        for (std::size_t k = 0; k < devex_size; ++k) {
+            primal_devex_ref[k] = var_status_[k] != BasisStatus::Basic ? 1 : 0;
+        }
+    };
+    if (use_primal_devex) {
+        resetPrimalDevex();
+    }
     auto primalEnteringScore = [&](Index k, Real rc) -> Real {
         const auto kk = static_cast<std::size_t>(k);
         if (use_primal_devex) {
@@ -2458,42 +2473,52 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
             buildPivotRowAlphaFromWork();
 
-            // Update reduced costs.
+            // Devex, before the basis changes: the entering column's exact
+            // reference weight from its FTRAN (basis position order), and a
+            // restart of the framework when the kept weight is that far off.
+            Real devex_wq = 1.0;
+            if (use_primal_devex) {
+                const auto q = static_cast<std::size_t>(entering_p);
+                Real exact = primal_devex_ref[q] != 0 ? 1.0 : 0.0;
+                for (Index i = 0; i < num_rows_; ++i) {
+                    if (primal_devex_ref[static_cast<std::size_t>(basis_[i])] != 0) {
+                        exact += pivot_col[i] * pivot_col[i];
+                    }
+                }
+                exact = std::max(exact, 1.0);
+                const Real kept = primal_devex_w[q];
+                if (kept > kPrimalDevexErrorRatio * exact ||
+                    exact > kPrimalDevexErrorRatio * kept) {
+                    resetPrimalDevex();
+                } else {
+                    primal_devex_w[q] = exact;
+                    devex_wq = exact;
+                }
+            }
+
+            // Update reduced costs, and the Devex weights with them:
+            // w_k >= (alpha_rk / alpha_rq)^2 w_q for the nonbasics.
             Real theta_d_p = reduced_cost_[entering_p] / pivot_elem;
             for (Index k : nonbasic_) {
                 if (k == entering_p) {
                     continue;
                 }
-                if (std::abs(pivot_row_alpha[k]) > kZeroTol) {
-                    reduced_cost_[k] -= theta_d_p * pivot_row_alpha[k];
+                const Real a = pivot_row_alpha[k];
+                if (std::abs(a) > kZeroTol) {
+                    reduced_cost_[k] -= theta_d_p * a;
+                    if (use_primal_devex) {
+                        const Real ratio = a / pivot_elem;
+                        Real& wk = primal_devex_w[static_cast<std::size_t>(k)];
+                        wk = std::max(wk, ratio * ratio * devex_wq);
+                    }
                 }
             }
             reduced_cost_[entering_p] = 0.0;
             reduced_cost_[leaving_var_p] = -theta_d_p;
-
-            // Devex: w_k >= (alpha_rk / alpha_rq)^2 w_q for the nonbasics,
-            // and the leaving variable takes w_q / alpha_rq^2 (at least 1).
-            // The reference framework restarts when a weight outgrows it.
+            // The leaving variable takes w_q / alpha_rq^2, at least 1.
             if (use_primal_devex) {
-                const Real wq = primal_devex_w[static_cast<std::size_t>(entering_p)];
-                bool reset = false;
-                for (Index k : nonbasic_) {
-                    if (k == entering_p) {
-                        continue;
-                    }
-                    const Real a = pivot_row_alpha[k];
-                    if (std::abs(a) > kZeroTol) {
-                        const Real ratio = a / pivot_elem;
-                        Real& wk = primal_devex_w[static_cast<std::size_t>(k)];
-                        wk = std::max(wk, ratio * ratio * wq);
-                        reset = reset || wk > kPrimalDevexResetWeight;
-                    }
-                }
                 primal_devex_w[static_cast<std::size_t>(leaving_var_p)] =
-                    std::max(wq / (pivot_elem * pivot_elem), 1.0);
-                if (reset) {
-                    std::ranges::fill(primal_devex_w, 1.0);
-                }
+                    std::max(devex_wq / (pivot_elem * pivot_elem), 1.0);
             }
 
             // Update duals.

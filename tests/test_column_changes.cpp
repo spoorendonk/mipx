@@ -289,6 +289,17 @@ TEST_CASE("Column changes: primal Devex re-solves reach the same optima", "[colu
         CHECK_THAT(solver.getObjective(), WithinRel(arcFlowOptimum(net), 1e-9));
         CHECK(run.warm_iterations < run.cold_iterations);
     }
+
+    // The option reaches the pricing: on a grid with enough primal pivots
+    // the warm re-solves take another path (on the small ones they can tie).
+    const Network net = gridNetwork(8, 6);
+    DualSimplexSolver devex;
+    devex.setOptions(options);
+    const CgRun devex_run = runColumnGeneration(net, devex);
+    DualSimplexSolver plain;
+    const CgRun plain_run = runColumnGeneration(net, plain);
+    CHECK_THAT(devex.getObjective(), WithinRel(plain.getObjective(), 1e-9));
+    CHECK(devex_run.warm_iterations != plain_run.warm_iterations);
 }
 
 TEST_CASE("Column changes: removing nonbasic and basic columns re-solves warm as cold",

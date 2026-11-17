@@ -419,9 +419,11 @@ private:
     std::vector<Real> devex_weights_;
     Int devex_reset_count_ = 0;
     static constexpr Int kDevexResetFreq = 200;  // reset every N pivots
-    // Primal Devex restarts its reference framework when a weight grows past
-    // this (the weights are only bounds on the true norms, and drift up).
-    static constexpr Real kPrimalDevexResetWeight = 1e6;
+    // Primal Devex restarts its reference framework when the entering
+    // column's kept weight and its exact one differ by more than this factor
+    // (Forrest & Goldfarb 1992: the weights only bound the reference norms
+    // and drift; an error past a small factor means the framework is stale).
+    static constexpr Real kPrimalDevexErrorRatio = 3.0;
 
     // DSE state.
     bool dse_active_ = false;        // true when using DSE pricing
