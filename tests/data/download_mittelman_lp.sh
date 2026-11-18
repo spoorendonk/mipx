@@ -21,7 +21,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DEST_DIR="${SCRIPT_DIR}/mittelman_lp"
+EMPS_SCRIPT="${REPO_ROOT}/scripts/emps_to_mps.sh"
 
 # --- Instance sources ---
 # [2] plato.asu.edu/ftp/lptestset/ — Mittelman's hosted collection
@@ -171,6 +173,18 @@ mkdir -p "${DEST_DIR}"
 TOTAL=0
 FAILED=0
 
+# True when $1 is one of the remaining arguments. Not `printf | grep -qx`:
+# under pipefail that fails whenever grep exits before printf has written
+# everything (SIGPIPE), which made bdry2 an "UNKNOWN SOURCE".
+in_list() {
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [[ "${item}" == "${needle}" ]] && return 0
+    done
+    return 1
+}
+
 is_valid_gzip_file() {
     local file="$1"
     gzip -t "${file}" >/dev/null 2>&1
@@ -181,54 +195,86 @@ is_probable_mps_text() {
     head -n 40 "${file}" | grep -Eq '^[[:space:]]*(\*|NAME|ROWS|COLUMNS|RHS|BOUNDS|RANGES|OBJSENSE|OBJSEN|ENDATA)'
 }
 
+# Some Mittelman instances (fome*, pds*, rail*, nug*, bdry2, Linf_520c,
+# L1_sixm250obs) are in Netlib's compressed MPS format (MPC), which mipx
+# cannot read. An MPC file starts with NAME like plain MPS, but its second
+# line is a row of integer counts where plain MPS has ROWS or a comment.
+# Blank lines before them are skipped (the MPC files start with one). Works
+# on plain or gzipped files.
+is_mpc_file() {
+    local lines first second
+    lines=$({ gzip -dcf "$1" 2>/dev/null || true; } | grep -m 2 -v '^[[:space:]]*$' || true)
+    first=${lines%%$'\n'*}
+    second=${lines#*$'\n'}
+    [[ "${first}" == NAME* && "${second}" =~ ^[[:space:]]*[0-9]+([[:space:]]+[0-9]+)+[[:space:]]*$ ]]
+}
+
+# Stores a plain-text instance as the gzipped MPS file outfile, decoding MPC
+# with emps (as download_netlib.sh does).
+store_mps_gz() {
+    local plain="$1" outfile="$2"
+    if is_mpc_file "${plain}"; then
+        "${EMPS_SCRIPT}" < "${plain}" | gzip -c > "${outfile}"
+    else
+        gzip -c "${plain}" > "${outfile}"
+    fi
+}
+
+# Decodes in place an MPC file that an older version of this script stored
+# as is.
+redecode_mpc() {
+    local gzfile="$1" plain rc=0
+    plain=$(mktemp)
+    gzip -dc "${gzfile}" > "${plain}" && store_mps_gz "${plain}" "${gzfile}.tmp" &&
+        mv "${gzfile}.tmp" "${gzfile}" || rc=$?
+    rm -f "${plain}" "${gzfile}.tmp"
+    return "${rc}"
+}
+
 download_instance() {
     local name="$1"
     local url="$2"
     local outfile="${DEST_DIR}/${name}.mps.gz"
 
     if [[ -f "${outfile}" ]]; then
+        if is_mpc_file "${outfile}"; then
+            echo -n "  ${name}: decoding MPC..."
+            if ! redecode_mpc "${outfile}"; then
+                echo " FAILED"
+                ((FAILED++)) || true
+                return 1
+            fi
+            echo " ok"
+        fi
         return 0
     fi
 
     echo -n "  ${name}..."
-    local tmpfile
+    local tmpfile plain how=""
     tmpfile=$(mktemp)
+    plain=$(mktemp)
 
     # Try .mps.bz2 first (most Mittelman files), then .bz2 (some use this without
     # .mps in filename), then .mps.gz, then .mps
     if curl -sS -f -L -o "${tmpfile}" "${url}.mps.bz2" 2>/dev/null; then
-        if bunzip2 -c "${tmpfile}" | gzip -c > "${outfile}"; then
-            rm -f "${tmpfile}"
-            echo " ok (mps.bz2)"
-            ((TOTAL++)) || true
-            return 0
-        fi
-        rm -f "${outfile}"
+        bunzip2 -c "${tmpfile}" > "${plain}" && how="mps.bz2"
     elif curl -sS -f -L -o "${tmpfile}" "${url}.bz2" 2>/dev/null; then
-        if bunzip2 -c "${tmpfile}" | gzip -c > "${outfile}"; then
-            rm -f "${tmpfile}"
-            echo " ok (bz2)"
-            ((TOTAL++)) || true
-            return 0
-        fi
-        rm -f "${outfile}"
+        bunzip2 -c "${tmpfile}" > "${plain}" && how="bz2"
     elif curl -sS -f -L -o "${tmpfile}" "${url}.mps.gz" 2>/dev/null; then
-        mv "${tmpfile}" "${outfile}"
-        echo " ok (gz)"
-        ((TOTAL++)) || true
-        return 0
+        gzip -dc "${tmpfile}" > "${plain}" && how="gz"
     elif curl -sS -f -L -o "${tmpfile}" "${url}.mps" 2>/dev/null; then
-        gzip -c "${tmpfile}" > "${outfile}"
-        rm -f "${tmpfile}"
-        echo " ok (mps)"
+        cp "${tmpfile}" "${plain}" && how="mps"
+    fi
+    if [[ -n "${how}" ]] && store_mps_gz "${plain}" "${outfile}"; then
+        rm -f "${tmpfile}" "${plain}"
+        echo " ok (${how})"
         ((TOTAL++)) || true
         return 0
-    else
-        rm -f "${tmpfile}"
-        echo " FAILED"
-        ((FAILED++)) || true
-        return 1
     fi
+    rm -f "${tmpfile}" "${plain}" "${outfile}"
+    echo " FAILED"
+    ((FAILED++)) || true
+    return 1
 }
 
 download_from_mittelman() {
@@ -366,19 +412,19 @@ else
 
     for name in "${SMALL_SET[@]}"; do
         # Try Mittelman first (root, rail, pds, fome, nug), then MIPLIB, then Meszaros
-        if printf '%s\n' "${MITTELMAN_INSTANCES[@]}" | grep -qx "${name}"; then
+        if in_list "${name}" "${MITTELMAN_INSTANCES[@]}"; then
             download_from_mittelman "${name}" || true
-        elif printf '%s\n' "${MITTELMAN_RAIL_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MITTELMAN_RAIL_INSTANCES[@]}"; then
             download_from_mittelman_rail "${name}" || true
-        elif printf '%s\n' "${MITTELMAN_PDS_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MITTELMAN_PDS_INSTANCES[@]}"; then
             download_from_mittelman_pds "${name}" || true
-        elif printf '%s\n' "${MITTELMAN_FOME_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MITTELMAN_FOME_INSTANCES[@]}"; then
             download_from_mittelman_fome "${name}" || true
-        elif printf '%s\n' "${MITTELMAN_NUG_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MITTELMAN_NUG_INSTANCES[@]}"; then
             download_from_mittelman_nug "${name}" || true
-        elif printf '%s\n' "${MIPLIB_LP_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MIPLIB_LP_INSTANCES[@]}"; then
             download_from_miplib "${name}" || true
-        elif printf '%s\n' "${MESZAROS_INSTANCES[@]}" | grep -qx "${name}"; then
+        elif in_list "${name}" "${MESZAROS_INSTANCES[@]}"; then
             download_from_meszaros "${name}" || true
         else
             echo "  ${name}... UNKNOWN SOURCE"
