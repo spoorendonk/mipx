@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-push base=3ae99ca26321
+# wcp: pre-push base=8aa900b9b655
 # Linear history on the trunk, then the review receipt.
 #
 # A real file in this repository, not a shim — see the note in `commit-msg` for
@@ -1049,6 +1049,32 @@ configure_inputs() {
 	fi
 }
 
+#: Each line of a git `--name-only` as the path it names: git quotes a path
+#: with a quote, a backslash, a tab or another control character in C's
+#: style, `core.quotePath=false` or not (#735), so that a build file under
+#: such a name would match no pattern. One holding a newline, which no line
+#: can hold, is `/unknown`, what a push whose paths git cannot list changes.
+GIT_PATH_AWK='
+BEGIN { esc["a"] = 7; esc["b"] = 8; esc["t"] = 9; esc["v"] = 11; esc["f"] = 12; esc["r"] = 13 }
+!/^".*"$/ { print; next }
+{
+	s = substr($0, 2, length($0) - 2)
+	out = ""
+	for (i = 1; i <= length(s); i++) {
+		c = substr(s, i, 1)
+		if (c != "\\") { out = out c; continue }
+		c = substr(s, ++i, 1)
+		if (c == "n") { print "/unknown"; next }
+		if (c ~ /[0-7]/) {
+			n = c + 0
+			for (k = 1; k < 3 && substr(s, i + 1, 1) ~ /[0-7]/; k++) n = n * 8 + substr(s, ++i, 1)
+			c = sprintf("%c", n)
+		} else if (c in esc) c = sprintf("%c", esc[c])
+		out = out c
+	}
+	print out
+}'
+
 #: A CMake quoted argument's value, for awk: the quotes off, `\x` as `x`.
 UNQUOTE_AWK='
 function unquote(q,    out, i, c) {
@@ -2005,26 +2031,63 @@ def record_key(commit: str, test_dir: str) -> str:
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
-def first_parents(commit: str) -> list[tuple[str, list[str]]]:
+#: A line `first_parents` asks git for: `\x01`, the commit, its parents; a
+#: space after the commit where it has none, a root or a shallow clone's edge.
+COMMIT_LINE = re.compile(r"\x01([0-9a-f]{40,64})((?: [0-9a-f]{40,64})*) ?")
+
+
+def merge_paths(merge: str, env: dict[str, str]) -> list[str] | None:
+    """What `merge` changed from its first parent; None if git cannot say."""
+    argv = ["git", "diff", "-z", "--no-renames", "--name-only", f"{merge}^1", merge, "--"]
+    try:
+        done = subprocess.run(argv, cwd=ROOTS[0], env=env, capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return [p for p in done.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def first_parents(commit: str) -> list[tuple[str, list[str] | None]]:
     """`commit` and its first parents, each with the paths it changed, nearest first.
 
-    `RECORD_WALK` in all, or `commit` alone, changing nothing, if git cannot say.
+    `RECORD_WALK` in all, or `commit` alone, changing nothing, if git cannot
+    say. git before 2.31 lists no paths for any merge under `--first-parent`,
+    so a merge listed with none is asked about on its own, and is unknown,
+    `None`, if that fails (#735).
     """
     env = {k: v for k, v in E.items() if not k.startswith("GIT_")}
-    # `--no-renames`: a rename lists only its new path, and the old may be a build file.
-    log = ["log", "--first-parent", f"--max-count={RECORD_WALK}", "--no-renames", "--name-only"]
-    argv = ["git", "-c", "core.quotePath=false", *log, "--format=%x01%H", commit, "--"]
+    # `--no-renames`: a rename lists only its new path, and the old may be a
+    # build file. `-z`: a path with a quote, a tab or a control character is
+    # quoted otherwise, `core.quotePath=false` or not (#735).
+    # `log.showSignature=false`: set, it writes a signed commit's check into
+    # the field before its line, and the commit and its first path go unseen.
+    log = ["log", "-z", "--first-parent", f"--max-count={RECORD_WALK}", "--no-renames", "--name-only"]
+    argv = ["git", "-c", "log.showSignature=false", *log, "--format=%x01%H %P", commit, "--"]
     try:
         done = subprocess.run(argv, cwd=ROOTS[0], env=env, capture_output=True, check=True)
     except (OSError, subprocess.CalledProcessError):
         return [(commit, [])]
     walk: list[tuple[str, list[str]]] = []
-    for line in done.stdout.decode("utf-8", "surrogateescape").splitlines():
-        if line.startswith("\x01"):
-            walk.append((line[1:], []))
-        elif line and walk:
-            walk[-1][1].append(line)
-    return walk or [(commit, [])]
+    merges: set[str] = set()
+    lead = False
+    for field in done.stdout.decode("utf-8", "surrogateescape").split("\0"):
+        # A commit's line, and not a later path that starts with `\x01`.
+        line = COMMIT_LINE.fullmatch(field)
+        if line:
+            sha, parents = line[1], line[2]
+            if len(parents.split()) > 1:
+                merges.add(sha)
+            walk.append((sha, []))
+            lead = True
+            continue
+        # A newline between a commit's line and its first path, none after.
+        if lead and field.startswith("\n"):
+            field = field[1:]
+        lead = False
+        if field and walk:
+            walk[-1][1].append(field)
+    if not walk:
+        return [(commit, [])]
+    return [(sha, merge_paths(sha, env) if sha in merges and not paths else paths) for sha, paths in walk]
 
 
 def configure_read() -> set[str]:
@@ -2036,12 +2099,48 @@ def configure_read() -> set[str]:
         return set()
 
 
-def may_reconfigure(paths: list[str], read: set[str]) -> bool:
-    """Whether one of the changed `paths` may change a unit's configuration: what
-    `build_file_reason` counts, a `.clang-tidy`, or any path if the hook passed no pattern.
+def may_reconfigure(paths: list[str] | None, read: set[str]) -> bool:
+    """Whether one of the changed `paths` (`None`: unknown) may change a unit's configuration.
+
+    A build file by name, a file the configure read, a `.clang-tidy`, or any
+    path if the hook passed no pattern; and every CMake file, where
+    `build_file_reason` leaves out those this build reads as data only (#285):
+    that says nothing of an older commit's build (#735).
     """
     pattern = E.get("CI_TIDY_CONFIG_FILES", "")
-    return any(not pattern or p in read or re.search(pattern, p) for p in paths)
+    return paths is None or any(not pattern or p in read or re.search(pattern, p) for p in paths)
+
+
+def read_key(commit: str, test_dir: str) -> str:
+    """Where the cache keeps what the configure read at `commit`, beside its record (#735)."""
+    material = {"schema": SCHEMA, "read": commit, "tests": spelled(test_dir)}
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
+
+
+def record_at(cache: Cache, commit: str, test_dir: str) -> dict[str, str] | None:
+    """The units' configurations the cache keeps for `commit`; None for none."""
+    try:
+        record = json.loads(cache.hit(record_key(commit, test_dir)) or "null")
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def read_at(cache: Cache, commit: str, test_dir: str) -> set[str] | None:
+    """What the configure read at `commit`, as its record's run kept it.
+
+    None, unknown, when the cache keeps none: a record from before #735, one
+    whose set was pruned while the record was not, or a write that failed. And
+    when it keeps an empty one, what a configure that could not be read leaves,
+    as `build_file_reason` takes an empty list.
+    """
+    try:
+        read = json.loads(cache.hit(read_key(commit, test_dir)) or "null")
+    except ValueError:
+        return None
+    if not isinstance(read, list):
+        return None
+    return {p for p in read if isinstance(p, str)} or None
 
 
 def nearest_record(cache: Cache, base: str, test_dir: str) -> tuple[dict[str, str] | None, str]:
@@ -2055,18 +2154,28 @@ def nearest_record(cache: Cache, base: str, test_dir: str) -> tuple[dict[str, st
     lint, under that same configuration. Past one (from another host, say, so
     with no record here), a configuration changed and later undone would
     compare equal, with the code between linted only under the change; and a
-    unit gone and back would not be new.
+    unit gone and back would not be new. Judged by what this build's configure
+    read and by what the record's did: a file only the older configure read
+    may have changed its configuration too (#735).
     """
+    # The base's own, before a walk that runs git over `RECORD_WALK` commits.
+    record = record_at(cache, base, test_dir)
+    if record is not None:
+        return record, base
     read = configure_read()
+    since: list[str] = []
     for commit, changed in first_parents(base):
-        try:
-            record = json.loads(cache.hit(record_key(commit, test_dir)) or "null")
-        except ValueError:
-            record = None
-        if isinstance(record, dict):
+        record = record_at(cache, commit, test_dir) if commit != base else None
+        if record is not None:
+            # Across a change, a record whose configure's reads are unknown
+            # cannot be judged by them, and stands in for none.
+            older = read_at(cache, commit, test_dir)
+            if since and (older is None or any(p in older for p in since)):
+                break
             return record, commit
-        if may_reconfigure(changed, read):
+        if changed is None or may_reconfigure(changed, read):
             break
+        since += changed
     return None, base
 
 
@@ -2331,6 +2440,8 @@ def main() -> int:
     elif before is not None and configs is not None:
         record = {name: d for name, d in before.items() if name in configs}
     if status == 0 and record is not None and E.get("CI_SHA"):
+        # What the configure read, for a later walk to judge the record by (#735).
+        cache.store(read_key(E["CI_SHA"], test_dir), json.dumps(sorted(configure_read())))
         cache.store(record_key(E["CI_SHA"], test_dir), json.dumps(record, sort_keys=True))
     return status
 
@@ -3140,7 +3251,9 @@ warm_worktree() {
 # itself is left as written. A wider or a narrower number either way: the build
 # and lint steps keep the admission's, and so does a lint this step runs, at
 # `hooks.localCiJobs` in the runner and through `lint_ctest` where ctest runs
-# it; `ci_lint_jobs` and `ci_lint_ctest` keep them for that. So does
+# it, there with a block's `-j$(nproc)` taken back only when it is wider, never
+# raised, and a `CTEST_PARALLEL_LEVEL` either way (#735); `ci_lint_jobs` and
+# `ci_lint_ctest` keep them for that. So does
 # `CMAKE_BUILD_PARALLEL_LEVEL`, for a block that compiles too; one that
 # compiles at `$(nproc)` compiles at these jobs.
 test_step_jobs() {
@@ -3870,6 +3983,8 @@ while heredoc_read=1; read -r local_ref local_sha remote_ref remote_sha extra; d
 	fi
 	if [ -z "$base" ] || ! files=$(git -c core.quotePath=false diff --no-renames --name-only "$base" "$local_sha" -- 2>/dev/null); then
 		files='/unknown'
+	else
+		files=$(printf '%s\n' "$files" | awk "$GIT_PATH_AWK")
 	fi
 	pushed=$(printf '%s\n%s' "$pushed" "$(printf '%s\n' "$files" | sed "s|^|$local_sha |")")
 	bases=$(printf '%s\n%s %s' "$bases" "$local_sha" "${base:--}")
