@@ -446,18 +446,25 @@ Devex off and on.
 default; fetches HiGHS v1.16.0 with HiPO, needs a BLAS such as
 libopenblas-dev) to build `mipx-lpseq-replay-highs`. It reads the ops with
 the same parser (`lpseq_format.h`) and writes the same CSV, on HiGHS
-through its API, one thread:
+through its API, one thread unless `--threads N`:
 
 ```bash
 ./build/mipx-lpseq-replay-highs tests/data/lpseq/grid1 \
     --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold \
-    [--presolve] [--csv out.csv]
+    [--presolve] [--threads N] [--csv out.csv]
 ```
 
 `simplex-warm` (dual) and `primal-warm` keep one `Highs` across the changes,
 as mcf's HiGHS backend does; the `-cold` arms solve each LP on a fresh one
 (IPX and HiPO without crossover, held to `--ipm-rel-tol` 1e-5). Presolve is
 off unless `--presolve`, as mcf runs it. The mipx library never links HiGHS.
+
+`--threads N` sets HiGHS's `threads` option for every arm; it speeds up HiPO
+and `pami-warm`, which is `simplex-warm` on HiGHS's parallel dual simplex
+(PAMI, `simplex_strategy` 3). The serial dual of `simplex-warm` stays serial:
+in HiGHS 1.16 `parallel=on` does not switch it to PAMI. Time `pami-warm` only
+on otherwise idle CPUs: sharing them with a build made a small sequence about
+100 times slower.
 
 ## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
 

@@ -8,10 +8,13 @@
 // Arms: simplex-warm (dual simplex) and primal-warm (primal simplex) keep
 // one Highs object across the changes, as mcf's HiGHS backend does;
 // simplex-cold, ipx-cold and hipo-cold solve each LP on a fresh Highs
-// (interior points without crossover). One thread, presolve off unless
-// --presolve. Exit 0 when every solve matches the recorded status and
-// objective (simplex --rel-tol 1e-6, interior point --ipm-rel-tol 1e-5),
-// 1 when one does not, 2 on a usage or format error.
+// (interior points without crossover); pami-warm is simplex-warm on HiGHS's
+// parallel dual simplex (PAMI, simplex_strategy 3), for use with --threads
+// (parallel=on alone does not select it in HiGHS 1.16). One thread unless
+// --threads N, presolve off unless --presolve. Exit 0 when every solve
+// matches the recorded status and objective (simplex --rel-tol 1e-6,
+// interior point --ipm-rel-tol 1e-5), 1 when one does not, 2 on a usage or
+// format error.
 
 #include "lpseq_format.h"
 
@@ -37,7 +40,7 @@ struct Arm {
     std::string name;
     bool warm = false;
     std::string solver;  // HiGHS "solver" option: simplex, ipx, hipo
-    int strategy = 1;    // simplex_strategy: 1 dual, 4 primal
+    int strategy = 1;    // simplex_strategy: 1 dual, 3 dual PAMI, 4 primal
     std::unique_ptr<Highs> highs;
 };
 
@@ -45,6 +48,7 @@ struct Options {
     std::string dir;
     std::vector<Arm> arms;
     bool presolve = false;
+    int threads = 1;
     double rel_tol = 1e-6;
     double ipm_rel_tol = 1e-5;
     std::string csv;
@@ -72,10 +76,10 @@ void checkEntries(const std::vector<double>& values, const std::string& what) {
     }
 }
 
-void configure(Highs& h, const Arm& arm, bool presolve) {
+void configure(Highs& h, const Arm& arm, const Options& opt) {
     const bool ok = widenLimits(h) && h.setOptionValue("output_flag", false) == HighsStatus::kOk &&
-                    h.setOptionValue("threads", 1) == HighsStatus::kOk &&
-                    h.setOptionValue("presolve", presolve ? "on" : "off") == HighsStatus::kOk &&
+                    h.setOptionValue("threads", opt.threads) == HighsStatus::kOk &&
+                    h.setOptionValue("presolve", opt.presolve ? "on" : "off") == HighsStatus::kOk &&
                     h.setOptionValue("solver", arm.solver) == HighsStatus::kOk &&
                     h.setOptionValue("simplex_strategy", arm.strategy) == HighsStatus::kOk &&
                     h.setOptionValue("run_crossover", "off") == HighsStatus::kOk;
@@ -178,7 +182,7 @@ int run(Options& opt) {
     for (Arm& arm : opt.arms) {
         if (arm.warm) {
             arm.highs = std::make_unique<Highs>();
-            configure(*arm.highs, arm, opt.presolve);
+            configure(*arm.highs, arm, opt);
             check(arm.highs->passModel(lp), "the master");
         }
     }
@@ -217,7 +221,7 @@ int run(Options& opt) {
             Highs* h = arm.highs.get();
             if (!arm.warm) {
                 cold = std::make_unique<Highs>();
-                configure(*cold, arm, opt.presolve);
+                configure(*cold, arm, opt);
                 check(cold->passModel(model.getLp()), "the LP");
                 h = cold.get();
             }
@@ -251,8 +255,8 @@ int run(Options& opt) {
 
 void usage() {
     std::cerr << "usage: mipx-lpseq-replay-highs DIR "
-                 "[--arm simplex-warm|primal-warm|simplex-cold|ipx-cold|hipo-cold]... "
-                 "[--presolve] [--rel-tol T] [--ipm-rel-tol T] [--csv FILE]\n";
+                 "[--arm simplex-warm|pami-warm|primal-warm|simplex-cold|ipx-cold|hipo-cold]... "
+                 "[--presolve] [--threads N] [--rel-tol T] [--ipm-rel-tol T] [--csv FILE]\n";
 }
 
 }  // namespace
@@ -266,6 +270,8 @@ int main(int argc, char** argv) {
             Arm arm;
             if (v == "simplex-warm") {
                 arm = {v, true, "simplex", 1, nullptr};
+            } else if (v == "pami-warm") {
+                arm = {v, true, "simplex", 3, nullptr};
             } else if (v == "primal-warm") {
                 arm = {v, true, "simplex", 4, nullptr};
             } else if (v == "simplex-cold") {
@@ -281,6 +287,12 @@ int main(int argc, char** argv) {
             opt.arms.push_back(std::move(arm));
         } else if (a == "--presolve") {
             opt.presolve = true;
+        } else if (a == "--threads" && i + 1 < argc) {
+            opt.threads = std::atoi(argv[++i]);
+            if (opt.threads < 1) {
+                usage();
+                return 2;
+            }
         } else if (a == "--rel-tol" && i + 1 < argc) {
             opt.rel_tol = std::atof(argv[++i]);
         } else if (a == "--ipm-rel-tol" && i + 1 < argc) {
