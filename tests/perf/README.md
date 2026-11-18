@@ -462,9 +462,11 @@ off unless `--presolve`, as mcf runs it. The mipx library never links HiGHS.
 `--threads N` sets HiGHS's `threads` option for every arm; it speeds up HiPO
 and `pami-warm`, which is `simplex-warm` on HiGHS's parallel dual simplex
 (PAMI, `simplex_strategy` 3). The serial dual of `simplex-warm` stays serial:
-in HiGHS 1.16 `parallel=on` does not switch it to PAMI. Time `pami-warm` only
-on otherwise idle CPUs: sharing them with a build made a small sequence about
-100 times slower.
+in HiGHS 1.16 `parallel=on` does not switch it to PAMI. `--threads` sets the
+workers, not PAMI's width, which stays at HiGHS's `simplex_max_concurrency`
+(8): `pami-warm` at `--threads 1` is still PAMI, on one worker, not the serial
+dual. Time `pami-warm` only on otherwise idle CPUs: sharing them with a build
+made a small sequence about 100 times slower.
 
 ## Barrier LP Comparison (mipx vs HiGHS IPX vs cuOpt)
 

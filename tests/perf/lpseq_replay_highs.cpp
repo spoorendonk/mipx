@@ -10,7 +10,8 @@
 // simplex-cold, ipx-cold and hipo-cold solve each LP on a fresh Highs
 // (interior points without crossover); pami-warm is simplex-warm on HiGHS's
 // parallel dual simplex (PAMI, simplex_strategy 3), for use with --threads
-// (parallel=on alone does not select it in HiGHS 1.16). One thread unless
+// (parallel=on alone does not select it in HiGHS 1.16; its width stays at
+// simplex_max_concurrency, 8, whatever --threads says). One thread unless
 // --threads N, presolve off unless --presolve. Exit 0 when every solve
 // matches the recorded status and objective (simplex --rel-tol 1e-6,
 // interior point --ipm-rel-tol 1e-5), 1 when one does not, 2 on a usage or
