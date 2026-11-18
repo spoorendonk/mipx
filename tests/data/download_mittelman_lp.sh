@@ -199,35 +199,41 @@ is_probable_mps_text() {
 # L1_sixm250obs) are in Netlib's compressed MPS format (MPC), which mipx
 # cannot read. An MPC file starts with NAME like plain MPS, but its second
 # line is a row of integer counts where plain MPS has ROWS or a comment.
-# Blank lines before them are skipped (the MPC files start with one). Works
-# on plain or gzipped files.
+# Like emps, lines before NAME (blank, comment) are skipped; so are blank
+# lines after it. Works on plain or gzipped files.
 is_mpc_file() {
-    local lines first second
-    lines=$({ gzip -dcf "$1" 2>/dev/null || true; } | grep -m 2 -v '^[[:space:]]*$' || true)
-    first=${lines%%$'\n'*}
-    second=${lines#*$'\n'}
-    [[ "${first}" == NAME* && "${second}" =~ ^[[:space:]]*[0-9]+([[:space:]]+[0-9]+)+[[:space:]]*$ ]]
+    { gzip -dcf "$1" 2>/dev/null || true; } | awk '
+        named { if ($0 ~ /^[ \t\r]*$/) next
+                mpc = ($0 ~ /^[ \t]*[0-9]+([ \t]+[0-9]+)+[ \t\r]*$/); exit }
+        /^NAME/ { named = 1; next }
+        NR > 100 { exit }
+        END { exit !mpc }'
 }
 
 # Stores a plain-text instance as the gzipped MPS file outfile, decoding MPC
-# with emps (as download_netlib.sh does).
+# with emps (as download_netlib.sh does). Writes outfile.part and renames it,
+# so an interrupted run leaves no truncated outfile that a rerun would keep.
 store_mps_gz() {
-    local plain="$1" outfile="$2"
+    local plain="$1" outfile="$2" rc=0
     if is_mpc_file "${plain}"; then
-        "${EMPS_SCRIPT}" < "${plain}" | gzip -c > "${outfile}"
+        "${EMPS_SCRIPT}" < "${plain}" | gzip -c > "${outfile}.part" || rc=$?
     else
-        gzip -c "${plain}" > "${outfile}"
+        gzip -c "${plain}" > "${outfile}.part" || rc=$?
     fi
+    if [[ ${rc} -eq 0 ]]; then
+        mv "${outfile}.part" "${outfile}" || rc=$?
+    fi
+    rm -f "${outfile}.part"
+    return "${rc}"
 }
 
 # Decodes in place an MPC file that an older version of this script stored
 # as is.
 redecode_mpc() {
     local gzfile="$1" plain rc=0
-    plain=$(mktemp)
-    gzip -dc "${gzfile}" > "${plain}" && store_mps_gz "${plain}" "${gzfile}.tmp" &&
-        mv "${gzfile}.tmp" "${gzfile}" || rc=$?
-    rm -f "${plain}" "${gzfile}.tmp"
+    plain=$(mktemp -p "${DEST_DIR}")
+    gzip -dc "${gzfile}" > "${plain}" && store_mps_gz "${plain}" "${gzfile}" || rc=$?
+    rm -f "${plain}"
     return "${rc}"
 }
 
@@ -250,9 +256,11 @@ download_instance() {
     fi
 
     echo -n "  ${name}..."
+    # Temp files next to the data: an uncompressed instance can be over a GB,
+    # too big for a size-capped tmpfs /tmp.
     local tmpfile plain how=""
-    tmpfile=$(mktemp)
-    plain=$(mktemp)
+    tmpfile=$(mktemp -p "${DEST_DIR}")
+    plain=$(mktemp -p "${DEST_DIR}")
 
     # Try .mps.bz2 first (most Mittelman files), then .bz2 (some use this without
     # .mps in filename), then .mps.gz, then .mps
