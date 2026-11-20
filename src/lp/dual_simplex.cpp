@@ -678,6 +678,8 @@ LpResult DualSimplexSolver::solve() {
     if (!warm || verdictHolds()) {
         return res;
     }
+    // A guard: the loop reaches a verdict only with iterations left, so today
+    // only the time limit can leave the cold start no budget.
     if (res.iterations >= iter_limit_) {
         return withdrawVerdict(res, Status::IterLimit);
     }

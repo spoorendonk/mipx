@@ -1514,17 +1514,43 @@ TEST_CASE("Regression #243: a row repaired exactly to its bound is not a Farkas 
          {6, 1, -75000000}}));
 }
 
-TEST_CASE("Regression #249: a warm verdict that failed its check is not returned on a limit",
+// Solve `lp` cold, add the cut row, and re-solve warm under every iteration
+// limit below the total the full re-solve takes. The warm run reaches a
+// verdict after `warm_iters` iterations that fails the solver's own check,
+// so solve() starts cold. With a limit past `warm_iters`, the cold run stops
+// on it, and the warm verdict used to come back with the restored warm
+// point; it must come back as IterLimit (#249). A limit of `warm_iters` or
+// less stops the warm run itself: the loop finds a verdict only with budget
+// left, so solve()'s no-budget path is reached through the time limit
+// alone. With the full budget the cold verdict is returned, unchecked, as a
+// first cold solve's is.
+void requireNoVerdictOnLimit(const LpProblem& lp, const std::vector<Index>& idx,
+                             const std::vector<Real>& vals, Real lo, Real up, Int warm_iters,
+                             Status full_status) {
+    const std::vector<Index> starts{0};
+    const std::vector<Real> los{lo};
+    const std::vector<Real> ups{up};
+    auto resolve = [&](Int limit) {
+        DualSimplexSolver solver;
+        REQUIRE(solveLiteral(solver, lp).status == Status::Optimal);
+        solver.addRows(starts, idx, vals, los, ups);
+        solver.setIterationLimit(limit);
+        return solver.solve();
+    };
+    const LpResult full = resolve(10000);
+    REQUIRE(full.status == full_status);
+    const Int total = full.iterations;
+    REQUIRE(total > warm_iters + 1);
+    for (Int limit = 1; limit < total; ++limit) {
+        INFO("iteration limit " << limit << " of " << total);
+        CHECK(resolve(limit).status == Status::IterLimit);
+    }
+}
+
+TEST_CASE("Regression #249: a warm Optimal that failed its check is not returned on a limit",
           "[lp_validity]") {
-    // Audit cuts seed 166, variant 5, round 0. After the cut the warm
-    // re-solve reaches Optimal in two iterations, but that optimum fails the
-    // solver's own check, so it starts cold, which takes six more. With a
-    // limit between the two, the cold run stopped on it and the warm verdict
-    // came back with the restored warm point. It must come back as IterLimit.
-    // (A limit of two or less stops the warm run itself: the loop finds a
-    // verdict only with budget left, so the no-budget path of solve() is
-    // reached through the time limit alone.) With the full budget the cold
-    // verdict is returned, unchecked, as a first cold solve's is.
+    // Audit cuts seed 166, variant 5, round 0: the warm re-solve's Optimal
+    // after two iterations fails the check; the cold run takes six more.
     const LpProblem lp = literalLp(
         Sense::Maximize, 6.5,
         {0.00075781250000000002, -0.0026718750000000002, -637.5, 1.5625, -6234.375, 25, -0.0078125},
@@ -1552,29 +1578,40 @@ TEST_CASE("Regression #249: a warm verdict that failed its check is not returned
          {3, 4, -2625},
          {3, 5, -500},
          {3, 6, 0.022499999999999999}});
-    const std::vector<Index> starts{0};
-    const std::vector<Index> idx{1, 2, 3, 6};
-    const std::vector<Real> vals{0.02375, 3.25, -0.0016250000000000001, 2500};
-    const std::vector<Real> lo{-kInf};
-    const std::vector<Real> up{114258.4956576374};
-    auto resolve = [&](Int limit) {
-        DualSimplexSolver solver;
-        REQUIRE(solveLiteral(solver, lp).status == Status::Optimal);
-        solver.addRows(starts, idx, vals, lo, up);
-        solver.setIterationLimit(limit);
-        const LpResult res = solver.solve();
-        return std::pair{res, solver.getDualRay().empty()};
-    };
-    const LpResult full = resolve(10000).first;
-    REQUIRE(full.status == Status::Optimal);
-    const Int total = full.iterations;
-    REQUIRE(total > 2);
-    for (Int limit = 1; limit < total; ++limit) {
-        const auto [res, no_ray] = resolve(limit);
-        INFO("iteration limit " << limit << " of " << total);
-        CHECK(res.status == Status::IterLimit);
-        CHECK(no_ray);
-    }
+    requireNoVerdictOnLimit(lp, {1, 2, 3, 6}, {0.02375, 3.25, -0.0016250000000000001, 2500}, -kInf,
+                            114258.4956576374, 2, Status::Optimal);
+}
+
+TEST_CASE("Regression #249: a warm Infeasible that failed its check is not returned on a limit",
+          "[lp_validity]") {
+    // Audit cuts seed 5527, variant 3, round 0: the warm re-solve's
+    // Infeasible after two iterations has a ray that fails the Farkas
+    // contract, and wrongly so: the cold run finds the optimum four
+    // iterations later. A limit between the two used to return Infeasible.
+    const LpProblem lp =
+        literalLp(Sense::Minimize, -0.125,
+                  {-3281.25, 0.0070000000000000001, -3562.5, 0.016875000000000001, -4.03125},
+                  {-kInf, -250, -kInf, -250, -1.5}, {kInf, -250, kInf, 175, 8.25},
+                  {-2609.375, 0.013359375, -kInf, -0.001475, 137.34375},
+                  {kInf, 0.013359375, 48.28125, kInf, 147.34375},
+                  {{0, 3, -33.75},
+                   {1, 0, 4.625},
+                   {1, 1, -1.6250000000000001e-06},
+                   {1, 3, -3.0000000000000001e-05},
+                   {1, 4, 0.004875},
+                   {2, 0, -7500},
+                   {2, 1, -0.032500000000000001},
+                   {2, 2, 23750},
+                   {3, 1, 3.8750000000000005e-07},
+                   {3, 2, -0.33750000000000002},
+                   {3, 3, -4.8750000000000008e-06},
+                   {3, 4, -0.00022500000000000002},
+                   {4, 0, 33750},
+                   {4, 1, -0.037499999999999999},
+                   {4, 3, -0.375},
+                   {4, 4, 43.75}});
+    requireNoVerdictOnLimit(lp, {0, 1, 2, 4}, {-0.17500000000000002, 2500, 0.0002875, -125}, -kInf,
+                            -638300.83653284155, 2, Status::Optimal);
 }
 
 TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
