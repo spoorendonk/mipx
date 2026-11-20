@@ -676,39 +676,46 @@ int main(int argc, char* argv[]) {
                     stats.cols_examined);
             }
 
-            auto t0 = std::chrono::steady_clock::now();
-            mipx::LpResult result;
-            std::vector<mipx::Real> primals;
-            bool used_gpu_backend = false;
-            std::string lp_error_message;
-            if (lp_mode == LpMode::Barrier) {
-                mipx::BarrierSolver solver;
-                mipx::BarrierOptions bopts;
-                bopts.verbose = verbose;
-                bopts.algorithm = barrier_gpu ? mipx::BarrierAlgorithm::Auto
-                                              : mipx::BarrierAlgorithm::CpuCholesky;
-                bopts.ordering = barrier_ordering;
-                solver.setOptions(bopts);
-                solver.load(working);
-                result = solver.solve();
-                primals = solver.getPrimalValues();
-                used_gpu_backend = solver.usedGpu();
-                lp_error_message = solver.lastError();
-            } else if (lp_mode == LpMode::Pdlp) {
-                mipx::PdlpSolver solver;
-                mipx::PdlpOptions popts;
-                popts.verbose = verbose;
-                popts.use_gpu = barrier_gpu;
-                popts.gpu_min_rows = barrier_gpu_min_rows;
-                popts.gpu_min_nnz = barrier_gpu_min_nnz;
-                popts.max_solve_seconds = time_limit;
-                popts.optimality_norm = pdlp_optimality_norm;
-                solver.setOptions(popts);
-                solver.load(working);
-                result = solver.solve();
-                primals = solver.getPrimalValues();
-                used_gpu_backend = solver.usedGpu();
-            } else {
+            struct LpRun {
+                mipx::LpResult result;
+                std::vector<mipx::Real> primals;
+                bool used_gpu = false;
+                std::string error;
+            };
+            // One solve of `model` on the chosen backend; a negative limit is none.
+            auto solveLp = [&](const mipx::LpProblem& model, double seconds) {
+                LpRun run;
+                if (lp_mode == LpMode::Barrier) {
+                    mipx::BarrierSolver solver;
+                    mipx::BarrierOptions bopts;
+                    bopts.verbose = verbose;
+                    bopts.algorithm = barrier_gpu ? mipx::BarrierAlgorithm::Auto
+                                                  : mipx::BarrierAlgorithm::CpuCholesky;
+                    bopts.ordering = barrier_ordering;
+                    solver.setOptions(bopts);
+                    solver.load(model);
+                    run.result = solver.solve();
+                    run.primals = solver.getPrimalValues();
+                    run.used_gpu = solver.usedGpu();
+                    run.error = solver.lastError();
+                    return run;
+                }
+                if (lp_mode == LpMode::Pdlp) {
+                    mipx::PdlpSolver solver;
+                    mipx::PdlpOptions popts;
+                    popts.verbose = verbose;
+                    popts.use_gpu = barrier_gpu;
+                    popts.gpu_min_rows = barrier_gpu_min_rows;
+                    popts.gpu_min_nnz = barrier_gpu_min_nnz;
+                    popts.max_solve_seconds = seconds;
+                    popts.optimality_norm = pdlp_optimality_norm;
+                    solver.setOptions(popts);
+                    solver.load(model);
+                    run.result = solver.solve();
+                    run.primals = solver.getPrimalValues();
+                    run.used_gpu = solver.usedGpu();
+                    return run;
+                }
                 mipx::DualSimplexSolver solver;
                 solver.setVerbose(verbose);
                 mipx::DualSimplexOptions dopts = solver.getOptions();
@@ -730,32 +737,63 @@ int main(int argc, char* argv[]) {
                 if (!std::isnan(dual_lu_ft_drop_tolerance)) {
                     dopts.lu_ft_drop_tolerance = dual_lu_ft_drop_tolerance;
                 }
-                if (time_limit >= 0.0) {
-                    dopts.max_solve_seconds = time_limit;
+                if (seconds >= 0.0) {
+                    dopts.max_solve_seconds = seconds;
                 }
                 solver.setOptions(dopts);
-                solver.load(working);
-                result = solver.solve();
-                primals = solver.getPrimalValues();
+                solver.load(model);
+                run.result = solver.solve();
+                run.primals = solver.getPrimalValues();
+                return run;
+            };
+
+            auto t0 = std::chrono::steady_clock::now();
+            auto secondsSince = [](std::chrono::steady_clock::time_point start) {
+                return std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+                    .count();
+            };
+            LpRun run = solveLp(working, time_limit);
+
+            // Presolve holds its reductions to its own tolerances, so the
+            // postsolved point can miss the model as loaded (#244). Check it
+            // there, as the MIP path does; on a miss the model is solved again
+            // without presolve in the time left, and that answer stands as it
+            // would with --no-presolve (#257).
+            double obj = run.result.objective;
+            if (did_presolve && run.result.status == mipx::Status::Optimal) {
+                auto postsolved = presolver.postsolve(run.primals);
+                if (mipx::pointHoldsModel(lp, postsolved)) {
+                    obj = lp.obj_offset;
+                    for (mipx::Index j = 0; j < lp.num_cols; ++j) {
+                        obj += lp.obj[j] * postsolved[j];
+                    }
+                } else {
+                    std::fflush(stdout);
+                    log.log(
+                        "Postsolved point misses the model as loaded; "
+                        "solving again without presolve\n");
+                    const mipx::Int iterations = run.result.iterations;
+                    const double work_units = run.result.work_units;
+                    const double time_left =
+                        time_limit >= 0.0 ? time_limit - secondsSince(t0) : -1.0;
+                    if (time_limit >= 0.0 && time_left <= 0.0) {
+                        run.result.status = mipx::Status::TimeLimit;
+                    } else {
+                        run = solveLp(lp, time_left);
+                        run.result.iterations += iterations;
+                        run.result.work_units += work_units;
+                        obj = run.result.objective;
+                    }
+                }
             }
-            auto t1 = std::chrono::steady_clock::now();
-            double solve_seconds = std::chrono::duration<double>(t1 - t0).count();
+            const mipx::LpResult& result = run.result;
+            const double solve_seconds = secondsSince(t0);
 
             if (lp_mode == LpMode::Barrier && (verbose || print_backend)) {
-                log.log("Barrier backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
+                log.log("Barrier backend: %s\n", run.used_gpu ? "GPU" : "CPU");
             }
             if (lp_mode == LpMode::Pdlp && (verbose || print_backend)) {
-                log.log("PDLP backend: %s\n", used_gpu_backend ? "GPU" : "CPU");
-            }
-
-            // Postsolve if needed.
-            double obj = result.objective;
-            if (did_presolve && result.status == mipx::Status::Optimal) {
-                auto postsolved = presolver.postsolve(primals);
-                obj = lp.obj_offset;
-                for (mipx::Index j = 0; j < lp.num_cols; ++j) {
-                    obj += lp.obj[j] * postsolved[j];
-                }
+                log.log("PDLP backend: %s\n", run.used_gpu ? "GPU" : "CPU");
             }
 
             std::fflush(stdout);  // flush LP solver's printf output before Logger write()
@@ -785,8 +823,8 @@ int main(int argc, char* argv[]) {
                 default:
                     status_text = "Error";
                     log.log("Status: Error\n");
-                    if (!lp_error_message.empty()) {
-                        log.log("Error detail: %s\n", lp_error_message.c_str());
+                    if (!run.error.empty()) {
+                        log.log("Error detail: %s\n", run.error.c_str());
                     }
                     break;
             }

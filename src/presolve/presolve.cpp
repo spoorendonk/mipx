@@ -1,5 +1,6 @@
 #include "mipx/presolve.h"
 
+#include "../heuristics/common.h"
 #include "mipx/implication_graph.h"
 #include "mipx/probing.h"
 #include "mipx/variable_bounds.h"
@@ -2686,6 +2687,11 @@ LpProblem Presolver::buildReducedProblem(const LpProblem& lp, const std::vector<
 
 std::vector<Real> Presolver::postsolve(const std::vector<Real>& presolved_solution) const {
     return postsolve_stack_.postsolve(presolved_solution, col_mapping_, orig_num_cols_);
+}
+
+bool pointHoldsModel(const LpProblem& model, std::span<const Real> x) {
+    return static_cast<Index>(x.size()) == model.num_cols &&
+           heuristic_detail::isFeasiblePoint(model, x);
 }
 
 }  // namespace mipx

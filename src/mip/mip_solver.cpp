@@ -1799,8 +1799,7 @@ bool MipSolver::isFeasibleMip(const std::vector<Real>& primals) const {
 }
 
 bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
-    return static_cast<Index>(x.size()) == problem_.num_cols &&
-           heuristic_detail::isFeasiblePoint(problem_, x);
+    return pointHoldsModel(problem_, x);
 }
 
 // The node LP holds rows and bounds to 1e-7 in its scaled space, which on a
@@ -1819,8 +1818,7 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
                                                               std::span<const Real> x,
                                                               Real node_obj, double& work_units) {
     const auto acceptable = [&model](std::span<const Real> point) {
-        return static_cast<Index>(point.size()) == model.num_cols &&
-               heuristic_detail::isFeasiblePoint(model, point);
+        return pointHoldsModel(model, point);
     };
     if (acceptable(x)) {
         return HeuristicSolution{{x.begin(), x.end()}, node_obj};

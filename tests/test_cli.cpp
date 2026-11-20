@@ -163,6 +163,23 @@ TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]
     CHECK(run.mentions("Objective: none"));
 }
 
+TEST_CASE("CLI: an LP whose postsolved point misses a row is solved again", "[cli]") {
+    // Issue #257: the LP path postsolved and printed Optimal unchecked. The
+    // model's doubleton aggregation leaves xe = -5e-5, clamped to 0, so the
+    // postsolved point misses the row by 5e-5. It must be caught and the
+    // model solved again without presolve, on every LP backend.
+    for (const char* backend : {"--dual", "--barrier", "--pdlp"}) {
+        INFO(backend);
+        const auto run = runSolver("'" + testDataDir() + "/presolve_misses_row_lp.lp' " + backend +
+                                   " --no-gpu --quiet");
+
+        CHECK(run.exit_code == 0);
+        CHECK(run.mentions("Postsolved point misses the model as loaded"));
+        CHECK(run.mentions("Status: Optimal"));
+        CHECK(run.mentions("Objective: 0.0000000000e+00"));
+    }
+}
+
 TEST_CASE("CLI: a MIP stopped before any incumbent reports no objective", "[cli]") {
     // Issue #224: MipResult::objective defaults to 0, and the MIP summary
     // printed it whether or not a solution existed. The model has no integer

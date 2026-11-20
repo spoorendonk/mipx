@@ -17,9 +17,9 @@ says what each one means, and records where each one is used (#236).
 | Integrality | 1e-6, absolute | A value is integral when it is within 1e-6 of an integer. | `MipSolver::kIntTol`, `isIntegral` |
 | Bound crossing | 1e-8, absolute | A column whose lower bound passes its upper by at most 1e-8 is not empty; keep the swapped (or clamped) interval. | `DomainPropagator::kTol`, `keepCrossingWithinTolerance` |
 | Row slack | 1e-8 times the row's magnitude | A row is violated only past 1e-8 times the largest of 1, its finite sides and its finite activity terms. Bounds derived from a row take the same slack. | `DomainPropagator::propagateRow`, `Presolver::rowTol` |
-| Integer bound rounding | 1e-6, or `1e-8 / \|a\|` when larger; 1e-8 (or `1e-8 / \|a\|`) where presolve drops the row | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Through a coefficient `a` the division scales the sums' rounding by `1/\|a\|`. A row presolve drops must still hold at the rounded bound, so it rounds at no more than its own tolerance. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
+| Integer bound rounding | 1e-6 in node propagation; in presolve 1e-6, or `1e-8 / \|a\|` when larger, and 1e-8 (or `1e-8 / \|a\|`) where it drops the row | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Node propagation (the domain and objective propagators) rounds at a plain 1e-6, after adding the row slack to the bound's numerator. Presolve divides by the coefficient `a` without that slack, which scales the sums' rounding by `1/\|a\|`, so it takes the larger of the two. A row presolve drops must still hold at the rounded bound, so there it rounds at no more than its own tolerance. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
 | Prune | 1e-6, absolute | A node is pruned when its bound is within 1e-6 of the incumbent. | `ObjectivePropagator::kPruneTol`, the node queue |
-| Improvement | 1e-6, absolute | The solution pool keeps a solution only when it improves by more than 1e-6. The tree takes any strict improvement as its incumbent. | `SolutionPool::better` |
+| Improvement | 1e-6, absolute; 1e-9 in LP-free and LP-light search | The solution pool keeps a solution only when it improves by more than 1e-6. The tree takes any strict improvement as its incumbent. The LP-free and LP-light heuristics (feasibility jump, FPR, local MIP, diving) take a candidate when it beats their incumbent by more than 1e-9. | `SolutionPool::better`, `improvesObjective` in `mip_solver.cpp` |
 
 ## The rule
 
@@ -77,7 +77,14 @@ answers, and changing them alters behaviour on every model:
   row dropped as redundant while tight at its bounds turns 1.3e-8 of bound
   slack into 0.05 through a coefficient of 4e6 (#244). The final point is
   therefore checked against the model as loaded, by the same test as every
-  incumbent (`MipSolver::solveMinimization`). A point that fails is
+  incumbent (`pointHoldsModel`), wherever `Presolver` runs ahead of a solve:
+  `MipSolver::solveMinimization`, which also solves models without integers,
+  and the LP path of `mipx-solve` (#257). There a point that fails is not
+  repaired: the model is solved again without presolve on the same backend
+  in the time left, and that answer stands as it would with `--no-presolve`;
+  with no time left the status is `Time limit`. The barrier's own presolve
+  (`BarrierPresolver`) is not covered; its answer holds what the barrier
+  holds. In `MipSolver` a point that fails is
   re-solved with its integers fixed, cold. A MIP's repaired point keeps an
   `Optimal` status only within the gap tolerance of the bound, since its
   integers were optimal only for the reduced model. Failing that, the model

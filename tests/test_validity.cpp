@@ -2003,6 +2003,18 @@ TEST_CASE("Regression #244: presolve keeps a ranged row of an LP", "[validity]")
     requirePresolveAgrees(lp);
 }
 
+TEST_CASE("Regression #257: an LP's postsolved point is checked against the model", "[validity]") {
+    // Doubleton aggregation eliminates x0 = 10000 - 10000 x1 and skips the
+    // projection x1 <= 1, within 1e-8 of x1's own bound. Presolved, x1 sits at
+    // 1 + 5e-9 and postsolve clamps x0 = -5e-5 to 0: the row misses by 5e-5.
+    // tests/data/presolve_misses_row_lp.lp drives the same model through the
+    // CLI.
+    constexpr auto C = VarType::Continuous;
+    const LpProblem lp = makeModel(Sense::Minimize, {1, 0}, {0, 0}, {10000, 1.000000005}, {C, C},
+                                   {{1, 10000}}, {10000}, {10000});
+    requirePresolveAgrees(lp);
+}
+
 TEST_CASE("Regression #244: presolve keeps the rows of an all-integer MIP", "[validity]") {
     constexpr auto I = VarType::Integer;
     LpProblem lp =

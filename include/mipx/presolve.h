@@ -4,6 +4,7 @@
 #include "mipx/lp_problem.h"
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -295,5 +296,12 @@ private:
 
     static constexpr Real kTol = 1e-8;
 };
+
+/// Whether `x` holds `model`: every bound and row to 1e-6, and integral where
+/// a column's type says so. This is the test every incumbent passes (#240).
+/// Presolve holds its reductions to its own tolerances, so a postsolved point
+/// can miss the model as loaded by more (#244); check it here before calling
+/// it an answer (#257).
+[[nodiscard]] bool pointHoldsModel(const LpProblem& model, std::span<const Real> x);
 
 }  // namespace mipx
