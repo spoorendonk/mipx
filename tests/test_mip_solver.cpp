@@ -3,6 +3,7 @@
 #include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
@@ -762,6 +763,59 @@ TEST_CASE("MipSolver: node limit", "[mip]") {
 
     // With node limit 1, we process root but can't explore children.
     CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+}
+
+TEST_CASE("MipSolver: a node dropped without an LP verdict leaves the search unproven",
+          "[mip][issue283]") {
+    // Presolve and cuts would round x + y <= 4.5 to the integral optimum at
+    // the root; without them the root LP (-9) must branch to reach -8.
+    // Each thread mode reaches nodes through its own caller of processNode.
+    const Int threads = GENERATE(1, 2);
+    const ParallelMode mode = GENERATE(ParallelMode::Deterministic, ParallelMode::Opportunistic);
+    CAPTURE(threads, static_cast<int>(mode));
+    auto lp = buildBranchingMip();
+    auto configure = [&](MipSolver& solver) {
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(false);
+        solver.setNumThreads(threads);
+        solver.setParallelMode(mode);
+    };
+
+    SECTION("node LPs stopped on their iteration limit are not pruned as proven") {
+        MipSolver solver;
+        configure(solver);
+        // No pivot allowed: every child LP, warm and then cold, ends on
+        // IterLimit, so no node below the root gets a verdict.
+        solver.setNodeLpIterationLimit(0);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        const auto& stats = solver.getLpStats();
+        REQUIRE(stats.nodes_dropped_no_verdict > 0);
+        CHECK(stats.node_lp_no_verdict >= stats.nodes_dropped_no_verdict);
+        CHECK(stats.node_lp_no_verdict_recovered == 0);
+        // The dropped subtrees hold the optimum -8 the root bound -9 allows:
+        // the result may not claim a proof, and its bound must admit them.
+        CHECK(result.status != Status::Optimal);
+        CHECK(result.status != Status::Infeasible);
+        CHECK(result.best_bound <= -9.0 + 1e-6);
+        if (!result.solution.empty()) {
+            CHECK(result.objective >= -8.0 - 1e-6);
+            CHECK(result.gap > 0.0);
+        }
+    }
+
+    SECTION("without the limit the same search proves the optimum") {
+        MipSolver solver;
+        configure(solver);
+        solver.load(lp);
+        const auto result = solver.solve();
+
+        CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-8.0, 1e-6));
+    }
 }
 
 TEST_CASE("MipSolver: root heuristics provide incumbent before branching", "[mip]") {

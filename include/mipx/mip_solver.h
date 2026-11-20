@@ -78,6 +78,16 @@ struct MipLpStats {
     Int root_race_dual_wins = 0;
     Int root_race_barrier_wins = 0;
     Int root_race_pdlp_wins = 0;
+    /// Node LPs that ended without a verdict (neither Optimal nor
+    /// Infeasible: Error, a limit, or Unbounded) and were re-solved cold.
+    Int node_lp_no_verdict = 0;
+    /// Of those, the ones the cold re-solve gave a verdict.
+    Int node_lp_no_verdict_recovered = 0;
+    /// Nodes left unexplored because no re-solve gave a verdict (#283).
+    Int nodes_dropped_no_verdict = 0;
+    /// The least bound among those nodes; +inf when none was dropped. The
+    /// search counts as complete only while this is not below the incumbent.
+    Real dropped_node_bound = kInf;
 };
 
 struct MipCutStats {
@@ -390,6 +400,12 @@ public:
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.
     void setTreePseudocostsEnabled(bool enabled) { tree_pseudocosts_enabled_ = enabled; }
+    /// Cap the dual simplex iterations of each node LP solve; negative (the
+    /// default) leaves the LP's own limit. A node whose LP stops on the cap
+    /// is dropped unexplored, and the result then reports it (#283): its
+    /// bound enters best_bound and the status is not Optimal unless the gap
+    /// closes. Mainly for tests that need a node LP without a verdict.
+    void setNodeLpIterationLimit(Int limit) { node_lp_iter_limit_ = limit; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
     void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
@@ -606,6 +622,13 @@ private:
                      NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                      Int strong_branch_budget_override = -1,
                      std::optional<TreePseudocostSample>* deferred_pseudocost = nullptr);
+    /// Re-solve from a cold basis a node LP that ended without a verdict;
+    /// returns `first` unchanged when it has one (#283).
+    LpResult resolveNodeLpWithoutVerdict(DualSimplexSolver& lp, const LpResult& first,
+                                         Int& node_iters_out, double& node_work_out);
+    /// Record a node left unexplored for want of an LP verdict, with a valid
+    /// lower bound for its subtree (#283).
+    void recordNodeDroppedWithoutVerdict(Real bound);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);
@@ -764,6 +787,9 @@ private:
     std::mutex branching_mutex_;
     mutable std::mutex tree_presolve_stats_mutex_;
     mutable std::mutex rc_fixing_stats_mutex_;
+    // Guards the no-verdict fields of lp_stats_, which node workers update.
+    std::mutex no_verdict_mutex_;
+    Int node_lp_iter_limit_ = -1;
     SymmetryManager symmetry_manager_;
     bool symmetry_enabled_ = true;
 

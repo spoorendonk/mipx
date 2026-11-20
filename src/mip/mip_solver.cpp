@@ -1989,6 +1989,34 @@ bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real
     return true;
 }
 
+// A node LP that ends on Error, a limit, or Unbounded (the root LP was
+// bounded, so a node's cannot be) proves nothing about the node. A warm
+// start may have led it there, so it gets one cold start, which takes
+// another path, before the caller gives the node up (#283).
+LpResult MipSolver::resolveNodeLpWithoutVerdict(DualSimplexSolver& lp, const LpResult& first,
+                                                Int& node_iters_out, double& node_work_out) {
+    if (first.status == Status::Optimal || first.status == Status::Infeasible) {
+        return first;
+    }
+    lp.clearBasis();
+    LpResult cold = lp.solve();
+    node_iters_out += cold.iterations;
+    node_work_out += cold.work_units;
+    const bool recovered = cold.status == Status::Optimal || cold.status == Status::Infeasible;
+    std::lock_guard<std::mutex> lock(no_verdict_mutex_);
+    ++lp_stats_.node_lp_no_verdict;
+    if (recovered) {
+        ++lp_stats_.node_lp_no_verdict_recovered;
+    }
+    return cold;
+}
+
+void MipSolver::recordNodeDroppedWithoutVerdict(Real bound) {
+    std::lock_guard<std::mutex> lock(no_verdict_mutex_);
+    ++lp_stats_.nodes_dropped_no_verdict;
+    lp_stats_.dropped_node_bound = std::min(lp_stats_.dropped_node_bound, bound);
+}
+
 bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent_snapshot,
                             std::vector<BnbNode>& children_out, Real& node_obj_out,
                             std::vector<Real>& node_primals_out, Int& node_iters_out,
@@ -2011,6 +2039,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     std::vector<Index> temp_local_rows;
     ScopedRowRemoval local_row_guard(lp, temp_local_rows);
+    struct RestoreIterationLimit {
+        DualSimplexSolver& lp;
+        Int limit;
+        ~RestoreIterationLimit() { lp.setIterationLimit(limit); }
+    } restore_iter_limit{lp, lp.getIterationLimit()};
+    if (node_lp_iter_limit_ >= 0) {
+        lp.setIterationLimit(node_lp_iter_limit_);
+    }
 
     // Skip if pruned by bound (might have changed since pop).
     if (incumbent_snapshot < kInf && node.lp_bound >= incumbent_snapshot - 1e-6) {
@@ -2214,10 +2250,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // Solve node LP.
     t0 = std::chrono::steady_clock::now();
     auto node_result = lp.solve();
-    node_stats.lp_solve_seconds +=
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     node_iters_out = node_result.iterations;
     node_work_out += node_result.work_units;
+    node_result = resolveNodeLpWithoutVerdict(lp, node_result, node_iters_out, node_work_out);
+    node_stats.lp_solve_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     // The gain this LP shows over its parent is the pseudocost signal for the
     // branching that created the node; recording it is what lets variables
@@ -2246,6 +2283,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     if (node_result.status != Status::Optimal) {
+        // No verdict even cold: the subtree may hold the optimum, so the
+        // search is not complete without it (#283).
+        recordNodeDroppedWithoutVerdict(node.lp_bound);
         return false;
     }
 
@@ -2504,9 +2544,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             const Int total_tight = activity_tight + rc_tight;
             if (total_tight > 0) {
                 const Real prev_obj = node_obj_out;
-                const auto refresh = lp.solve();
+                auto refresh = lp.solve();
                 node_iters_out += refresh.iterations;
                 node_work_out += refresh.work_units;
+                refresh = resolveNodeLpWithoutVerdict(lp, refresh, node_iters_out, node_work_out);
                 ++tree_presolve_delta.lp_resolves;
 
                 if (refresh.status == Status::Infeasible) {
@@ -2518,7 +2559,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     return false;
                 }
                 if (refresh.status != Status::Optimal) {
+                    // The node's LP optimum before the tightening still
+                    // bounds its subtree (#283).
                     flushTreePresolveStats();
+                    recordNodeDroppedWithoutVerdict(prev_obj);
                     return false;
                 }
                 node_obj_out = refresh.objective;
@@ -5860,30 +5904,52 @@ MipResult MipSolver::solveMinimizationOnce() {
     result.nodes = nodes_explored;
     result.time_seconds = elapsed();
 
+    // A node dropped for want of an LP verdict is unexplored, not pruned: its
+    // bound holds the result's bound down, and an empty queue no longer
+    // proves the search complete (#283). One the final incumbent would have
+    // pruned by bound anyway leaves the search complete.
+    const Real dropped_bound = lp_stats_.dropped_node_bound;
+    const bool dropped_open = dropped_bound < kInf && dropped_bound < incumbent - 1e-6;
+    if (dropped_open && verbose_) {
+        log_.log("Search incomplete: %d node(s) dropped without an LP verdict, bound %.6g\n",
+                 lp_stats_.nodes_dropped_no_verdict, log_obj_sign_ * dropped_bound);
+    }
+    const bool limit_hit = !queue.empty();
+    const Status limit_status =
+        nodes_explored >= node_limit_ ? Status::NodeLimit : Status::TimeLimit;
     if (incumbent < kInf) {
         result.objective = incumbent;
         result.solution = std::move(best_solution);
         Real final_bound = queue.empty() ? incumbent : queue.bestBound();
+        if (dropped_open) {
+            final_bound = std::min(final_bound, dropped_bound);
+        }
         result.best_bound = final_bound;
         result.gap = computeGap(incumbent, final_bound);
-        result.gap_limit_reached = !queue.empty() && result.gap < gap_tol_;
+        const bool complete = !limit_hit && !dropped_open;
+        result.gap_limit_reached = !complete && result.gap < gap_tol_;
 
-        if (queue.empty() || result.gap_limit_reached) {
+        if (complete || result.gap_limit_reached) {
             result.status = Status::Optimal;
-        } else if (nodes_explored >= node_limit_) {
-            result.status = Status::NodeLimit;
+        } else if (limit_hit) {
+            result.status = limit_status;
         } else {
-            result.status = Status::TimeLimit;
+            // The tree ran out with the gap open on dropped nodes: no limit
+            // stopped it, and no proof came of it.
+            result.status = Status::Error;
         }
     } else {
-        if (queue.empty()) {
-            result.status = Status::Infeasible;
-        } else if (nodes_explored >= node_limit_) {
-            result.status = Status::NodeLimit;
+        if (limit_hit) {
+            result.status = limit_status;
+        } else if (dropped_open) {
+            result.status = Status::Error;
         } else {
-            result.status = Status::TimeLimit;
+            result.status = Status::Infeasible;
         }
         result.best_bound = queue.empty() ? kInf : queue.bestBound();
+        if (dropped_open) {
+            result.best_bound = std::min(result.best_bound, dropped_bound);
+        }
     }
 
     applyPostsolve(result);

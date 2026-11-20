@@ -243,6 +243,9 @@ public:
     void setColObjective(Index col, Real cost) override;
 
     void setIterationLimit(Int limit) { iter_limit_ = limit; }
+    /// Forget the current basis, so the next solve() starts cold from the
+    /// crash basis, as a first solve does.
+    void clearBasis() { dropBasis(); }
     [[nodiscard]] Int getIterationLimit() const { return iter_limit_; }
     void getColBounds(Index col, Real& lower, Real& upper) const;
     void setVerbose(bool v) { verbose_ = v; }
