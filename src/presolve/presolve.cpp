@@ -2694,4 +2694,26 @@ bool pointHoldsModel(const LpProblem& model, std::span<const Real> x) {
            heuristic_detail::isFeasiblePoint(model, x);
 }
 
+Real pointViolation(const LpProblem& model, std::span<const Real> x) {
+    if (static_cast<Index>(x.size()) != model.num_cols) {
+        return kInf;
+    }
+    Real worst = 0.0;
+    for (Index j = 0; j < model.num_cols; ++j) {
+        if (!std::isfinite(x[j])) {
+            return kInf;
+        }
+        worst = std::max({worst, model.col_lower[j] - x[j], x[j] - model.col_upper[j]});
+    }
+    for (Index i = 0; i < model.num_rows; ++i) {
+        const auto row = model.matrix.row(i);
+        Real activity = 0.0;
+        for (Index k = 0; k < row.size(); ++k) {
+            activity += row.values[k] * x[row.indices[k]];
+        }
+        worst = std::max({worst, model.row_lower[i] - activity, activity - model.row_upper[i]});
+    }
+    return worst;
+}
+
 }  // namespace mipx

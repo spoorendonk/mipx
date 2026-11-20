@@ -2003,7 +2003,7 @@ TEST_CASE("Regression #244: presolve keeps a ranged row of an LP", "[validity]")
     requirePresolveAgrees(lp);
 }
 
-TEST_CASE("Regression #257: an LP's postsolved point is checked against the model", "[validity]") {
+TEST_CASE("Regression #257: MipSolver checks an LP's postsolved point", "[validity]") {
     // Doubleton aggregation eliminates x0 = 10000 - 10000 x1 and skips the
     // projection x1 <= 1, within 1e-8 of x1's own bound. Presolved, x1 sits at
     // 1 + 5e-9 and postsolve clamps x0 = -5e-5 to 0: the row misses by 5e-5.
@@ -2013,6 +2013,14 @@ TEST_CASE("Regression #257: an LP's postsolved point is checked against the mode
     const LpProblem lp = makeModel(Sense::Minimize, {1, 0}, {0, 0}, {10000, 1.000000005}, {C, C},
                                    {{1, 10000}}, {10000}, {10000});
     requirePresolveAgrees(lp);
+
+    // The measure the CLI compares to tell such a miss from the LP's own.
+    const std::vector<Real> clamped = {0.0, 1.000000005};
+    CHECK_FALSE(pointHoldsModel(lp, clamped));
+    CHECK(std::abs(pointViolation(lp, clamped) - 5e-5) <= 1e-9);
+    CHECK(pointViolation(lp, std::vector<Real>{0.0, 1.0}) == 0.0);
+    CHECK(std::abs(pointViolation(lp, std::vector<Real>{-1e-3, 1.0}) - 1e-3) <= 1e-9);
+    CHECK(pointViolation(lp, std::vector<Real>{0.0}) == kInf);
 }
 
 TEST_CASE("Regression #244: presolve keeps the rows of an all-integer MIP", "[validity]") {

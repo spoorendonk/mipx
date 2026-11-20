@@ -304,4 +304,10 @@ private:
 /// it an answer (#257).
 [[nodiscard]] bool pointHoldsModel(const LpProblem& model, std::span<const Real> x);
 
+/// The largest amount by which `x` misses a bound or row of `model`, in model
+/// units; infinite when `x` has the wrong size or a non-finite entry.
+/// Integrality is not measured. Comparing it on the reduced and the
+/// postsolved point tells a miss presolve added from one the solver left.
+[[nodiscard]] Real pointViolation(const LpProblem& model, std::span<const Real> x);
+
 }  // namespace mipx

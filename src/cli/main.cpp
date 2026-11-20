@@ -756,13 +756,22 @@ int main(int argc, char* argv[]) {
 
             // Presolve holds its reductions to its own tolerances, so the
             // postsolved point can miss the model as loaded (#244). Check it
-            // there, as the MIP path does; on a miss the model is solved again
-            // without presolve in the time left, and that answer stands as it
-            // would with --no-presolve (#257).
+            // there, as the MIP path does (#257). A backend's Optimal holds
+            // rows only to its own tolerance, which can be looser than the
+            // check's 1e-6 (PDLP's is relative), and solving again without
+            // presolve would give a point no better. So only a miss presolve
+            // added, past the reduced point's own by more than 1e-6, sends the
+            // model to be solved again without presolve in the time left; that
+            // answer stands as it would with --no-presolve.
             double obj = run.result.objective;
             if (did_presolve && run.result.status == mipx::Status::Optimal) {
                 auto postsolved = presolver.postsolve(run.primals);
-                if (mipx::pointHoldsModel(lp, postsolved)) {
+                const mipx::Real loaded_miss = mipx::pointHoldsModel(lp, postsolved)
+                                                   ? 0.0
+                                                   : mipx::pointViolation(lp, postsolved);
+                const mipx::Real reduced_miss =
+                    loaded_miss > 0.0 ? mipx::pointViolation(working, run.primals) : 0.0;
+                if (loaded_miss <= reduced_miss + 1e-6) {
                     obj = lp.obj_offset;
                     for (mipx::Index j = 0; j < lp.num_cols; ++j) {
                         obj += lp.obj[j] * postsolved[j];
@@ -770,8 +779,9 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::fflush(stdout);
                     log.log(
-                        "Postsolved point misses the model as loaded; "
-                        "solving again without presolve\n");
+                        "Postsolved point misses the model as loaded by %.3g (the presolved "
+                        "point its model by %.3g); solving again without presolve\n",
+                        loaded_miss, reduced_miss);
                     const mipx::Int iterations = run.result.iterations;
                     const double work_units = run.result.work_units;
                     const double time_left =

@@ -17,7 +17,7 @@ says what each one means, and records where each one is used (#236).
 | Integrality | 1e-6, absolute | A value is integral when it is within 1e-6 of an integer. | `MipSolver::kIntTol`, `isIntegral` |
 | Bound crossing | 1e-8, absolute | A column whose lower bound passes its upper by at most 1e-8 is not empty; keep the swapped (or clamped) interval. | `DomainPropagator::kTol`, `keepCrossingWithinTolerance` |
 | Row slack | 1e-8 times the row's magnitude | A row is violated only past 1e-8 times the largest of 1, its finite sides and its finite activity terms. Bounds derived from a row take the same slack. | `DomainPropagator::propagateRow`, `Presolver::rowTol` |
-| Integer bound rounding | 1e-6 in node propagation; in presolve 1e-6, or `1e-8 / \|a\|` when larger, and 1e-8 (or `1e-8 / \|a\|`) where it drops the row | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Node propagation (the domain and objective propagators) rounds at a plain 1e-6, after adding the row slack to the bound's numerator. Presolve divides by the coefficient `a` without that slack, which scales the sums' rounding by `1/\|a\|`, so it takes the larger of the two. A row presolve drops must still hold at the rounded bound, so there it rounds at no more than its own tolerance. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
+| Integer bound rounding | 1e-6 in node propagation; in presolve 1e-6, or `1e-8 / \|a\|` when larger, and 1e-8 (or `1e-8 / \|a\|`) where it drops the row | A bound derived for an integer column rounds to the nearest integer within this before it is compared. Node propagation (the domain and objective propagators) rounds at a plain 1e-6; the domain propagator first adds the row slack to the bound's numerator, the objective propagator adds none. Presolve divides by the coefficient `a` without that slack, which scales the sums' rounding by `1/\|a\|`, so it takes the larger of the two. A row presolve drops must still hold at the rounded bound, so there it rounds at no more than its own tolerance. | `DomainPropagator::kIntRoundTol`, `integerRoundTol` in presolve |
 | Prune | 1e-6, absolute | A node is pruned when its bound is within 1e-6 of the incumbent. | `ObjectivePropagator::kPruneTol`, the node queue |
 | Improvement | 1e-6, absolute; 1e-9 in LP-free and LP-light search | The solution pool keeps a solution only when it improves by more than 1e-6. The tree takes any strict improvement as its incumbent. The LP-free and LP-light heuristics (feasibility jump, FPR, local MIP, diving) take a candidate when it beats their incumbent by more than 1e-9. | `SolutionPool::better`, `improvesObjective` in `mip_solver.cpp` |
 
@@ -80,9 +80,13 @@ answers, and changing them alters behaviour on every model:
   incumbent (`pointHoldsModel`), wherever `Presolver` runs ahead of a solve:
   `MipSolver::solveMinimization`, which also solves models without integers,
   and the LP path of `mipx-solve` (#257). There a point that fails is not
-  repaired: the model is solved again without presolve on the same backend
-  in the time left, and that answer stands as it would with `--no-presolve`;
-  with no time left the status is `Time limit`. The barrier's own presolve
+  repaired. A backend holds its rows only to its own tolerance (PDLP's is
+  relative), so the CLI blames presolve only when the postsolved point
+  misses the loaded model by more than 1e-6 beyond the presolved point's
+  own worst miss (`pointViolation`). Then the model is solved again without
+  presolve on the same backend in the time left (the barrier takes no time
+  limit), and that answer stands as it would with `--no-presolve`; with no
+  time left the status is `Time limit`. The barrier's own presolve
   (`BarrierPresolver`) is not covered; its answer holds what the barrier
   holds. In `MipSolver` a point that fails is
   re-solved with its integers fixed, cold. A MIP's repaired point keeps an
@@ -107,7 +111,9 @@ answers, and changing them alters behaviour on every model:
   scaling stretches that on a column of tiny coefficients. The LP audit
   (#237) saw basic columns past their bounds by up to 1e-3 in model units
   while every row held to its tolerance. Other solvers re-check the
-  unscaled point and re-solve when it fails; this one does not.
+  unscaled point and re-solve when it fails; this one does not. The CLI's
+  check of a postsolved point (#257) re-solves only for a miss presolve
+  added, so it does not change this.
 - Models that are feasible, or infeasible, only within that tolerance can
   be answered either way, and a warm and a cold solve of one model can
   disagree. The LP audit counts these as tolerance calls, not failures.
