@@ -817,11 +817,33 @@ bool DualSimplexSolver::dualRayMeetsContract() const {
 
 // The optimum read back in the model's units: rows within a relative
 // kUnscaledRelTol of their sides, no multiplier of the wrong sign on a side or
-// bound that is infinite, and a duality gap within kUnscaledRelTol of the
-// terms that make it up. Tolerances hold in the scaled space, where a basis
-// reached through ill-conditioned pivots can still miss all three badly: a
-// dual infeasibility of 1e-9 times a primal value of 1e7 left an optimum 5%
-// above the true one (#241).
+// bound that is infinite, and c^T x within kUnscaledRelTol of the Lagrangian
+// bound of y, relative to the terms that make up either. Tolerances hold in
+// the scaled space, where a basis reached through ill-conditioned pivots can
+// still miss all three badly: a dual infeasibility of 1e-9 times a primal
+// value of 1e7 left an optimum 5% above the true one (#241).
+//
+// The bound is L(y) = sum_i y_i side_i + sum_j d_j bound_j, each side and
+// bound the one its multiplier's sign picks, so c^T x - L(y) is the sum of
+// y_i (a_i x - side_i) and d_j (x_j - bound_j): what complementary slackness
+// leaves. Every multiplier counts, however small: dropping a d_j of 6e-7 on a
+// column fixed at 31250 left a gap of 0.02 on a correct optimum (#282). One
+// that meets an infinite side or bound has the wrong sign; under the sign
+// check's threshold it counts as zero, so its term (y_i a_i x, d_j x_j) stays
+// in the gap: the backstop for a tiny wrong-sign multiplier against a large
+// activity or value, the #241 failure. The row check allows a_i x to miss
+// side_i by kUnscaledRelTol of the row's terms, so the gap also allows, summed
+// over rows, |y_i| times the row's actual miss up to that much. The actual
+// miss, not the allowance: a row's terms include a_ij x_j, so allowing
+// |y_i| kUnscaledRelTol of them would cover any sub-threshold d_j x_j.
+//
+// Two bands are knowingly stricter than the scaled tolerances deliver, and
+// cost a needless cold re-solve, never a wrong verdict (#282, measured on the
+// LP audits): a row missed by 1e-6 to 1e-5 of its terms, which is the scaled
+// feasibility tolerance read in model units; and a gap made of a d_j far under
+// any tolerance on a basic column far from its finite bound, which the
+// Lagrangian bound counts as d_j (x_j - bound_j). Loosening kUnscaledRelTol
+// would let more ill-conditioned optima through, so it stays.
 bool DualSimplexSolver::optimumHoldsUnscaled() const {
     const auto uz = [](Index k) { return static_cast<std::size_t>(k); };
     const std::vector<Real> x = getPrimalValues();
@@ -840,6 +862,7 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
         gap_mag = std::max(gap_mag, std::abs(d[uz(j)] * x[uz(j)]));
     }
     Real dual_obj = 0.0;
+    Real row_allow = 0.0;
     std::vector<Real> row_max(uz(num_rows_), 0.0);
     std::vector<Real> yi_min(uz(num_rows_));
     for (Index i = 0; i < num_rows_; ++i) {
@@ -872,8 +895,7 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
         }
         const Real side = yi > 0.0 ? lo : up;
         if (yi != 0.0 && std::isfinite(side)) {
-            dual_obj += yi * side;
-            gap_mag = std::max(gap_mag, std::abs(yi * side));
+            row_allow += std::abs(yi) * std::min(std::abs(act - side), kUnscaledRelTol * mag);
         }
     }
     Real dual_scale = 1.0;
@@ -882,26 +904,35 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
     }
     for (Index i = 0; i < num_rows_; ++i) {
         const Real yi = yi_min[uz(i)];
+        if (yi == 0.0) {
+            continue;
+        }
+        const Real rs = scaled_ ? row_scale_[i] : 1.0;
         const Real side = yi > 0.0 ? row_lower_[i] : row_upper_[i];
-        if (yi != 0.0 && !std::isfinite(side) &&
-            std::abs(yi) * row_max[uz(i)] > kUnscaledRelTol * dual_scale) {
+        if (std::isfinite(side)) {
+            const Real t = yi * side / rs;
+            dual_obj += t;
+            gap_mag = std::max(gap_mag, std::abs(t));
+        } else if (std::abs(yi) * row_max[uz(i)] > kUnscaledRelTol * dual_scale) {
             return false;
         }
     }
     for (Index j = 0; j < num_cols_; ++j) {
         const Real dj = d[uz(j)];
-        if (std::abs(dj) <= kUnscaledRelTol * std::max(1.0, d_mag[uz(j)])) {
+        if (dj == 0.0) {
             continue;
         }
         const Real cs = scaled_ ? col_scale_[j] : 1.0;
         const Real bound = dj > 0.0 ? col_lower_[j] : col_upper_[j];
-        if (!std::isfinite(bound)) {
+        if (std::isfinite(bound)) {
+            const Real t = dj * bound * cs;
+            dual_obj += t;
+            gap_mag = std::max(gap_mag, std::abs(t));
+        } else if (std::abs(dj) > kUnscaledRelTol * std::max(1.0, d_mag[uz(j)])) {
             return false;
         }
-        dual_obj += dj * bound * cs;
-        gap_mag = std::max(gap_mag, std::abs(dj * bound * cs));
     }
-    return std::abs(primal_obj - dual_obj) <= kUnscaledRelTol * gap_mag;
+    return std::abs(primal_obj - dual_obj) <= kUnscaledRelTol * gap_mag + row_allow;
 }
 
 LpResult DualSimplexSolver::solveFromCurrentBasis() {

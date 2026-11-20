@@ -1557,37 +1557,25 @@ void requireNoVerdictOnLimit(const LpProblem& lp, const std::vector<Index>& idx,
 
 TEST_CASE("Regression #249: a warm Optimal that failed its check is not returned on a limit",
           "[lp_validity]") {
-    // Audit cuts seed 166, variant 5, round 0: the warm re-solve's Optimal
-    // after two iterations fails the check; the cold run takes six more.
+    // Audit cuts seed 46234, variant 5, round 0: the warm re-solve's Optimal
+    // after four iterations leaves a reduced cost of the wrong sign against
+    // an infinite bound, so the check fails it; the cold run takes four more.
+    // (Seed 166, the first literal here, failed only the duality gap's
+    // dropped reduced costs, and passes since #282.)
     const LpProblem lp = literalLp(
-        Sense::Maximize, 6.5,
-        {0.00075781250000000002, -0.0026718750000000002, -637.5, 1.5625, -6234.375, 25, -0.0078125},
-        {-20000, -4375, -0.028750000000000001, -kInf, -0.0042500000000000003,
-         -0.0025000000000000001, -kInf},
-        {-11250, -1875, kInf, kInf, 0.0015, -0.0025000000000000001, 50},
-        {1859.375, -1151.5625, -kInf, 9.328125}, {3484.375, kInf, kInf, 10.203125},
-        {{0, 0, -0.36250000000000004},
-         {0, 2, 150000},
-         {0, 3, -625},
-         {0, 5, -450000},
-         {0, 6, 35},
-         {1, 0, -0.01},
-         {1, 1, 0.41250000000000003},
-         {1, 3, 287.5},
-         {1, 4, 225000},
-         {1, 5, 25000},
-         {1, 6, 3.75},
-         {2, 1, 41.25},
-         {2, 2, -1000000},
-         {2, 4, -31250000},
-         {2, 6, 175},
-         {3, 0, -6.2500000000000001e-05},
-         {3, 1, -0.0011250000000000001},
-         {3, 4, -2625},
-         {3, 5, -500},
-         {3, 6, 0.022499999999999999}});
-    requireNoVerdictOnLimit(lp, {1, 2, 3, 6}, {0.02375, 3.25, -0.0016250000000000001, 2500}, -kInf,
-                            114258.4956576374, 2, 8, Status::Optimal);
+        Sense::Maximize, 6.375, {53.90625, -0.10781250000000001, 1293.75, 4312.5, -13.75, 13656.25},
+        {-kInf, -kInf, -0.033750000000000002, -kInf, 0.025000000000000001, -kInf},
+        {0.58750000000000002, 425, 0.018749999999999999, kInf, 0.025000000000000001, kInf},
+        {-0.87187500000000007, -0.012}, {-0.87187500000000007, -0.012},
+        {{0, 0, 1.875},
+         {0, 5, 462.5},
+         {1, 1, -3.7499999999999997e-05},
+         {1, 2, 0.45000000000000007},
+         {1, 3, 1.5},
+         {1, 5, 0.125}});
+    requireNoVerdictOnLimit(lp, {0, 1, 2, 5},
+                            {-6.2500000000000001e-05, 36250, -50000, 0.00013750000000000001},
+                            15712721.894821055, kInf, 4, 8, Status::Optimal);
 }
 
 TEST_CASE("Regression #249: a warm Infeasible that failed its check is not returned on a limit",
@@ -1620,6 +1608,25 @@ TEST_CASE("Regression #249: a warm Infeasible that failed its check is not retur
                    {4, 4, 43.75}});
     requireNoVerdictOnLimit(lp, {0, 1, 2, 4}, {-0.17500000000000002, 2500, 0.0002875, -125}, -kInf,
                             -638300.83653284155, 2, 6, Status::Optimal);
+}
+
+TEST_CASE("Regression #282: a tiny reduced cost on a large fixed column leaves no duality gap",
+          "[lp_validity]") {
+    // min x0 s.t. x0 - 6.4e-7 x1 >= 1, x0 in [0, 10], x1 fixed at 31250: the
+    // optimum is x0 = 1.02 with y = 1, so x1's reduced cost is 6.4e-7, under
+    // the check's zero threshold. The check used to drop it from the dual
+    // objective while c^T x kept its share, a gap of 0.02 on a correct
+    // optimum, and a warm re-solve of it started over cold. Now it counts at
+    // the fixed bound, and the warm re-solve stands with no iterations.
+    const LpProblem lp = literalLp(Sense::Minimize, 0.0, {1.0, 0.0}, {0.0, 31250.0},
+                                   {10.0, 31250.0}, {1.0}, {kInf}, {{0, 0, 1.0}, {0, 1, -6.4e-7}});
+    DualSimplexSolver solver;
+    REQUIRE(solveLiteral(solver, lp).status == Status::Optimal);
+    const LpResult warm = solver.solve();
+    REQUIRE(warm.status == Status::Optimal);
+    CHECK(warm.iterations == 0);
+    CHECK(std::abs(warm.objective - 1.02) <= 1e-12);
+    CHECK(checkOptimal(lp, solver.getPrimalValues(), solver.getDualValues(), warm.objective) == "");
 }
 
 TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
