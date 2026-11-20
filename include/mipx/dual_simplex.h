@@ -343,6 +343,12 @@ private:
     LpResult solveFromCurrentBasis();
     bool dualRayMeetsContract() const;
     bool optimumHoldsUnscaled() const;
+    // False for an Optimal or Infeasible status whose certificate fails the
+    // checks above; true for any other status.
+    bool verdictHolds() const;
+    // Replace an uncertified verdict by `status`, a non-verdict, keeping the
+    // point and the basis (#249).
+    LpResult withdrawVerdict(LpResult res, Status status);
     void unscaleResults();
 
     // Record the Farkas ray proven by basis position `row` (rho = B^{-T} e_row,

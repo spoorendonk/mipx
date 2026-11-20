@@ -668,11 +668,18 @@ LpResult DualSimplexSolver::solve() {
     // lean on entries the current scaling makes look like zero (#241). Check
     // the verdict in the model's units and, when it does not hold, give it
     // to a cold start, which takes another path, within what is left of the
-    // iteration and time limits.
-    const bool doubtful = (res.status == Status::Infeasible && !dualRayMeetsContract()) ||
-                          (res.status == Status::Optimal && !optimumHoldsUnscaled());
-    if (!warm || !doubtful || res.iterations >= iter_limit_) {
+    // iteration and time limits. A warm verdict that fails its check is never
+    // returned (#249): with no budget left for the cold start it becomes that
+    // limit's status on the warm point, and when the cold start stops on a
+    // limit or Error, the cold status on the restored warm point. The cold
+    // verdict is returned as a first cold solve's is, unchecked: the check is
+    // stricter than the certificate and rejects many correct cold verdicts
+    // (#249's measurements, #282).
+    if (!warm || verdictHolds()) {
         return res;
+    }
+    if (res.iterations >= iter_limit_) {
+        return withdrawVerdict(res, Status::IterLimit);
     }
     const Int iter_limit = iter_limit_;
     const double time_limit = options_.max_solve_seconds;
@@ -680,13 +687,13 @@ LpResult DualSimplexSolver::solve() {
         const double spent =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         if (spent >= time_limit) {
-            return res;
+            return withdrawVerdict(res, Status::TimeLimit);
         }
         options_.max_solve_seconds = time_limit - spent;
     }
-    // A cold run that stops on a limit has no verdict; the warm one is then
-    // the better answer (strong branching reads IterLimit objectives as
-    // bounds), so keep what it left to put back.
+    // A cold run that stops on a limit has no verdict; the warm point is then
+    // the better one to leave (strong branching reads IterLimit objectives),
+    // so keep what it left to put back. Its verdict is not kept.
     auto primal = primal_;
     auto dual = dual_;
     auto reduced_cost = reduced_cost_;
@@ -695,8 +702,6 @@ LpResult DualSimplexSolver::solve() {
     auto nonbasic = nonbasic_;
     auto basis_pos = basis_pos_;
     auto nonbasic_pos = nonbasic_pos_;
-    auto dual_ray = dual_ray_;
-    const Status warm_status = status_;
     const bool dse_fell_back = dse_fell_back_;
     iter_limit_ = iter_limit - res.iterations;
     has_basis_ = false;
@@ -718,9 +723,9 @@ LpResult DualSimplexSolver::solve() {
     nonbasic_ = std::move(nonbasic);
     basis_pos_ = std::move(basis_pos);
     nonbasic_pos_ = std::move(nonbasic_pos);
-    dual_ray_ = std::move(dual_ray);
+    dual_ray_.clear();
     primal_ray_.clear();
-    status_ = warm_status;
+    status_ = cold.status;
     dse_fell_back_ = dse_fell_back;
     // The factors are the cold run's; getTableauRow (cut separation) reads
     // them against the restored basis.
@@ -728,13 +733,32 @@ LpResult DualSimplexSolver::solve() {
         refactorize();
     } catch (const std::runtime_error&) {
         has_basis_ = false;
-        status_ = cold.status;
         return cold;
     }
     has_basis_ = true;
+    res.status = cold.status;
     res.iterations = cold.iterations;
     res.work_units = cold.work_units;
     res.objective = getObjective();
+    return res;
+}
+
+bool DualSimplexSolver::verdictHolds() const {
+    switch (status_) {
+        case Status::Infeasible:
+            return dualRayMeetsContract();
+        case Status::Optimal:
+            return optimumHoldsUnscaled();
+        default:
+            return true;
+    }
+}
+
+LpResult DualSimplexSolver::withdrawVerdict(LpResult res, Status status) {
+    status_ = status;
+    dual_ray_.clear();
+    primal_ray_.clear();
+    res.status = status;
     return res;
 }
 
@@ -3721,6 +3745,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
+    dual_ray_.clear();    // the proof leans on the column bounds
     primal_ray_.clear();  // a new finite bound may stop the ray
     if (!loaded_ || col < 0 || col >= num_cols_) {
         return;

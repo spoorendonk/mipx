@@ -1514,6 +1514,69 @@ TEST_CASE("Regression #243: a row repaired exactly to its bound is not a Farkas 
          {6, 1, -75000000}}));
 }
 
+TEST_CASE("Regression #249: a warm verdict that failed its check is not returned on a limit",
+          "[lp_validity]") {
+    // Audit cuts seed 166, variant 5, round 0. After the cut the warm
+    // re-solve reaches Optimal in two iterations, but that optimum fails the
+    // solver's own check, so it starts cold, which takes six more. With a
+    // limit between the two, the cold run stopped on it and the warm verdict
+    // came back with the restored warm point. It must come back as IterLimit.
+    // (A limit of two or less stops the warm run itself: the loop finds a
+    // verdict only with budget left, so the no-budget path of solve() is
+    // reached through the time limit alone.) With the full budget the cold
+    // verdict is returned, unchecked, as a first cold solve's is.
+    const LpProblem lp = literalLp(
+        Sense::Maximize, 6.5,
+        {0.00075781250000000002, -0.0026718750000000002, -637.5, 1.5625, -6234.375, 25, -0.0078125},
+        {-20000, -4375, -0.028750000000000001, -kInf, -0.0042500000000000003,
+         -0.0025000000000000001, -kInf},
+        {-11250, -1875, kInf, kInf, 0.0015, -0.0025000000000000001, 50},
+        {1859.375, -1151.5625, -kInf, 9.328125}, {3484.375, kInf, kInf, 10.203125},
+        {{0, 0, -0.36250000000000004},
+         {0, 2, 150000},
+         {0, 3, -625},
+         {0, 5, -450000},
+         {0, 6, 35},
+         {1, 0, -0.01},
+         {1, 1, 0.41250000000000003},
+         {1, 3, 287.5},
+         {1, 4, 225000},
+         {1, 5, 25000},
+         {1, 6, 3.75},
+         {2, 1, 41.25},
+         {2, 2, -1000000},
+         {2, 4, -31250000},
+         {2, 6, 175},
+         {3, 0, -6.2500000000000001e-05},
+         {3, 1, -0.0011250000000000001},
+         {3, 4, -2625},
+         {3, 5, -500},
+         {3, 6, 0.022499999999999999}});
+    const std::vector<Index> starts{0};
+    const std::vector<Index> idx{1, 2, 3, 6};
+    const std::vector<Real> vals{0.02375, 3.25, -0.0016250000000000001, 2500};
+    const std::vector<Real> lo{-kInf};
+    const std::vector<Real> up{114258.4956576374};
+    auto resolve = [&](Int limit) {
+        DualSimplexSolver solver;
+        REQUIRE(solveLiteral(solver, lp).status == Status::Optimal);
+        solver.addRows(starts, idx, vals, lo, up);
+        solver.setIterationLimit(limit);
+        const LpResult res = solver.solve();
+        return std::pair{res, solver.getDualRay().empty()};
+    };
+    const LpResult full = resolve(10000).first;
+    REQUIRE(full.status == Status::Optimal);
+    const Int total = full.iterations;
+    REQUIRE(total > 2);
+    for (Int limit = 1; limit < total; ++limit) {
+        const auto [res, no_ray] = resolve(limit);
+        INFO("iteration limit " << limit << " of " << total);
+        CHECK(res.status == Status::IterLimit);
+        CHECK(no_ray);
+    }
+}
+
 TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
     // A model of the #244 sweep: presolved, its root LP incumbent held the
     // reduced model but missed row 2 of this one by 1.24e-6.

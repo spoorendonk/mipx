@@ -46,9 +46,13 @@ public:
     /// row, in the space of the loaded problem (unscaled, original row order).
     ///
     /// Returned when the last solve() proved the LP infeasible; empty after any
-    /// other status, and from backends that do not produce one (the default).
-    /// Also empty when the dual simplex reports Infeasible only as a status
-    /// carried over from an earlier solve (issue #222).
+    /// other status, after any change to the rows, columns or column bounds
+    /// since that solve (the status still reads Infeasible), and from backends
+    /// that do not produce one (the default). The dual simplex checks a warm
+    /// re-solve's ray against the contract below in the model's units and
+    /// re-solves cold when it fails; if no budget is left for that, or the
+    /// cold run stops on a limit or Error, it reports that status and no ray
+    /// (issue #249). A cold solve's ray is not checked.
     ///
     /// Contract, for the ray y and d = A^T y:
     ///   - y_i > 0 only where row_upper_i is finite, y_i < 0 only where

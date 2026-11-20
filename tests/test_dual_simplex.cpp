@@ -1478,6 +1478,20 @@ TEST_CASE("DualSimplex: no dual ray without a proof in the last solve", "[dual_s
     CHECK(solver.getDualRay().empty());
 }
 
+TEST_CASE("DualSimplex: a column bound change drops the dual ray", "[dual_simplex][farkas]") {
+    // The ray of x + y = 5 over [0, 2]^2 proves infeasibility against the
+    // column bounds; once x may reach 10 it proves nothing, and the solver
+    // must not hand it out before the next solve (#249).
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(buildLp(Sense::Minimize, {1.0, 1.0}, {0.0, 0.0}, {2.0, 2.0}, {5.0}, {5.0},
+                        {{0, 0, 1.0}, {0, 1, 1.0}}));
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    REQUIRE_FALSE(solver.getDualRay().empty());
+    solver.setColBounds(0, 0.0, 10.0);
+    CHECK(solver.getDualRay().empty());
+}
+
 TEST_CASE("DualSimplex: an iteration-limited re-solve does not keep the last verdict",
           "[dual_simplex]") {
     // min x + 2y s.t. x + y >= 1 over [0, 2]^2 solves to Optimal 1 at x = 1.
