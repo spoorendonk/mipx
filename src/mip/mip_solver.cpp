@@ -5914,7 +5914,11 @@ MipResult MipSolver::solveMinimizationOnce() {
         log_.log("Search incomplete: %d node(s) dropped without an LP verdict, bound %.6g\n",
                  lp_stats_.nodes_dropped_no_verdict, log_obj_sign_ * dropped_bound);
     }
-    const bool limit_hit = !queue.empty();
+    // An open queue means a limit stopped the tree, or its gap test, which
+    // reads the queue alone: with nodes dropped, the gap may still be open
+    // and no limit reached, which is no limit's status.
+    const bool limit_hit = !queue.empty() && (!dropped_open || nodes_explored >= node_limit_ ||
+                                              result.time_seconds >= time_limit_);
     const Status limit_status =
         nodes_explored >= node_limit_ ? Status::NodeLimit : Status::TimeLimit;
     if (incumbent < kInf) {
