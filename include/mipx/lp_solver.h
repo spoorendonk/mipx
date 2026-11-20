@@ -46,7 +46,7 @@ public:
     /// row, in the space of the loaded problem (unscaled, original row order).
     ///
     /// Returned when the last solve() proved the LP infeasible; empty after any
-    /// other status, after any change to the rows, columns or column bounds
+    /// other status, after any change to the rows, columns or their bounds
     /// since that solve (the status still reads Infeasible), and from backends
     /// that do not produce one (the default). The dual simplex checks a warm
     /// re-solve's ray against the contract below in the model's units and

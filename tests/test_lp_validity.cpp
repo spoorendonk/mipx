@@ -1514,19 +1514,25 @@ TEST_CASE("Regression #243: a row repaired exactly to its bound is not a Farkas 
          {6, 1, -75000000}}));
 }
 
+namespace {
+
 // Solve `lp` cold, add the cut row, and re-solve warm under every iteration
 // limit below the total the full re-solve takes. The warm run reaches a
 // verdict after `warm_iters` iterations that fails the solver's own check,
-// so solve() starts cold. With a limit past `warm_iters`, the cold run stops
-// on it, and the warm verdict used to come back with the restored warm
-// point; it must come back as IterLimit (#249). A limit of `warm_iters` or
+// so solve() starts cold; the full re-solve takes `total_iters` with it.
+// Both counts were read from instrumented runs, and the total is asserted:
+// if a solver change lets the warm verdict pass, the total moves and the
+// test says so instead of passing on the warm run alone. With a limit past
+// `warm_iters`, the cold run stops on it, and the warm verdict used to come
+// back with the restored warm point; it must come back as IterLimit (#249).
+// A limit of `warm_iters` or
 // less stops the warm run itself: the loop finds a verdict only with budget
 // left, so solve()'s no-budget path is reached through the time limit
 // alone. With the full budget the cold verdict is returned, unchecked, as a
 // first cold solve's is.
 void requireNoVerdictOnLimit(const LpProblem& lp, const std::vector<Index>& idx,
                              const std::vector<Real>& vals, Real lo, Real up, Int warm_iters,
-                             Status full_status) {
+                             Int total_iters, Status full_status) {
     const std::vector<Index> starts{0};
     const std::vector<Real> los{lo};
     const std::vector<Real> ups{up};
@@ -1539,13 +1545,15 @@ void requireNoVerdictOnLimit(const LpProblem& lp, const std::vector<Index>& idx,
     };
     const LpResult full = resolve(10000);
     REQUIRE(full.status == full_status);
-    const Int total = full.iterations;
-    REQUIRE(total > warm_iters + 1);
-    for (Int limit = 1; limit < total; ++limit) {
-        INFO("iteration limit " << limit << " of " << total);
+    REQUIRE(full.iterations == total_iters);
+    REQUIRE(total_iters > warm_iters + 1);
+    for (Int limit = 1; limit < total_iters; ++limit) {
+        INFO("iteration limit " << limit << " of " << total_iters);
         CHECK(resolve(limit).status == Status::IterLimit);
     }
 }
+
+}  // namespace
 
 TEST_CASE("Regression #249: a warm Optimal that failed its check is not returned on a limit",
           "[lp_validity]") {
@@ -1579,7 +1587,7 @@ TEST_CASE("Regression #249: a warm Optimal that failed its check is not returned
          {3, 5, -500},
          {3, 6, 0.022499999999999999}});
     requireNoVerdictOnLimit(lp, {1, 2, 3, 6}, {0.02375, 3.25, -0.0016250000000000001, 2500}, -kInf,
-                            114258.4956576374, 2, Status::Optimal);
+                            114258.4956576374, 2, 8, Status::Optimal);
 }
 
 TEST_CASE("Regression #249: a warm Infeasible that failed its check is not returned on a limit",
@@ -1611,7 +1619,7 @@ TEST_CASE("Regression #249: a warm Infeasible that failed its check is not retur
                    {4, 3, -0.375},
                    {4, 4, 43.75}});
     requireNoVerdictOnLimit(lp, {0, 1, 2, 4}, {-0.17500000000000002, 2500, 0.0002875, -125}, -kInf,
-                            -638300.83653284155, 2, Status::Optimal);
+                            -638300.83653284155, 2, 6, Status::Optimal);
 }
 
 TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
