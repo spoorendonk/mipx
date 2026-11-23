@@ -2413,7 +2413,8 @@ TEST_CASE("Presolve: a zero-cost singleton is removed as its equation's slack", 
     SECTION("off by default") {
         const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
         Presolver presolver;
-        presolveSolvePostsolve(lp, presolver, zeroCostOptions(false));
+        presolveSolvePostsolve(lp, presolver, PresolveOptions{});
+        CHECK_FALSE(PresolveOptions{}.enable_zero_cost_singletons);
         CHECK(presolver.stats().zero_cost_singleton_changes == 0);
     }
     SECTION("the slack at its lower bound") {
@@ -2485,6 +2486,40 @@ TEST_CASE("Presolve: a zero-cost singleton with a negative coefficient in a rang
     }
 }
 
+TEST_CASE("Presolve: a zero-cost singleton between its bounds puts its row at a side",
+          "[presolve]") {
+    // 2 <= x1 + x2 + s <= 6, s in [-5, 10] (kept in [-10, 6] by the row,
+    // so not implied free), x2 <= 2: min x1 - x2 at x = (0, 2) leaves s in
+    // [0, 4], inside s's bounds, and postsolve puts the row at its lower
+    // side, s = 0.
+    const LpProblem lp = rowsModel(
+        {1.0, -1.0, 0.0}, {0.0, 0.0, -5.0}, {10.0, 2.0, 10.0},
+        {{2.0, 6.0, {{0, 1.0}, {1, 1.0}, {2, 1.0}}}, {-kInf, 1.0, {{0, 1.0}, {1, -1.0}}}});
+    Presolver presolver;
+    const auto full = checkZeroCost(lp, presolver);
+    CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+    CHECK_THAT(full[2], WithinAbs(0.0, 1e-12));
+}
+
+TEST_CASE("Presolve: a zero-cost singleton's huge widened side is infinite", "[presolve]") {
+    // x1 + x2 + 1e10 s = 4, s in [-1e10, 3], x1 and x2 >= 0 with no upper
+    // bound, so no row bounds s from below: a s reaches -1e20, and the
+    // widened upper side 4 + 1e20 is taken as infinite (1e20 is presolve's
+    // huge bound). Kept finite, it would hold the row, which no activity
+    // can show redundant.
+    const LpProblem lp = rowsModel({1.0, 1.0, 0.0}, {0.0, 0.0, -1e10}, {kInf, kInf, 3.0},
+                                   {{4.0, 4.0, {{0, 1.0}, {1, 1.0}, {2, 1e10}}}});
+    Presolver presolver;
+    presolver.setOptions(zeroCostOptions(true));
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+    for (Index i = 0; i < reduced.num_rows; ++i) {
+        CHECK((std::isinf(reduced.row_upper[i]) || std::abs(reduced.row_upper[i]) < 1e20));
+        CHECK((std::isinf(reduced.row_lower[i]) || std::abs(reduced.row_lower[i]) < 1e20));
+    }
+}
+
 TEST_CASE("Presolve: zero-cost singletons leave what they cannot take", "[presolve]") {
     SECTION("a column with a cost") {
         const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.5}, 0.0, 3.0);
@@ -2499,11 +2534,15 @@ TEST_CASE("Presolve: zero-cost singletons leave what they cannot take", "[presol
         checkZeroCost(lp, presolver);
         CHECK(presolver.stats().zero_cost_singleton_changes == 0);
     }
-    SECTION("a one-sided row, left to dual fixing") {
+    SECTION("a one-sided row, which singleton columns take first") {
+        // x1 + x2 + s <= 4: singleton-column removal fixes s at 0 before
+        // this pass runs, so the guard against one-sided rows is not what
+        // keeps it here; HiGHS leaves those rows to dual fixing.
         LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
         lp.row_lower[0] = -kInf;
         Presolver presolver;
         checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().singleton_col_changes >= 1);
         CHECK(presolver.stats().zero_cost_singleton_changes == 0);
     }
     SECTION("a column in two rows") {

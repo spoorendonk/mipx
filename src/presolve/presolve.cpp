@@ -1084,8 +1084,13 @@ Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_
         const bool min_finite = a > 0.0 ? l_finite : u_finite;
         const Real ax_max = a > 0.0 ? at_u : at_l;
         const Real ax_min = a > 0.0 ? at_l : at_u;
-        const Real new_lo = max_finite ? lo - ax_max : -kInf;
-        const Real new_up = min_finite ? up - ax_min : kInf;
+        // A side at or past kHugeBound is infinite, as the passes that test
+        // sides with std::isinf take it.
+        const auto side = [](bool finite, Real value, Real inf) {
+            return finite && std::abs(value) < kHugeBound ? value : inf;
+        };
+        const Real new_lo = side(max_finite, lo - ax_max, -kInf);
+        const Real new_up = side(min_finite, up - ax_min, kInf);
 
         std::vector<Index> row_cols;
         std::vector<Real> row_coeffs;
@@ -1101,7 +1106,20 @@ Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_
                            next_dirty_rows, next_dirty_cols);
         lp.row_lower[i] = new_lo;
         lp.row_upper[i] = new_up;
+        // The sides took a x_j's extremes in, as shiftRowSides folds a term:
+        // the row's tolerance scales with them.
+        if (max_finite) {
+            row_scale_[i] = std::max(row_scale_[i], std::abs(ax_max));
+        }
+        if (min_finite) {
+            row_scale_[i] = std::max(row_scale_[i], std::abs(ax_min));
+        }
         next_dirty_rows[i] = 1;
+        // A side gone infinite leaves the row one-sided, which singleton
+        // columns and dual fixing take: the row's columns are looked at again.
+        for (const Index col : row_cols) {
+            next_dirty_cols[col] = 1;
+        }
         ++stats_.vars_removed;
         ++changes;
         postsolve_stack_.push(PostsolveZeroCostSingleton{
