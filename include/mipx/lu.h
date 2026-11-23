@@ -167,7 +167,9 @@ private:
     void applyFTSparse(std::span<Real> x, std::vector<Index>& pattern) const;
     void applyFTTransposeSparse(std::span<Real> x, std::vector<Index>& pattern) const;
     /// applyFTTransposeSparse's hyper-sparse kernel, by the etas' row-wise copy.
-    /// `mark`/`id` mark the positions of `pattern`.
+    /// `mark`/`id` must be a fresh epoch, nothing marked: the kernel marks the
+    /// positions of `pattern` itself, and skips one it finds already marked
+    /// as a repeat.
     void applyFTTransposeByRow(std::span<Real> x, std::vector<Index>& pattern, uint32_t* mark,
                                uint32_t id) const;
 

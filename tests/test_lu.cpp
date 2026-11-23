@@ -2293,8 +2293,11 @@ TEST_CASE("SparseLU: BTRAN by the etas' rows matches by their columns on repeate
     // Updates that keep replacing the same few positions, so values an eta
     // writes are read only down to the previous eta pivoting there, and some
     // full entering columns, so dense-stored etas sit among the sparse ones.
+    // Two rounds of updates with a refactorization between them, so the
+    // row-wise copy is rebuilt from a clean state.
     constexpr Index n = 600;
     constexpr Index num_updates = 40;
+    constexpr Index num_entering = 2 * num_updates;
     constexpr std::array<Index, 5> kPivots = {5, 17, 99, 5, 300};
     std::mt19937 rng(2026U);
     std::uniform_int_distribution<Index> row_dist(0, n - 1);
@@ -2309,7 +2312,7 @@ TEST_CASE("SparseLU: BTRAN by the etas' rows matches by their columns on repeate
             }
         }
     }
-    for (Index u = 0; u < num_updates; ++u) {
+    for (Index u = 0; u < num_entering; ++u) {
         const Index j = n + u;
         const Index p = kPivots[static_cast<std::size_t>(u % 5)];
         if (u % 10 == 3) {
@@ -2326,7 +2329,7 @@ TEST_CASE("SparseLU: BTRAN by the etas' rows matches by their columns on repeate
             }
         }
     }
-    const SparseMatrix A(n, n + num_updates, trips);
+    const SparseMatrix A(n, n + num_entering, trips);
     std::vector<Index> basis(n);
     std::iota(basis.begin(), basis.end(), 0);
     const auto kernel =
@@ -2336,55 +2339,75 @@ TEST_CASE("SparseLU: BTRAN by the etas' rows matches by their columns on repeate
     lu.setSolveKernel(kernel);
     SparseLU ref;
     ref.setSolveKernel(SparseLU::SolveKernel::AlwaysDense);
-    lu.factorize(A, basis);
-    ref.factorize(A, basis);
-    for (Index u = 0; u < num_updates; ++u) {
-        const Index entering = n + u;
-        const Index p = kPivots[static_cast<std::size_t>(u % 5)];
-        std::vector<Real> col = denseColumn(A, entering);
-        std::vector<Index> col_pattern;
-        for (Index i = 0; i < n; ++i) {
-            if (col[static_cast<std::size_t>(i)] != 0.0) {
-                col_pattern.push_back(i);
+
+    // Brings in entering columns first..first+num_updates-1.
+    auto applyUpdates = [&](Index first) {
+        for (Index u = first; u < first + num_updates; ++u) {
+            const Index entering = n + u;
+            const Index p = kPivots[static_cast<std::size_t>(u % 5)];
+            std::vector<Real> col = denseColumn(A, entering);
+            std::vector<Index> col_pattern;
+            for (Index i = 0; i < n; ++i) {
+                if (col[static_cast<std::size_t>(i)] != 0.0) {
+                    col_pattern.push_back(i);
+                }
             }
+            std::vector<Real> ref_col = col;
+            ref.ftran(ref_col);
+            REQUIRE(std::abs(ref_col[static_cast<std::size_t>(p)]) > 0.1);
+            lu.ftranSparse(col, col_pattern);
+            checkClose(col, ref_col);
+            lu.updateFromFtranColumn(p, col, col_pattern);
+            ref.updateFromFtranColumn(p, ref_col);
+            basis[static_cast<std::size_t>(p)] = entering;
         }
-        std::vector<Real> ref_col = col;
-        ref.ftran(ref_col);
-        REQUIRE(std::abs(ref_col[static_cast<std::size_t>(p)]) > 0.1);
-        lu.ftranSparse(col, col_pattern);
-        checkClose(col, ref_col);
-        lu.updateFromFtranColumn(p, col, col_pattern);
-        ref.updateFromFtranColumn(p, ref_col);
-        basis[static_cast<std::size_t>(p)] = entering;
-    }
-    REQUIRE(lu.numUpdates() == num_updates);
+        REQUIRE(lu.numUpdates() == num_updates);
+    };
 
     std::uniform_int_distribution<Index> pos_dist(0, n - 1);
-    std::vector<std::vector<Index>> rhs_patterns = {{5}, {17}, {99, 300}, {0}, {599}};
-    for (int trial = 0; trial < 10; ++trial) {
-        rhs_patterns.push_back({pos_dist(rng), pos_dist(rng), pos_dist(rng)});
-    }
-    for (const auto& rhs_pattern : rhs_patterns) {
-        std::vector<Real> b(n, 0.0);
-        std::vector<Index> pattern;
-        for (Index i : rhs_pattern) {
-            if (b[static_cast<std::size_t>(i)] == 0.0) {
-                pattern.push_back(i);
+    auto checkBtran = [&]() {
+        std::vector<std::vector<Index>> rhs_patterns = {{5}, {17}, {99, 300}, {0}, {599}};
+        for (int trial = 0; trial < 10; ++trial) {
+            rhs_patterns.push_back({pos_dist(rng), pos_dist(rng), pos_dist(rng)});
+        }
+        for (const auto& rhs_pattern : rhs_patterns) {
+            std::vector<Real> b(n, 0.0);
+            std::vector<Index> pattern;
+            for (Index i : rhs_pattern) {
+                if (b[static_cast<std::size_t>(i)] == 0.0) {
+                    pattern.push_back(i);
+                }
+                b[static_cast<std::size_t>(i)] = 1.5 + val_dist(rng);
             }
-            b[static_cast<std::size_t>(i)] = 1.0 + val_dist(rng);
+            // The input may list a position twice, and one holding zero.
+            pattern.push_back(pattern.front());
+            Index zero_pos = 1;
+            while (b[static_cast<std::size_t>(zero_pos)] != 0.0) {
+                ++zero_pos;
+            }
+            pattern.push_back(zero_pos);
+            std::vector<Real> want = b;
+            ref.btran(want);
+            std::vector<Real> got = b;
+            lu.btranSparse(got, pattern);
+            checkPattern(got, pattern);
+            checkClose(got, want);
+            const auto Bty = denseMultiplyTranspose(A, basis, got);
+            for (Index i = 0; i < n; ++i) {
+                CHECK_THAT(Bty[static_cast<std::size_t>(i)],
+                           WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
+            }
         }
-        std::vector<Real> want = b;
-        ref.btran(want);
-        std::vector<Real> got = b;
-        lu.btranSparse(got, pattern);
-        checkPattern(got, pattern);
-        checkClose(got, want);
-        const auto Bty = denseMultiplyTranspose(A, basis, got);
-        for (Index i = 0; i < n; ++i) {
-            CHECK_THAT(Bty[static_cast<std::size_t>(i)],
-                       WithinAbs(b[static_cast<std::size_t>(i)], 1e-9));
-        }
-    }
+    };
+
+    lu.factorize(A, basis);
+    ref.factorize(A, basis);
+    applyUpdates(0);
+    checkBtran();
+    lu.factorize(A, basis);
+    ref.factorize(A, basis);
+    applyUpdates(num_updates);
+    checkBtran();
 }
 
 TEST_CASE("SparseLU: hyper-sparse stage falls back to the dense kernel past its reach limit",
