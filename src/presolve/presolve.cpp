@@ -2315,6 +2315,96 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
                             std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
+    // Each row's activity over its active columns, huge bounds infinite,
+    // summed on first use and updated as fixes take columns out of the row
+    // (enable_extended_dual_fixing only), allocated on first use. No other
+    // bound changes in this pass.
+    struct Activity {
+        CompensatedSum min;
+        CompensatedSum max;
+        Index min_inf = 0;
+        Index max_inf = 0;
+        bool valid = false;
+    };
+    std::vector<Activity> activity;
+    auto rowActivity = [&](Index r) -> const Activity& {
+        if (activity.empty()) {
+            activity.resize(static_cast<size_t>(lp.num_rows));
+        }
+        Activity& act = activity[r];
+        if (!act.valid) {
+            act = Activity{};
+            for (const auto [col, a] : work_->row(r)) {
+                if (col_removed[col] || a == 0.0) {
+                    continue;
+                }
+                const Real at_min = a > 0.0 ? lp.col_lower[col] : lp.col_upper[col];
+                const Real at_max = a > 0.0 ? lp.col_upper[col] : lp.col_lower[col];
+                if (std::abs(at_min) >= kHugeBound) {
+                    ++act.min_inf;
+                } else {
+                    act.min.add(a * at_min);
+                }
+                if (std::abs(at_max) >= kHugeBound) {
+                    ++act.max_inf;
+                } else {
+                    act.max.add(a * at_max);
+                }
+            }
+            act.valid = true;
+        }
+        return act;
+    };
+    // Whether every row that locks x_j against moving down (upward: up)
+    // holds at x_j = value for any values of its other columns within their
+    // bounds: HiGHS's worst-case bound (computeWorstCaseLowerBound) at or
+    // past that bound.
+    auto holdsForAnyRest = [&](Index j, Real value, bool upward) -> bool {
+        const Real lj = lp.col_lower[j];
+        const Real uj = lp.col_upper[j];
+        for (const auto [r, a] : work_->col(j)) {
+            if (row_removed[r] || a == 0.0) {
+                continue;
+            }
+            const bool lower_locks = !std::isinf(lp.row_lower[r]) && ((a > 0.0) != upward);
+            const bool upper_locks = !std::isinf(lp.row_upper[r]) && ((a < 0.0) != upward);
+            if (!lower_locks && !upper_locks) {
+                continue;
+            }
+            const Activity& act = rowActivity(r);
+            if (lower_locks) {
+                // The row's least activity over its other columns.
+                const Real j_at_min = a > 0.0 ? lj : uj;
+                Index inf = act.min_inf;
+                Real rest = 0.0;
+                if (std::abs(j_at_min) >= kHugeBound) {
+                    --inf;
+                    rest = act.min.value();
+                } else {
+                    rest = act.min.without(a * j_at_min);
+                }
+                if (inf > 0 || rest + a * value < lp.row_lower[r]) {
+                    return false;
+                }
+            }
+            if (upper_locks) {
+                const Real j_at_max = a > 0.0 ? uj : lj;
+                Index inf = act.max_inf;
+                Real rest = 0.0;
+                if (std::abs(j_at_max) >= kHugeBound) {
+                    --inf;
+                    rest = act.max.value();
+                } else {
+                    rest = act.max.without(a * j_at_max);
+                }
+                if (inf > 0 || rest + a * value > lp.row_upper[r]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
     for (Index j : dirty_cols) {
         if (col_removed[j]) {
             continue;
@@ -2375,6 +2465,36 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
         } else if (!prefer_down && up_locks == 0 && !std::isinf(lp.col_upper[j])) {
             fixed = true;
             fix_value = lp.col_upper[j];
+        } else if (options_.enable_extended_dual_fixing) {
+            // HiGHS's dualFixing (#366), its bound strengthening applied as a
+            // fix: a column whose cost does not push it up (cost >= 0 when
+            // minimizing) and whose every down-locking row holds at x_j = l_j
+            // whatever values its other columns take is optimal at l_j.
+            // Moving it down there keeps those rows by that test, the others
+            // because they do not lock it downward, and does not raise the
+            // objective. The same upward. A zero-cost column with no up locks
+            // is the case with no row to test; prefer_down picked the lower
+            // side for it and missed it.
+            //
+            // With x_j at that bound the test is the row's whole least (most)
+            // activity, so each locking side is redundant. A tested side can
+            // still be tight at the reduced optimum, though: its dual may then
+            // leave x_j a reduced cost of the wrong sign at the bound (the old
+            // rule's cannot). A dual postsolve (#323) must recompute d_j for
+            // these fixes, as HiGHS's FixedCol::undo does.
+            const Real cost = lp.sense == Sense::Minimize ? lp.obj[j] : -lp.obj[j];
+            if (cost >= 0.0 && lp.col_lower[j] > -kHugeBound &&
+                holdsForAnyRest(j, lp.col_lower[j], false)) {
+                fixed = true;
+                fix_value = lp.col_lower[j];
+            } else if (cost <= 0.0 && lp.col_upper[j] < kHugeBound &&
+                       holdsForAnyRest(j, lp.col_upper[j], true)) {
+                fixed = true;
+                fix_value = lp.col_upper[j];
+            }
+            if (fixed) {
+                ++stats_.extended_dual_fixing_changes;
+            }
         }
         if (!fixed) {
             continue;
@@ -2393,6 +2513,24 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
             }
             shiftRowSides(lp, row, a * fix_value);
             next_dirty_rows[row] = 1;
+            if (!activity.empty() && activity[row].valid && a != 0.0) {
+                // x_j's term leaves the row's activity, its value the sides
+                // (shiftRowSides): updated in place, as a dense row re-summed
+                // after each of its columns is fixed costs O(n^2).
+                Activity& act = activity[row];
+                const Real at_min = a > 0.0 ? lp.col_lower[j] : lp.col_upper[j];
+                const Real at_max = a > 0.0 ? lp.col_upper[j] : lp.col_lower[j];
+                if (std::abs(at_min) >= kHugeBound) {
+                    --act.min_inf;
+                } else {
+                    act.min.add(-a * at_min);
+                }
+                if (std::abs(at_max) >= kHugeBound) {
+                    --act.max_inf;
+                } else {
+                    act.max.add(-a * at_max);
+                }
+            }
         }
     }
 

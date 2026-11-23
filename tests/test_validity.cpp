@@ -817,6 +817,9 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions zero_cost = o;
     zero_cost.enable_zero_cost_singletons = true;
     cases.push_back({"zero-cost singletons (opt-in)", zero_cost});
+    PresolveOptions extended_dual = o;
+    extended_dual.enable_extended_dual_fixing = true;
+    cases.push_back({"extended dual fixing (opt-in)", extended_dual});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
@@ -824,6 +827,7 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_doubleton_fill_in = true;
     all.enable_aggregator = true;
     all.enable_zero_cost_singletons = true;
+    all.enable_extended_dual_fixing = true;
     cases.push_back({"all opt-in but parallel columns", all});
     all.enable_parallel_cols = true;
     cases.push_back({"all opt-in", all, false});
@@ -869,6 +873,10 @@ std::vector<PresolveReduction> presolveReductions() {
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
          [](const PresolveOptions& o) { return o.enable_dual_fixing; }},
+        {"extended dual fixing", &PresolveStats::extended_dual_fixing_changes,
+         [](const PresolveOptions& o) {
+             return o.enable_dual_fixing && o.enable_extended_dual_fixing;
+         }},
         {"empty columns", &PresolveStats::empty_col_changes, always},
         {"coefficient tightening", &PresolveStats::coeff_tightening_changes,
          [](const PresolveOptions& o) { return o.enable_coefficient_tightening; }},
@@ -1041,6 +1049,15 @@ std::vector<LpProblem> presolveAuditModels() {
                                {{-2, 1, 1}, {0, 1, 1}}, {1, -kInf}, {3, 3}));
     models.push_back(makeModel(Sense::Minimize, {0, 1, 2}, {0, 0, 0}, {kInf, 3, 2}, {C, I, I},
                                {{1, 1, 1}, {0, 1, -1}}, {2, -kInf}, {5, 1}));
+    // Extended dual fixing (#366): x0 at zero cost with two down locks and
+    // no up lock; x0 whose one down lock, a ranged row's lower side, holds at
+    // x0 = 0 for any x1 >= 1; the same upward, maximizing.
+    models.push_back(makeModel(Sense::Minimize, {0, 1, 1}, {0, 0, 0}, {5, 3, 3}, {C, I, C},
+                               {{1, 1, 1}, {1, -1, 2}}, {2, 1}, {kInf, kInf}));
+    models.push_back(makeModel(Sense::Minimize, {1, 1, 1}, {0, 1, 0}, {3, 4, 3}, {C, I, C},
+                               {{1, 1, 0}, {1, 0, -1}}, {1, -kInf}, {6, 2}));
+    models.push_back(makeModel(Sense::Maximize, {1, -1, -1}, {0, 0, 0}, {3, 3, 3}, {C, I, C},
+                               {{1, 1, 0}, {1, 0, 1}}, {2, 1}, {6, kInf}));
     return models;
 }
 

@@ -3258,3 +3258,119 @@ TEST_CASE("Presolve: netlib grow15 and pilot-ja optima hold the reduced LP absol
     REQUIRE(result.status == Status::Optimal);
     CHECK(pointViolation(reduced, solver.getPrimalValues()) <= 1e-6);
 }
+
+namespace {
+
+/// The options of the extended dual fixing tests (#366): those of the
+/// aggregator tests, aggregator off and dual fixing on, its extension as
+/// given.
+PresolveOptions extendedDualOptions(bool on) {
+    PresolveOptions opts = aggregatorOptions(false);
+    opts.enable_dual_fixing = true;
+    opts.enable_extended_dual_fixing = on;
+    return opts;
+}
+
+/// Presolves with the extension on, solves and postsolves, checks the point
+/// against the original model and the direct optimum, and returns it.
+std::vector<Real> checkExtendedDual(const LpProblem& lp, Presolver& presolver) {
+    auto full = presolveSolvePostsolve(lp, presolver, extendedDualOptions(true));
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+    return full;
+}
+
+/// min y + z: x + y + z >= 2, x - y + 2z >= 1, x in [0, 5] at zero cost,
+/// y and z in [0, 10]. x has two down locks and no up lock.
+LpProblem zeroCostUpModel() {
+    return rowsModel({0.0, 1.0, 1.0}, {0.0, 0.0, 0.0}, {5.0, 10.0, 10.0},
+                     {{2.0, kInf, {{0, 1.0}, {1, 1.0}, {2, 1.0}}},
+                      {1.0, kInf, {{0, 1.0}, {1, -1.0}, {2, 2.0}}}});
+}
+
+/// min x + y + z: 1 <= x + y <= 20 and x - z <= 4, x in [0, 10],
+/// y in [y_lower, 15], z in [0, 10]. x's one down lock is the ranged row's
+/// lower side, which holds at x = 0 for any y >= 1.
+LpProblem rangedLowerSideModel(Real y_lower) {
+    return rowsModel({1.0, 1.0, 1.0}, {0.0, y_lower, 0.0}, {10.0, 15.0, 10.0},
+                     {{1.0, 20.0, {{0, 1.0}, {1, 1.0}}}, {-kInf, 4.0, {{0, 1.0}, {2, -1.0}}}});
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: extended dual fixing fixes what the cost-sign rule misses", "[presolve]") {
+    SECTION("off by default") {
+        const LpProblem lp = zeroCostUpModel();
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, PresolveOptions{});
+        CHECK_FALSE(PresolveOptions{}.enable_extended_dual_fixing);
+        CHECK(presolver.stats().extended_dual_fixing_changes == 0);
+    }
+    SECTION("the cost-sign rule alone leaves the zero-cost column") {
+        const LpProblem lp = zeroCostUpModel();
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, extendedDualOptions(false));
+        CHECK(presolver.stats().dual_fixing_changes == 0);
+    }
+    SECTION("a zero-cost column with no up lock goes to its upper bound") {
+        const LpProblem lp = zeroCostUpModel();
+        Presolver presolver;
+        const auto full = checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes >= 1);
+        CHECK_THAT(full[0], WithinAbs(5.0, 1e-12));
+    }
+    SECTION("a down lock that holds at the lower bound for any rest") {
+        const LpProblem lp = rangedLowerSideModel(1.0);
+        Presolver presolver;
+        const auto full = checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes >= 1);
+        CHECK_THAT(full[0], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("an unbounded rest keeps the lock") {
+        // y free below: the ranged row's least activity is infinite.
+        const LpProblem lp = rangedLowerSideModel(-kInf);
+        Presolver presolver;
+        checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes == 0);
+    }
+    SECTION("an up lock that holds at the upper bound, maximizing") {
+        // max x - y - z: 5 <= x + y <= 20 and x + z >= 1, all in [0, 10].
+        // x's one up lock is the ranged row's upper side, which holds at
+        // x = 10 for any y <= 10; the optimum is 10 at x = 10.
+        LpProblem lp =
+            rowsModel({1.0, -1.0, -1.0}, {0.0, 0.0, 0.0}, {10.0, 10.0, 10.0},
+                      {{5.0, 20.0, {{0, 1.0}, {1, 1.0}}}, {1.0, kInf, {{0, 1.0}, {2, 1.0}}}});
+        lp.sense = Sense::Maximize;
+        Presolver presolver;
+        const auto full = checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes >= 1);
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+    }
+    SECTION("a negative coefficient's upper side locks it down") {
+        // min x + y + z: -4 <= -x + y <= 1 and x - z <= 4, x in [2, 10],
+        // y in [0, 3], z in [0, 10]. x's one down lock is the ranged row's
+        // upper side, which holds at x = 2 for any y <= 3.
+        const LpProblem lp =
+            rowsModel({1.0, 1.0, 1.0}, {2.0, 0.0, 0.0}, {10.0, 3.0, 10.0},
+                      {{-4.0, 1.0, {{0, -1.0}, {1, 1.0}}}, {-kInf, 4.0, {{0, 1.0}, {2, -1.0}}}});
+        Presolver presolver;
+        const auto full = checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes >= 1);
+        CHECK_THAT(full[0], WithinAbs(2.0, 1e-12));
+    }
+    SECTION("a fix's term leaves the cached activity of its rows") {
+        // min x + y: w + x + y >= 7 and -w + x - y <= 3, w in [3, 5] at zero
+        // cost, x and y in [0, 10]. w's down locks fail at w = 3, building
+        // the first row's cache with w's term 3; it has no up lock and goes
+        // to 5, the row's side to 2. x's and y's down lock then must not
+        // hold at 0 (rest 0 < 2): a cache still holding w's 3 says it does.
+        const LpProblem lp = rowsModel({0.0, 1.0, 1.0}, {3.0, 0.0, 0.0}, {5.0, 10.0, 10.0},
+                                       {{7.0, kInf, {{0, 1.0}, {1, 1.0}, {2, 1.0}}},
+                                        {-kInf, 3.0, {{0, -1.0}, {1, 1.0}, {2, -1.0}}}});
+        Presolver presolver;
+        const auto full = checkExtendedDual(lp, presolver);
+        CHECK(presolver.stats().extended_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(5.0, 1e-12));
+    }
+}
