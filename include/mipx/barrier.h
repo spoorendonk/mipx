@@ -153,6 +153,9 @@ public:
     [[nodiscard]] Int gondzioCorrections() const { return gondzio_corrections_; }
     // Whether the last IPM run was the homogeneous self-dual loop, for tests.
     [[nodiscard]] bool usedHomogeneous() const { return used_homogeneous_; }
+    // Simplex iterations of the last solve's crossover, cold fallback
+    // included; 0 when it did not run (or its basis guess was optimal).
+    [[nodiscard]] Int crossoverIterations() const { return crossover_iters_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:

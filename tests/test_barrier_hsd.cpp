@@ -67,6 +67,35 @@ Solved solveWith(const LpProblem& lp, const BarrierOptions& opts) {
     return out;
 }
 
+// A solve with crossover on (#294): what crossover did after the IPM.
+struct Crossed {
+    LpResult result;
+    bool homogeneous = false;
+    std::vector<BasisStatus> basis;
+    Int iters = 0;  // crossover's simplex iterations
+};
+
+Crossed crossWith(const LpProblem& lp, BarrierOptions opts) {
+    opts.crossover = true;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    Crossed out;
+    out.result = solver.solve();
+    out.homogeneous = solver.usedHomogeneous();
+    out.basis = solver.getBasis();
+    out.iters = solver.crossoverIterations();
+    return out;
+}
+
+// The basis crossover hands back: one status per column and row, as many
+// basic as there are rows.
+void checkBasis(const std::vector<BasisStatus>& basis, const LpProblem& lp) {
+    REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
+    const auto basic = std::count(basis.begin(), basis.end(), BasisStatus::Basic);
+    CHECK(basic == lp.num_rows);
+}
+
 }  // namespace
 
 TEST_CASE("Barrier HSD: off by default", "[barrier][hsd]") {
@@ -310,6 +339,22 @@ TEST_CASE("Barrier HSD: an infeasible LP ends Infeasible, an unbounded one Unbou
     CHECK(solveWith(noRowsLp(), opts).result.status == Status::Unbounded);
     // A feasible bounded LP still ends Optimal.
     CHECK(solveWith(smallLp(), opts).result.status == Status::Optimal);
+    if (crossover) {
+        // A verdict is reported as it stands, crossover never runs (#294).
+        for (const auto& lp : {infeasibleLp(), unboundedLp()}) {
+            const auto crossed = crossWith(lp, opts);
+            CHECK(crossed.homogeneous);
+            CHECK(crossed.iters == 0);
+            CHECK(crossed.basis.empty());
+        }
+        // An optimum: the basis guessed at the IPM's point is the optimal
+        // one, no pivot (a crash-basis start takes one here).
+        const auto lp = smallLp();
+        const auto crossed = crossWith(lp, opts);
+        REQUIRE(crossed.result.status == Status::Optimal);
+        CHECK(crossed.iters == 0);
+        checkBasis(crossed.basis, lp);
+    }
 }
 
 TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hsd]") {
@@ -398,4 +443,72 @@ TEST_CASE("Barrier HSD: Netlib LPs reach the same objectives", "[barrier][hsd][n
     CHECK(homogeneous);
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
+}
+
+// Crossover from the homogeneous loop's iterate (#294): the LP point
+// (x, y, s) / tau it hands over reaches the same objective and a basis.
+// Not a test of the point itself: on most of these LPs crossover's basis
+// guess is singular, from either loop, and the simplex restarts from a
+// crash basis (#398).
+TEST_CASE("Barrier HSD: Netlib LPs cross over to a basis", "[barrier][hsd][netlib][crossover]") {
+    using Case = std::pair<const char*, Real>;
+    auto [name, expected] =
+        GENERATE(Case{"adlittle", 2.2549496316e+05}, Case{"afiro", -4.6475314286e+02},
+                 Case{"blend", -3.0812149846e+01}, Case{"kb2", -1.7499001299e+03},
+                 Case{"sc50a", -6.4575077059e+01}, Case{"sc50b", -7.0000000000e+01},
+                 Case{"sc105", -5.2202061212e+01}, Case{"sc205", -5.2202061212e+01},
+                 Case{"share1b", -7.6589318579e+04}, Case{"share2b", -4.1573224074e+02},
+                 Case{"stocfor1", -4.1131976219e+04}, Case{"bore3d", 1.3730803942e+03},
+                 Case{"recipe", -2.6661600000e+02});
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    INFO(name << " algo " << static_cast<int>(algo));
+    const std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!std::filesystem::exists(path)) {
+        SKIP("Netlib instance " + std::string(name) + " not downloaded");
+    }
+    const auto lp = readMps(path);
+    auto opts = quietOptions(true, algo);
+    opts.presolve = true;
+    const auto hsd = crossWith(lp, opts);
+    CHECK(hsd.homogeneous);
+    REQUIRE(hsd.result.status == Status::Optimal);
+    CHECK(std::abs(hsd.result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
+    checkBasis(hsd.basis, lp);
+}
+
+// A homogeneous run that stops short of tolerance hands its best iterate to
+// crossover as NearOptimal, as the infeasible-start loop does (#294). A
+// tolerance of 0 is never met, so the run ends on its stall test (max_iter
+// 60) or on the iteration limit (max_iter 12, past the 1e-6 hand-off);
+// without crossover that is an error, with it an optimum.
+TEST_CASE("Barrier HSD: a stop short of tolerance seeds crossover", "[barrier][hsd][crossover]") {
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    const Int max_iter = GENERATE(12, 60);
+    INFO("algo " << static_cast<int>(algo) << " max_iter " << max_iter);
+    const auto lp = smallLp();
+    auto opts = quietOptions(true, algo);
+    opts.primal_dual_tol = 0.0;
+    opts.max_iter = max_iter;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto off = solver.solve();
+    CHECK(solver.usedHomogeneous());
+    CHECK(off.status == Status::Error);
+    CHECK(solver.lastError() == "Barrier stopped short of tolerance and crossover is disabled.");
+    // Which of the two stops ended the run.
+    if (max_iter == 60) {
+        CHECK(off.iterations < max_iter);
+    } else {
+        CHECK(off.iterations == max_iter);
+    }
+
+    const auto on = crossWith(lp, opts);
+    CHECK(on.homogeneous);
+    REQUIRE(on.result.status == Status::Optimal);
+    CHECK(std::abs(on.result.objective - (-3.5)) <= 1e-9);
+    // The best iterate is the optimum to 1e-6, so the basis guessed at it is
+    // the optimal one: no pivot (a crash-basis start takes one here).
+    CHECK(on.iters == 0);
+    checkBasis(on.basis, lp);
 }

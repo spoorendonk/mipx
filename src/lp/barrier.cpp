@@ -2236,6 +2236,7 @@ bool BarrierSolver::runCrossover() {
 LpResult BarrierSolver::solve() {
     last_error_.clear();
     gondzio_corrections_ = 0;
+    crossover_iters_ = 0;
     used_homogeneous_ = false;
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
