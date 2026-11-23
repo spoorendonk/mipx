@@ -65,7 +65,8 @@ DependentEquations findDependentEquations(const LpProblem& lp, const PresolveMat
     start.reserve(equations.size() + 1);
     start.push_back(0);
     for (const auto& [size, i] : equations) {
-        // The working matrix keeps each row sorted by column.
+        // By column index, as the working matrix keeps each row; HiGHS's
+        // getRowVector walks its row tree instead (see the header).
         for (const auto [j, a] : work.row(i)) {
             if (!col_removed[j] && a != 0.0) {
                 index.push_back(j);

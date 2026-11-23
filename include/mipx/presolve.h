@@ -332,11 +332,12 @@ struct PresolveOptions {
     /// LP: the active equations, each with its rhs as one more entry, are
     /// factored by the rank-revealing LU, and an equation left without a
     /// pivot is a combination of the others, rhs included, and is dropped.
-    /// One whose row is a combination of others but whose rhs is not keeps
-    /// a pivot and stays, as in HiGHS, for the LP solve to find infeasible.
-    /// Runs once, when the reduction loop first stalls; the loop goes on if
-    /// it dropped more than 0.05% of the rows. Off by default until
-    /// benchmarked.
+    /// When rows are combinations of others but their rhs is not, the rhs
+    /// row takes a pivot and the inconsistency stays, as in HiGHS, for the
+    /// LP solve to find infeasible.
+    /// Runs once, when the reduction loop first stalls or its rounds run
+    /// out; the loop goes on if it dropped more than 0.05% of the rows. Off
+    /// by default until benchmarked.
     bool enable_dependent_equations = false;
     /// Seconds that factorization may take; past it nothing is dropped.
     /// HiGHS gives it max(1, min(0.01 * time_limit, 100)). mipx's presolve

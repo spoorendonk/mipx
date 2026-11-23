@@ -831,9 +831,9 @@ std::vector<PresolveCase> presolveCases() {
     dominated.enable_dominated_columns = true;
     cases.push_back({"dominated columns (opt-in)", dominated, false});
     // A dependent equation holds wherever the others do, so dropping it
-    // keeps every feasible point. The audit's models never reach the pass
-    // (see presolveReductions()); the case checks that enabling it does no
-    // harm to them.
+    // keeps every feasible point. On the audit's LPs the pass runs but finds
+    // no equation left (see presolveReductions()); the case checks that
+    // enabling it does no harm to them.
     PresolveOptions dependent = o;
     dependent.enable_dependent_equations = true;
     cases.push_back({"dependent equations (opt-in)", dependent});

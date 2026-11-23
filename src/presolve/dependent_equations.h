@@ -39,7 +39,9 @@ struct DependentEquations {
     /// The equations to drop, in the factorization's order.
     std::vector<Index> rows;
     /// Columns left without a pivot that were fictitious (HiGHS's
-    /// "fictitious rows skipped"): nothing to drop for them.
+    /// "fictitious rows skipped"): nothing to drop for them. Always 0, as in
+    /// HiGHS, kept to match it: build() returns the count of real unpivoted
+    /// columns, which varWithNoPivot() lists before the -1s.
     Index fictitious = 0;
     /// The factorization ran out of time; `rows` is then empty.
     bool timed_out = false;
@@ -49,12 +51,22 @@ struct DependentEquations {
 /// equation (row_lower == row_upper exactly, as HiGHS's isEquation) is a
 /// column of a matrix with one row per LP column and one more, num_cols, for
 /// the rhs: its nonzeros on active columns, and row_lower in the rhs row when
-/// nonzero. The columns come in HiGHS's equations order, by that size and
-/// then by row. A column the rank-revealing LU leaves without a pivot is a
+/// nonzero. The columns come ordered as HiGHS's equations set, by that size
+/// and then by row. Two known deviations, neither a correctness matter.
+/// mipx reads the set from the current state; HiGHS builds it when it sets
+/// up its matrix or shrinks the problem (which it does right before this
+/// pass once half the rows or columns are gone) and in between only deletes,
+/// adds cut rows and re-sorts some rows whose size changed, so it misses LP
+/// rows that became equations through bound changes, and some sizes are
+/// stale. And each equation's entries go in by LP column index, where HiGHS
+/// walks its row tree in pre-order; the Markowitz search may then break ties
+/// differently. A column the rank-revealing LU leaves without a pivot is a
 /// combination of columns with one, rhs included, so its equation holds
-/// wherever theirs do. A row that is a combination of others while its rhs is
-/// not has its pivot in the rhs row and is not returned: HiGHS reports no
-/// infeasibility here. `time_limit` is the factorization's, in seconds.
+/// wherever theirs do. When LP rows are combinations of others but their rhs
+/// is not, the rhs row takes a pivot and the span keeps the inconsistency,
+/// so whatever is dropped, the LP solve still finds it infeasible: HiGHS
+/// reports no infeasibility here. `time_limit` is the factorization's, in
+/// seconds.
 DependentEquations findDependentEquations(const LpProblem& lp, const PresolveMatrix& work,
                                           const std::vector<bool>& col_removed,
                                           const std::vector<bool>& row_removed, double time_limit);
