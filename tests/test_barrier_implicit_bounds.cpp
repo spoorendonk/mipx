@@ -106,9 +106,9 @@ TEST_CASE("Barrier implicit bounds: reduced cost at an upper bound is negative",
 
 TEST_CASE("Barrier implicit bounds: ranged row slack carries the range",
           "[barrier][implicit-bounds]") {
-    // max x + y  s.t.  1 <= x - y <= 2 (ranged),  x + y <= 4,  x, y >= 0,
-    // x <= 10: optimum on x + y = 4, objective 4.
-    auto lp = makeLp(Sense::Maximize, {1.0, 1.0}, {0.0, 0.0}, {10.0, kInf}, {1.0, -kInf},
+    // max x  s.t.  1 <= x - y <= 2 (ranged),  x + y <= 4,  x, y >= 0,
+    // x <= 10: optimum x = 3, y = 1, the range's upper side active.
+    auto lp = makeLp(Sense::Maximize, {1.0, 0.0}, {0.0, 0.0}, {10.0, kInf}, {1.0, -kInf},
                      {2.0, 4.0}, {{0, 0, 1.0}, {0, 1, -1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
     const bool implicit = GENERATE(false, true);
     INFO("implicit " << implicit);
@@ -119,11 +119,36 @@ TEST_CASE("Barrier implicit bounds: ranged row slack carries the range",
     CHECK(solver.standardFormRows() == (implicit ? 2 : 4));
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-6));
+    CHECK_THAT(result.objective, WithinAbs(3.0, 1e-6));
     const auto x = solver.getPrimalValues();
-    CHECK_THAT(x[0] + x[1], WithinAbs(4.0, 1e-6));
-    CHECK(x[0] - x[1] >= 1.0 - 1e-6);
-    CHECK(x[0] - x[1] <= 2.0 + 1e-6);
+    CHECK_THAT(x[0], WithinAbs(3.0, 1e-6));
+    CHECK_THAT(x[1], WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("Barrier implicit bounds: scaled columns keep their upper bounds",
+          "[barrier][implicit-bounds]") {
+    // Non-unit coefficients, so Ruiz scales each column differently and the
+    // bounds must follow (u / C). min -3x - 2y  s.t.  2x + 0.5y <= 5,
+    // 0.1x + 4y <= 8,  0 <= x <= 2,  0 <= y <= 1.5: both columns end at their
+    // upper bounds with the rows slack, so the reduced costs are the costs.
+    auto lp = makeLp(Sense::Minimize, {-3.0, -2.0}, {0.0, 0.0}, {2.0, 1.5}, {-kInf, -kInf},
+                     {5.0, 8.0}, {{0, 0, 2.0}, {0, 1, 0.5}, {1, 0, 0.1}, {1, 1, 4.0}});
+    const bool implicit = GENERATE(false, true);
+    INFO("implicit " << implicit);
+    BarrierSolver solver;
+    solver.setOptions(quietOptions(implicit));
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
+    const auto x = solver.getPrimalValues();
+    CHECK_THAT(x[0], WithinAbs(2.0, 1e-6));
+    CHECK_THAT(x[1], WithinAbs(1.5, 1e-6));
+    if (implicit) {
+        const auto rc = solver.getReducedCosts();
+        CHECK_THAT(rc[0], WithinAbs(-3.0, 1e-6));
+        CHECK_THAT(rc[1], WithinAbs(-2.0, 1e-6));
+    }
 }
 
 TEST_CASE("Barrier implicit bounds: bounds-only LP goes to the upper bound",
