@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import stat
 import sys
@@ -101,8 +102,16 @@ def test_barrier_backends_run_the_cpu_barrier_on_one_ne_backend(backend: str, ne
     assert f"--{backend}" not in args
 
 
-def test_barrier_suite_covers_both_ne_backends() -> None:
-    assert set(gate.SUITES["barrier"].backends) == set(gate.BARRIER_NE)
+def test_barrier_backends_are_selectable_only_on_the_barrier_suite() -> None:
+    def pick(suite: str, backends: str) -> list[str]:
+        args = argparse.Namespace(suite=suite, backends=backends)
+        result: list[str] = gate.selected_backends(args, gate.SUITES[suite])
+        return result
+
+    assert pick("barrier", "barrier-dense") == ["barrier-dense"]
+    assert pick("barrier", "") == list(gate.SUITES["barrier"].backends)
+    with pytest.raises(SystemExit, match="barrier-dense"):
+        pick("lp", "barrier-dense")
 
 
 def test_read_solu_keeps_only_usable_references(tmp_path: Path) -> None:
