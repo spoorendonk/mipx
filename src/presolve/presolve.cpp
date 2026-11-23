@@ -1084,13 +1084,18 @@ Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_
         const bool min_finite = a > 0.0 ? l_finite : u_finite;
         const Real ax_max = a > 0.0 ? at_u : at_l;
         const Real ax_min = a > 0.0 ? at_l : at_u;
-        // A side at or past kHugeBound is infinite, as the passes that test
-        // sides with std::isinf take it.
-        const auto side = [](bool finite, Real value, Real inf) {
-            return finite && std::abs(value) < kHugeBound ? value : inf;
-        };
-        const Real new_lo = side(max_finite, lo - ax_max, -kInf);
-        const Real new_up = side(min_finite, up - ax_min, kInf);
+        // A lower side at or below -kHugeBound, or an upper side at or above
+        // it, is infinite, as the passes that test sides with std::isinf
+        // take it. A side huge the other way (R >= 1e20, or <= -1e20) is a
+        // row no point of sane size meets: the column is left to the passes
+        // that report that, rather than the side dropped or kept at 1e20.
+        const bool lo_kept = max_finite && lo - ax_max > -kHugeBound;
+        const bool up_kept = min_finite && up - ax_min < kHugeBound;
+        if ((lo_kept && lo - ax_max >= kHugeBound) || (up_kept && up - ax_min <= -kHugeBound)) {
+            continue;
+        }
+        const Real new_lo = lo_kept ? lo - ax_max : -kInf;
+        const Real new_up = up_kept ? up - ax_min : kInf;
 
         std::vector<Index> row_cols;
         std::vector<Real> row_coeffs;
@@ -1106,12 +1111,12 @@ Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_
                            next_dirty_rows, next_dirty_cols);
         lp.row_lower[i] = new_lo;
         lp.row_upper[i] = new_up;
-        // The sides took a x_j's extremes in, as shiftRowSides folds a term:
-        // the row's tolerance scales with them.
-        if (max_finite) {
+        // The sides kept finite took a x_j's extremes in, as shiftRowSides
+        // folds a term: the row's tolerance scales with them.
+        if (lo_kept) {
             row_scale_[i] = std::max(row_scale_[i], std::abs(ax_max));
         }
-        if (min_finite) {
+        if (up_kept) {
             row_scale_[i] = std::max(row_scale_[i], std::abs(ax_min));
         }
         next_dirty_rows[i] = 1;

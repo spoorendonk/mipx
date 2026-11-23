@@ -2520,6 +2520,22 @@ TEST_CASE("Presolve: a zero-cost singleton's huge widened side is infinite", "[p
     }
 }
 
+TEST_CASE("Presolve: a zero-cost singleton is kept when a side goes huge the wrong way",
+          "[presolve]") {
+    // 0 <= x1 - 1e10 s <= 1, s in [1e10, 2e10], x1 in [0, 10]: over x1 the
+    // row would be x1 >= 1e20, which no x1 meets. Dropping that side as
+    // huge would hide the infeasibility, so the column stays.
+    const LpProblem lp =
+        rowsModel({1.0, 0.0}, {0.0, 1e10}, {10.0, 2e10}, {{0.0, 1.0, {{0, 1.0}, {1, -1e10}}}});
+    Presolver presolver;
+    presolver.setOptions(zeroCostOptions(true));
+    const LpProblem reduced = presolver.presolve(lp);
+    CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    if (!presolver.isInfeasible()) {
+        CHECK(reduced.num_rows == 1);
+    }
+}
+
 TEST_CASE("Presolve: zero-cost singletons leave what they cannot take", "[presolve]") {
     SECTION("a column with a cost") {
         const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.5}, 0.0, 3.0);
