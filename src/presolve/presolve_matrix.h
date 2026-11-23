@@ -35,7 +35,7 @@ class PresolveMatrix {
 public:
     PresolveMatrix() = default;
     /// Every stored entry of `matrix`, explicit zeros included. Each row's
-    /// columns must be sorted and unique (asserted), or find() misses them.
+    /// columns must be sorted and unique (asserted), or find() may miss them.
     explicit PresolveMatrix(const SparseMatrix& matrix);
 
     [[nodiscard]] Index numRows() const { return static_cast<Index>(row_size_.size()); }
@@ -77,10 +77,11 @@ public:
 
     /// The live entries of one row or column in order, as Terms: `for (const
     /// auto [col, a] : m.row(i))`. Reads the pool through the matrix at each
-    /// step, so changing a value, erasing an entry, or inserting into another
-    /// row or column is fine while walking; only inserting a new entry into,
-    /// or clearing, the line being walked invalidates it (its id list may
-    /// grow, compact or empty).
+    /// step, so changing a value, erasing an entry, or inserting an entry
+    /// that is not in the line being walked (walking row r: any entry of
+    /// another row; walking column c: any entry of another column) is fine;
+    /// inserting into, or clearing, the line being walked invalidates it
+    /// (its id list may grow, compact or empty).
     class Line {
     public:
         class Iterator {
