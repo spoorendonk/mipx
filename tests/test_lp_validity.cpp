@@ -1689,6 +1689,33 @@ TEST_CASE("Regression #307: a cold optimum holds its rows in the model's units",
          {5, 5, 0.0042500000000000003}}));
 }
 
+TEST_CASE("Regression #306: a cold optimum holds its reduced-cost signs in the model's units",
+          "[lp_validity]") {
+    // Audit cuts seed 2554, variant 1, round 1. A cold Optimal held its rows
+    // but left d3 = -1.3e-6 on C3, which has no upper bound: the scaled dual
+    // tolerance read through C3's column scale. The clean-up re-solves it
+    // unscaled.
+    requireCertifiedOptimal(
+        literalLp(Sense::Maximize, -2.5,
+                  {0.00015000000000000001, 2.875, -2.625, 0.0, -1.375, -0.0074999999999999997},
+                  {-kInf, -kInf, -2.75, -0.00073749999999999998, -1.625, 237.5},
+                  {-37500, -2, 0.5, kInf, kInf, 237.5}, {-kInf, -0.97716022017357163, -kInf},
+                  {kInf, kInf, -121491684.42963625},
+                  {{0, 0, 0.00016250000000000002},
+                   {0, 2, -0.25},
+                   {0, 3, -5000},
+                   {0, 4, -2.125},
+                   {0, 5, -0.044999999999999998},
+                   {1, 1, 0.36250000000000004},
+                   {1, 2, 0.10000000000000001},
+                   {2, 0, 3000},
+                   {2, 1, -46.25},
+                   {2, 2, -0.10000000000000001},
+                   {2, 3, -26.25},
+                   {2, 4, 0.003375},
+                   {2, 5, 1250}}));
+}
+
 TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
           "[lp_validity]") {
     // A capacitated transportation LP whose costs take three values, so most
