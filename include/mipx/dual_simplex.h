@@ -190,6 +190,12 @@ struct DualSimplexOptions {
     // BTRAN-density gate and the EMA history. Provided so the sparse and dense
     // kernels can be compared directly; the adaptive path is the default.
     bool force_dense_pivot_row = false;
+    // Charge each pivot-row assembly the work it does (one unit per row
+    // scanned, plus the nonzeros of each row with a nonzero BTRAN entry)
+    // instead of the whole matrix's nonzero count (#379, decided in #378).
+    // Off by default: work units pace the DSE fallback and the MIP's
+    // heuristics, so the default waits on an LP and MIP benchmark.
+    bool row_price_actual_work = false;
 
     // Optional cooperative stop flag for externally orchestrated solves.
     const std::atomic<bool>* stop_flag = nullptr;
@@ -331,6 +337,17 @@ public:
         Real ema_alpha_density = 0.0;  // EMA of assembled alpha-row density (live state)
     };
     [[nodiscard]] const RowPriceStats& getRowPriceStats() const { return row_price_stats_; }
+
+    /// DSE-to-Devex fallbacks of the most recent solve(), all of its internal
+    /// passes included, by cause. The cost check reads work units, so a
+    /// change to how work is charged can move it (#379).
+    struct DseFallbackStats {
+        Int cost = 0;        // DSE's extra BTRAN work over its share of the total
+        Int degenerate = 0;  // a degenerate pivot streak under DSE
+    };
+    [[nodiscard]] const DseFallbackStats& getDseFallbackStats() const {
+        return dse_fallback_stats_;
+    }
 
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
@@ -543,6 +560,7 @@ private:
     // Hyper-sparse row-price (#131) path tracking and density history,
     // reset each solve().
     RowPriceStats row_price_stats_{};
+    DseFallbackStats dse_fallback_stats_{};
     std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
     std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
     DualSimplexOptions options_{};

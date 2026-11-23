@@ -677,6 +677,7 @@ LpResult DualSimplexSolver::solve() {
     // The row-price counters cover the whole call, cold retry and unscaled
     // clean-up included; each pass restarts only the density history.
     row_price_stats_ = RowPriceStats{};
+    dse_fallback_stats_ = DseFallbackStats{};
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);
     res = cleanUpUnscaled(res, start, checked);
@@ -2152,13 +2153,20 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // resume the dense scan at the first row the walk has not yet reached.
     auto buildPivotRowAlphaFromWork = [&]() {
         pivot_row_alpha.clear();
+        // The work this assembly does, charged under row_price_actual_work:
+        // one unit per row visited (an abandoned sparse walk's rows and the
+        // dense scan that resumes after it both count), plus each accumulated
+        // row's nonzeros and its slack entry.
+        uint64_t assembly_work = 0;
 
         auto accumulateRow = [&](Index i) {
+            ++assembly_work;
             const Real rho_i = btran_work[i];
             if (std::abs(rho_i) < kZeroTol) {
                 return;
             }
             auto rv = matrix_.row(i);
+            assembly_work += static_cast<uint64_t>(rv.size()) + 1;
             for (Index p = 0; p < rv.size(); ++p) {
                 const Index j = rv.indices[p];
                 pivot_row_alpha.add(j, rho_i * rv.values[p]);
@@ -2205,6 +2213,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
         }
 
+        // Alpha computation. By default every assembly is charged the whole
+        // matrix, whichever kernel ran (#378 keeps that until benchmarked).
+        work_.count(options_.row_price_actual_work ? assembly_work
+                                                   : static_cast<uint64_t>(matrix_.numNonzeros()));
         if (completed_sparse) {
             ++row_price_stats_.sparse_assemblies;
         } else {
@@ -3172,7 +3184,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             lu_.btranSparse(btran_work.dense(), btran_work.touchedMut());
 
             // Compute pivot row alphas (row-wise).
-            work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
             buildPivotRowAlphaFromWork();
 
             // Devex, before the basis changes: the entering column's exact
@@ -3334,7 +3345,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // Compute alpha_j = rho^T * a_j for all nonbasic j.
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
         // This is much faster than column-wise when rho is sparse.
-        work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
         buildPivotRowAlphaFromWork();
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
@@ -4135,6 +4145,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     if (dse_total_work_ > 0.0 &&
                         dse_btran_work_ / dse_total_work_ > options_.dse_fallback_cost_ratio) {
                         fallbackToDevex();
+                        ++dse_fallback_stats_.cost;
                     }
                     dse_btran_work_ = 0.0;
                     dse_total_work_ = 0.0;
@@ -4145,6 +4156,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 // not guiding the solver well (common with approximate init).
                 if (dse_active_ && degenerate_pivot_streak >= options_.dse_fallback_window) {
                     fallbackToDevex();
+                    ++dse_fallback_stats_.degenerate;
                 }
             }
         } else {

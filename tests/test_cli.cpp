@@ -16,6 +16,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -259,7 +260,8 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
           "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
           "--presolve-probing-probes", "--presolve-probing-time", "--clique-table",
           "--no-clique-table", "--plunge-depth", "--no-plunge", "--plunge-bound-quotient",
-          "--dual-primal-devex", "--dual-no-primal-devex", "--dual-dense-row-price"}) {
+          "--dual-primal-devex", "--dual-no-primal-devex", "--dual-dense-row-price",
+          "--dual-row-price-actual-work"}) {
         INFO(flag);
         CHECK(run.mentions(flag));
     }
@@ -325,8 +327,8 @@ TEST_CASE("CLI: --plunge-depth reaches the tree search", "[cli]") {
 }
 
 TEST_CASE("CLI: the dual simplex flags are accepted and solve the LP", "[cli]") {
-    for (const char* flag :
-         {"--dual-primal-devex", "--dual-no-primal-devex", "--dual-dense-row-price"}) {
+    for (const char* flag : {"--dual-primal-devex", "--dual-no-primal-devex",
+                             "--dual-dense-row-price", "--dual-row-price-actual-work"}) {
         INFO(flag);
         const auto run =
             runSolver("'" + testDataDir() + "/lp_format.lp' --dual --quiet " + std::string(flag));
@@ -353,6 +355,38 @@ TEST_CASE("CLI: --dual-dense-row-price reaches the dual simplex", "[cli]") {
     CHECK_FALSE(adaptive.mentions("Row price: 0 sparse"));
     CHECK(dense.mentions("Row price: 0 sparse, "));
     CHECK_FALSE(dense.mentions(", 0 dense ("));
+}
+
+namespace {
+
+/// The value of the "Work units: " summary line, or -1 when it is missing.
+double workUnits(const CliRun& run) {
+    const std::string_view key = "Work units: ";
+    const auto at = run.output.find(key);
+    if (at == std::string::npos) {
+        return -1.0;
+    }
+    return std::strtod(run.output.c_str() + at + key.size(), nullptr);
+}
+
+}  // namespace
+
+TEST_CASE("CLI: --dual-row-price-actual-work reaches the dual simplex", "[cli]") {
+    // Presolve would empty this model, leaving no pivots to charge.
+    const std::string base = "'" + testDataDir() + "/grid2_master_0001.mps' --dual --no-presolve ";
+    const auto flat = runSolver(base);
+    const auto actual = runSolver(base + "--dual-row-price-actual-work");
+
+    for (const auto* run : {&flat, &actual}) {
+        CHECK(run->exit_code == 0);
+        CHECK(run->mentions("Objective: 2.0390200000e+06"));
+        CHECK(run->mentions("DSE fallbacks: "));
+    }
+    // Every pivot of this model takes the hyper-sparse row price, which
+    // touches far less than the whole matrix, so the actual charge is lower.
+    CHECK(workUnits(flat) > 0.0);
+    CHECK(workUnits(actual) > 0.0);
+    CHECK(workUnits(actual) < workUnits(flat));
 }
 
 #endif  // MIPX_HAS_SOLVE_BINARY && !_WIN32

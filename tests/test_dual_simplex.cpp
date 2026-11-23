@@ -1374,6 +1374,62 @@ TEST_CASE("DualSimplex: force_dense_pivot_row option round-trips",
     CHECK(stats.ema_alpha_density == 0.0);
 }
 
+// #379: row_price_actual_work charges each assembly the rows it visits and
+// the nonzeros it multiplies, in place of the whole matrix. It changes the
+// accounting only: the pivots, and so the optimum and basis, stay the same.
+// The default flat charge cannot see which kernel ran; the actual one can.
+TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
+          "[dual_simplex][row_price]") {
+    // A column-generation master that stays hyper-sparse from the slack
+    // basis, so the adaptive kernel takes the sparse path on its pivots.
+    const auto lp = readMps(testDataDir() + "/grid2_master_0001.mps");
+
+    struct Run {
+        LpResult result;
+        std::vector<BasisStatus> basis;
+        DualSimplexSolver::RowPriceStats stats;
+    };
+    auto solve = [&](bool actual_work, bool force_dense) {
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        DualSimplexOptions opts;
+        opts.row_price_actual_work = actual_work;
+        opts.force_dense_pivot_row = force_dense;
+        solver.setOptions(opts);
+        solver.load(lp);
+        Run run{solver.solve(), {}, solver.getRowPriceStats()};
+        run.basis = solver.getBasis();
+        return run;
+    };
+    const Run flat = solve(false, false);
+    const Run flat_dense = solve(false, true);
+    const Run actual = solve(true, false);
+    const Run actual_dense = solve(true, true);
+
+    for (const Run* run : {&flat, &flat_dense, &actual, &actual_dense}) {
+        REQUIRE(run->result.status == Status::Optimal);
+        CHECK(run->result.iterations == flat.result.iterations);
+        CHECK_THAT(run->result.objective, WithinULP(flat.result.objective, 0));
+        CHECK(run->basis == flat.basis);
+    }
+    REQUIRE(actual.stats.sparse_assemblies > 0);
+    REQUIRE(actual_dense.stats.sparse_assemblies == 0);
+
+    // The flat charge is kernel-blind; the actual one is below it, and lower
+    // still on the sparse kernel, which never visits the rows BTRAN missed.
+    CHECK(flat.result.work_units == flat_dense.result.work_units);
+    CHECK(actual_dense.result.work_units < flat.result.work_units);
+    CHECK(actual.result.work_units < actual_dense.result.work_units);
+}
+
+TEST_CASE("DualSimplex: row_price_actual_work defaults to off", "[dual_simplex][options]") {
+    DualSimplexSolver solver;
+    CHECK(solver.getOptions().row_price_actual_work == false);
+    const auto& dse = solver.getDseFallbackStats();
+    CHECK(dse.cost == 0);
+    CHECK(dse.degenerate == 0);
+}
+
 // ---------------------------------------------------------------------------
 // A warm-started basis can outlive the bounds it was taken under: a
 // branch-and-bound node installs the basis saved at its parent, whose bounds

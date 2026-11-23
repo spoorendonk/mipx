@@ -63,6 +63,7 @@ void printUsage(FILE* out) {
                  "[--dual-bfrt|--dual-no-bfrt] "
                  "[--dual-lu-update-limit N] "
                  "[--dual-lu-ft-drop-tol T] [--dual-dense-row-price] "
+                 "[--dual-row-price-actual-work] "
                  "[--search-stable|--search-default|--search-aggressive] "
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
                  "[--pdlp-opt-norm l2|linf] "
@@ -167,6 +168,8 @@ int main(int argc, char* argv[]) {
     // Forces the dense pivot-row assembly (DualSimplexOptions::force_dense_pivot_row),
     // so the hyper-sparse row price can be benchmarked against it (#178).
     bool dual_dense_row_price = false;
+    // Charges the row price its actual work (DualSimplexOptions::row_price_actual_work, #379).
+    bool dual_row_price_actual_work = false;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -370,6 +373,8 @@ int main(int argc, char* argv[]) {
             dual_lu_ft_drop_tolerance = std::atof(argv[++i]);
         } else if (arg == "--dual-dense-row-price") {
             dual_dense_row_price = true;
+        } else if (arg == "--dual-row-price-actual-work") {
+            dual_row_price_actual_work = true;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
             search_profile_explicit = true;
@@ -723,6 +728,7 @@ int main(int argc, char* argv[]) {
                 std::string error;
                 // Set by the dual simplex only: which pivot-row kernel ran.
                 std::optional<mipx::DualSimplexSolver::RowPriceStats> row_price;
+                std::optional<mipx::DualSimplexSolver::DseFallbackStats> dse_fallbacks;
             };
             // One solve of `model` on the chosen backend; a negative limit is none.
             auto solveLp = [&](const mipx::LpProblem& model, double seconds) {
@@ -787,6 +793,7 @@ int main(int argc, char* argv[]) {
                     dopts.lu_ft_drop_tolerance = dual_lu_ft_drop_tolerance;
                 }
                 dopts.force_dense_pivot_row = dual_dense_row_price;
+                dopts.row_price_actual_work = dual_row_price_actual_work;
                 if (seconds >= 0.0) {
                     dopts.max_solve_seconds = seconds;
                 }
@@ -795,6 +802,7 @@ int main(int argc, char* argv[]) {
                 run.result = solver.solve();
                 run.primals = solver.getPrimalValues();
                 run.row_price = solver.getRowPriceStats();
+                run.dse_fallbacks = solver.getDseFallbackStats();
                 return run;
             };
 
@@ -836,6 +844,7 @@ int main(int argc, char* argv[]) {
                     const mipx::Int iterations = run.result.iterations;
                     const double work_units = run.result.work_units;
                     const auto row_price = run.row_price;
+                    const auto dse_fallbacks = run.dse_fallbacks;
                     const double time_left =
                         time_limit >= 0.0 ? time_limit - secondsSince(t0) : -1.0;
                     if (time_limit >= 0.0 && time_left <= 0.0) {
@@ -848,6 +857,10 @@ int main(int argc, char* argv[]) {
                             run.row_price->sparse_assemblies += row_price->sparse_assemblies;
                             run.row_price->dense_assemblies += row_price->dense_assemblies;
                             run.row_price->fill_in_fallbacks += row_price->fill_in_fallbacks;
+                        }
+                        if (run.dse_fallbacks && dse_fallbacks) {
+                            run.dse_fallbacks->cost += dse_fallbacks->cost;
+                            run.dse_fallbacks->degenerate += dse_fallbacks->degenerate;
                         }
                         obj = run.result.objective;
                     }
@@ -872,6 +885,13 @@ int main(int argc, char* argv[]) {
                         static_cast<int>(rps.sparse_assemblies),
                         static_cast<int>(rps.dense_assemblies),
                         static_cast<int>(rps.fill_in_fallbacks));
+            }
+            if (run.dse_fallbacks && verbose) {
+                // The cost check reads work units, so a benchmark of
+                // --dual-row-price-actual-work compares these (#379).
+                log.log("DSE fallbacks: %d on cost, %d on degeneracy\n",
+                        static_cast<int>(run.dse_fallbacks->cost),
+                        static_cast<int>(run.dse_fallbacks->degenerate));
             }
 
             std::fflush(stdout);  // flush LP solver's printf output before Logger write()
