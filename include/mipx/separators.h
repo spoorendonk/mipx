@@ -2,13 +2,13 @@
 
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
+#include "mipx/deadline.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/gomory.h"
 #include "mipx/lp_problem.h"
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <span>
 #include <utility>
 #include <vector>
@@ -92,10 +92,11 @@ public:
         local_rows_ = std::move(rows);
     }
 
-    /// Separation stops at @p deadline: no family starts after it, and the
-    /// row and candidate loops stop between rows (#336). A round cut short
-    /// keeps the cuts it pooled. The default, time_point::max(), never stops.
-    void setDeadline(std::chrono::steady_clock::time_point deadline) {
+    /// Separation stops at @p deadline, seen within 16 polls of passing it
+    /// (pastDeadline()): no family starts once it is seen, and the row and
+    /// candidate loops stop between rows (#336). A round cut short keeps the
+    /// cuts it pooled. The default, an unset Deadline, never stops.
+    void setDeadline(const Deadline& deadline) {
         deadline_ = deadline;
         deadline_polls_ = 0;
         past_deadline_ = false;
@@ -110,11 +111,11 @@ private:
     /// read. The quadratic loops call it per inner step, so a long row still
     /// reaches the clock quickly. Once past, it stays past.
     [[nodiscard]] bool pastDeadline() const {
-        if (deadline_ == std::chrono::steady_clock::time_point::max()) {
+        if (!deadline_.isSet()) {
             return false;
         }
         if (!past_deadline_ && (deadline_polls_++ & 15U) == 0) {
-            past_deadline_ = std::chrono::steady_clock::now() >= deadline_;
+            past_deadline_ = deadline_.passed();
         }
         return past_deadline_;
     }
@@ -184,7 +185,7 @@ private:
     const VariableBoundStore* vb_store_ = nullptr;
     const CliqueTable* clique_table_ = nullptr;
     bool strengthen_cuts_ = false;
-    std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
+    Deadline deadline_;
     // pastDeadline()'s poll counter and latch. A manager is used from one
     // thread at a time.
     mutable unsigned deadline_polls_ = 0;

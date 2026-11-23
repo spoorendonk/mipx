@@ -974,9 +974,10 @@ TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][famili
     }
 }
 
-// #336: a deadline in the past stops separation before any family starts;
+// #336: a deadline already passed stops separation before any family starts;
 // the same manager with a far deadline finds cuts on this model. The first
-// deadline poll reads the clock, so this does not depend on timing.
+// deadline poll reads the clock, so this does not depend on timing. It covers
+// the check between families only, not the ones inside the row loops.
 TEST_CASE("SeparatorManager: a past deadline separates no cuts", "[cuts][time_limit]") {
     auto problem = buildBinaryConflictMip();
     DualSimplexSolver lp;
@@ -990,16 +991,15 @@ TEST_CASE("SeparatorManager: a past deadline separates no cuts", "[cuts][time_li
     config.clique = true;
     manager.setConfig(config);
     manager.setMaxCutsPerFamily(10);
-    const auto now = std::chrono::steady_clock::now();
 
     CutPool far_pool;
     CutSeparationStats far_stats;
-    manager.setDeadline(now + std::chrono::hours(1));
+    manager.setDeadline(Deadline::after(3600.0));
     REQUIRE(manager.separate(lp, problem, lp.getPrimalValues(), far_pool, far_stats) >= 1);
 
     CutPool past_pool;
     CutSeparationStats past_stats;
-    manager.setDeadline(now - std::chrono::seconds(1));
+    manager.setDeadline(Deadline::after(0.0));  // passed once read
     CHECK(manager.separate(lp, problem, lp.getPrimalValues(), past_pool, past_stats) == 0);
     CHECK(past_pool.size() == 0);
     CHECK(past_stats.at(CutFamily::Cover).attempted == 0);

@@ -802,6 +802,21 @@ static LpProblem buildSlowRootSetCover(Index rows, Index cols, Index per_col) {
     return lp;
 }
 
+// An incumbent, when one was found, covers every row of the set cover.
+static void checkSetCoverIncumbent(const LpProblem& lp, const std::vector<Real>& solution) {
+    if (solution.empty()) {
+        return;
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        Real activity = 0.0;
+        const auto row = lp.matrix.row(i);
+        for (Index p = 0; p < row.size(); ++p) {
+            activity += row.values[p] * solution[row.indices[p]];
+        }
+        CHECK(activity >= 1.0 - 1e-6);
+    }
+}
+
 // #336: the time limit holds through the root stage. The root LP of this
 // model does not finish in 0.2 s, so a 0.2 s limit stops it there,
 // and the solve returns TimeLimit within the stated overrun. Wall-clock, so
@@ -811,19 +826,19 @@ TEST_CASE("MipSolver: time limit stops a root LP that does not finish in time",
     constexpr double kLimit = 0.2;
     constexpr double kAllowedOverrun = 0.5;
 
-    // Not the race yet: one CPU factorization of its barrier arm takes
-    // minutes on the large model, and the race's stop flag is not read inside
-    // it until fix/275-stop-flag lands (#346). The barrier alone stops in its
-    // factorization on its own max_solve_seconds (#275), but the steps before
-    // the first IPM iteration have no check: on the large model (~40400
-    // standard-form rows) the dense Cholesky fills an m x m matrix of ~13 GB
-    // and the sparse one's ordering takes ~7 s. Its model is 10x narrower,
-    // where the time goes into the factorization.
+    // The barrier, alone or as a race arm, stops inside its factorization on
+    // its own max_solve_seconds (#275), but the steps before its first IPM
+    // iteration have no check: on the large model (~40400 standard-form rows)
+    // the dense Cholesky fills an m x m matrix of ~13 GB and the sparse one's
+    // ordering takes ~7 s. Those two policies get a 10x narrower model, where
+    // the time goes into the factorization (#345, #346).
     const auto policy =
-        GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot, RootLpPolicy::BarrierRoot);
+        GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot, RootLpPolicy::BarrierRoot,
+                 RootLpPolicy::ConcurrentRootExperimental);
     CAPTURE(static_cast<int>(policy));
-    const auto lp =
-        buildSlowRootSetCover(400, policy == RootLpPolicy::BarrierRoot ? 4000 : 40000, 8);
+    const bool runs_barrier =
+        policy == RootLpPolicy::BarrierRoot || policy == RootLpPolicy::ConcurrentRootExperimental;
+    const auto lp = buildSlowRootSetCover(400, runs_barrier ? 4000 : 40000, 8);
     MipSolver solver;
     solver.setVerbose(false);
     solver.setNumThreads(1);
@@ -837,19 +852,33 @@ TEST_CASE("MipSolver: time limit stops a root LP that does not finish in time",
 
     CHECK(result.status == Status::TimeLimit);
     CHECK(result.nodes <= 1);
+    // A stopped root LP is no bound (minimization: -inf).
+    CHECK(result.best_bound == -kInf);
     CHECK(wall <= kLimit + kAllowedOverrun);
     CHECK(result.time_seconds <= kLimit + kAllowedOverrun);
-    // An incumbent, when one was found, is feasible for the model.
-    if (!result.solution.empty()) {
-        for (Index i = 0; i < lp.num_rows; ++i) {
-            Real activity = 0.0;
-            const auto row = lp.matrix.row(i);
-            for (Index p = 0; p < row.size(); ++p) {
-                activity += row.values[p] * result.solution[row.indices[p]];
-            }
-            CHECK(activity >= 1.0 - 1e-6);
-        }
-    }
+    checkSetCoverIncumbent(lp, result.solution);
+}
+
+// #336, deterministic: with no time at all, every root policy, the race
+// included, returns TimeLimit with no bound and no node beyond the root.
+TEST_CASE("MipSolver: a zero time limit stops in the root with no bound", "[mip][time_limit]") {
+    const auto policy =
+        GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot, RootLpPolicy::BarrierRoot,
+                 RootLpPolicy::ConcurrentRootExperimental);
+    CAPTURE(static_cast<int>(policy));
+    const auto lp = buildSlowRootSetCover(100, 1000, 4);
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setRootLpPolicy(policy);
+    solver.setTimeLimit(0.0);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    CHECK(result.status == Status::TimeLimit);
+    CHECK(result.nodes <= 1);
+    CHECK(result.best_bound == -kInf);
+    checkSetCoverIncumbent(lp, result.solution);
 }
 
 TEST_CASE("MipSolver: a node dropped without an LP verdict leaves the search unproven",

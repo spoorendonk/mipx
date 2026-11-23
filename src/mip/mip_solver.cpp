@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -41,43 +40,6 @@ void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
     opts.max_solve_seconds = seconds;
     lp.setOptions(opts);
 }
-
-// Sets `flag` once `time_left` reaches 0: the root race's stop flag (#336),
-// which also ends a race arm whose own time limit is not checked where it
-// spends its time. Stops and joins on destruction.
-class DeadlineWatcher {
-public:
-    DeadlineWatcher(std::atomic<bool>& flag, std::function<double()> time_left)
-        : thread_([this, &flag, time_left = std::move(time_left)] {
-              std::unique_lock lock(mutex_);
-              while (!done_) {
-                  const double left = time_left();
-                  if (left <= 0.0) {
-                      flag.store(true, std::memory_order_relaxed);
-                      return;
-                  }
-                  // Re-read the clock at least every second: a limit of
-                  // hours never becomes one far-off time_point.
-                  cv_.wait_for(lock, std::chrono::duration<double>(std::min(left, 1.0)));
-              }
-          }) {}
-    DeadlineWatcher(const DeadlineWatcher&) = delete;
-    DeadlineWatcher& operator=(const DeadlineWatcher&) = delete;
-    ~DeadlineWatcher() {
-        {
-            std::lock_guard lock(mutex_);
-            done_ = true;
-        }
-        cv_.notify_one();
-        thread_.join();
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool done_ = false;
-    std::thread thread_;  // Last: it starts once the members it uses exist.
-};
 
 /// Get physical core count (linux only, falls back to hardware_concurrency).
 unsigned getPhysicalCores() {
@@ -5234,6 +5196,12 @@ MipResult MipSolver::solveMinimizationOnce() {
             out.lp_result.status = Status::IterLimit;
             return out;
         }
+        // Past the deadline (the race's dual fallback after every arm
+        // stopped on it), not even a load().
+        if (timeLeft() <= 0.0) {
+            out.lp_result.status = Status::TimeLimit;
+            return out;
+        }
 
         const auto started = std::chrono::steady_clock::now();
         if (backend == RootBackend::Dual) {
@@ -5273,9 +5241,11 @@ MipResult MipSolver::solveMinimizationOnce() {
                             barrier_algorithm_ == BarrierAlgorithm::GpuCholesky ||
                             barrier_algorithm_ == BarrierAlgorithm::GpuAugmented);
             opts.stop_flag = stop_flag;
-            opts.max_solve_seconds = timeLeft();
             solver.setOptions(opts);
             solver.load(problem_);
+            // As for the barrier: PDLP's clock starts in solve().
+            opts.max_solve_seconds = timeLeft();
+            solver.setOptions(opts);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
             out.used_gpu = solver.usedGpu();
@@ -5331,9 +5301,8 @@ MipResult MipSolver::solveMinimizationOnce() {
             race_results.push_back(runRootBackend(RootBackend::Barrier, nullptr));
             race_results.push_back(runRootBackend(RootBackend::Pdlp, nullptr));
         } else {
+            // The deadline stops every arm through its own time limit (#336).
             std::atomic<bool> race_stop{false};
-            // The deadline stops every arm (#336).
-            const DeadlineWatcher race_deadline(race_stop, [this] { return timeLeft(); });
             std::mutex race_mutex;
             auto run_and_store = [&](RootBackend backend) {
                 auto result = runRootBackend(backend, &race_stop);
@@ -5713,9 +5682,10 @@ MipResult MipSolver::solveMinimizationOnce() {
                     break;
                 }
 
-                setLpTimeLimit(lp, timeLeft());
+                // Unlimited, as the cut back-outs: a warm re-solve, usually
+                // of no iterations, and a stopped one would leave `lp`
+                // non-optimal for the root basis and branching (#240).
                 auto refine_result = lp.solve();
-                setLpTimeLimit(lp, -1.0);
                 ++exact_refinement_stats_.resolve_calls;
                 exact_refinement_stats_.resolve_iterations += refine_result.iterations;
                 exact_refinement_stats_.resolve_work_units += refine_result.work_units;
@@ -6248,13 +6218,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     SeparatorManager separators;
     separators.setStrengthenCuts(cut_strengthening_);
     // One separator call can outlast a short limit (rail507's cmir takes
-    // seconds), so separation stops at the deadline too (#336). A limit
-    // past ~30 years is left unset rather than overflow the clock.
-    if (const double left = timeLeft(); left < 1e9) {
-        separators.setDeadline(std::chrono::steady_clock::now() +
-                               std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                   std::chrono::duration<double>(left)));
-    }
+    // seconds), so separation stops at the deadline too (#336).
+    separators.setDeadline(Deadline::after(timeLeft()));
     if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
         separators.setVariableBoundStore(&vb_store_);
     }
