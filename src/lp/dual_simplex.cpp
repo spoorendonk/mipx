@@ -1941,9 +1941,48 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // dense loop does to give the same values.
     std::vector<Index> pivot_col_support;
     pivot_col_support.reserve(static_cast<std::size_t>(num_rows_));
+    // pivot_col's pattern from its last FTRAN (pivot_col is zero elsewhere),
+    // so the next column clears and is built by it, not over all rows.
+    std::vector<Index> pivot_col_pattern;
+    pivot_col_pattern.reserve(static_cast<std::size_t>(num_rows_));
     SparseWorkVector btran_work(num_rows_);
-    // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector).
+    // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector), and
+    // after its FTRAN v = B^{-1} tau, with v's pattern (zero elsewhere).
     std::vector<Real> dse_tau(num_rows_, 0.0);
+    std::vector<Index> dse_tau_pattern;
+    dse_tau_pattern.reserve(static_cast<std::size_t>(num_rows_));
+    // FTRAN of the entering column into pivot_col by pattern. The pattern is
+    // put in ascending order, as the dense scan it replaces gave it, so the
+    // updates that walk it break ties as before.
+    auto ftranPivotColumn = [&](Index entering) {
+        for (Index i : pivot_col_pattern) {
+            pivot_col[static_cast<std::size_t>(i)] = 0.0;
+        }
+        pivot_col_pattern.clear();
+        if (entering < num_cols_) {
+            auto cv = matrix_.col(entering);
+            for (Index p = 0; p < cv.size(); ++p) {
+                pivot_col[static_cast<std::size_t>(cv.indices[p])] = cv.values[p];
+                pivot_col_pattern.push_back(cv.indices[p]);
+            }
+        } else {
+            pivot_col[static_cast<std::size_t>(entering - num_cols_)] = -1.0;
+            pivot_col_pattern.push_back(entering - num_cols_);
+        }
+        lu_.ftranSparse(pivot_col, pivot_col_pattern);
+        // Sorting costs k log k; past m / 16 entries (log k ~ 16) a scan of
+        // all m rows is the cheaper way to an ascending pattern.
+        if (pivot_col_pattern.size() * 16 > static_cast<std::size_t>(num_rows_)) {
+            pivot_col_pattern.clear();
+            for (Index i = 0; i < num_rows_; ++i) {
+                if (pivot_col[static_cast<std::size_t>(i)] != 0.0) {
+                    pivot_col_pattern.push_back(i);
+                }
+            }
+        } else {
+            std::sort(pivot_col_pattern.begin(), pivot_col_pattern.end());
+        }
+    };
     SparseWorkVector pricing_reduced_cost(numVars());
     // Columns the bound-flipping ratio test moved this iteration. A flip is
     // dual feasible only with the dual step that follows it, so a pivot
@@ -2849,16 +2888,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // Primal feasible but not dual feasible: primal simplex pivot.
 
             // FTRAN: compute pivot column eta = B^{-1} * a_entering.
-            std::fill(pivot_col.begin(), pivot_col.end(), 0.0);
-            if (entering_p < num_cols_) {
-                auto cv = matrix_.col(entering_p);
-                for (Index p = 0; p < cv.size(); ++p) {
-                    pivot_col[cv.indices[p]] = cv.values[p];
-                }
-            } else {
-                pivot_col[entering_p - num_cols_] = -1.0;
-            }
-            lu_.ftran(pivot_col);
+            ftranPivotColumn(entering_p);
 
             // Direction: entering moves to improve objective.
             Real delta_dir;
@@ -2879,7 +2909,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // Compute pivot column norm and build sparse nonzero index in one pass.
             Real pivot_col_norm = 0.0;
             pivot_col_nz.clear();
-            for (Index i = 0; i < num_rows_; ++i) {
+            for (Index i : pivot_col_pattern) {
                 Real v = pivot_col[i];
                 pivot_col_norm += v * v;
                 if (std::abs(v) > kZeroTol) {
@@ -3135,7 +3165,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // BTRAN for dual update.
             btran_work.clear();
             btran_work.set(leaving_row_p, 1.0);
-            lu_.btran(btran_work.dense(), btran_work.touchedMut());
+            lu_.btranSparse(btran_work.dense(), btran_work.touchedMut());
 
             // Compute pivot row alphas (row-wise).
             work_.count(static_cast<uint64_t>(matrix_.numNonzeros()));  // alpha computation
@@ -3228,7 +3258,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // Reuse transformed pivot column and avoid a second FTRAN in LU update.
             lu_.updateFromFtranColumn(
                 leaving_row_p,
-                std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)));
+                std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)),
+                pivot_col_pattern);
 
             if (primal_step_degenerate) {
                 ++degenerate_pivot_streak;
@@ -3294,7 +3325,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // y = B^{-T} * e_{leaving_row}
         btran_work.clear();
         btran_work.set(leaving_row, 1.0);
-        lu_.btran(btran_work.dense(), btran_work.touchedMut());
+        lu_.btranSparse(btran_work.dense(), btran_work.touchedMut());
 
         // Compute alpha_j = rho^T * a_j for all nonbasic j.
         // Row-wise: alpha = rho^T * A, then alpha_{n+i} = -rho[i] for slacks.
@@ -3827,21 +3858,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
         // ---- FTRAN: Compute pivot column ----
         // aq = B^{-1} * a_entering (use matrix_ directly, not augmented_)
-        std::fill(pivot_col.begin(), pivot_col.end(), 0.0);
-        if (entering_var < num_cols_) {
-            auto cv = matrix_.col(entering_var);
-            for (Index p = 0; p < cv.size(); ++p) {
-                pivot_col[cv.indices[p]] = cv.values[p];
-            }
-        } else {
-            pivot_col[entering_var - num_cols_] = -1.0;
-        }
-        lu_.ftran(pivot_col);
+        ftranPivotColumn(entering_var);
 
         // Build sparse nonzero index list for incremental infeasibility updates.
         pivot_col_nz.clear();
         pivot_col_support.clear();
-        for (Index i = 0; i < num_rows_; ++i) {
+        for (Index i : pivot_col_pattern) {
             if (pivot_col[i] != 0.0) {
                 pivot_col_support.push_back(i);
                 if (std::abs(pivot_col[i]) > kZeroTol) {
@@ -4037,28 +4059,58 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // Track DSE FTRAN cost for fallback decision (includes LU work).
             double lu_work_before_dse = lu_.workUnits().units();
 
-            auto btran_dense = btran_work.dense();
-            std::copy(btran_dense.begin(), btran_dense.end(), dse_tau.begin());
-            lu_.ftran(dse_tau);
-
-            double dse_extra_work =
-                lu_.workUnits().units() - lu_work_before_dse + static_cast<double>(num_rows_);
+            // tau by the BTRAN result's pattern, over the last v's pattern.
+            for (Index i : dse_tau_pattern) {
+                dse_tau[static_cast<std::size_t>(i)] = 0.0;
+            }
+            dse_tau_pattern.clear();
+            for (Index i : btran_work.touched()) {
+                dse_tau[static_cast<std::size_t>(i)] = btran_work[i];
+                dse_tau_pattern.push_back(i);
+            }
+            lu_.ftranSparse(dse_tau, dse_tau_pattern);
 
             const Real d_p = pivot_col[leaving_row];
             const Real d_p_inv = 1.0 / d_p;
             const Real w_p = devex_weights_[leaving_row];
 
-            for (Index i = 0; i < num_rows_; ++i) {
-                if (i == leaving_row) {
-                    continue;
-                }
+            // A row with d_i == 0 keeps w_i exactly, which only clamps it to
+            // kDualTol, and every weight but devex_clamp_row_ is already at
+            // least that: the support of d plus that row give what a loop over
+            // all rows gives (as for Devex, #281), and v is read only there.
+            auto updateDseRow = [&](Index i) {
                 const Real d_i = pivot_col[i];
                 const Real ratio = d_i * d_p_inv;
                 const Real v_i = dse_tau[i];
                 Real w_new = devex_weights_[i] - 2.0 * ratio * v_i + ratio * ratio * w_p;
                 devex_weights_[i] = std::max(kDualTol, w_new);
+            };
+            std::size_t dse_rows = pivot_col_support.size();
+            if (devex_clamp_row_ == kDevexClampAll) {
+                for (Index i = 0; i < num_rows_; ++i) {
+                    if (i != leaving_row) {
+                        updateDseRow(i);
+                    }
+                }
+                dse_rows = static_cast<std::size_t>(num_rows_);
+            } else {
+                for (Index i : pivot_col_support) {
+                    if (i != leaving_row) {
+                        updateDseRow(i);
+                    }
+                }
+                if (devex_clamp_row_ >= 0 && devex_clamp_row_ < num_rows_ &&
+                    devex_clamp_row_ != leaving_row) {
+                    devex_weights_[devex_clamp_row_] =
+                        std::max(kDualTol, devex_weights_[devex_clamp_row_]);
+                }
             }
             devex_weights_[leaving_row] = std::max(kDualTol, w_p / (d_p * d_p));
+            // Every weight is now at least kDualTol.
+            devex_clamp_row_ = -1;
+
+            double dse_extra_work = lu_.workUnits().units() - lu_work_before_dse +
+                                    static_cast<double>(btran_work.touched().size() + dse_rows);
 
             ++dse_pivots_since_init_;
 
@@ -4134,7 +4186,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // Reuse transformed pivot column and avoid a second FTRAN in LU update.
         lu_.updateFromFtranColumn(
             leaving_row,
-            std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)));
+            std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)),
+            pivot_col_pattern);
 
         if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
             ++degenerate_pivot_streak;
