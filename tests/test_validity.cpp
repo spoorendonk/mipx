@@ -27,6 +27,7 @@
 #include "mipx/variable_bounds.h"
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
@@ -168,17 +169,94 @@ std::string describe(const LpProblem& lp) {
     return os.str();
 }
 
+// Values (u, v) of the two continuous columns of a 2-D slice.
+using Point2 = std::array<Real, 2>;
+
+// A 2-D slice stands in for an infinite bound by this one, far past any
+// vertex the audit's small models have, so its region is a polygon.
+constexpr Real kSliceBox = 1e4;
+
 // One integral assignment with the feasible values of the continuous column
-// (`cont` < 0 when there is none, and then `cont_set` is empty).
+// (`cont` < 0 when there is none, and then `cont_set` is empty). With two
+// continuous columns, `cont2` is the second and `poly` the vertices, in
+// order, of the convex region the pair may take (cut to kSliceBox);
+// cont_set is then unused. Only the presolve audit builds models with two
+// (doubleton aggregation needs them, #258): every other audit's models have
+// at most one, so its slices are 1-D.
 struct Slice {
     std::vector<Real> x;
     Index cont = -1;
     std::vector<Interval> cont_set;
+    Index cont2 = -1;
+    std::vector<Point2> poly;
 };
+
+// Keeps the part of the convex polygon where a*u + b*v >= r (within 1e-9),
+// one Sutherland-Hodgman step. A polygon an equality cut down to a segment
+// or a point stays a list of points on it.
+std::vector<Point2> clipHalfPlane(const std::vector<Point2>& poly, Real a, Real b, Real r) {
+    std::vector<Point2> out;
+    auto inside = [&](const Point2& p) { return a * p[0] + b * p[1] - r >= -1e-9; };
+    for (std::size_t k = 0; k < poly.size(); ++k) {
+        const Point2& p = poly[k];
+        const Point2& q = poly[(k + 1) % poly.size()];
+        if (inside(p)) {
+            out.push_back(p);
+        }
+        if (inside(p) != inside(q)) {
+            const Real sp = a * p[0] + b * p[1] - r;
+            const Real sq = a * q[0] + b * q[1] - r;
+            const Real t = sp / (sp - sq);
+            out.push_back({p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])});
+        }
+    }
+    return out;
+}
+
+// The region of (x[cont], x[cont2]) that keeps every row with the integral
+// columns at x, inside the columns' bounds with each infinite one at `box`.
+std::vector<Point2> slicePolygon(const LpProblem& lp, const std::vector<Real>& x, Index cont,
+                                 Index cont2, Real box) {
+    auto finite = [box](Real b) { return std::clamp(b, -box, box); };
+    const Real ulo = finite(lp.col_lower[cont]);
+    const Real uhi = finite(lp.col_upper[cont]);
+    const Real vlo = finite(lp.col_lower[cont2]);
+    const Real vhi = finite(lp.col_upper[cont2]);
+    std::vector<Point2> poly = {{ulo, vlo}, {uhi, vlo}, {uhi, vhi}, {ulo, vhi}};
+    for (Index i = 0; i < lp.num_rows && !poly.empty(); ++i) {
+        auto rv = lp.matrix.row(i);
+        Real act = 0.0;
+        Real a = 0.0;
+        Real b = 0.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            if (rv.indices[k] == cont) {
+                a += rv.values[k];
+            } else if (rv.indices[k] == cont2) {
+                b += rv.values[k];
+            } else {
+                act += rv.values[k] * x[rv.indices[k]];
+            }
+        }
+        if (a == 0.0 && b == 0.0) {
+            if (act < lp.row_lower[i] - 1e-9 || act > lp.row_upper[i] + 1e-9) {
+                poly.clear();
+            }
+            continue;
+        }
+        if (std::isfinite(lp.row_lower[i])) {
+            poly = clipHalfPlane(poly, a, b, lp.row_lower[i] - act);
+        }
+        if (std::isfinite(lp.row_upper[i]) && !poly.empty()) {
+            poly = clipHalfPlane(poly, -a, -b, act - lp.row_upper[i]);
+        }
+    }
+    return poly;
+}
 
 // Calls `fn` for every integral assignment that has a feasible completion.
 void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)>& fn) {
     Index cont = -1;
+    Index cont2 = -1;
     std::vector<std::vector<Real>> values(lp.num_cols);
     for (Index j = 0; j < lp.num_cols; ++j) {
         if (isIntegral(lp.col_type[j])) {
@@ -187,14 +265,21 @@ void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)
                 return;
             }
         } else {
-            REQUIRE(cont < 0);  // The enumeration handles one continuous column.
-            cont = j;
+            // The enumeration handles two continuous columns, and two only
+            // when neither is semi-continuous.
+            REQUIRE(cont2 < 0);
+            (cont < 0 ? cont : cont2) = j;
             values[j] = {0.0};
         }
+    }
+    if (cont2 >= 0) {
+        REQUIRE(!isSemi(lp.col_type[cont]));
+        REQUIRE(!isSemi(lp.col_type[cont2]));
     }
 
     Slice slice;
     slice.cont = cont;
+    slice.cont2 = cont2;
     slice.x.assign(lp.num_cols, 0.0);
     std::vector<std::size_t> pos(lp.num_cols, 0);
     while (true) {
@@ -203,7 +288,11 @@ void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)
         }
         bool feasible = true;
         slice.cont_set = cont >= 0 ? columnDomain(lp, cont) : std::vector<Interval>{};
-        for (Index i = 0; i < lp.num_rows && feasible; ++i) {
+        if (cont2 >= 0) {
+            slice.poly = slicePolygon(lp, slice.x, cont, cont2, kSliceBox);
+            feasible = !slice.poly.empty();
+        }
+        for (Index i = 0; i < lp.num_rows && feasible && cont2 < 0; ++i) {
             auto rv = lp.matrix.row(i);
             Real act = 0.0;
             Real c = 0.0;
@@ -251,11 +340,32 @@ void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)
 
 // Concrete points of a slice: its endpoints, midpoints and a value near zero
 // in each interval, so that checks see interior and boundary values alike.
+// A 2-D slice gives its vertices, the midpoints of its edges and the mean
+// of its vertices.
 std::vector<std::vector<Real>> slicePoints(const Slice& s) {
     if (s.cont < 0) {
         return {s.x};
     }
     std::vector<std::vector<Real>> points;
+    if (s.cont2 >= 0) {
+        auto add2 = [&](const Point2& p) {
+            auto x = s.x;
+            x[s.cont] = p[0];
+            x[s.cont2] = p[1];
+            points.push_back(std::move(x));
+        };
+        Point2 mean = {0.0, 0.0};
+        for (std::size_t k = 0; k < s.poly.size(); ++k) {
+            const Point2& p = s.poly[k];
+            const Point2& q = s.poly[(k + 1) % s.poly.size()];
+            add2(p);
+            add2({0.5 * (p[0] + q[0]), 0.5 * (p[1] + q[1])});
+            mean[0] += p[0] / static_cast<Real>(s.poly.size());
+            mean[1] += p[1] / static_cast<Real>(s.poly.size());
+        }
+        add2(mean);
+        return points;
+    }
     auto add = [&](Real v) {
         auto x = s.x;
         x[s.cont] = v;
@@ -281,6 +391,34 @@ std::vector<std::vector<Real>> slicePoints(const Slice& s) {
 bool bestOfSlice(const LpProblem& lp, const Slice& s, std::vector<Real>& best) {
     best = s.x;
     if (s.cont < 0) {
+        return true;
+    }
+    if (s.cont2 >= 0) {
+        // A linear objective is best at a vertex; among the best, the one
+        // nearest the origin. Bounded, the region's best vertex lies inside
+        // kSliceBox, so a box twice as large finds the same value; unbounded,
+        // it finds a better one.
+        const Real cu = minTerms(lp, lp.obj[s.cont]);
+        const Real cv = minTerms(lp, lp.obj[s.cont2]);
+        auto bestVertex = [&](const std::vector<Point2>& poly) {
+            Point2 arg = poly.front();
+            for (const Point2& p : poly) {
+                const Real d = cu * p[0] + cv * p[1] - (cu * arg[0] + cv * arg[1]);
+                if (d < -1e-9 || (d <= 1e-9 && std::max(std::abs(p[0]), std::abs(p[1])) <
+                                                   std::max(std::abs(arg[0]), std::abs(arg[1])))) {
+                    arg = p;
+                }
+            }
+            return arg;
+        };
+        const Point2 near = bestVertex(s.poly);
+        const Point2 far = bestVertex(slicePolygon(lp, s.x, s.cont, s.cont2, 2.0 * kSliceBox));
+        const Real near_value = cu * near[0] + cv * near[1];
+        if (cu * far[0] + cv * far[1] < near_value - 1e-6 * (1.0 + std::abs(near_value))) {
+            return false;
+        }
+        best[s.cont] = near[0];
+        best[s.cont2] = near[1];
         return true;
     }
     const Real c = minTerms(lp, lp.obj[s.cont]);
@@ -338,6 +476,10 @@ struct ModelSpec {
     int int_width = 3;        // General integer columns span up to this many units.
     bool equalities = false;  // Half the rows are equalities.
     bool tiny_coefs = false;  // Rows may carry one coefficient of 1e-9 to 1e-6.
+    // Two continuous columns (bounded, free or half-free; no semi) instead of
+    // the one above, and the first row an equality over that pair only: a
+    // doubleton equation (#258). Only the presolve audit enumerates these.
+    bool continuous_pair = false;
 };
 
 /// A random model; `anchor_out`, when given, receives the point its rows
@@ -384,7 +526,21 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
             addCol(lb, ub, VarType::Integer);
         }
     }
-    if (spec.continuous) {
+    const Index pair = spec.continuous_pair ? lp.num_cols : -1;
+    for (int k = 0; spec.continuous_pair && k < 2; ++k) {
+        switch (uniform(0, 2)) {
+            case 0:
+                addCol(-2.5, 3.5, VarType::Continuous);
+                break;
+            case 1:
+                addCol(-kInf, kInf, VarType::Continuous);
+                break;
+            default:
+                addCol(0.0, kInf, VarType::Continuous);
+                break;
+        }
+    }
+    if (spec.continuous && !spec.continuous_pair) {
         switch (uniform(0, 3)) {
             case 0:
                 addCol(-2.5, 3.5, VarType::Continuous);
@@ -428,8 +584,11 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
     std::vector<Triplet> trips;
     for (int i = 0; i < m; ++i) {
         std::vector<std::pair<Index, Real>> row;
+        const bool doubleton = pair >= 0 && i == 0;
         for (Index j = 0; j < lp.num_cols; ++j) {
-            if (chance(0.75)) {
+            if (doubleton && (j == pair || j == pair + 1)) {
+                row.push_back({j, cont_coefs[uniform(0, static_cast<int>(cont_coefs.size()) - 1)]});
+            } else if (!doubleton && chance(0.75)) {
                 const auto& pool = isIntegral(lp.col_type[j]) ? int_coefs : cont_coefs;
                 row.push_back({j, pool[uniform(0, static_cast<int>(pool.size()) - 1)]});
             }
@@ -459,7 +618,7 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
             act += a * anchor[j];
             trips.push_back({static_cast<Index>(i), j, a});
         }
-        switch (spec.equalities && chance(0.5) ? 0 : uniform(0, 4)) {
+        switch (doubleton || (spec.equalities && chance(0.5)) ? 0 : uniform(0, 4)) {
             case 0:
                 lp.row_lower.push_back(act);
                 lp.row_upper.push_back(act);
@@ -615,10 +774,50 @@ std::vector<PresolveCase> presolveCases() {
     return cases;
 }
 
+// One reduction's change counter and whether an option set runs it, so the
+// audit can show that each reduction a case enables fired on its models
+// (#258): one that stopped firing would otherwise pass the audit unseen.
+struct PresolveReduction {
+    const char* name;
+    Index PresolveStats::* count;
+    bool (*enabled)(const PresolveOptions&);
+};
+
+std::vector<PresolveReduction> presolveReductions() {
+    const auto always = [](const PresolveOptions&) { return true; };
+    return {
+        {"fixed variables", &PresolveStats::fixed_var_changes, always},
+        {"singleton rows", &PresolveStats::singleton_row_changes, always},
+        {"singleton columns", &PresolveStats::singleton_col_changes, always},
+        {"doubleton equations", &PresolveStats::doubleton_eq_changes,
+         [](const PresolveOptions& o) { return o.enable_doubleton_aggregation; }},
+        {"forcing rows", &PresolveStats::forcing_row_changes,
+         [](const PresolveOptions& o) { return o.enable_forcing_rows; }},
+        {"dominated rows", &PresolveStats::dominated_row_changes, always},
+        {"duplicate rows", &PresolveStats::duplicate_row_changes, always},
+        {"parallel rows", &PresolveStats::parallel_row_changes,
+         [](const PresolveOptions& o) { return o.enable_parallel_rows; }},
+        {"implied equations", &PresolveStats::implied_equation_changes, always},
+        {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
+        {"dual fixing", &PresolveStats::dual_fixing_changes,
+         [](const PresolveOptions& o) { return o.enable_dual_fixing; }},
+        {"empty columns", &PresolveStats::empty_col_changes, always},
+        {"coefficient tightening", &PresolveStats::coeff_tightening_changes,
+         [](const PresolveOptions& o) { return o.enable_coefficient_tightening; }},
+        {"probing fixings", &PresolveStats::probing_fixings,
+         [](const PresolveOptions& o) { return o.enable_probing; }},
+        {"probing coefficient strengthening", &PresolveStats::probing_coeff_strengthenings,
+         [](const PresolveOptions& o) { return o.enable_probing; }},
+    };
+}
+
 // Checks one model under one option set. With a zero objective every
 // reduction must keep the projection of each feasible point; with an
 // objective, dual reductions may drop points but never the optimum.
-void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
+// With `fired`, adds each reduction's change count to its entry, in the
+// order of presolveReductions().
+void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
+                   std::vector<Index>* fired = nullptr) {
     const Enumeration orig = enumerate(lp);
     if (orig.unbounded) {
         return;
@@ -626,6 +825,13 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
     Presolver presolver;
     presolver.setOptions(pc.options);
     const LpProblem reduced = presolver.presolve(lp);
+    if (fired != nullptr) {
+        const auto reductions = presolveReductions();
+        fired->resize(reductions.size(), 0);
+        for (std::size_t r = 0; r < reductions.size(); ++r) {
+            (*fired)[r] += presolver.stats().*reductions[r].count;
+        }
+    }
     INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
     if (presolver.isInfeasible()) {
         CHECK(!orig.feasible);
@@ -673,6 +879,32 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc) {
             CHECK(pointFeasible(reduced, xr, kFeasTol));
         }
     });
+}
+
+// The presolve audit's models: the shared ones, plus models that reach the
+// reductions those never trigger (#258). Doubleton aggregation needs an
+// equality over two continuous columns; implied equations, in a case with
+// forcing rows on, a row forcing rows declines, which one with a column it
+// cannot pin (a coefficient at or below presolve's 1e-8) is.
+std::vector<LpProblem> presolveAuditModels() {
+    constexpr auto I = VarType::Integer;
+    constexpr auto B = VarType::Binary;
+    constexpr auto C = VarType::Continuous;
+    std::vector<LpProblem> models = auditModels(227, 300, true);
+    // x0 + x1 + 1e-10 x2 <= 0 at its minimum activity: an implied equation.
+    models.push_back(makeModel(Sense::Maximize, {1, 2, 1}, {0, 0, 0}, {1, 2, 3}, {B, I, I},
+                               {{1, 1, 1e-10}, {1, 0, 1}}, {-kInf, 1}, {0, 3}));
+    // 2x0 - x1 = 1 over continuous columns, both in a second row.
+    models.push_back(makeModel(Sense::Minimize, {1, -1, 2}, {0, -kInf, 0}, {3, kInf, 2}, {C, C, I},
+                               {{2, -1, 0}, {1, 1, 1}}, {1, -kInf}, {1, 4}));
+    std::mt19937 rng(258);
+    for (int t = 0; t < 100; ++t) {
+        ModelSpec spec;
+        spec.continuous_pair = true;
+        spec.max_int = 3;
+        models.push_back(randomModel(rng, spec));
+    }
+    return models;
 }
 
 LpProblem withoutObjective(LpProblem lp) {
@@ -756,15 +988,65 @@ bool literalTrue(const std::vector<Real>& x, Literal lit) {
 // =============================================================================
 
 TEST_CASE("Validity: every presolve reduction keeps the feasible set and optimum", "[validity]") {
-    const auto models = auditModels(227, 300, true);
+    const auto models = presolveAuditModels();
+    const auto reductions = presolveReductions();
     for (const auto& pc : presolveCases()) {
+        std::vector<Index> fired(reductions.size(), 0);
         for (std::size_t t = 0; t < models.size(); ++t) {
             INFO("model " << t);
             const LpProblem lp = linearized(models[t]);
-            auditPresolve(lp, pc);
-            auditPresolve(withoutObjective(lp), pc);
+            auditPresolve(lp, pc, &fired);
+            auditPresolve(withoutObjective(lp), pc, &fired);
+        }
+        // A reduction the case enables but never exercises is not audited.
+        INFO("presolve case: " << pc.name);
+        for (std::size_t r = 0; r < reductions.size(); ++r) {
+            if (reductions[r].enabled(pc.options)) {
+                INFO("reduction: " << reductions[r].name << ", changes " << fired[r]);
+                CHECK(fired[r] > 0);
+            }
         }
     }
+}
+
+// The 2-D enumeration (two continuous columns) is new with #258 and only the
+// presolve audit reads it, so it is checked here against a plain solve.
+TEST_CASE("Validity: the two-column enumeration agrees with a solve without presolve",
+          "[validity]") {
+    std::mt19937 rng(1258);
+    Int bounded = 0;
+    Int unbounded = 0;
+    for (int t = 0; t < 100; ++t) {
+        ModelSpec spec;
+        spec.continuous_pair = true;
+        spec.max_int = 3;
+        const LpProblem lp = randomModel(rng, spec);
+        const Enumeration e = enumerate(lp);
+        if (e.unbounded) {
+            ++unbounded;
+            continue;
+        }
+        INFO("model " << t << ":\n" << describe(lp));
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.setGapTolerance(0.0);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        if (!e.feasible) {
+            CHECK(result.status == Status::Infeasible);
+            continue;
+        }
+        ++bounded;
+        INFO("enumerated optimum " << e.best << " at" << describe(e.argbest));
+        CHECK(pointFeasible(lp, e.argbest, kFeasTol));
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(e.best, kObjTol));
+    }
+    CHECK(bounded > 0);
+    CHECK(unbounded > 0);
 }
 
 // =============================================================================
