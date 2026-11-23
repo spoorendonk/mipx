@@ -63,13 +63,17 @@ void RankRevealingLU::setup(Index num_row, std::span<const Index> start,
         index.size() != value.size()) {
         throw std::invalid_argument("RankRevealingLU: index and value do not match start");
     }
-    // No row twice in a column: colDelete and rowDelete find an entry by
-    // its index, so a duplicate would corrupt the kernel.
-    std::vector<Index> last_col(static_cast<std::size_t>(num_row), -1);
+    // All of start first: with start[0] >= 0 and start[num_basic] in range,
+    // a monotone start keeps every column's entries inside index.
     for (Index j = 0; j < num_basic; ++j) {
         if (start[j + 1] < start[j]) {
             throw std::invalid_argument("RankRevealingLU: start is not monotone");
         }
+    }
+    // No row twice in a column: colDelete and rowDelete find an entry by
+    // its index, so a duplicate would corrupt the kernel.
+    std::vector<Index> last_col(static_cast<std::size_t>(num_row), -1);
+    for (Index j = 0; j < num_basic; ++j) {
         for (Index k = start[j]; k < start[j + 1]; ++k) {
             const Index i = index[k];
             if (i < 0 || i >= num_row) {
@@ -149,6 +153,9 @@ void RankRevealingLU::colFixMax(Index i_col) {
 }
 
 Index RankRevealingLU::build() {
+    if (a_start_.empty()) {
+        throw std::logic_error("RankRevealingLU: build() before setup()");
+    }
     // HFactor's build timer, read by the kernel's timeout check.
     build_start_ = Clock::now();
     rank_deficiency_ = 0;

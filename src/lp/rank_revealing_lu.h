@@ -79,7 +79,8 @@ public:
     /// HFactor::build up to buildMarkSingC. Returns kBuildKernelReturnTimeout
     /// on a timeout, else the rank deficiency of the columns: with
     /// num_basic < num_row, rankDeficiency() less the num_row - num_basic
-    /// rows no column could have covered.
+    /// rows no column could have covered. Throws std::logic_error before
+    /// setup().
     [[nodiscard]] Index build();
 
     [[nodiscard]] Index numRow() const { return num_row_; }

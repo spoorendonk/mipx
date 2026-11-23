@@ -207,6 +207,37 @@ TEST_CASE("RankRevealingLU: a near-combination is dependent within the pivot tol
         CHECK(lu.build() == 1);
         CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0});
     }
+    SECTION("a deferred pivot in a row with other entries zeroes its column") {
+        // The first kernel pivot, on row 0, leaves -eps alone in column 0,
+        // row 1; row 1 still has columns 2 and 3, so the deferred pivot
+        // zeroes column 0 (HFactor's zeroCol) instead of only its entry.
+        const Csc a = makeCsc(4, {{{0, 1}, {1, 1}},
+                                  {{0, 1}, {1, 1 + 1e-12}},
+                                  {{1, 1}, {2, 1}, {3, 1}},
+                                  {{1, 2}, {2, 1}, {3, 3}}});
+        CHECK(factor(lu, a) == 1);
+        CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0});
+        CHECK(toVector(lu.rowWithNoPivot()) == std::vector<Index>{3});
+        CHECK(toVector(lu.colWithNoPivot()) == std::vector<Index>{0});
+    }
+}
+
+TEST_CASE("RankRevealingLU: a second build after a deficient one gives the same result",
+          "[lu][rank_revealing_lu]") {
+    // The deficiency path resizes permute_ and iwork_; a repeat build on the
+    // same setup starts over from the matrix.
+    const Csc a = makeCsc(5, {{{0, 1}, {1, 2}},
+                              {{2, 3}, {3, 1}},
+                              {{0, 2}, {1, 4}},
+                              {{0, 1}, {1, 2}, {2, -3}, {3, -1}},
+                              {{4, 5}}});
+    RankRevealingLU lu;
+    CHECK(factor(lu, a) == 2);
+    CHECK(lu.build() == 2);
+    CHECK(lu.rankDeficiency() == 2);
+    CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0, 2});
+    CHECK(toVector(lu.rowWithNoPivot()) == std::vector<Index>{1, 3});
+    CHECK(toVector(lu.colWithNoPivot()) == std::vector<Index>{0, 2});
 }
 
 TEST_CASE("RankRevealingLU: an empty column has no pivot", "[lu][rank_revealing_lu]") {
@@ -341,4 +372,14 @@ TEST_CASE("RankRevealingLU: setup rejects a malformed matrix", "[lu][rank_reveal
     CHECK_THROWS_AS(lu.setup(3, start, short_index, std::span<const Real>(value).first(1)),
                     std::invalid_argument);
     CHECK_THROWS_AS(lu.setup(3, {}, {}, {}), std::invalid_argument);
+    // Column 0 would end past index; the later drop in start is caught
+    // before any column is read.
+    const std::vector<Index> overshoot{0, 5, 2};
+    const std::vector<Index> two_rows{0, 1};
+    CHECK_THROWS_AS(lu.setup(3, overshoot, two_rows, value), std::invalid_argument);
+}
+
+TEST_CASE("RankRevealingLU: build before setup throws", "[lu][rank_revealing_lu]") {
+    RankRevealingLU lu;
+    CHECK_THROWS_AS(lu.build(), std::logic_error);
 }
