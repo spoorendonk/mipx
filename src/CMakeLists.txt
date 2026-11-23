@@ -55,6 +55,7 @@ add_library(mipx STATIC
     heuristics/runtime.cpp
     heuristics/symmetry.cpp
     presolve/presolve.cpp
+    presolve/presolve_matrix.cpp
     cuts/cut_pool.cpp
     cuts/gomory.cpp
     cuts/tableau_cut.cpp

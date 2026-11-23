@@ -16,6 +16,7 @@ add_executable(mipx-tests
     test_mip_solver.cpp
     test_heuristics.cpp
     test_presolve.cpp
+    test_presolve_matrix.cpp
     test_cuts.cpp
     test_cut_manager.cpp
     test_parallel.cpp
@@ -57,6 +58,10 @@ set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
 # The dense-column tests drive a barrier backend through its internal
 # interface (src/lp/newton_solver.h), so that file alone sees src/.
 set_property(SOURCE test_barrier_dense_cols.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+    ${PROJECT_SOURCE_DIR}/src
+)
+# Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326).
+set_property(SOURCE test_presolve_matrix.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
 
