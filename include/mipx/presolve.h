@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <span>
 #include <string>
-#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -231,6 +230,10 @@ public:
     /// The postsolve stack and column mapping are stored internally.
     /// Throws std::invalid_argument when the problem has semi columns, SOS or
     /// indicator constraints: linearize them with linearizeModelFeatures first.
+    /// The matrix must hold each (row, col) at most once with columns sorted
+    /// within each row, as SparseMatrix's triplet constructor leaves it: the
+    /// working matrix looks entries up by binary search, so a repeated or
+    /// out-of-order column would be missed (asserted in debug builds).
     LpProblem presolve(const LpProblem& problem);
 
     /// Postsolve: given solution to presolved problem, reconstruct full solution.
@@ -370,11 +373,9 @@ private:
     Index max_rounds_ = 20;
     bool infeasible_ = false;
     bool probing_done_ = false;
-    /// Coefficient changes of the passes not yet on the working matrix
-    /// (#340); each write is mirrored into *work_.
-    std::unordered_map<uint64_t, Real> coeff_overrides_{};
-    /// The working matrix (#326), current under every coefficient change;
-    /// set only while presolve() runs, to a matrix it owns.
+    /// The working matrix (#326): every pass reads it, and every coefficient
+    /// change is made in it; the input's matrix stays as given. Set only
+    /// while presolve() runs, to a matrix it owns.
     PresolveMatrix* work_ = nullptr;
 
     /// Subtract a fixed column's term from the row's finite sides, and keep

@@ -85,29 +85,6 @@ inline uint64_t mixHash(uint64_t h, uint64_t x) {
     return h ^ (x + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
 }
 
-inline uint64_t coeffKey(Index row, Index col) {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(row)) << 32) | static_cast<uint32_t>(col);
-}
-
-inline Real effectiveCoeff(const std::unordered_map<uint64_t, Real>& coeff_overrides, Index row,
-                           Index col, Real matrix_value) {
-    if (coeff_overrides.empty()) {
-        return matrix_value;
-    }
-    const auto it = coeff_overrides.find(coeffKey(row, col));
-    return (it != coeff_overrides.end()) ? it->second : matrix_value;
-}
-
-/// Mirrors dropping a column's overrides: its entries in the working matrix
-/// back to the input's values. Pattern is unchanged; until #340 every
-/// override is on an input entry.
-void revertCol(PresolveMatrix& work, const SparseMatrix& input, Index col) {
-    const auto cv = input.col(col);
-    for (Index k = 0; k < cv.size(); ++k) {
-        work.set(cv.indices[k], col, cv.values[k]);
-    }
-}
-
 inline uint64_t rowPatternHash(const PresolveMatrix& m, Index row,
                                const std::vector<bool>& col_removed) {
     uint64_t h = 1469598103934665603ULL;
@@ -900,13 +877,12 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         }
         ++stats_.cols_examined;
 
-        auto cv = lp.matrix.col(j);
         Index i = -1;
         Real a = 0.0;
-        for (Index k = 0; k < cv.size(); ++k) {
-            if (!row_removed[cv.indices[k]]) {
-                i = cv.indices[k];
-                a = effectiveCoeff(coeff_overrides_, i, j, cv.values[k]);
+        for (const auto [row, value] : work_->col(j)) {
+            if (!row_removed[row]) {
+                i = row;
+                a = value;
                 break;
             }
         }
@@ -923,7 +899,6 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         }
 
         // Activity range of the row's other terms, huge bounds infinite.
-        auto rv = lp.matrix.row(i);
         CompensatedSum r_min;
         CompensatedSum r_max;
         Index inf_min = 0;
@@ -931,12 +906,10 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         Real max_abs = std::abs(a);
         std::vector<Index> row_cols;
         std::vector<Real> row_coeffs;
-        for (Index k = 0; k < rv.size(); ++k) {
-            const Index col = rv.indices[k];
+        for (const auto [col, ak] : work_->row(i)) {
             if (col == j || col_removed[col]) {
                 continue;
             }
-            const Real ak = effectiveCoeff(coeff_overrides_, i, col, rv.values[k]);
             if (ak == 0.0) {
                 continue;
             }
@@ -1005,10 +978,6 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
                            next_dirty_rows, next_dirty_cols);
         removeActiveRow(*work_, i, col_removed, row_removed, row_active_nnz, col_active_nnz,
                         next_dirty_rows, next_dirty_cols);
-        std::erase_if(coeff_overrides_, [j](const auto& entry) {
-            return static_cast<Index>(entry.first & 0xFFFFFFFF) == j;
-        });
-        revertCol(*work_, lp.matrix, j);
 
         ++stats_.vars_removed;
         ++stats_.rows_removed;
@@ -1029,17 +998,13 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                                               std::vector<uint8_t>& next_dirty_cols) {
     Index changes = 0;
 
-    auto findRowCoeff = [&](Index row, Index col, Real& coeff, Real& matrix_coeff) -> bool {
-        auto rv = lp.matrix.row(row);
-        for (Index k = 0; k < rv.size(); ++k) {
-            if (rv.indices[k] != col) {
-                continue;
-            }
-            matrix_coeff = rv.values[k];
-            coeff = effectiveCoeff(coeff_overrides_, row, col, rv.values[k]);
-            return true;
+    // An entry, explicit zero included; none means substituting would fill in.
+    auto findRowCoeff = [&](Index row, Index col, Real& coeff) -> bool {
+        if (!work_->contains(row, col)) {
+            return false;
         }
-        return false;
+        coeff = work_->coeff(row, col);
+        return true;
     };
 
     for (Index i : dirty_rows) {
@@ -1057,16 +1022,13 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             continue;
         }
 
-        auto rv = lp.matrix.row(i);
         std::array<Index, 2> row_cols = {-1, -1};
         std::array<Real, 2> row_coeffs = {0.0, 0.0};
         Index n_active = 0;
-        for (Index k = 0; k < rv.size(); ++k) {
-            const Index col = rv.indices[k];
+        for (const auto [col, a] : work_->row(i)) {
             if (col_removed[col]) {
                 continue;
             }
-            const Real a = effectiveCoeff(coeff_overrides_, i, col, rv.values[k]);
             if (std::abs(a) <= kTol) {
                 continue;
             }
@@ -1107,18 +1069,13 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                 return false;
             }
 
-            auto cv = lp.matrix.col(elim_col);
-            for (Index k = 0; k < cv.size(); ++k) {
-                const Index row = cv.indices[k];
+            for (const auto [row, a_row_elim] : work_->col(elim_col)) {
                 if (row_removed[row] || row == i) {
                     continue;
                 }
 
-                const Real a_row_elim =
-                    effectiveCoeff(coeff_overrides_, row, elim_col, cv.values[k]);
                 Real a_row_keep = 0.0;
-                [[maybe_unused]] Real matrix_keep = 0.0;
-                if (!findRowCoeff(row, keep_col, a_row_keep, matrix_keep)) {
+                if (!findRowCoeff(row, keep_col, a_row_keep)) {
                     return false;  // Would create fill-in.
                 }
                 if (std::abs(a_row_keep) <= kTol) {
@@ -1175,20 +1132,16 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             Index row = -1;
             Real shift = 0.0;
             Real new_keep = 0.0;
-            Real matrix_keep = 0.0;
         };
         std::vector<RowUpdate> updates;
         bool valid_updates = true;
 
         // Substitute eliminated variable into objective: x_e = alpha + beta*x_k.
-        auto cv = lp.matrix.col(best_elim);
-        for (Index kk = 0; kk < cv.size(); ++kk) {
-            const Index row = cv.indices[kk];
+        for (const auto [row, a_row_elim] : work_->col(best_elim)) {
             if (row_removed[row] || row == i) {
                 continue;
             }
 
-            const Real a_row_elim = effectiveCoeff(coeff_overrides_, row, best_elim, cv.values[kk]);
             const Real shift = a_row_elim * alpha;
             if (!std::isinf(lp.row_lower[row]) && !std::isfinite(shift)) {
                 valid_updates = false;
@@ -1200,8 +1153,7 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             }
 
             Real a_row_keep = 0.0;
-            Real matrix_keep = 0.0;
-            const bool has_keep = findRowCoeff(row, best_keep, a_row_keep, matrix_keep);
+            const bool has_keep = findRowCoeff(row, best_keep, a_row_keep);
             if (!has_keep) {
                 valid_updates = false;
                 break;
@@ -1211,7 +1163,7 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                 valid_updates = false;
                 break;
             }
-            updates.push_back({row, shift, new_keep, matrix_keep});
+            updates.push_back({row, shift, new_keep});
         }
         if (!valid_updates) {
             continue;
@@ -1224,14 +1176,9 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
 
         for (const auto& update : updates) {
             shiftRowSides(lp, update.row, update.shift);
-            const uint64_t key = coeffKey(update.row, best_keep);
-            // Exact: on a row of small coefficients a change below kTol is
-            // still the whole substitution (#244: 1.875e-6 became 1.883e-6).
-            if (update.new_keep == update.matrix_keep) {
-                coeff_overrides_.erase(key);
-            } else {
-                coeff_overrides_[key] = update.new_keep;
-            }
+            // Exact, however small the change: on a row of small coefficients
+            // a change below kTol is still the whole substitution (#244:
+            // 1.875e-6 became 1.883e-6).
             work_->set(update.row, best_keep, update.new_keep);
             next_dirty_rows[update.row] = 1;
             markColsInRow(*work_, update.row, col_removed, next_dirty_cols);
@@ -1291,12 +1238,6 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                            col_active_nnz, next_dirty_rows, next_dirty_cols);
         removeActiveRow(*work_, i, col_removed, row_removed, row_active_nnz, col_active_nnz,
                         next_dirty_rows, next_dirty_cols);
-
-        // Clean up stale coeff_overrides_ entries for the eliminated column.
-        std::erase_if(coeff_overrides_, [best_elim](const auto& entry) {
-            return static_cast<Index>(entry.first & 0xFFFFFFFF) == best_elim;
-        });
-        revertCol(*work_, lp.matrix, best_elim);
 
         ++stats_.vars_removed;
         ++stats_.rows_removed;
@@ -2623,14 +2564,12 @@ Index Presolver::strengthenCoefficientsFromVarBounds(LpProblem& lp,
 
         row_cols.clear();
         row_vals.clear();
-        auto rv = lp.matrix.row(i);
-        for (Index k = 0; k < rv.size(); ++k) {
-            const Index j = rv.indices[k];
+        for (const auto [j, a] : work_->row(i)) {
             if (col_removed[j]) {
                 continue;
             }
             row_cols.push_back(j);
-            row_vals.push_back(effectiveCoeff(coeff_overrides_, i, j, rv.values[k]));
+            row_vals.push_back(a);
         }
         if (row_cols.size() < 2) {
             continue;
@@ -2657,7 +2596,6 @@ Index Presolver::strengthenCoefficientsFromVarBounds(LpProblem& lp,
             postsolve_stack_.push(
                 PostsolveCoeffTightening{i, j, row_vals[k], res.new_coeff, rhs, new_rhs});
 
-            coeff_overrides_[coeffKey(i, j)] = res.new_coeff;
             work_->set(i, j, res.new_coeff);
             row_vals[k] = res.new_coeff;
             rhs = new_rhs;
@@ -2685,7 +2623,6 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
         if (row_removed[i]) {
             continue;
         }
-        auto rv = lp.matrix.row(i);
 
         auto tightenOneSided = [&](bool use_upper_side) {
             Real rhs = 0.0;
@@ -2731,13 +2668,11 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 
             Real total_max = 0.0;
             Real magnitude = std::abs(rhs);
-            for (Index k = 0; k < rv.size(); ++k) {
-                const Index j = rv.indices[k];
+            for (const auto [j, a_orig] : work_->row(i)) {
                 if (col_removed[j]) {
                     continue;
                 }
 
-                const Real a_orig = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
                 const Real a = use_upper_side ? a_orig : -a_orig;
                 const Real contrib = (a > 0.0) ? a * upperOf(j) : a * lowerOf(j);
                 if (!std::isfinite(contrib)) {
@@ -2759,8 +2694,9 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
 
             // Each reduction lowers total_max and the rhs by the same amount,
             // so the slack the later columns see is unchanged.
-            for (Index k = 0; k < rv.size(); ++k) {
-                const Index j = rv.indices[k];
+            // Changing a value while walking the row is fine; nothing here
+            // inserts into it.
+            for (const auto [j, a_orig] : work_->row(i)) {
                 if (col_removed[j]) {
                     continue;
                 }
@@ -2773,8 +2709,6 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                     continue;  // Fixed: no x_j strictly inside the bounds.
                 }
 
-                const uint64_t key = coeffKey(i, j);
-                const Real a_orig = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
                 const Real a = use_upper_side ? a_orig : -a_orig;
 
                 Real new_a = a;
@@ -2819,7 +2753,6 @@ Index Presolver::tightenCoefficients(LpProblem& lp, std::vector<bool>& col_remov
                     lp.row_lower[i] = -new_rhs;
                 }
 
-                coeff_overrides_[key] = new_a_orig;
                 work_->set(i, j, new_a_orig);
                 // Coefficient changes must be visible to later passes.
                 markRowsTouchingCol(*work_, j, row_removed, next_dirty_rows);
@@ -2858,7 +2791,6 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     stats_ = PresolveStats{};
     infeasible_ = false;
     probing_done_ = false;
-    coeff_overrides_.clear();
 
     // Work on a copy.
     LpProblem lp = problem;
