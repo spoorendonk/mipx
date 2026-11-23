@@ -13,6 +13,7 @@
 namespace mipx {
 
 class VariableBoundStore;
+class PresolveMatrix;
 
 // ---- Postsolve operations ---------------------------------------------------
 
@@ -369,7 +370,12 @@ private:
     Index max_rounds_ = 20;
     bool infeasible_ = false;
     bool probing_done_ = false;
+    /// Coefficient changes of the passes not yet on the working matrix
+    /// (#340); each write is mirrored into *work_.
     std::unordered_map<uint64_t, Real> coeff_overrides_{};
+    /// The working matrix (#326), current under every coefficient change;
+    /// set only while presolve() runs, to a matrix it owns.
+    PresolveMatrix* work_ = nullptr;
 
     /// Subtract a fixed column's term from the row's finite sides, and keep
     /// the term's size in the row's magnitude.

@@ -67,6 +67,68 @@ public:
     [[nodiscard]] Index entryCol(Index entry) const { return entry_col_[entry]; }
     [[nodiscard]] Real entryValue(Index entry) const { return entry_val_[entry]; }
 
+    /// A live entry seen from its row (index = column) or its column (index =
+    /// row), by value.
+    struct Term {
+        Index index;
+        Real value;
+    };
+
+    /// The live entries of one row or column in order, as Terms: `for (const
+    /// auto [col, a] : m.row(i))`. Reads the pool through the matrix at each
+    /// step, so an insert into another row or column may move it; the same
+    /// rule as the forEach walks holds for the line being walked.
+    class Line {
+    public:
+        class Iterator {
+        public:
+            Iterator(const PresolveMatrix* m, const Index* it, const Index* end, bool by_row)
+                : m_(m), it_(it), end_(end), by_row_(by_row) {
+                skipDead();
+            }
+            Term operator*() const {
+                return {by_row_ ? m_->entry_col_[*it_] : m_->entry_row_[*it_],
+                        m_->entry_val_[*it_]};
+            }
+            Iterator& operator++() {
+                ++it_;
+                skipDead();
+                return *this;
+            }
+            bool operator==(const Iterator& other) const { return it_ == other.it_; }
+
+        private:
+            void skipDead() {
+                while (it_ != end_ && m_->entry_live_[*it_] == 0) {
+                    ++it_;
+                }
+            }
+            const PresolveMatrix* m_;
+            const Index* it_;
+            const Index* end_;
+            bool by_row_;
+        };
+
+        Line(const PresolveMatrix* m, const std::vector<Index>& ids, bool by_row)
+            : m_(m), ids_(&ids), by_row_(by_row) {}
+        [[nodiscard]] Iterator begin() const {
+            const Index* end = ids_->data() + ids_->size();
+            return {m_, ids_->data(), end, by_row_};
+        }
+        [[nodiscard]] Iterator end() const {
+            const Index* end = ids_->data() + ids_->size();
+            return {m_, end, end, by_row_};
+        }
+
+    private:
+        const PresolveMatrix* m_;
+        const std::vector<Index>* ids_;
+        bool by_row_;
+    };
+
+    [[nodiscard]] Line row(Index r) const { return {this, row_ids_[r], true}; }
+    [[nodiscard]] Line col(Index c) const { return {this, col_ids_[c], false}; }
+
     /// Calls f(col, value) for each live entry of a row, by column.
     template <typename F>
     void forEachInRow(Index row, F&& f) const {
