@@ -2569,8 +2569,8 @@ TEST_CASE("Presolve: netlib bore3d stays feasible and keeps its optimum", "[pres
 // equality rows (rhs 0, terms up to 1.2e5) missed by 2.1e-5 in the model's
 // units: the scaled point held kPrimalTol / rs_i, and the unscaled check held
 // rows only relative to their terms. pilot-ja missed by 1.8e-4 in the bench
-// runs of #288. The point must hold pointViolation() or the status must say
-// otherwise.
+// runs of #288. Both solve to Optimal, and the point must hold
+// pointViolation() to 1e-6.
 TEST_CASE("Presolve: netlib grow15 and pilot-ja optima hold the reduced LP absolutely",
           "[presolve][netlib]") {
     const std::string name = GENERATE(std::string("grow15"), std::string("pilot-ja"));

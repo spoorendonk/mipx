@@ -997,7 +997,7 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
 bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
     const auto uz = [](Index k) { return static_cast<std::size_t>(k); };
     const std::vector<Real> x = getPrimalValues();
-    std::vector<Real> reach(uz(num_cols_), kInf);
+    std::vector<Real> reach(tight ? 0 : uz(num_cols_), kInf);
     for (Index i = 0; i < num_rows_; ++i) {
         const Real rs = scaled_ ? row_scale_[i] : 1.0;
         const Real lo = row_lower_[i] == -kInf ? -kInf : row_lower_[i] / rs;
@@ -1132,11 +1132,14 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     // misses rows or bounds by more than kUnscaledAbsTol (#304).
     bool tight_only = false;
     if (res.status == Status::Optimal) {
-        primal_held = primalHoldsUnscaled();
-        // A point that holds relatively but misses absolutely is cleaned up
-        // too, and kept as one that holds.
+        // The absolute check is never looser than the relative one, so a
+        // point that holds it holds relatively too: one pass on the common
+        // path, every warm B&B node's. A point that holds relatively but
+        // misses absolutely is cleaned up too, and kept as one that holds.
+        const bool tight_held = primalHoldsUnscaled(true);
+        primal_held = tight_held || primalHoldsUnscaled();
         if (primal_held && (checked || optimumHoldsUnscaled())) {
-            if (primalHoldsUnscaled(true)) {
+            if (tight_held) {
                 return res;
             }
             tight_only = true;
@@ -1179,11 +1182,14 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         std::vector<Real> primal, dual, reduced_cost;
         std::vector<BasisStatus> var_status;
         std::vector<Index> basis, nonbasic, basis_pos, nonbasic_pos;
+        // Put back with the point, so the next warm solve prices as it would
+        // have without the clean-up.
+        std::vector<Real> devex_weights;
     };
     std::optional<Point> scaled_point;
     if (primal_held) {
-        scaled_point = Point{primal_, dual_,     reduced_cost_, var_status_,
-                             basis_,  nonbasic_, basis_pos_,    nonbasic_pos_};
+        scaled_point = Point{primal_,   dual_,      reduced_cost_, var_status_,   basis_,
+                             nonbasic_, basis_pos_, nonbasic_pos_, devex_weights_};
     }
     unapplyScaling();
     convertValues(true);
@@ -1230,6 +1236,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         nonbasic_ = std::move(scaled_point->nonbasic);
         basis_pos_ = std::move(scaled_point->basis_pos);
         nonbasic_pos_ = std::move(scaled_point->nonbasic_pos);
+        devex_weights_ = std::move(scaled_point->devex_weights);
         dual_ray_.clear();
         primal_ray_.clear();
         has_basis_ = true;
