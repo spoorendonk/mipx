@@ -49,17 +49,28 @@ LpProblem smallLp() {
     return lp;
 }
 
-LpResult solveWith(const LpProblem& lp, const BarrierOptions& opts) {
+struct Solved {
+    LpResult result;
+    Int corrections = 0;
+};
+
+Solved solveWith(const LpProblem& lp, const BarrierOptions& opts) {
     BarrierSolver solver;
     solver.setOptions(opts);
     solver.load(lp);
-    return solver.solve();
+    Solved out;
+    out.result = solver.solve();
+    out.corrections = solver.gondzioCorrections();
+    return out;
 }
 
 }  // namespace
 
 TEST_CASE("Barrier Gondzio: off by default", "[barrier][gondzio]") {
     CHECK(BarrierOptions{}.gondzio_correctors == 0);
+    const auto off = solveWith(smallLp(), quietOptions(0, BarrierAlgorithm::CpuCholesky, false));
+    REQUIRE(off.result.status == Status::Optimal);
+    CHECK(off.corrections == 0);
 }
 
 TEST_CASE("Barrier Gondzio: small LP reaches the same optimum with correctors",
@@ -69,12 +80,14 @@ TEST_CASE("Barrier Gondzio: small LP reaches the same optimum with correctors",
     const bool implicit = GENERATE(false, true);
     INFO("algo " << static_cast<int>(algo) << " implicit " << implicit);
     const auto lp = smallLp();
-    const auto off = solveWith(lp, quietOptions(0, algo, implicit));
-    const auto on = solveWith(lp, quietOptions(4, algo, implicit));
+    const auto off = solveWith(lp, quietOptions(0, algo, implicit)).result;
+    const auto on = solveWith(lp, quietOptions(4, algo, implicit)).result;
     REQUIRE(off.status == Status::Optimal);
     REQUIRE(on.status == Status::Optimal);
-    CHECK(std::abs(on.objective - (-3.5)) <= 1e-7);
-    CHECK(std::abs(on.objective - off.objective) <= 1e-7);
+    // Crossover is off, so this is the IPM's own point: its stop on x'z/n at
+    // 1e-8 (#253) allows a gap of about n_compl 1e-8 (1 + |obj|), ~2e-7 here.
+    CHECK(std::abs(on.objective - (-3.5)) <= 1e-6);
+    CHECK(std::abs(on.objective - off.objective) <= 1e-6);
 }
 
 TEST_CASE("Barrier Gondzio: Netlib LPs reach the same objectives with correctors",
@@ -102,7 +115,9 @@ TEST_CASE("Barrier Gondzio: Netlib LPs reach the same objectives with correctors
     // implicit bounds: pinf 5e-10 scaled; fine at 1e-10), and such a point
     // goes to crossover by design. The stopping test is #253's.
     opts.crossover = true;
-    const auto result = solveWith(lp, opts);
+    const auto [result, corrections] = solveWith(lp, opts);
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
+    // The correctors ran and some were taken, not all rejected.
+    CHECK(corrections > 0);
 }

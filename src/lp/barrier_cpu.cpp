@@ -629,17 +629,17 @@ public:
         theta_.assign(static_cast<size_t>(n), 0.0);
         s_copy_.assign(static_cast<size_t>(n), 0.0);
         // M = sum_k theta_k a_k a_k' costs nnz(a_k)^2 per column k.
-        std::vector<double> col_nnz(static_cast<size_t>(n), 0.0);
+        col_nnz_.assign(static_cast<size_t>(n), 0.0);
         a_nnz_ = 0.0;
         for (Index i = 0; i < m; ++i) {
             const auto row = A.row(i);
             for (Index k = 0; k < row.size(); ++k) {
-                col_nnz[row.indices[k]] += 1.0;
+                col_nnz_[row.indices[k]] += 1.0;
             }
             a_nnz_ += static_cast<double>(row.size());
         }
         form_flops_ = 0.0;
-        for (const double c : col_nnz) {
+        for (const double c : col_nnz_) {
             form_flops_ += c * c;
         }
         return setupFactor(opts);
@@ -730,9 +730,15 @@ protected:
     // The cost estimates of FactorStats: forming and factoring M; and one
     // solveNewton, i.e. 1 + ir_steps solves with M and 2 + 2 ir_steps
     // products with A or A' (2 nnz(A) flops each).
-    void addCostEstimates(FactorStats& st) const {
+    // Columns in `left_out` are not formed into M (the sparse backend's dense
+    // columns).
+    void addCostEstimates(FactorStats& st, std::span<const Index> left_out = {}) const {
         const double ir = static_cast<double>(std::max<Int>(ir_steps_, 0));
-        st.factor_flops = form_flops_ + factorMFlops();
+        double form = form_flops_;
+        for (const Index j : left_out) {
+            form -= col_nnz_[static_cast<size_t>(j)] * col_nnz_[static_cast<size_t>(j)];
+        }
+        st.factor_flops = std::max(form, 0.0) + factorMFlops();
         st.solve_flops = (1.0 + ir) * solveMFlops() + (2.0 + 2.0 * ir) * 2.0 * a_nnz_;
     }
 
@@ -752,6 +758,7 @@ protected:
     Real reg_ = 1e-8;
     double a_nnz_ = 0.0;
     double form_flops_ = 0.0;
+    std::vector<double> col_nnz_;
     std::vector<Real> theta_;
     std::vector<Real> s_copy_;
 };
@@ -923,7 +930,7 @@ public:
     [[nodiscard]] FactorStats factorStats() const override {
         FactorStats st{chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size()), schur_order_,
                        schur_dropped_};
-        addCostEstimates(st);
+        addCostEstimates(st, dense_cols_);
         return st;
     }
 

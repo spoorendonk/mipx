@@ -73,6 +73,8 @@ struct BarrierOptions {
     // Gondzio's multiple centrality correctors (#293) after Mehrotra's
     // corrector in the CPU IPM loop: at most this many per iteration, fewer
     // when the backend's factorization is cheap next to its solve. 0: off.
+    // Opt-in, CPU backends only: above 0 the GPU path is skipped, an explicit
+    // GPU backend included (reported when verbose).
     Int gondzio_correctors = 0;
     bool verbose = true;
     bool crossover = true;
@@ -120,6 +122,8 @@ public:
     [[nodiscard]] Index standardFormRows() const { return aeq_.numRows(); }
     [[nodiscard]] Index standardFormCols() const { return aeq_.numCols(); }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    // Gondzio correctors accepted over the last IPM run, for tests.
+    [[nodiscard]] Int gondzioCorrections() const { return gondzio_corrections_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:
@@ -174,6 +178,7 @@ private:
     Status crossover_status_ =
         Status::Error;  // Infeasible/Unbounded if either crossover run proved it
     bool used_gpu_ = false;
+    Int gondzio_corrections_ = 0;
     std::string last_error_;
 };
 

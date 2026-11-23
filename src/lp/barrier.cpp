@@ -352,9 +352,11 @@ inline Real maxStepOn(std::span<const Index> cols, std::span<const Real> x,
 //   t = beta_min sigma mu - v~  where v~ <= beta_min sigma mu,
 //   t = beta_max sigma mu - v~  where v~ >= beta_max sigma mu,  0 otherwise.
 // The corrector d_m solves the Newton system for (0, 0, t) with the current
-// factorization, and d + d_m replaces d while its steps grow by at least a
-// fraction of the increase aimed at, at most k times. The bound pairs (v, w)
-// of #299 are complementarity pairs like (z, s) and take part the same way.
+// factorization. In each space short of a full step, d + d_m replaces d when
+// that space's step grows by at least a fraction of the increase aimed at;
+// correcting goes on, at most k times, while either space takes it. t has no
+// lower cap: CG08 eq. 7 states none. The bound pairs (v, w) of #299 are
+// complementarity pairs like (z, s) and take part the same way.
 struct GondzioCorrectors {
     static constexpr Real kAspiration = 0.1;  // delta, Gondzio 1996
     static constexpr Real kBetaMin = 0.1;     // gamma of CG08's neighbourhood
@@ -367,7 +369,7 @@ struct GondzioCorrectors {
 
     std::vector<Real> zero_m{}, zero_n{}, t_c{}, t_w{};
     std::vector<Real> mz{}, my{}, ms{}, mv{}, mw{};  // corrector
-    std::vector<Real> tz{}, ty{}, ts{}, tv{}, tw{};  // d + d_m
+    std::vector<Real> tz{}, ts{}, tv{}, tw{};        // d + d_m
 
     void steps(std::span<const Real> ddz, std::span<const Real> dds, std::span<const Real> ddv,
                std::span<const Real> ddw, Real& a_p, Real& a_d) const {
@@ -399,7 +401,11 @@ struct GondzioCorrectors {
                 vec->assign(n, 0.0);
             }
             my.assign(m, 0.0);
-            ty.assign(m, 0.0);
+        }
+        // sigma mu = 0 (sigma clamped to 0) has no neighbourhood to aim at:
+        // every target would be -v~, a second affine step, not a centring one.
+        if (!(sigma_mu > 0.0)) {
+            return 0;
         }
         const Real lo = kBetaMin * sigma_mu;
         const Real hi = kBetaMax * sigma_mu;
@@ -430,22 +436,32 @@ struct GondzioCorrectors {
             Real new_p = 0.0;
             Real new_d = 0.0;
             steps(tz, ts, tv, tw, new_p, new_d);
-            if (new_p < a_p + kAcceptFraction * (aim_p - a_p) ||
-                new_d < a_d + kAcceptFraction * (aim_d - a_d)) {
+            // Each space takes the corrector on its own (CG08 sec. 5): A dz_m
+            // = 0, dz_m + dv_m = 0 and A' dy_m + ds_m - dw_m = 0, so either
+            // half keeps its feasibility equations whatever the other does. A
+            // space already at a full step keeps its direction.
+            const bool take_p = a_p < 1.0 && new_p >= a_p + kAcceptFraction * (aim_p - a_p);
+            const bool take_d = a_d < 1.0 && new_d >= a_d + kAcceptFraction * (aim_d - a_d);
+            if (!take_p && !take_d) {
                 break;
             }
-            for (std::size_t i = 0; i < m; ++i) {
-                ty[i] = dy[i] + my[i];
+            if (take_p) {
+                std::copy(tz.begin(), tz.end(), dz.begin());
+                for (const Index j : cols) {
+                    dv[j] = tv[j];
+                }
+                a_p = new_p;
             }
-            std::copy(tz.begin(), tz.end(), dz.begin());
-            std::copy(ty.begin(), ty.end(), dy.begin());
-            std::copy(ts.begin(), ts.end(), ds.begin());
-            for (const Index j : cols) {
-                dv[j] = tv[j];
-                dw[j] = tw[j];
+            if (take_d) {
+                for (std::size_t i = 0; i < m; ++i) {
+                    dy[i] += my[i];
+                }
+                std::copy(ts.begin(), ts.end(), ds.begin());
+                for (const Index j : cols) {
+                    dw[j] = tw[j];
+                }
+                a_d = new_d;
             }
-            a_p = new_p;
-            a_d = new_d;
             ++used;
         }
         return used;
@@ -457,7 +473,9 @@ struct GondzioCorrectors {
 // capped by BarrierOptions::gondzio_correctors. Gondzio 1996 (sec. 3.3) sets
 // it from this ratio of factorization to solve effort; the estimate
 // (1 + k) E_s ~ E_f is the one of arXiv:2508.04370 without its refinement
-// terms. The cap alone where the backend gives no cost estimate.
+// terms. The cap alone where the backend gives no cost estimate. The caller
+// counts once, at the first factorization: a Schur complement that grows
+// later does not change it.
 Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
     if (cap <= 0) {
         return 0;
@@ -479,10 +497,11 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                                  std::span<const Real> b, std::span<const Real> c,
                                  std::span<const Real> u, const BarrierOptions& opts,
                                  Real obj_offset, std::vector<Real>& z, std::vector<Real>& y,
-                                 std::vector<Real>& s, Int& iters) {
+                                 std::vector<Real>& s, Int& iters, Int& corrections) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const Real reg = std::max(opts.regularization, 1e-12);
+    corrections = 0;
 
     // Columns with an upper bound (#299); empty unless implicit_upper_bounds,
     // and then the loop below is the plain standard-form one.
@@ -724,6 +743,7 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
 
         if (gondzio_k > 0) {
             const Int used = gondzio.correct(gondzio_k, sigma * mu, newtonFor);
+            corrections += used;
             if (opts.verbose) {
                 std::printf("        gondzio correctors: %d of %d\n", used, gondzio_k);
             }
@@ -1256,6 +1276,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                                                    std::vector<Real>& s, Int& iters) {
     const Index m = aeq_.numRows();
     const Index n = aeq_.numCols();
+    gondzio_corrections_ = 0;
     if (n == 0) {
         z.clear();
         y.assign(static_cast<size_t>(m), 0.0);
@@ -1391,7 +1412,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 return BarrierIpmOutcome::Failed;
             }
             outcome = runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
-                                     z, y, s, iters);
+                                     z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
