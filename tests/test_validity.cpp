@@ -814,12 +814,16 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions aggregator = o;
     aggregator.enable_aggregator = true;
     cases.push_back({"aggregator (opt-in)", aggregator});
+    PresolveOptions zero_cost = o;
+    zero_cost.enable_zero_cost_singletons = true;
+    cases.push_back({"zero-cost singletons (opt-in)", zero_cost});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
     all.enable_free_col_substitution = true;
     all.enable_doubleton_fill_in = true;
     all.enable_aggregator = true;
+    all.enable_zero_cost_singletons = true;
     cases.push_back({"all opt-in but parallel columns", all});
     all.enable_parallel_cols = true;
     cases.push_back({"all opt-in", all, false});
@@ -859,6 +863,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_free_col_substitution; }},
         {"aggregator", &PresolveStats::aggregator_changes,
          [](const PresolveOptions& o) { return o.enable_aggregator; }},
+        {"zero-cost singletons", &PresolveStats::zero_cost_singleton_changes,
+         [](const PresolveOptions& o) { return o.enable_zero_cost_singletons; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
@@ -1025,6 +1031,16 @@ std::vector<LpProblem> presolveAuditModels() {
                                {{1, 1, 1}, {1, -1, 0}, {1, 0, 1}}, {4, -kInf, 1}, {4, 3, kInf}));
     models.push_back(makeModel(Sense::Maximize, {1, 0, 1}, {-kInf, 0, 0}, {kInf, 3, 2}, {C, C, I},
                                {{1, 2, -1}, {1, 0, 1}, {-1, 1, 0}}, {1, -kInf, -kInf}, {1, 4, 2}));
+    // Zero-cost continuous singletons (#359), no implied-free column: x0 in
+    // [0, 3] in an equation that keeps it in [-2, 4]; x0 in [0, 1] with
+    // coefficient -2 in a ranged row that keeps it in [-1.5, 1.5]; x0 >= 0
+    // with no upper bound in a ranged row.
+    models.push_back(makeModel(Sense::Minimize, {0, -1, -1}, {0, 0, 0}, {3, 3, 3}, {C, I, I},
+                               {{1, 1, 1}, {0, 1, -1}}, {4, -kInf}, {4, 1}));
+    models.push_back(makeModel(Sense::Maximize, {0, 1, -1}, {0, 0, 0}, {1, 2, 2}, {C, I, I},
+                               {{-2, 1, 1}, {0, 1, 1}}, {1, -kInf}, {3, 3}));
+    models.push_back(makeModel(Sense::Minimize, {0, 1, 2}, {0, 0, 0}, {kInf, 3, 2}, {C, I, I},
+                               {{1, 1, 1}, {0, 1, -1}}, {2, -kInf}, {5, 1}));
     return models;
 }
 

@@ -270,6 +270,42 @@ Real integerRoundTol(Real a, bool row_dropped) {
     return std::max(row_dropped ? kRowTol : kIntRoundTol, kRowTol / std::abs(a));
 }
 
+// x_col for a zero-cost singleton slack (#359): the x in [col_lower,
+// col_upper] with row_lower <= a x + R <= row_upper, R the row's other terms
+// as postsolved. A bound where one fits, so the point stays a vertex, as
+// HiGHS's undo picks one; else the row side that fits. A reduced point that
+// left R a hair outside the widened sides has no such x: the bound nearest
+// the row's range then misses the row by that hair and no more.
+Real zeroCostSingletonValue(const PostsolveZeroCostSingleton& op, const std::vector<Real>& full) {
+    CompensatedSum rest;
+    for (std::size_t k = 0; k < op.row_cols.size(); ++k) {
+        rest.add(op.row_coeffs[k] * full[op.row_cols[k]]);
+    }
+    const Real a = op.coeff;
+    // a x in [row_lower - R, row_upper - R], both finite.
+    const Real from_lower = -rest.without(op.row_lower) / a;
+    const Real from_upper = -rest.without(op.row_upper) / a;
+    const Real x_lo = a > 0.0 ? from_lower : from_upper;
+    const Real x_hi = a > 0.0 ? from_upper : from_lower;
+    const Real l = op.col_lower;
+    const Real u = op.col_upper;
+    const bool l_finite = std::abs(l) < kHugeBound;
+    const bool u_finite = std::abs(u) < kHugeBound;
+    if (l_finite && x_hi < l) {
+        return l;
+    }
+    if (u_finite && x_lo > u) {
+        return u;
+    }
+    if (l_finite && x_lo <= l) {
+        return l;
+    }
+    if (u_finite && x_hi >= u) {
+        return u;
+    }
+    return x_lo;  // Inside (l, u): the row at its lower side over a x.
+}
+
 }  // namespace
 
 // =============================================================================
@@ -404,6 +440,8 @@ std::vector<Real> PostsolveStack::postsolve(const std::vector<Real>& presolved_s
                     }
                     // rest.without(rhs) is rest - rhs, rounded once.
                     full[op.orig_col] = -rest.without(op.rhs) / op.coeff;
+                } else if constexpr (std::is_same_v<T, PostsolveZeroCostSingleton>) {
+                    full[op.orig_col] = zeroCostSingletonValue(op, full);
                 }
             },
             *it);
@@ -984,6 +1022,90 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         ++changes;
         postsolve_stack_.push(
             PostsolveFreeColSubstitution{j, i, a, t, std::move(row_cols), std::move(row_coeffs)});
+    }
+
+    return changes;
+}
+
+// HiGHS's zero-cost singleton (HPresolve::zeroCostSingleton, #359): a
+// continuous column x_j with cost 0 and one active row i, lo <= a x_j + R <= up
+// with both sides finite (an equation included), is the row's slack. Over R
+// alone the row is lo - max(a l, a u) <= R <= up - min(a l, a u): every R in
+// that range has an x_j in [l, u] that puts the row back in [lo, up], and no
+// R outside it has one. x_j goes and the row keeps those sides; an infinite
+// bound of x_j makes its side infinite. As x_j costs nothing, which x_j
+// postsolve picks does not change the objective. A one-sided row is left to
+// dual fixing, as in HiGHS.
+Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_removed,
+                                          std::vector<bool>& row_removed,
+                                          std::vector<Index>& row_active_nnz,
+                                          std::vector<Index>& col_active_nnz,
+                                          const std::vector<Index>& dirty_cols,
+                                          std::vector<uint8_t>& next_dirty_rows,
+                                          std::vector<uint8_t>& next_dirty_cols) {
+    Index changes = 0;
+
+    for (Index j : dirty_cols) {
+        if (col_removed[j] || col_active_nnz[j] != 1 || lp.col_type[j] != VarType::Continuous ||
+            lp.obj[j] != 0.0) {
+            continue;
+        }
+        ++stats_.cols_examined;
+        const Real l = lp.col_lower[j];
+        const Real u = lp.col_upper[j];
+        if (l > u) {
+            continue;  // Crossed bounds: removeSingletonCols reports them.
+        }
+
+        Index i = -1;
+        Real a = 0.0;
+        for (const auto [row, value] : work_->col(j)) {
+            if (!row_removed[row]) {
+                i = row;
+                a = value;
+                break;
+            }
+        }
+        if (i < 0 || a == 0.0 || !std::isfinite(a)) {
+            continue;
+        }
+        const Real lo = lp.row_lower[i];
+        const Real up = lp.row_upper[i];
+        if (std::abs(lo) >= kHugeBound || std::abs(up) >= kHugeBound || lo > up) {
+            continue;  // One-sided, free, or crossed (infeasible, reported elsewhere).
+        }
+
+        // a x_j over [l, u], a huge bound infinite.
+        const bool l_finite = std::abs(l) < kHugeBound;
+        const bool u_finite = std::abs(u) < kHugeBound;
+        const Real at_l = a * l;
+        const Real at_u = a * u;
+        const bool max_finite = a > 0.0 ? u_finite : l_finite;
+        const bool min_finite = a > 0.0 ? l_finite : u_finite;
+        const Real ax_max = a > 0.0 ? at_u : at_l;
+        const Real ax_min = a > 0.0 ? at_l : at_u;
+        const Real new_lo = max_finite ? lo - ax_max : -kInf;
+        const Real new_up = min_finite ? up - ax_min : kInf;
+
+        std::vector<Index> row_cols;
+        std::vector<Real> row_coeffs;
+        for (const auto [col, ak] : work_->row(i)) {
+            if (col == j || col_removed[col] || ak == 0.0) {
+                continue;
+            }
+            row_cols.push_back(col);
+            row_coeffs.push_back(ak);
+        }
+
+        removeActiveColumn(*work_, j, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        lp.row_lower[i] = new_lo;
+        lp.row_upper[i] = new_up;
+        next_dirty_rows[i] = 1;
+        ++stats_.vars_removed;
+        ++changes;
+        postsolve_stack_.push(PostsolveZeroCostSingleton{
+            j, i, a, lo, up, new_lo, new_up, l, u, std::move(row_cols), std::move(row_coeffs)});
     }
 
     return changes;
@@ -3244,6 +3366,18 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                                    next_dirty_cols);
             });
             stats_.free_col_substitution_changes += ch;
+            total_changes += ch;
+        }
+
+        // After free column substitution, as in HiGHS's singletonCol: an
+        // implied-free slack takes its row with it there.
+        if (options_.enable_zero_cost_singletons) {
+            ch = timed(stats_.zero_cost_singleton_seconds, [&] {
+                return removeZeroCostSingletons(lp, col_removed, row_removed, row_active_nnz,
+                                                col_active_nnz, dirty_col_list, next_dirty_rows,
+                                                next_dirty_cols);
+            });
+            stats_.zero_cost_singleton_changes += ch;
             total_changes += ch;
         }
 

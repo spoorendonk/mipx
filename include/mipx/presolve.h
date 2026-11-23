@@ -104,10 +104,31 @@ struct PostsolveFreeColSubstitution {
     std::vector<Real> row_coeffs;
 };
 
+/// A zero-cost continuous column singleton in a row with both sides finite
+/// was that row's slack (#359, HiGHS's zero-cost singleton): the column was
+/// removed and the row's sides widened to row_lower - max(a l, a u) and
+/// row_upper - min(a l, a u) over the other columns. Postsolve picks x_col
+/// in [col_lower, col_upper] that puts a x_col + (the row's other terms)
+/// back in [row_lower, row_upper]; the row's terms are kept for that.
+struct PostsolveZeroCostSingleton {
+    Index orig_col;
+    Index orig_row;
+    Real coeff;
+    Real row_lower;  ///< The row's sides before the column went.
+    Real row_upper;
+    Real new_row_lower;  ///< And after, over the other columns.
+    Real new_row_upper;
+    Real col_lower;
+    Real col_upper;
+    std::vector<Index> row_cols;
+    std::vector<Real> row_coeffs;
+};
+
 using PostsolveOp =
     std::variant<PostsolveFixVariable, PostsolveSingletonRow, PostsolveSingletonCol,
                  PostsolveForcingRow, PostsolveDominatedRow, PostsolveCoeffTightening,
-                 PostsolveDoubletonEquality, PostsolveParallelCol, PostsolveFreeColSubstitution>;
+                 PostsolveDoubletonEquality, PostsolveParallelCol, PostsolveFreeColSubstitution,
+                 PostsolveZeroCostSingleton>;
 
 // ---- PostsolveStack ---------------------------------------------------------
 
@@ -162,6 +183,9 @@ struct PresolveStats {
     /// aggregator (enable_aggregator, #348), and the entries it inserted.
     Index aggregator_changes = 0;
     Index aggregator_fill_in = 0;
+    /// Zero-cost column singletons removed as their ranged row's or
+    /// equation's slack (enable_zero_cost_singletons, #359).
+    Index zero_cost_singleton_changes = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -193,6 +217,7 @@ struct PresolveStats {
     Real parallel_col_seconds = 0.0;
     Real free_col_substitution_seconds = 0.0;
     Real aggregator_seconds = 0.0;
+    Real zero_cost_singleton_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -228,6 +253,10 @@ struct PresolveOptions {
     /// filling in, and remove both. Runs once the other passes reach a
     /// fixpoint. Off by default until benchmarked.
     bool enable_aggregator = false;
+    /// Remove a zero-cost continuous column singleton whose row has both
+    /// sides finite as that row's slack, widening the row's sides (#359,
+    /// HiGHS's zero-cost singleton). Off by default until benchmarked.
+    bool enable_zero_cost_singletons = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.
@@ -353,6 +382,13 @@ private:
                                       const std::vector<Index>& dirty_cols,
                                       std::vector<uint8_t>& next_dirty_rows,
                                       std::vector<uint8_t>& next_dirty_cols);
+    Index removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_removed,
+                                   std::vector<bool>& row_removed,
+                                   std::vector<Index>& row_active_nnz,
+                                   std::vector<Index>& col_active_nnz,
+                                   const std::vector<Index>& dirty_cols,
+                                   std::vector<uint8_t>& next_dirty_rows,
+                                   std::vector<uint8_t>& next_dirty_cols);
     Index aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& col_removed,
                                        std::vector<bool>& row_removed,
                                        std::vector<Index>& row_active_nnz,

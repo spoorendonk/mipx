@@ -2378,6 +2378,144 @@ TEST_CASE("Presolve: the aggregator refuses a substitution that cancels an entry
     CHECK(presolver.stats().aggregator_changes == 0);
 }
 
+namespace {
+
+/// The options of the zero-cost singleton tests (#359): those of the
+/// aggregator tests, aggregator off, zero-cost singletons as given.
+PresolveOptions zeroCostOptions(bool on) {
+    PresolveOptions opts = aggregatorOptions(false);
+    opts.enable_zero_cost_singletons = on;
+    return opts;
+}
+
+/// Presolves with zero-cost singletons on, solves and postsolves, checks the
+/// point against the original model and the direct optimum, and returns it.
+std::vector<Real> checkZeroCost(const LpProblem& lp, Presolver& presolver) {
+    auto full = presolveSolvePostsolve(lp, presolver, zeroCostOptions(true));
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+    return full;
+}
+
+/// x1 + x2 + s = 4 with s in [s_lo, s_up], x1 and x2 in [0, 10], and
+/// x1 - x2 <= 1: s is no implied-free column, as the equation keeps it only
+/// in [-16, 4].
+LpProblem slackEquationModel(std::vector<Real> obj, Real s_lo, Real s_up, Real x2_up = 10.0) {
+    return rowsModel(
+        std::move(obj), {0.0, 0.0, s_lo}, {10.0, x2_up, s_up},
+        {{4.0, 4.0, {{0, 1.0}, {1, 1.0}, {2, 1.0}}}, {-kInf, 1.0, {{0, 1.0}, {1, -1.0}}}});
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: a zero-cost singleton is removed as its equation's slack", "[presolve]") {
+    SECTION("off by default") {
+        const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, zeroCostOptions(false));
+        CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    }
+    SECTION("the slack at its lower bound") {
+        // max x1 + x2: x1 + x2 = 4, s = 0.
+        const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(full[2], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("the slack at its upper bound") {
+        // min x1 + x2: x1 + x2 = 1, s = 3.
+        const LpProblem lp = slackEquationModel({1.0, 1.0, 0.0}, 0.0, 3.0);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(full[2], WithinAbs(3.0, 1e-12));
+    }
+    SECTION("the slack between its bounds") {
+        // min x1 - x2 with x2 <= 2: x = (0, 2), s = 2.
+        const LpProblem lp = slackEquationModel({1.0, -1.0, 0.0}, 0.0, 3.0, 2.0);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(full[2], WithinAbs(2.0, 1e-12));
+    }
+    SECTION("an infinite upper bound leaves the row one-sided") {
+        // s >= 0 alone: x1 + x2 <= 4; max x1 + x2 puts s at 0.
+        const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, kInf);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(full[2], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("a free slack frees its row") {
+        // Both widened sides infinite: the equation goes with s.
+        const LpProblem lp = slackEquationModel({1.0, -1.0, 0.0}, -kInf, kInf);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK(presolver.stats().rows_removed >= 1);
+        CHECK_THAT(full[0] + full[1] + full[2], WithinAbs(4.0, 1e-12));
+    }
+}
+
+TEST_CASE("Presolve: a zero-cost singleton with a negative coefficient in a ranged row",
+          "[presolve]") {
+    // 2 <= x1 + x2 - 2 s <= 6, s in [0, 1]: over x1 + x2 the row is
+    // 2 <= x1 + x2 <= 8, x1 and x2 in [0, 10].
+    const auto model = [](Real c) {
+        return rowsModel(
+            {c, c, 0.0}, {0.0, 0.0, 0.0}, {10.0, 10.0, 1.0},
+            {{2.0, 6.0, {{0, 1.0}, {1, 1.0}, {2, -2.0}}}, {-kInf, 1.0, {{0, 1.0}, {1, -1.0}}}});
+    };
+    SECTION("min x1 + x2: x1 + x2 = 2, s = 0") {
+        const LpProblem lp = model(1.0);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(full[2], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("max x1 + x2: x1 + x2 = 8, s = 1") {
+        const LpProblem lp = model(-1.0);
+        Presolver presolver;
+        const auto full = checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 1);
+        CHECK_THAT(objectiveAt(lp, full), WithinAbs(-8.0, 1e-12));
+        CHECK_THAT(full[2], WithinAbs(1.0, 1e-12));
+    }
+}
+
+TEST_CASE("Presolve: zero-cost singletons leave what they cannot take", "[presolve]") {
+    SECTION("a column with a cost") {
+        const LpProblem lp = slackEquationModel({-1.0, -1.0, 0.5}, 0.0, 3.0);
+        Presolver presolver;
+        checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    }
+    SECTION("an integer column") {
+        LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
+        lp.col_type[2] = VarType::Integer;
+        Presolver presolver;
+        checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    }
+    SECTION("a one-sided row, left to dual fixing") {
+        LpProblem lp = slackEquationModel({-1.0, -1.0, 0.0}, 0.0, 3.0);
+        lp.row_lower[0] = -kInf;
+        Presolver presolver;
+        checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    }
+    SECTION("a column in two rows") {
+        LpProblem lp = rowsModel({-1.0, -1.0, 0.0}, {0.0, 0.0, 0.0}, {10.0, 10.0, 3.0},
+                                 {{4.0, 4.0, {{0, 1.0}, {1, 1.0}, {2, 1.0}}},
+                                  {-kInf, 1.0, {{0, 1.0}, {1, -1.0}, {2, 1.0}}}});
+        Presolver presolver;
+        checkZeroCost(lp, presolver);
+        CHECK(presolver.stats().zero_cost_singleton_changes == 0);
+    }
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2

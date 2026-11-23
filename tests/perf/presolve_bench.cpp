@@ -48,7 +48,8 @@ namespace {
 const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
-    "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n";
+    "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n"
+    "       [--zero-cost-singletons]\n";
 
 struct Options {
     pb::CommonOptions common;
@@ -60,6 +61,8 @@ struct Options {
     bool doubleton_fill_in = false;
     /// PresolveOptions::enable_aggregator (#348), off by default.
     bool aggregator = false;
+    /// PresolveOptions::enable_zero_cost_singletons (#359), off by default.
+    bool zero_cost_singletons = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -88,6 +91,8 @@ Options parse(int argc, char** argv) {
             opt.doubleton_fill_in = true;
         } else if (arg == "--aggregator") {
             opt.aggregator = true;
+        } else if (arg == "--zero-cost-singletons") {
+            opt.zero_cost_singletons = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -277,6 +282,8 @@ constexpr Rule kRules[] = {
     {"coeff_tightening", &PresolveStats::coeff_tightening_changes,
      &PresolveStats::coeff_tightening_seconds},
     {"aggregator", &PresolveStats::aggregator_changes, &PresolveStats::aggregator_seconds},
+    {"zero_cost_singleton", &PresolveStats::zero_cost_singleton_changes,
+     &PresolveStats::zero_cost_singleton_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
     {"implied_bounds_relaxed", &PresolveStats::implied_bounds_relaxed,
      &PresolveStats::implied_bounds_relaxed_seconds},
@@ -315,6 +322,7 @@ int main(int argc, char** argv) {
         popts.enable_free_col_substitution = opt.free_col_substitution;
         popts.enable_doubleton_fill_in = opt.doubleton_fill_in;
         popts.enable_aggregator = opt.aggregator;
+        popts.enable_zero_cost_singletons = opt.zero_cost_singletons;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
