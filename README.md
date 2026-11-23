@@ -154,4 +154,5 @@ python/           nanobind bindings and pytest tests
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Code translated from other projects keeps their notices; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

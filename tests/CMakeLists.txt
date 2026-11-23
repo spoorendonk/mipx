@@ -6,6 +6,7 @@ add_executable(mipx-tests
     test_benchmark.cpp
     test_lp_solver.cpp
     test_lu.cpp
+    test_rank_revealing_lu.cpp
     test_dual_simplex.cpp
     test_incremental.cpp
     test_column_changes.cpp
@@ -70,8 +71,10 @@ set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
     APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
-# Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326).
-set_property(SOURCE test_presolve_matrix.cpp test_dual_bounds.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+# Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326),
+# and the rank-revealing LU presolve will use (src/lp/rank_revealing_lu.h, #392).
+set_property(SOURCE test_presolve_matrix.cpp test_dual_bounds.cpp test_rank_revealing_lu.cpp
+    APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
 

@@ -4,6 +4,7 @@ add_library(mipx STATIC
     lp/lp_problem.cpp
     lp/lp_solver.cpp
     lp/lu.cpp
+    lp/rank_revealing_lu.cpp
     lp/dual_simplex.cpp
     lp/exact_refinement.cpp
     lp/barrier.cpp
