@@ -124,7 +124,8 @@ TEST_CASE("Sparse normal equations stop their setup once the deadline has passed
     // Its ordering and analysis take seconds on a large LP (#347). The same
     // chain of rows as above: far below the pattern loop's first check, so
     // the ordering's own check (AMD's per pivot, ND's per subgraph) is what
-    // stops it here.
+    // stops it here. The text is analyzePattern's own, which a stop inside
+    // SparseCholesky::analyze would not give.
     constexpr Index kRows = 30;
     constexpr Index kCols = kRows + 1;
     std::vector<Triplet> t;
@@ -141,12 +142,14 @@ TEST_CASE("Sparse normal equations stop their setup once the deadline has passed
     auto solver = createCpuSparseCholeskySolver();
     solver->setDeadline(Deadline::after(0.0));
     CHECK_FALSE(solver->setup(A, kRows, kCols, opts));
-    CHECK(solver->lastError().find("time limit") != std::string::npos);
+    CHECK(solver->lastError().find("time limit reached in the normal-equations analysis") !=
+          std::string::npos);
 
     const std::atomic<bool> stop{true};
     solver->setDeadline(Deadline{}.orStop(&stop));
     CHECK_FALSE(solver->setup(A, kRows, kCols, opts));
-    CHECK(solver->lastError().find("stopped") != std::string::npos);
+    CHECK(solver->lastError().find("stopped in the normal-equations analysis") !=
+          std::string::npos);
 
     solver->setDeadline(Deadline{});
     CHECK(solver->setup(A, kRows, kCols, opts));
