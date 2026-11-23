@@ -44,7 +44,28 @@ public:
 
     /// Solve B^T*y = rhs in-place.
     void btran(std::span<Real> rhs) const;
+    /// As btran(rhs), and `nonzero_rows` is set to the rows whose result exceeds
+    /// 1e-13 in magnitude (an output only: its content on entry is ignored).
     void btran(std::span<Real> rhs, std::vector<Index>& nonzero_rows) const;
+
+    /// Solve B*x = rhs in-place, given the right-hand side's nonzero pattern
+    /// and returning the result's, so the solve costs the patterns it walks
+    /// rather than the dimension (hyper-sparse, Gilbert-Peierls reach).
+    ///
+    /// On entry `pattern` lists the rows where rhs may be nonzero, and rhs is
+    /// zero at every other row. On return rhs holds x, and `pattern` lists,
+    /// without duplicates, every basis position where x is nonzero; x is
+    /// exactly zero elsewhere. No value is dropped, however small: the result
+    /// is the dense solve's up to round-off. The L and U stages each run
+    /// hyper-sparse or dense on their predicted result density; the update
+    /// etas go by pattern forward (an eta stored dense costs a rescan of the
+    /// dimension) and densely in btranSparse, so those parts are not yet
+    /// O(pattern).
+    void ftranSparse(std::span<Real> rhs, std::vector<Index>& pattern) const;
+
+    /// Solve B^T*y = rhs in-place by pattern, as ftranSparse: `pattern` lists
+    /// basis positions on entry and rows on return.
+    void btranSparse(std::span<Real> rhs, std::vector<Index>& pattern) const;
 
     /// Forrest-Tomlin rank-1 update: replace basis column at position `pivot_pos`
     /// with new column `entering_col` (given in terms of original row indices/values).
@@ -52,6 +73,18 @@ public:
     /// Forrest-Tomlin rank-1 update with pre-transformed column `d = B^{-1} a_q`.
     /// `transformed_col` is in basis-position order and must have size dimension().
     void updateFromFtranColumn(Index pivot_pos, std::span<const Real> transformed_col);
+    /// As above, with `pattern` listing without duplicates every position
+    /// where `transformed_col` is nonzero (ftranSparse's output pattern), so
+    /// only those are read.
+    void updateFromFtranColumn(Index pivot_pos, std::span<const Real> transformed_col,
+                               std::span<const Index> pattern);
+
+    /// Test-only: how each triangular stage chooses between its hyper-sparse
+    /// and dense kernels. Auto decides on predicted density; the forced modes
+    /// exist so tests can check both kernels on the same basis.
+    enum class SolveKernel : uint8_t { Auto, AlwaysHyperSparse, AlwaysDense };
+    void setSolveKernel(SolveKernel kernel) { solve_kernel_ = kernel; }
+    [[nodiscard]] SolveKernel solveKernel() const { return solve_kernel_; }
 
     /// Check if refactorization is needed.
     [[nodiscard]] bool needsRefactorization() const;
@@ -115,13 +148,28 @@ public:
     void resetWorkUnits() { work_.reset(); }
 
 private:
-    /// Apply Forrest-Tomlin update etas forward.
+    /// Solve stages whose result density is predicted (index into ema_density_).
+    enum SolveStage : uint8_t {
+        kStageFtranL = 0,
+        kStageBtranLTranspose = 1,
+        kStageBtranUTranspose = 2,
+        kStageFtranU = 3,
+    };
+
+    /// Apply Forrest-Tomlin update etas forward (dense x).
     void applyFT(std::span<Real> x) const;
 
-    /// Apply Forrest-Tomlin update etas in reverse, with density-guided switching.
+    /// Apply Forrest-Tomlin update etas in reverse (dense x).
     void applyFTTranspose(std::span<Real> x) const;
 
-    void btranImpl(std::span<Real> rhs, std::vector<Index>* nonzero_rows) const;
+    /// The same by pattern: `pattern` lists where x may be nonzero, and is
+    /// extended by the positions the etas make nonzero.
+    void applyFTSparse(std::span<Real> x, std::vector<Index>& pattern) const;
+    void applyFTTransposeSparse(std::span<Real> x, std::vector<Index>& pattern) const;
+
+    /// Dense L and L^T solves in elimination order (supernodal when panels exist).
+    void solveLDense(std::span<Real> x) const;
+    void solveLTransposeDense(std::span<Real> x) const;
 
     /// Backward solve with U (upper triangular, row-wise).
     void solveU(std::span<Real> x) const;
@@ -129,9 +177,34 @@ private:
     /// Forward solve with U^T.
     void solveUTranspose(std::span<Real> x) const;
 
-    /// Hyper-sparse forward solve with U^T: only process columns reachable from
-    /// the nonzero positions in x. Returns the number of output nonzeros.
-    Index solveUTransposeSparse(std::span<Real> x) const;
+    /// One triangular stage in elimination order by pattern: hyper-sparse over
+    /// the reach of `pattern`, or the dense kernel; `pattern` is replaced by
+    /// the stage result's pattern either way.
+    void solveLStage(std::span<Real> x, std::vector<Index>& pattern) const;
+    void solveUStage(std::span<Real> x, std::vector<Index>& pattern) const;
+    void solveUTransposeStage(std::span<Real> x, std::vector<Index>& pattern) const;
+    void solveLTransposeStage(std::span<Real> x, std::vector<Index>& pattern) const;
+
+    /// Whether `stage` runs hyper-sparse on an input of `nnz` nonzeros.
+    [[nodiscard]] bool useHyperSparse(SolveStage stage, std::size_t nnz) const;
+    /// Fold a stage's result size into its density prediction.
+    void recordDensity(SolveStage stage, std::size_t nnz) const;
+
+    /// Depth-first reach of `seeds` in the graph whose node v has successors
+    /// adj[adj_start[v] .. adj_start[v+1]). On success sparse_steps_ holds the
+    /// reached nodes in postorder (so its reverse is a topological order:
+    /// every node before its successors). Returns false, leaving the reach
+    /// incomplete, once more than `limit` nodes are reached.
+    bool reach(std::span<const Index> seeds, const Index* adj_start, const Index* adj,
+               Index limit) const;
+    /// Node count past which a hyper-sparse stage gives up for the dense kernel.
+    [[nodiscard]] Index reachLimit() const;
+    /// Start a fresh marking in sparse_epoch_ (all entries unmarked).
+    void newMarkEpoch() const;
+
+    /// Mixed-precision (FP32 + iterative refinement) solves on dense rhs.
+    void ftranMixed(std::span<Real> rhs) const;
+    void btranMixed(std::span<Real> rhs) const;
 
     /// BTF detection: find block upper-triangular form via maximum matching
     /// and Tarjan's SCC algorithm. Returns the number of blocks found.
@@ -227,6 +300,13 @@ private:
     std::vector<Real> u_val_;
     std::vector<Real> u_diag_;  // u_diag_[k] = U(k,k)
     std::vector<Real> u_diag_inv_;
+    // U's off-diagonal entries again, column-wise, for the hyper-sparse back
+    // substitution: ucol_row_/ucol_val_[ucol_start_[j] .. ucol_start_[j+1])
+    // are the rows (elimination order) and values of column j. U is fixed
+    // from factorize() on (updates are etas), so this copy stays valid.
+    std::vector<Index> ucol_start_;
+    std::vector<Index> ucol_row_;
+    std::vector<Real> ucol_val_;
 
     // Forrest-Tomlin update etas.
     // Each update stores an eta vector and the position of the replaced column.
@@ -244,12 +324,23 @@ private:
     Index num_updates_ = 0;
 
     // Reusable dense scratch buffers for hot-path solves/updates.
+    // solve_work_ is all zero between solves: each solve leaves it so by
+    // zeroing the pattern it read out.
     mutable std::vector<Real> solve_work_;
     std::vector<Real> update_work_;
+    // update_work_'s nonzero pattern (zero elsewhere), from the last update().
     std::vector<Index> update_touched_;
     mutable std::vector<Index> sparse_steps_;
     mutable std::vector<uint32_t> sparse_epoch_;
     mutable uint32_t sparse_epoch_id_ = 1;
+    // Depth-first search stack: node and next successor position.
+    mutable std::vector<Index> dfs_node_;
+    mutable std::vector<Index> dfs_pos_;
+    // Elimination-order pattern inside a solve, and the pattern the dense
+    // entry points build for the pattern solves.
+    mutable std::vector<Index> stage_pattern_;
+    mutable std::vector<Index> api_pattern_;
+    SolveKernel solve_kernel_ = SolveKernel::Auto;
 
     Index max_updates_ = 500;
     static constexpr Real kPivotTol = 0.1;
@@ -271,9 +362,7 @@ private:
     static constexpr Index kFtDenseMinDim = 512;
     static constexpr Real kFtDenseThreshold = 0.85;
 
-    /// Exponential moving average of solve density per stage.
-    /// Stages: 0 = FTRAN L-solve, 1 = BTRAN L^T-solve, 2 = BTRAN U^T-solve,
-    ///         3 = BTRAN FT-transpose.
+    /// Exponential moving average of each stage's result density (SolveStage).
     static constexpr int kNumSolveStages = 4;
     static constexpr Real kEmaAlpha = 0.15;  // smoothing factor
     mutable Real ema_density_[kNumSolveStages] = {0.0, 0.0, 0.0, 0.0};
