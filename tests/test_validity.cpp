@@ -781,8 +781,10 @@ struct PresolveCase {
     // Whether each feasible point of a model without an objective projects
     // onto one of the reduced model. Parallel columns do not keep that
     // (#308): a merge replaces two columns by their sum, and with no
-    // objective every dominated column is fixed. Only the optimum and the
-    // postsolve of each reduced point are checked for them.
+    // objective every dominated column is fixed. Nor does single-equation
+    // dual fixing (#367): fixing a side of an equation moves its activity,
+    // which its other columns make up. Only the optimum and the postsolve of
+    // each reduced point are checked for them.
     bool projects = true;
 };
 
@@ -820,6 +822,9 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions extended_dual = o;
     extended_dual.enable_extended_dual_fixing = true;
     cases.push_back({"extended dual fixing (opt-in)", extended_dual});
+    PresolveOptions single_equation = o;
+    single_equation.enable_single_equation_dual_fixing = true;
+    cases.push_back({"single-equation dual fixing (opt-in)", single_equation, false});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
@@ -828,8 +833,9 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_aggregator = true;
     all.enable_zero_cost_singletons = true;
     all.enable_extended_dual_fixing = true;
-    cases.push_back({"all opt-in but parallel columns", all});
+    cases.push_back({"all opt-in but parallel columns and single equations", all});
     all.enable_parallel_cols = true;
+    all.enable_single_equation_dual_fixing = true;
     cases.push_back({"all opt-in", all, false});
     return cases;
 }
@@ -876,6 +882,10 @@ std::vector<PresolveReduction> presolveReductions() {
         {"extended dual fixing", &PresolveStats::extended_dual_fixing_changes,
          [](const PresolveOptions& o) {
              return o.enable_dual_fixing && o.enable_extended_dual_fixing;
+         }},
+        {"single-equation dual fixing", &PresolveStats::single_equation_dual_fixing_changes,
+         [](const PresolveOptions& o) {
+             return o.enable_dual_fixing && o.enable_single_equation_dual_fixing;
          }},
         {"empty columns", &PresolveStats::empty_col_changes, always},
         {"coefficient tightening", &PresolveStats::coeff_tightening_changes,

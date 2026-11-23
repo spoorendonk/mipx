@@ -2317,7 +2317,7 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
 
     // Each row's activity over its active columns, huge bounds infinite,
     // summed on first use and updated as fixes take columns out of the row
-    // (enable_extended_dual_fixing only), allocated on first use. No other
+    // (the extended and single-equation cases), allocated on first use. No other
     // bound changes in this pass.
     struct Activity {
         CompensatedSum min;
@@ -2405,6 +2405,194 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
         return true;
     };
 
+    // Equations the single-equation case has checked (#367), allocated on
+    // first use; a fix clears the flag of each row it touches.
+    std::vector<uint8_t> equation_checked;
+    // Fixes x_k at value, its term moved into its rows' sides.
+    auto fixColumn = [&](Index k, Real value) {
+        removeActiveColumn(*work_, k, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        ++changes;
+        ++stats_.vars_removed;
+        lp.obj_offset += lp.obj[k] * value;
+        postsolve_stack_.push(PostsolveFixVariable{k, value});
+
+        for (const auto [row, a] : work_->col(k)) {
+            if (row_removed[row]) {
+                continue;
+            }
+            shiftRowSides(lp, row, a * value);
+            next_dirty_rows[row] = 1;
+            if (!equation_checked.empty()) {
+                // The row lost a column: HiGHS checks it again (markChangedRow).
+                equation_checked[row] = 0;
+            }
+            if (!activity.empty() && activity[row].valid && a != 0.0) {
+                // x_k's term leaves the row's activity, its value the sides
+                // (shiftRowSides): updated in place, as a dense row re-summed
+                // after each of its columns is fixed costs O(n^2).
+                Activity& act = activity[row];
+                const Real at_min = a > 0.0 ? lp.col_lower[k] : lp.col_upper[k];
+                const Real at_max = a > 0.0 ? lp.col_upper[k] : lp.col_lower[k];
+                if (std::abs(at_min) >= kHugeBound) {
+                    --act.min_inf;
+                } else {
+                    act.min.add(-a * at_min);
+                }
+                if (std::abs(at_max) >= kHugeBound) {
+                    --act.max_inf;
+                } else {
+                    act.max.add(-a * at_max);
+                }
+            }
+        }
+    };
+
+    // Dual fixing's single-equation extension (#367), HiGHS 1.16.0's
+    // checkColumn and handleSingleEquation (HPresolveDualFixing.cpp;
+    // Achterberg et al., "Presolve Reductions in Mixed Integer Programming",
+    // INFORMS JoC 32(2), section 6.1). As in HiGHS, an equation's flag is set
+    // after its check, so the fixes that check makes (which clear their rows'
+    // flags in fixColumn, as HiGHS's markChangedRow) leave it checked, and a
+    // fix from another equation's check clears it. The flags last one call,
+    // where HiGHS's last until a change, so an equation can be checked again
+    // in a later call with no change between; each fix is valid whenever it
+    // is found, so that can only change how many columns are fixed.
+    // Whether row r holds for any values of its columns within their bounds:
+    // HiGHS's isRedundant, but by the columns' bounds only, where HiGHS's
+    // implied row bounds also take implied column bounds, so fewer rows count
+    // as redundant here. The tests use kTol where HiGHS uses primal_feastol;
+    // both differences can only leave a column unfixed.
+    auto isRedundantRow = [&](Index r) {
+        const Activity& act = rowActivity(r);
+        const bool lower_holds = std::isinf(lp.row_lower[r]) ||
+                                 (act.min_inf == 0 && act.min.value() >= lp.row_lower[r] - kTol);
+        const bool upper_holds = std::isinf(lp.row_upper[r]) ||
+                                 (act.max_inf == 0 && act.max.value() <= lp.row_upper[r] + kTol);
+        return lower_holds && upper_holds;
+    };
+    // Whether x_k, its coefficient in the equation's sign flipped by
+    // direction, is pushed down by its cost and only locked upward by its
+    // other rows: then it would lower the equation's activity (direction =
+    // sign of its coefficient there; S+) or raise it (the other sign; S-) if
+    // the equation let it.
+    auto checkColumn = [&](Index k, int direction, Index equation) {
+        const Real cost = lp.sense == Sense::Minimize ? lp.obj[k] : -lp.obj[k];
+        if (direction * cost < 0.0) {
+            return false;
+        }
+        for (const auto [r, a] : work_->col(k)) {
+            if (r == equation || row_removed[r] || a == 0.0 || isRedundantRow(r)) {
+                continue;
+            }
+            // Another ranged row (or equation) locks x_k both ways.
+            if (!std::isinf(lp.row_lower[r]) && !std::isinf(lp.row_upper[r])) {
+                return false;
+            }
+            const int row_direction =
+                std::isinf(lp.row_lower[r]) && !std::isinf(lp.row_upper[r]) ? 1 : -1;
+            if (static_cast<Real>(direction * row_direction) * a < 0.0) {
+                return false;
+            }
+        }
+        return true;
+    };
+    struct EquationEntry {
+        Index col;
+        Real val;
+        int mark;  // 1: S+, -1: S-, 0: neither.
+    };
+    std::vector<EquationEntry> equation_entries;
+    auto handleSingleEquation = [&](Index equation) {
+        equation_entries.clear();
+        Index num_plus = 0;
+        Index num_minus = 0;
+        for (const auto [k, a] : work_->row(equation)) {
+            if (col_removed[k] || a == 0.0) {
+                continue;
+            }
+            const int col_direction = a > 0.0 ? 1 : -1;
+            int mark = 0;
+            if (checkColumn(k, col_direction, equation)) {
+                ++num_plus;
+                mark = 1;
+            } else if (checkColumn(k, -col_direction, equation)) {
+                ++num_minus;
+                mark = -1;
+            }
+            equation_entries.push_back({k, a, mark});
+        }
+        if (num_plus == 0 && num_minus == 0) {
+            return;
+        }
+        // T+: the equation's supremum over the columns outside S+ (and
+        // integral ones), S^C+: its infimum over the continuous S+; T- and
+        // S^C- the other way round.
+        CompensatedSum t_plus;
+        CompensatedSum t_minus;
+        CompensatedSum sc_plus;
+        CompensatedSum sc_minus;
+        bool t_plus_finite = true;
+        bool t_minus_finite = true;
+        bool sc_plus_finite = true;
+        bool sc_minus_finite = true;
+        const auto addActivity = [&](const EquationEntry& e, CompensatedSum& sum, bool& finite,
+                                     int direction) {
+            const Real bound = direction * e.val > 0.0 ? lp.col_upper[e.col] : lp.col_lower[e.col];
+            finite = finite && std::abs(bound) < kHugeBound;
+            if (finite) {
+                sum.add(e.val * bound);
+            }
+        };
+        for (const EquationEntry& e : equation_entries) {
+            const bool integral = lp.col_type[e.col] != VarType::Continuous;
+            if (e.mark <= 0 || integral) {
+                addActivity(e, t_plus, t_plus_finite, 1);
+            } else {
+                addActivity(e, sc_plus, sc_plus_finite, -1);
+            }
+            if (e.mark >= 0 || integral) {
+                addActivity(e, t_minus, t_minus_finite, -1);
+            } else {
+                addActivity(e, sc_minus, sc_minus_finite, 1);
+            }
+            if ((num_minus == 0 || !t_plus_finite || !sc_plus_finite) &&
+                (num_plus == 0 || !t_minus_finite || !sc_minus_finite)) {
+                break;
+            }
+        }
+        // Fix all of S- at the bound that raises the equation's activity, or
+        // all of S+ at the one that lowers it (HiGHS's fixCols).
+        int direction = 0;
+        const Real rhs = lp.row_lower[equation];
+        if (num_minus > 0 && t_plus_finite && sc_plus_finite &&
+            t_plus.value() + sc_plus.value() <= rhs + kTol) {
+            direction = 1;
+        } else if (num_plus > 0 && t_minus_finite && sc_minus_finite &&
+                   t_minus.value() + sc_minus.value() >= rhs - kTol) {
+            direction = -1;
+        }
+        if (direction == 0) {
+            return;
+        }
+        for (const EquationEntry& e : equation_entries) {
+            if (direction * e.mark >= 0) {
+                continue;
+            }
+            // Same guard as the column loop: report a crossed bound rather
+            // than bury it in the postsolve stack.
+            if (lp.col_lower[e.col] > lp.col_upper[e.col] + kTol) {
+                infeasible_ = true;
+                return;
+            }
+            // As the extended case's fixes, these can leave a tight row's
+            // dual giving x_k a reduced cost of the wrong sign: a dual
+            // postsolve (#323) must recompute it.
+            fixColumn(e.col, direction * e.val > 0.0 ? lp.col_upper[e.col] : lp.col_lower[e.col]);
+            ++stats_.single_equation_dual_fixing_changes;
+        }
+    };
+
     for (Index j : dirty_cols) {
         if (col_removed[j]) {
             continue;
@@ -2420,6 +2608,9 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
 
         Index up_locks = 0;
         Index down_locks = 0;
+        // The last row locking x_j each way, for the single-equation case.
+        Index up_lock_row = -1;
+        Index down_lock_row = -1;
         Index active_nnz = col_active_nnz[j];
         if (active_nnz == 0) {
             continue;  // Handle empty columns in removeEmptyColumns().
@@ -2435,17 +2626,21 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
             if (has_upper) {
                 if (a > 0) {
                     ++up_locks;
+                    up_lock_row = row;
                 }
                 if (a < 0) {
                     ++down_locks;
+                    down_lock_row = row;
                 }
             }
             if (has_lower) {
                 if (a < 0) {
                     ++up_locks;
+                    up_lock_row = row;
                 }
                 if (a > 0) {
                     ++down_locks;
+                    down_lock_row = row;
                 }
             }
         }
@@ -2465,7 +2660,45 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
         } else if (!prefer_down && up_locks == 0 && !std::isinf(lp.col_upper[j])) {
             fixed = true;
             fix_value = lp.col_upper[j];
-        } else if (options_.enable_extended_dual_fixing) {
+        }
+        // HiGHS's dualFixing skips a column fixed by its bounds.
+        if (!fixed && options_.enable_single_equation_dual_fixing &&
+            lp.col_lower[j] != lp.col_upper[j]) {
+            // HiGHS's trigger: its locks count the cost as one, from no row,
+            // so a single down (up) lock is one row's with the cost not
+            // locking that way too, and a column with no lock either way is
+            // the cases above. The fixes may take x_j itself.
+            const Real cost = lp.sense == Sense::Minimize ? lp.obj[j] : -lp.obj[j];
+            const Index highs_down = down_locks + (cost < 0.0 ? 1 : 0);
+            const Index highs_up = up_locks + (cost > 0.0 ? 1 : 0);
+            if (highs_down > 0 && highs_up > 0) {
+                const auto isEquation = [&](Index r) {
+                    return r >= 0 && lp.row_lower[r] == lp.row_upper[r];
+                };
+                Index equation = -1;
+                if (highs_down == 1 && down_locks == 1 && isEquation(down_lock_row)) {
+                    equation = down_lock_row;
+                } else if (highs_up == 1 && up_locks == 1 && isEquation(up_lock_row)) {
+                    equation = up_lock_row;
+                }
+                if (equation >= 0) {
+                    if (equation_checked.empty()) {
+                        equation_checked.resize(static_cast<size_t>(lp.num_rows), 0);
+                    }
+                    if (equation_checked[equation] == 0) {
+                        handleSingleEquation(equation);
+                        if (infeasible_) {
+                            return changes;
+                        }
+                        equation_checked[equation] = 1;
+                        if (col_removed[j]) {
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        if (!fixed && options_.enable_extended_dual_fixing) {
             // HiGHS's dualFixing (#366), its bound strengthening applied as a
             // fix: a column whose cost does not push it up (cost >= 0 when
             // minimizing) and whose every down-locking row holds at x_j = l_j
@@ -2496,41 +2729,8 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
                 ++stats_.extended_dual_fixing_changes;
             }
         }
-        if (!fixed) {
-            continue;
-        }
-
-        removeActiveColumn(*work_, j, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                           next_dirty_rows, next_dirty_cols);
-        ++changes;
-        ++stats_.vars_removed;
-        lp.obj_offset += lp.obj[j] * fix_value;
-        postsolve_stack_.push(PostsolveFixVariable{j, fix_value});
-
-        for (const auto [row, a] : cv) {
-            if (row_removed[row]) {
-                continue;
-            }
-            shiftRowSides(lp, row, a * fix_value);
-            next_dirty_rows[row] = 1;
-            if (!activity.empty() && activity[row].valid && a != 0.0) {
-                // x_j's term leaves the row's activity, its value the sides
-                // (shiftRowSides): updated in place, as a dense row re-summed
-                // after each of its columns is fixed costs O(n^2).
-                Activity& act = activity[row];
-                const Real at_min = a > 0.0 ? lp.col_lower[j] : lp.col_upper[j];
-                const Real at_max = a > 0.0 ? lp.col_upper[j] : lp.col_lower[j];
-                if (std::abs(at_min) >= kHugeBound) {
-                    --act.min_inf;
-                } else {
-                    act.min.add(-a * at_min);
-                }
-                if (std::abs(at_max) >= kHugeBound) {
-                    --act.max_inf;
-                } else {
-                    act.max.add(-a * at_max);
-                }
-            }
+        if (fixed) {
+            fixColumn(j, fix_value);
         }
     }
 

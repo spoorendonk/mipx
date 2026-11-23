@@ -171,6 +171,9 @@ struct PresolveStats {
     /// Of dual_fixing_changes, the columns fixed by the cases
     /// enable_extended_dual_fixing adds (#366).
     Index extended_dual_fixing_changes = 0;
+    /// Of dual_fixing_changes, the columns fixed by the single-equation
+    /// extension enable_single_equation_dual_fixing adds (#367).
+    Index single_equation_dual_fixing_changes = 0;
     Index empty_col_changes = 0;
     Index duplicate_row_changes = 0;
     Index parallel_row_changes = 0;
@@ -267,6 +270,13 @@ struct PresolveOptions {
     /// applied as a fix), e.g. a zero-cost column with no up locks at its
     /// upper bound. Off by default until benchmarked.
     bool enable_extended_dual_fixing = false;
+    /// Dual fixing's single-equation extension (#367; HiGHS's
+    /// handleSingleEquation, Achterberg et al. 2020, section 6.1): a column
+    /// whose one lock in a direction is an equation triggers a check of that
+    /// equation, which fixes every column of it that all its other rows and
+    /// its cost push the same way, when the equation's activity bounds allow.
+    /// Off by default until benchmarked.
+    bool enable_single_equation_dual_fixing = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.

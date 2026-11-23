@@ -3374,3 +3374,109 @@ TEST_CASE("Presolve: extended dual fixing fixes what the cost-sign rule misses",
         CHECK_THAT(full[0], WithinAbs(5.0, 1e-12));
     }
 }
+
+namespace {
+
+/// The options of the single-equation dual fixing tests (#367): dual
+/// fixing on, its #366 extension off, the extension as given.
+PresolveOptions singleEquationOptions(bool on) {
+    PresolveOptions opts = extendedDualOptions(false);
+    opts.enable_single_equation_dual_fixing = on;
+    return opts;
+}
+
+/// min -x0 + x1 + x2 + x3: e (x0 + x1) = 10 e, x0 - x2 >= r1_lower (upper
+/// r1_upper), x1 + x3 <= 15, x2 + x3 >= 3; x2, x3 in [0, 10]. x1's one down
+/// lock is the equation, so it is checked: x1 pushed down (S+) and x0 up
+/// (S-) by their costs and other rows, unless r1 is ranged.
+LpProblem singleEquationModel(Real e, Real x0_upper, Real x1_upper, Real r1_upper) {
+    return rowsModel({-1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 0.0, 0.0}, {x0_upper, x1_upper, 10.0, 10.0},
+                     {{10.0 * e, 10.0 * e, {{0, e}, {1, e}}},
+                      {-2.0, r1_upper, {{0, 1.0}, {2, -1.0}}},
+                      {-kInf, 15.0, {{1, 1.0}, {3, 1.0}}},
+                      {3.0, kInf, {{2, 1.0}, {3, 1.0}}}});
+}
+
+std::vector<Real> checkSingleEquation(const LpProblem& lp, Presolver& presolver) {
+    auto full = presolveSolvePostsolve(lp, presolver, singleEquationOptions(true));
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+    return full;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: single-equation dual fixing fixes a side of an equation", "[presolve]") {
+    SECTION("off, dual fixing leaves the equation's columns") {
+        const LpProblem lp = singleEquationModel(1.0, 4.0, 20.0, kInf);
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, singleEquationOptions(false));
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 0);
+        CHECK(presolver.stats().dual_fixing_changes == 0);
+    }
+    SECTION("S- at the bound that raises the activity") {
+        // x0 <= 4: x0 at 4 and x1 at its least still fall short of 10. The
+        // equation stays checked after its own fix, as in HiGHS, so x1 = 6
+        // is left to the other passes.
+        const LpProblem lp = singleEquationModel(1.0, 4.0, 20.0, kInf);
+        Presolver presolver;
+        const auto full = checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(4.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(6.0, 1e-12));
+    }
+    SECTION("S+ at the bound that lowers the activity") {
+        // x1 <= 4: x1 at its least and x0 at its most reach 10; x0 = 10 is
+        // then left to the other passes, as above.
+        const LpProblem lp = singleEquationModel(1.0, 20.0, 4.0, kInf);
+        Presolver presolver;
+        const auto full = checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("a negated equation") {
+        const LpProblem lp = singleEquationModel(-1.0, 4.0, 20.0, kInf);
+        Presolver presolver;
+        const auto full = checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(4.0, 1e-12));
+    }
+    SECTION("a ranged other row keeps x0 out of S-") {
+        const LpProblem lp = singleEquationModel(1.0, 4.0, 20.0, 3.0);
+        Presolver presolver;
+        checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 0);
+    }
+    SECTION("an integral S+ column counts in T+ and T-") {
+        // x1 integral, its implied bounds [6, 10]: T+ takes its most,
+        // 4 + 10 > 10, so S- (x0) is not fixed; T- its least, 6 + 4 >= 10,
+        // so S+ (x1 itself) is, at 6. x0 = 4 is then left to other passes.
+        LpProblem lp = singleEquationModel(1.0, 4.0, 20.0, kInf);
+        lp.col_type[1] = VarType::Integer;
+        Presolver presolver;
+        const auto full = checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(4.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(6.0, 1e-12));
+    }
+    SECTION("an up-lock trigger when maximizing") {
+        // max x0 + y - x2 - x3: x0 - y = 10, x0 - x2 >= -2, -y + x3 <= 15,
+        // x2 + x3 >= 3; x0 in [0, 4], y in [-20, 0]. Both of the equation's
+        // columns have their one up lock there; x0 is fixed at 4 (S-), and
+        // y = -6 follows from the other passes.
+        LpProblem lp =
+            rowsModel({1.0, 1.0, -1.0, -1.0}, {0.0, -20.0, 0.0, 0.0}, {4.0, 0.0, 10.0, 10.0},
+                      {{10.0, 10.0, {{0, 1.0}, {1, -1.0}}},
+                       {-2.0, kInf, {{0, 1.0}, {2, -1.0}}},
+                       {-kInf, 15.0, {{1, -1.0}, {3, 1.0}}},
+                       {3.0, kInf, {{2, 1.0}, {3, 1.0}}}});
+        lp.sense = Sense::Maximize;
+        Presolver presolver;
+        const auto full = checkSingleEquation(lp, presolver);
+        CHECK(presolver.stats().single_equation_dual_fixing_changes == 1);
+        CHECK_THAT(full[0], WithinAbs(4.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(-6.0, 1e-12));
+    }
+}
