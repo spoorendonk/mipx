@@ -66,7 +66,8 @@ not run; ctest shows only `Skipped` for it unless run with `-V`. Widening the
 lists to the full sets is a benchmark-scale run, tracked in #223. The gate
 records no timings; timing baselines belong to #213.
 
-The gate's own tests: `uv run --with pytest pytest tests/perf/test_run_instance_gate.py`.
+The gate's own tests: `uv run --with pytest pytest tests/perf/test_run_instance_gate.py
+tests/perf/test_generate_cg_masters.py`.
 
 ## CPU Barrier Gate (#296)
 
@@ -76,17 +77,46 @@ The `barrier` suite runs the CPU barrier over every Netlib LP in
 (`--barrier --barrier-ne sparse --no-gpu`), one thread each, classified as
 above against `instance_gate/barrier_expected.csv`, with `--time-limit 10`
 per instance (the barrier honours it since #275; a time-limit stop reads as
-`dnf`), the normal-equations backends' setup included (#347). The dense backend still holds
-its m × m normal equations, about 2.2 GB on stocfor3 (m ≈ 16.7k), so it
-needs that much memory free; the limit bounds the time, not the memory. It takes
-minutes, so it has its own ctest label and stays out of `instance-gate` and
-the commit and push gates.
+`dnf`), the normal-equations backends' setup included (#347). The dense
+backend still holds its m × m normal equations, about 2.2 GB on stocfor3
+(m ≈ 16.7k), so it needs that much memory free; the limit bounds the time,
+not the memory. It takes minutes, so it has its own ctest label and stays out
+of `instance-gate` and the commit and push gates.
+
+The `barrier-cg` suite (#331) runs the same two backends over the first
+column-generation master of each of the 15 public CommaLab instances of the
+cold LP panel (#272: grid1-9, planar30/50/80/100/150/300), against
+`instance_gate/barrier_cg_expected.csv` and `tests/data/cg_masters/cg_masters.solu`
+(HiGHS's objective for each master, as mcf recorded it). Both backends take
+about 1.5 s together. The masters are not in git; generate them with
+[mcf](https://github.com/tinnet-ai/mcf) and its `data/commalab` instances:
+
+```bash
+python3 tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab
+```
+
+It runs one column-generation iteration per instance with `lp_dump`, writes
+`<name>.mps` into `tests/data/cg_masters/`, and rewrites the `.solu`; it
+refuses a master whose objective mipx would read differently (a maximisation,
+an objective offset, a free row, which the dump writes as a second `N` row)
+or whose first solve was not optimal, and changes nothing there when any
+master fails. Without the masters the suite reports `Skipped`.
+
+A first master holds only its initial columns, one nonzero each, so its
+normal equations are diagonal: the suite checks the barrier's answers and
+stopping on these LPs, not its sparse factorization's fill, which Netlib's
+half covers (a later master per instance is #358).
+
+The whole gate (both suites, both backends) takes about 5.7 minutes, nearly
+all of it the dense backend on Netlib; there is no faster subset in the commit
+and push gates, since it stays out of them.
 
 ```bash
 python3 tests/perf/run_instance_gate.py barrier                          # both backends
 python3 tests/perf/run_instance_gate.py barrier --backends barrier-sparse
 python3 tests/perf/run_instance_gate.py barrier --all --write-expected   # regenerate the list
-ctest --test-dir build -L barrier-gate --output-on-failure
+python3 tests/perf/run_instance_gate.py barrier-cg                       # the cg masters
+ctest --test-dir build -L barrier-gate --output-on-failure               # both suites
 ```
 
 # Performance Regression Gate

@@ -1,0 +1,34 @@
+# Expected class per instance and backend for run_instance_gate.py.
+# Refresh these rows: tests/perf/run_instance_gate.py barrier-cg --write-expected
+# Add every instance with a reference: tests/perf/run_instance_gate.py barrier-cg --all --write-expected
+instance,backend,expected
+grid1,barrier-dense,match_1e-6
+grid1,barrier-sparse,match_1e-6
+grid2,barrier-dense,match_1e-6
+grid2,barrier-sparse,match_1e-6
+grid3,barrier-dense,match_1e-6
+grid3,barrier-sparse,match_1e-6
+grid4,barrier-dense,match_1e-6
+grid4,barrier-sparse,match_1e-6
+grid5,barrier-dense,match_1e-6
+grid5,barrier-sparse,match_1e-6
+grid6,barrier-dense,match_1e-6
+grid6,barrier-sparse,match_1e-6
+grid7,barrier-dense,match_1e-6
+grid7,barrier-sparse,match_1e-6
+grid8,barrier-dense,match_1e-6
+grid8,barrier-sparse,match_1e-6
+grid9,barrier-dense,match_1e-6
+grid9,barrier-sparse,match_1e-6
+planar100,barrier-dense,match_1e-6
+planar100,barrier-sparse,match_1e-6
+planar150,barrier-dense,match_1e-6
+planar150,barrier-sparse,match_1e-6
+planar30,barrier-dense,match_1e-6
+planar30,barrier-sparse,match_1e-6
+planar300,barrier-dense,match_1e-6
+planar300,barrier-sparse,match_1e-6
+planar50,barrier-dense,match_1e-6
+planar50,barrier-sparse,match_1e-6
+planar80,barrier-dense,match_1e-6
+planar80,barrier-sparse,match_1e-6

@@ -32,6 +32,7 @@ incumbent is possible; doing so is follow-up work on #223.
     run_instance_gate.py lp  [--backends dual,barrier,pdlp]   # Netlib, per LP backend
     run_instance_gate.py mip                                   # curated MIPLIB subset
     run_instance_gate.py barrier [--backends barrier-dense,barrier-sparse]  # CPU barrier, Netlib
+    run_instance_gate.py barrier-cg [--backends ...]   # CPU barrier, first cg masters
 
 By default only the instances in the expected list run. `--all` runs every
 instance in the data directory that has a reference, and `--write-expected`
@@ -140,6 +141,15 @@ SUITES: dict[str, Suite] = {
         10.0,
         ("barrier-dense", "barrier-sparse"),
         "tests/data/download_netlib.sh",
+    ),
+    # The same on the first column-generation masters of #272 (#331).
+    "barrier-cg": Suite(
+        REPO / "tests" / "data" / "cg_masters",
+        "cg_masters.solu",
+        GATE_DIR / "barrier_cg_expected.csv",
+        10.0,
+        ("barrier-dense", "barrier-sparse"),
+        "tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab",
     ),
 }
 
@@ -315,7 +325,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--backends",
         default="",
-        help="Comma-separated subset (lp: dual,barrier,pdlp; barrier: barrier-{dense,sparse}).",
+        help=(
+            "Comma-separated subset (lp: dual,barrier,pdlp; "
+            "barrier, barrier-cg: barrier-{dense,sparse})."
+        ),
     )
     p.add_argument("--time-limit", type=float, default=0.0, help="Per-instance limit (s).")
     p.add_argument("--data-dir", default="", help="Instance directory (default: the suite's).")
@@ -386,7 +399,7 @@ def main(argv: list[str]) -> int:
         print(
             f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}, "
             f"not run: {', '.join(names) or 'none listed'}. "
-            f"Download them with {suite.download}.",
+            f"Get them with {suite.download}.",
             file=sys.stderr,
         )
         return SKIP_EXIT
