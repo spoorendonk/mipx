@@ -463,6 +463,12 @@ private:
     // When Devex is active, these hold approximate Devex weights.
     std::vector<Real> devex_weights_;
     Int devex_reset_count_ = 0;
+    // The one Devex weight that may sit below kDualTol: the last update's
+    // leaving row (1 / pivot^2). The next update clamps it, as the dense loop
+    // it replaced clamped every row. kDevexClampAll asks for a full pass, after
+    // weights were restored from elsewhere.
+    static constexpr Index kDevexClampAll = -2;
+    Index devex_clamp_row_ = -1;
     static constexpr Int kDevexResetFreq = 200;  // reset every N pivots
     // Primal Devex restarts its reference framework when the entering
     // column's kept weight and its exact one differ by more than this factor

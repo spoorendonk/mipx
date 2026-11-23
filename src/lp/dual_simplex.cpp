@@ -1250,6 +1250,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         basis_pos_ = std::move(scaled_point->basis_pos);
         nonbasic_pos_ = std::move(scaled_point->nonbasic_pos);
         devex_weights_ = std::move(scaled_point->devex_weights);
+        devex_clamp_row_ = kDevexClampAll;
         dual_ray_.clear();
         primal_ray_.clear();
         has_basis_ = true;
@@ -1935,6 +1936,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // Used by incremental infeasibility updates to avoid O(m) scans.
     std::vector<Index> pivot_col_nz;
     pivot_col_nz.reserve(static_cast<std::size_t>(num_rows_));
+    // Every exactly nonzero entry of pivot_col (a superset of pivot_col_nz),
+    // for the primal and Devex updates, which must see the same entries a
+    // dense loop does to give the same values.
+    std::vector<Index> pivot_col_support;
+    pivot_col_support.reserve(static_cast<std::size_t>(num_rows_));
     SparseWorkVector btran_work(num_rows_);
     // DSE BTRAN result: tau = B^{-T} e_p (steepest-edge update vector).
     std::vector<Real> dse_tau(num_rows_, 0.0);
@@ -3834,9 +3840,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
         // Build sparse nonzero index list for incremental infeasibility updates.
         pivot_col_nz.clear();
+        pivot_col_support.clear();
         for (Index i = 0; i < num_rows_; ++i) {
-            if (std::abs(pivot_col[i]) > kZeroTol) {
-                pivot_col_nz.push_back(i);
+            if (pivot_col[i] != 0.0) {
+                pivot_col_support.push_back(i);
+                if (std::abs(pivot_col[i]) > kZeroTol) {
+                    pivot_col_nz.push_back(i);
+                }
             }
         }
 
@@ -3914,7 +3924,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         Real theta_p = (leaving_val - target) / pivot_element;
 
         // Update primal values of basic variables.
-        for (Index i = 0; i < num_rows_; ++i) {
+        // A zero entry leaves its primal unchanged, so the support suffices.
+        for (Index i : pivot_col_support) {
             if (i != leaving_row) {
                 primal_[basis_[i]] -= theta_p * pivot_col[i];
             }
@@ -3946,8 +3957,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
             }
         }
-        for (Index k : nonbasic_) {
-            if (k == entering_var) {
+        // Only the row-price support can have alpha_k != 0, so walking it
+        // instead of every nonbasic gives the same reduced costs (each k is
+        // updated on its own) at O(support) rather than O(n) (#281).
+        for (Index k : pivot_row_alpha.touched()) {
+            if (k == entering_var || nonbasic_pos_[k] < 0) {
                 continue;
             }
             Real alpha_k = pivot_row_alpha[k];
@@ -4079,16 +4093,35 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
         } else {
             // Devex weight update (original behavior).
+            // A zero entry only clamps its weight to kDualTol, and every weight
+            // is at least that except devex_clamp_row_, so the support plus
+            // that one row give what a dense loop over all rows gives (#281).
             Real pivot_sq = pivot_col[leaving_row] * pivot_col[leaving_row];
-            for (Index i = 0; i < num_rows_; ++i) {
-                if (i == leaving_row) {
-                    continue;
-                }
+            auto updateDevexRow = [&](Index i) {
                 Real ratio = pivot_col[i] / pivot_col[leaving_row];
                 devex_weights_[i] = std::max(
                     kDualTol, devex_weights_[i] + ratio * ratio * devex_weights_[leaving_row]);
+            };
+            if (devex_clamp_row_ == kDevexClampAll) {
+                for (Index i = 0; i < num_rows_; ++i) {
+                    if (i != leaving_row) {
+                        updateDevexRow(i);
+                    }
+                }
+            } else {
+                for (Index i : pivot_col_support) {
+                    if (i != leaving_row) {
+                        updateDevexRow(i);
+                    }
+                }
+                if (devex_clamp_row_ >= 0 && devex_clamp_row_ < num_rows_ &&
+                    devex_clamp_row_ != leaving_row && pivot_col[devex_clamp_row_] == 0.0) {
+                    devex_weights_[devex_clamp_row_] =
+                        std::max(kDualTol, devex_weights_[devex_clamp_row_]);
+                }
             }
             devex_weights_[leaving_row] = 1.0 / pivot_sq;
+            devex_clamp_row_ = leaving_row;
 
             ++devex_reset_count_;
             if (devex_reset_count_ >= kDevexResetFreq) {
