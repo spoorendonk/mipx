@@ -659,8 +659,12 @@ void DualSimplexSolver::refactorize() {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
-    const bool warm = has_basis_;
     const auto start = std::chrono::steady_clock::now();
+    return cleanUpUnscaled(solveWithColdFallback(start), start);
+}
+
+LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::time_point start) {
+    const bool warm = has_basis_;
     LpResult res = solveFromCurrentBasis();
     // A warm basis can carry the solve into a corner its tolerances cannot
     // see out of: ill-conditioned pivots after addRows left optima that miss
@@ -933,6 +937,162 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
         }
     }
     return std::abs(primal_obj - dual_obj) <= kUnscaledRelTol * gap_mag + row_allow;
+}
+
+// The point read back in the model's units: every row within kUnscaledRelTol
+// of its sides, relative to its terms and sides (optimumHoldsUnscaled()'s row
+// check), and every column within kUnscaledRelTol of its bounds, relative to
+// them and to x_j, or within as much as moves no row by more than its own
+// allowance (the #236 policy the LP audits hold bounds to).
+//
+// The scaled feasibility tolerance kPrimalTol is kPrimalTol / rs_i on row i
+// and kPrimalTol cs_j on column j in the model's units, so large factors let a
+// point that holds scaled miss grossly. Cuts seed 1498 (#307): the cut
+// R5: 5000 C0 >= 0.0631 on a column fixed at 0, so an infeasible model, was
+// scaled to a side of 1.7e-8 and read as met at C0 = 0.
+bool DualSimplexSolver::primalHoldsUnscaled() const {
+    const auto uz = [](Index k) { return static_cast<std::size_t>(k); };
+    const std::vector<Real> x = getPrimalValues();
+    std::vector<Real> reach(uz(num_cols_), kInf);
+    for (Index i = 0; i < num_rows_; ++i) {
+        const Real rs = scaled_ ? row_scale_[i] : 1.0;
+        const Real lo = row_lower_[i] == -kInf ? -kInf : row_lower_[i] / rs;
+        const Real up = row_upper_[i] == kInf ? kInf : row_upper_[i] / rs;
+        const auto rv = matrix_.row(i);
+        const auto entry = [&](Index k) {
+            return rv.values[k] / (rs * (scaled_ ? col_scale_[rv.indices[k]] : 1.0));
+        };
+        Real act = 0.0;
+        Real mag = 1.0;
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Real t = entry(k) * x[uz(rv.indices[k])];
+            act += t;
+            mag = std::max(mag, std::abs(t));
+        }
+        if (std::isfinite(lo)) {
+            mag = std::max(mag, std::abs(lo));
+        }
+        if (std::isfinite(up)) {
+            mag = std::max(mag, std::abs(up));
+        }
+        const Real tol = kUnscaledRelTol * mag;
+        if (act < lo - tol || act > up + tol) {
+            return false;
+        }
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Real a = std::abs(entry(k));
+            if (a != 0.0) {
+                Real& r = reach[uz(rv.indices[k])];
+                r = std::min(r, tol / a);
+            }
+        }
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        const Real cs = scaled_ ? col_scale_[j] : 1.0;
+        const Real lo = col_lower_[j] == -kInf ? -kInf : col_lower_[j] * cs;
+        const Real up = col_upper_[j] == kInf ? kInf : col_upper_[j] * cs;
+        const Real xj = x[uz(j)];
+        Real mag = std::max(1.0, std::abs(xj));
+        if (std::isfinite(lo)) {
+            mag = std::max(mag, std::abs(lo));
+        }
+        if (std::isfinite(up)) {
+            mag = std::max(mag, std::abs(up));
+        }
+        Real tol = kUnscaledRelTol * mag;
+        if (std::isfinite(reach[uz(j)])) {
+            tol = std::max(tol, reach[uz(j)]);
+        }
+        if (xj < lo - tol || xj > up + tol) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// An Optimal whose point misses in the model's units (primalHoldsUnscaled())
+// is re-solved on the unscaled model from its basis, the way HiGHS cleans up
+// an optimum that holds only scaled: in the model's units kPrimalTol is what
+// the rows and bounds are held to, and the basis is the scaled optimum's, so
+// the clean-up starts close. It runs within what is left of the iteration and
+// time limits; with none left the verdict is withdrawn to that limit, as an
+// unchecked warm verdict is (#249). Its own verdict is returned unchecked, as
+// a cold one is. The scaled model is put back exactly as it was afterwards,
+// and the values, the basis and the factors with it, so later solves keep the
+// scaling. A clean-up that stops on a limit keeps its own point, unlike
+// solve()'s cold fallback, which puts the warm point back: there the cold run
+// starts over from a slack basis, while the clean-up continues from the
+// scaled optimum's basis, so its point is the later one of the same path. If
+// the scaled basis cannot be refactorized, the verdict stands without
+// factors (has_basis_ false), as on solve()'s cold fallback.
+//
+// On default, with no option to turn it off (#313): it fires only on a
+// verdict the model's units refute.
+LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
+                                            std::chrono::steady_clock::time_point start) {
+    if (res.status != Status::Optimal || !scaled_ || !has_basis_ || primalHoldsUnscaled()) {
+        return res;
+    }
+    if (res.iterations >= iter_limit_) {
+        return withdrawVerdict(res, Status::IterLimit);
+    }
+    const Int iter_limit = iter_limit_;
+    const double time_limit = options_.max_solve_seconds;
+    if (time_limit >= 0.0) {
+        const double spent =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (spent >= time_limit) {
+            return withdrawVerdict(res, Status::TimeLimit);
+        }
+        options_.max_solve_seconds = time_limit - spent;
+    }
+    SparseMatrix matrix = matrix_;
+    std::vector<Real> row_lower = row_lower_;
+    std::vector<Real> row_upper = row_upper_;
+    std::vector<Real> col_lower = col_lower_;
+    std::vector<Real> col_upper = col_upper_;
+    std::vector<Real> obj = obj_;
+    std::vector<Real> row_scale = row_scale_;
+    std::vector<Real> col_scale = col_scale_;
+    unapplyScaling();
+    convertValues(true);
+    row_scale_.assign(static_cast<std::size_t>(num_rows_), 1.0);
+    col_scale_.assign(static_cast<std::size_t>(num_cols_), 1.0);
+    scaled_ = false;
+    std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+    iter_limit_ = iter_limit - res.iterations;
+    LpResult clean = solveFromCurrentBasis();
+    iter_limit_ = iter_limit;
+    options_.max_solve_seconds = time_limit;
+
+    matrix_ = std::move(matrix);
+    row_lower_ = std::move(row_lower);
+    row_upper_ = std::move(row_upper);
+    col_lower_ = std::move(col_lower);
+    col_upper_ = std::move(col_upper);
+    obj_ = std::move(obj);
+    row_scale_ = std::move(row_scale);
+    col_scale_ = std::move(col_scale);
+    scaled_ = true;
+    convertValues(false);
+    std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+    buildBasisMatrixSource();
+    if (has_basis_) {
+        // Nonbasic values back exactly on the scaled bounds, and the factors
+        // of the scaled basis for getTableauRow and the next warm solve.
+        for (Index k : nonbasic_) {
+            reconcileNonbasicStatus(k);
+        }
+        try {
+            refactorize();
+        } catch (const std::runtime_error&) {
+            has_basis_ = false;
+        }
+    }
+    clean.iterations += res.iterations;
+    clean.work_units += res.work_units;
+    iterations_ = clean.iterations;
+    return clean;
 }
 
 LpResult DualSimplexSolver::solveFromCurrentBasis() {
@@ -4310,11 +4470,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     }
 }
 
-void DualSimplexSolver::rescaleKeepingBasis() {
-    if (!scaled_ || !options_.enable_scaling) {
-        return;
-    }
-    // Back to the model's own units.
+void DualSimplexSolver::unapplyScaling() {
     {
         std::vector<Triplet> triplets;
         triplets.reserve(matrix_.numNonzeros());
@@ -4344,43 +4500,51 @@ void DualSimplexSolver::rescaleKeepingBasis() {
         }
         obj_[j] /= col_scale_[j];
     }
-    // Values move with their scales: x = cs x', s = s' / rs, y = rs y',
-    // d_j = d'_j / cs_j, and a logical's reduced cost is its row's dual.
+}
+
+// Values move with their scales: x = cs x', s = s' / rs, y = rs y',
+// d_j = d'_j / cs_j, and a logical's reduced cost is its row's dual. The same
+// operations as the bounds get, so nonbasic values stay exactly on them.
+void DualSimplexSolver::convertValues(bool to_model) {
     const bool have_values = static_cast<Index>(primal_.size()) == numVars() &&
                              static_cast<Index>(reduced_cost_.size()) == numVars() &&
                              static_cast<Index>(dual_.size()) == num_rows_;
-    // The same operations as the bounds get, so nonbasic values stay exactly
-    // on them.
-    auto rescaleValues = [&](bool to_model) {
-        if (!have_values) {
-            return;
+    if (!have_values) {
+        return;
+    }
+    for (Index j = 0; j < num_cols_; ++j) {
+        if (to_model) {
+            primal_[j] *= col_scale_[j];
+            reduced_cost_[j] /= col_scale_[j];
+        } else {
+            primal_[j] /= col_scale_[j];
+            reduced_cost_[j] *= col_scale_[j];
         }
-        for (Index j = 0; j < num_cols_; ++j) {
-            if (to_model) {
-                primal_[j] *= col_scale_[j];
-                reduced_cost_[j] /= col_scale_[j];
-            } else {
-                primal_[j] /= col_scale_[j];
-                reduced_cost_[j] *= col_scale_[j];
-            }
+    }
+    for (Index i = 0; i < num_rows_; ++i) {
+        const auto k = static_cast<std::size_t>(num_cols_ + i);
+        if (to_model) {
+            primal_[k] /= row_scale_[i];
+            dual_[i] *= row_scale_[i];
+            reduced_cost_[k] *= row_scale_[i];
+        } else {
+            primal_[k] *= row_scale_[i];
+            dual_[i] /= row_scale_[i];
+            reduced_cost_[k] /= row_scale_[i];
         }
-        for (Index i = 0; i < num_rows_; ++i) {
-            const auto k = static_cast<std::size_t>(num_cols_ + i);
-            if (to_model) {
-                primal_[k] /= row_scale_[i];
-                dual_[i] *= row_scale_[i];
-                reduced_cost_[k] *= row_scale_[i];
-            } else {
-                primal_[k] *= row_scale_[i];
-                dual_[i] /= row_scale_[i];
-                reduced_cost_[k] /= row_scale_[i];
-            }
-        }
-    };
-    rescaleValues(true);
+    }
+}
+
+void DualSimplexSolver::rescaleKeepingBasis() {
+    if (!scaled_ || !options_.enable_scaling) {
+        return;
+    }
+    // Back to the model's own units, then scaled afresh.
+    unapplyScaling();
+    convertValues(true);
     computeScaling();
     applyScaling();
-    rescaleValues(false);
+    convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
 }
 

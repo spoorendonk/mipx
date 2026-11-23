@@ -351,10 +351,23 @@ private:
     void computeGeometricMeanScaling();
     void computeRuizScaling();
     void applyScaling();
+    // The inverse of applyScaling(): the matrix, sides, bounds and objective
+    // back in the model's units, with row_scale_/col_scale_ left as they were.
+    void unapplyScaling();
+    // Move primal_, dual_ and reduced_cost_ between the scaled and the model's
+    // units with the current row_scale_/col_scale_.
+    void convertValues(bool to_model);
     void rescaleKeepingBasis();
     LpResult solveFromCurrentBasis();
+    // solve() less the unscaled clean-up: a warm verdict that fails its check
+    // gets a cold re-solve.
+    LpResult solveWithColdFallback(std::chrono::steady_clock::time_point start);
+    // An Optimal whose point misses a row or bound in the model's units gets a
+    // re-solve of the unscaled model from its basis (#307).
+    LpResult cleanUpUnscaled(LpResult res, std::chrono::steady_clock::time_point start);
     bool dualRayMeetsContract() const;
     bool optimumHoldsUnscaled() const;
+    bool primalHoldsUnscaled() const;
     // False for an Optimal or Infeasible status whose certificate fails the
     // checks above; true for any other status.
     bool verdictHolds() const;

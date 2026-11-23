@@ -1629,6 +1629,66 @@ TEST_CASE("Regression #282: a tiny reduced cost on a large fixed column leaves n
     CHECK(checkOptimal(lp, solver.getPrimalValues(), solver.getDualValues(), warm.objective) == "");
 }
 
+TEST_CASE("Regression #307: a cut scaled under the feasibility tolerance is not read as met",
+          "[lp_validity]") {
+    // Audit cuts seed 1498, variant 1, round 1. The cut R5: 5000 x0 >= 0.0631
+    // on x0 fixed at 0 makes the model infeasible, but scaling took R5's side
+    // to 1.7e-8, under the scaled tolerance, and a cold solve returned Optimal
+    // at x0 = 0. The point misses R5 in the model's units, so the unscaled
+    // clean-up re-solves it and proves infeasibility.
+    requireCertifiedInfeasible(literalLp(
+        Sense::Minimize, 3.25, {-0.0365625, 3437.5, 71.40625}, {0.0, -kInf, -kInf},
+        {0.0, -0.000875, kInf}, {0.0, -56.25, -133.75, -1696.875, -kInf, 0.063107155964762199},
+        {0.0, kInf, kInf, kInf, 10.569738188569698, kInf},
+        {{0, 0, 0.075},
+         {1, 0, 0.0875},
+         {1, 2, 87.5},
+         {2, 0, 0.125},
+         {2, 1, 20000},
+         {2, 2, 387.5},
+         {3, 1, 225000},
+         {3, 2, 5000},
+         {4, 1, 2.25},
+         {4, 2, -37.5},
+         {5, 0, 5000}}));
+}
+
+TEST_CASE("Regression #307: a cold optimum holds its rows in the model's units", "[lp_validity]") {
+    // Audit cuts seed 391, variant 2, round 2. A cold Optimal left R2 at
+    // 29689.8 against its upper side 29687.5: the scaled tolerance read
+    // through R2's row scale. The clean-up re-solves it unscaled.
+    requireCertifiedOptimal(literalLp(
+        Sense::Maximize, -5.5, {412.5, 0.27500000000000002, -10.9375, -33.125, -24375, -48437.5},
+        {-0.0074999999999999997, -23.75, -0.40000000000000002, 0.0, -8.7499999999999999e-05, -kInf},
+        {kInf, -23.75, kInf, 0.0, kInf, kInf},
+        {-0.734375, -5187.5, 19687.5, -kInf, -kInf, 82005931973.974762},
+        {2.890625, -1687.5, 29687.5, 105898.98155945227, -4936153111.1139011, kInf},
+        {{0, 0, -275},
+         {0, 1, -0.1125},
+         {0, 2, 12.5},
+         {0, 5, 17500},
+         {1, 0, -275000},
+         {1, 1, 212.5},
+         {1, 2, 43750},
+         {1, 3, -37500},
+         {1, 4, -42500000},
+         {2, 5, -475000000},
+         {3, 0, 0.0025000000000000001},
+         {3, 1, -4750},
+         {3, 2, -0.00015000000000000001},
+         {3, 5, 42500},
+         {4, 0, -0.0625},
+         {4, 2, -25},
+         {4, 4, 0.00013750000000000001},
+         {4, 5, 425},
+         {5, 0, 2.25},
+         {5, 1, 1.5},
+         {5, 2, 387.5},
+         {5, 3, -31.25},
+         {5, 4, 0.0035000000000000001},
+         {5, 5, 0.0042500000000000003}}));
+}
+
 TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
           "[lp_validity]") {
     // A capacitated transportation LP whose costs take three values, so most
