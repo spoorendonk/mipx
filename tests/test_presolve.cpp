@@ -2081,6 +2081,303 @@ TEST_CASE("Presolve: doubleton fill-in keeps refusing a tiny ratio", "[presolve]
     CHECK(pointViolation(lp, full) <= 1e-6);
 }
 
+namespace {
+
+/// The options of the aggregator tests (#348): forcing rows, dual fixing and
+/// doubleton equations off, so the aggregator is what reduces the model.
+PresolveOptions aggregatorOptions(bool aggregator) {
+    PresolveOptions opts;
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_doubleton_aggregation = false;
+    opts.enable_aggregator = aggregator;
+    return opts;
+}
+
+struct RowSpec {
+    Real lower;
+    Real upper;
+    std::vector<std::pair<Index, Real>> terms;
+};
+
+/// Minimize obj . x over the given rows; every column continuous.
+LpProblem rowsModel(std::vector<Real> obj, std::vector<Real> lower, std::vector<Real> upper,
+                    const std::vector<RowSpec>& rows) {
+    LpProblem lp;
+    lp.name = "aggregator";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = static_cast<Index>(obj.size());
+    lp.obj = std::move(obj);
+    lp.col_lower = std::move(lower);
+    lp.col_upper = std::move(upper);
+    lp.col_type = std::vector<VarType>(lp.num_cols, VarType::Continuous);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        lp.col_names.push_back("c" + std::to_string(j));
+    }
+    lp.num_rows = static_cast<Index>(rows.size());
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        lp.row_lower.push_back(rows[i].lower);
+        lp.row_upper.push_back(rows[i].upper);
+        lp.row_names.push_back("r" + std::to_string(i));
+        for (const auto& [j, a] : rows[i].terms) {
+            trips.push_back({i, j, a});
+        }
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(trips));
+    return lp;
+}
+
+/// Presolves with the aggregator on, solves and postsolves, and checks the
+/// point against the original model and the direct optimum.
+void checkAggregated(const LpProblem& lp, Presolver& presolver) {
+    const auto full = presolveSolvePostsolve(lp, presolver, aggregatorOptions(true));
+    CHECK(pointViolation(lp, full) <= 1e-6);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+}
+
+/// x + y + z = 4 (e), x + w <= 5, x - v >= -3, y + z <= 3, min x - w - v,
+/// x free, the others in [0, 10]. Only x is implied free (by e and the two
+/// rows it shares with w and v), and y and z are not in x's other rows. The
+/// optimum is -7 at x = 1.
+LpProblem freeColumnModel(Real pivot = 1.0, Real rhs = 4.0, Real yz_cap = 3.0) {
+    return rowsModel({1.0, 0.0, 0.0, -1.0, -1.0}, {-kInf, 0.0, 0.0, 0.0, 0.0},
+                     {kInf, 10.0, 10.0, 10.0, 10.0},
+                     {{rhs, rhs, {{0, pivot}, {1, 1.0}, {2, 1.0}}},
+                      {-kInf, 5.0, {{0, 1.0}, {3, 1.0}}},
+                      {-3.0, kInf, {{0, 1.0}, {4, -1.0}}},
+                      {-kInf, yz_cap, {{1, 1.0}, {2, 1.0}}}});
+}
+
+/// x + y1 + ... + y6 = 4, y1 + ... + y6 <= 3, x + w_k <= 5 for k < n, min x
+/// - sum w_k: x free, the others in [0, 10]. Substituting x inserts the six
+/// y's into each of the n rows of w: a fill of n * 6 - (7 + n) entries.
+LpProblem fillModel(Index n) {
+    const Index cols = 7 + n;
+    std::vector<Real> obj(static_cast<std::size_t>(cols), 0.0);
+    obj[0] = 1.0;
+    std::vector<Real> lower(static_cast<std::size_t>(cols), 0.0);
+    lower[0] = -kInf;
+    std::vector<Real> upper(static_cast<std::size_t>(cols), 10.0);
+    upper[0] = kInf;
+    RowSpec eq{4.0, 4.0, {{0, 1.0}}};
+    RowSpec cap{-kInf, 3.0, {}};
+    for (Index y = 1; y <= 6; ++y) {
+        eq.terms.push_back({y, 1.0});
+        cap.terms.push_back({y, 1.0});
+    }
+    std::vector<RowSpec> rows = {eq, cap};
+    for (Index k = 0; k < n; ++k) {
+        obj[static_cast<std::size_t>(7 + k)] = -1.0;
+        rows.push_back({-kInf, 5.0, {{0, 1.0}, {7 + k, 1.0}}});
+    }
+    return rowsModel(std::move(obj), std::move(lower), std::move(upper), rows);
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: the aggregator substitutes a free column into its rows", "[presolve]") {
+    const LpProblem lp = freeColumnModel();
+    SECTION("off by default") {
+        Presolver presolver;
+        presolver.setOptions(aggregatorOptions(false));
+        (void)presolver.presolve(lp);
+        CHECK(presolver.stats().aggregator_changes == 0);
+        CHECK(presolver.stats().aggregator_fill_in == 0);
+    }
+    SECTION("on: y and z fill both of x's other rows, postsolved to the optimum") {
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+        CHECK(presolver.stats().aggregator_fill_in == 4);
+    }
+}
+
+TEST_CASE("Presolve: the aggregator refuses a fill over ten", "[presolve]") {
+    SECTION("three rows of x: a fill of 8, taken") {
+        const LpProblem lp = fillModel(3);
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+        CHECK(presolver.stats().aggregator_fill_in == 18);
+    }
+    SECTION("four rows of x: a fill of 13, refused") {
+        const LpProblem lp = fillModel(4);
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 0);
+    }
+}
+
+TEST_CASE("Presolve: the aggregator stops after three fill refusals in a row", "[presolve]") {
+    // `refused` copies of fillModel(4)'s rows (fill 13, length product 7 * 5),
+    // then x + u1 + ... + u7 = 4 with x in four rows x + 2 u1 + ... + 2 u7 +
+    // w_k <= 10 that hold every u (no fill, product 8 * 5, so it comes last).
+    auto model = [](Index refused) {
+        std::vector<Real> obj;
+        std::vector<Real> lower;
+        std::vector<Real> upper;
+        std::vector<RowSpec> rows;
+        // The w's cost -1: at no cost a later round drops their rows, and
+        // the refused blocks come back with less to fill.
+        auto column = [&](Real lb, Real ub, Real cost = 0.0) {
+            obj.push_back(cost);
+            lower.push_back(lb);
+            upper.push_back(ub);
+            return static_cast<Index>(obj.size()) - 1;
+        };
+        for (Index b = 0; b < refused; ++b) {
+            const Index x = column(-kInf, kInf);
+            RowSpec eq{4.0, 4.0, {{x, 1.0}}};
+            RowSpec cap{-kInf, 3.0, {}};
+            for (Index y = 0; y < 6; ++y) {
+                const Index c = column(0.0, 10.0);
+                eq.terms.push_back({c, 1.0});
+                cap.terms.push_back({c, 1.0});
+            }
+            rows.push_back(eq);
+            rows.push_back(cap);
+            for (Index k = 0; k < 4; ++k) {
+                rows.push_back({-kInf, 5.0, {{x, 1.0}, {column(0.0, 10.0, -1.0), 1.0}}});
+            }
+        }
+        const Index x = column(-kInf, kInf);
+        RowSpec eq{4.0, 4.0, {{x, 1.0}}};
+        std::vector<Index> u;
+        for (Index m = 0; m < 7; ++m) {
+            u.push_back(column(0.0, 10.0));
+            eq.terms.push_back({u.back(), 1.0});
+        }
+        rows.push_back(eq);
+        for (Index k = 0; k < 4; ++k) {
+            RowSpec row{-kInf, 10.0, {{x, 1.0}}};
+            for (const Index c : u) {
+                row.terms.push_back({c, 2.0});
+            }
+            row.terms.push_back({column(0.0, 10.0, -1.0), 1.0});
+            rows.push_back(row);
+        }
+        return rowsModel(std::move(obj), std::move(lower), std::move(upper), rows);
+    };
+    SECTION("two refusals: the last candidate is still taken") {
+        Presolver presolver;
+        checkAggregated(model(2), presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+        CHECK(presolver.stats().aggregator_fill_in == 0);
+    }
+    SECTION("three refusals end the pass before it") {
+        Presolver presolver;
+        checkAggregated(model(3), presolver);
+        CHECK(presolver.stats().aggregator_changes == 0);
+    }
+}
+
+TEST_CASE("Presolve: the aggregator skips integer and not implied-free columns", "[presolve]") {
+    SECTION("integer") {
+        LpProblem lp = freeColumnModel();
+        lp.col_type[0] = VarType::Integer;
+        Presolver presolver;
+        presolver.setOptions(aggregatorOptions(true));
+        (void)presolver.presolve(lp);
+        CHECK(presolver.stats().aggregator_changes == 0);
+    }
+    SECTION("x in [0, 2]: the rows only imply [-3, 4]") {
+        LpProblem lp = freeColumnModel();
+        lp.col_lower[0] = 0.0;
+        lp.col_upper[0] = 2.0;
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 0);
+    }
+    SECTION("x in [-3, 4]: implied by two different rows, taken") {
+        LpProblem lp = freeColumnModel();
+        lp.col_lower[0] = -3.0;
+        lp.col_upper[0] = 4.0;
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+    }
+}
+
+TEST_CASE("Presolve: the aggregator's pivot test", "[presolve]") {
+    SECTION("0.001 x: under 1% of both lines' largest entry, refused") {
+        // 0.001 x + y + z = 0.004 with y + z <= 0.003 keeps x in [1, 4].
+        const LpProblem lp = freeColumnModel(1e-3, 4e-3, 3e-3);
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 0);
+    }
+    SECTION("x against 200 y: under 1% of the shorter row, taken on its column") {
+        // x is in four rows, so its column is the longer line, and its
+        // largest entry is x's own 1.
+        LpProblem lp = freeColumnModel();
+        lp.num_cols = 6;
+        lp.obj.push_back(-1.0);
+        lp.col_lower.push_back(0.0);
+        lp.col_upper.push_back(10.0);
+        lp.col_type.push_back(VarType::Continuous);
+        lp.col_names.push_back("s");
+        lp.num_rows = 5;
+        lp.row_lower.push_back(-kInf);
+        lp.row_upper.push_back(6.0);
+        lp.row_names.push_back("r4");
+        lp.matrix = SparseMatrix(5, 6,
+                                 std::vector<Triplet>{{0, 0, 1.0},
+                                                      {0, 1, 200.0},
+                                                      {0, 2, 1.0},
+                                                      {1, 0, 1.0},
+                                                      {1, 3, 1.0},
+                                                      {2, 0, 1.0},
+                                                      {2, 4, -1.0},
+                                                      {3, 1, 1.0},
+                                                      {3, 2, 1.0},
+                                                      {4, 0, 1.0},
+                                                      {4, 5, 1.0}});
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+    }
+    SECTION("a column of length 2 takes 0.001 x, as HiGHS does") {
+        // freeColumnModel's small pivot without the row of v: x in e and
+        // the row of w only.
+        LpProblem lp = freeColumnModel(1e-3, 4e-3, 3e-3);
+        lp.matrix = SparseMatrix(4, 5,
+                                 std::vector<Triplet>{{0, 0, 1e-3},
+                                                      {0, 1, 1.0},
+                                                      {0, 2, 1.0},
+                                                      {1, 0, 1.0},
+                                                      {1, 3, 1.0},
+                                                      {2, 4, -1.0},
+                                                      {3, 1, 1.0},
+                                                      {3, 2, 1.0}});
+        lp.row_lower[2] = -10.0;
+        Presolver presolver;
+        checkAggregated(lp, presolver);
+        CHECK(presolver.stats().aggregator_changes == 1);
+    }
+}
+
+TEST_CASE("Presolve: the aggregator refuses a substitution that cancels an entry", "[presolve]") {
+    // x + y + w <= 5 in place of x + w <= 5: y's entry there would become
+    // 1 - 1 = 0, below the 1e-7 a changed entry must keep (#343).
+    LpProblem lp = freeColumnModel();
+    lp.matrix = SparseMatrix(4, 5,
+                             std::vector<Triplet>{{0, 0, 1.0},
+                                                  {0, 1, 1.0},
+                                                  {0, 2, 1.0},
+                                                  {1, 0, 1.0},
+                                                  {1, 1, 1.0},
+                                                  {1, 3, 1.0},
+                                                  {2, 0, 1.0},
+                                                  {2, 4, -1.0},
+                                                  {3, 1, 1.0},
+                                                  {3, 2, 1.0}});
+    Presolver presolver;
+    checkAggregated(lp, presolver);
+    CHECK(presolver.stats().aggregator_changes == 0);
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2

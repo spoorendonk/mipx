@@ -158,6 +158,10 @@ struct PresolveStats {
     /// Entries a doubleton equation's substitution inserted into rows that
     /// did not hold the kept column (enable_doubleton_fill_in, #343).
     Index doubleton_fill_in = 0;
+    /// Implied-free columns substituted out of an equation, with it, by the
+    /// aggregator (enable_aggregator, #348), and the entries it inserted.
+    Index aggregator_changes = 0;
+    Index aggregator_fill_in = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -188,6 +192,7 @@ struct PresolveStats {
     Real parallel_row_seconds = 0.0;
     Real parallel_col_seconds = 0.0;
     Real free_col_substitution_seconds = 0.0;
+    Real aggregator_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -218,6 +223,11 @@ struct PresolveOptions {
     /// Substitute implied-free continuous column singletons out of their row,
     /// removing both (#324). Off by default until benchmarked.
     bool enable_free_col_substitution = false;
+    /// The aggregator (#348), after HiGHS's: substitute an implied-free
+    /// continuous column out of an equation into every other row it is in,
+    /// filling in, and remove both. Runs once the other passes reach a
+    /// fixpoint. Off by default until benchmarked.
+    bool enable_aggregator = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.
@@ -350,6 +360,15 @@ private:
                                        const std::vector<Index>& dirty_rows,
                                        std::vector<uint8_t>& next_dirty_rows,
                                        std::vector<uint8_t>& next_dirty_cols);
+    /// The aggregator (enable_aggregator, #348): every active equation and
+    /// implied-free continuous column in it, in HiGHS's order and under its
+    /// pivot and fill limits (see the definition).
+    Index aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                                      std::vector<bool>& row_removed,
+                                      std::vector<Index>& row_active_nnz,
+                                      std::vector<Index>& col_active_nnz,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols);
     // Root probing: fixes variables whose opposite branch propagates to
     // infeasibility, and strengthens coefficients with the learned variable
     // bounds. Runs at most once per presolve call.

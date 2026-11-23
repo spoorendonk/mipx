@@ -1276,6 +1276,330 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
     return changes;
 }
 
+// HiGHS 1.16.0's aggregator (HPresolve::aggregator, HPresolveAggregator.cpp);
+// the rules taken, and where they differ, are written on #348. An equation
+// a x_j + sum_k a_k x_k = t with x_j continuous and implied free gives x_j =
+// (t - sum_k a_k x_k) / a; every other row r of x_j gets -(a_rj / a) times
+// the equation added (filling in where r lacks an x_k) and its sides moved
+// by a_rj t / a, the objective takes x_j's cost over the same way, and the
+// equation and x_j go. Postsolve takes x_j back from the equation.
+//
+// Implied free: each finite bound of x_j follows from some active row's
+// activity over its other columns, row i included. That stays sound with
+// row i gone: postsolve puts x_j on row i, each changed row r holds exactly
+// when the original r does, so the rows that implied x_j's bounds still hold.
+Index Presolver::aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                                             std::vector<bool>& row_removed,
+                                             std::vector<Index>& row_active_nnz,
+                                             std::vector<Index>& col_active_nnz,
+                                             std::vector<uint8_t>& next_dirty_rows,
+                                             std::vector<uint8_t>& next_dirty_cols) {
+    // HiGHS's presolve_pivot_threshold and presolve_substitution_maxfillin,
+    // and the fill refusals in a row that end its pass.
+    constexpr Real kPivotThreshold = 1e-2;
+    constexpr Index kMaxFillIn = 10;
+    constexpr Index kMaxFillFailures = 3;
+    // How far an implied bound may reach past x_j's own and still count as
+    // within it, as substituteFreeColSingletons holds it.
+    constexpr Real kFreeTol = 1e-9;
+    // A changed or inserted entry must come out above this, as a doubleton
+    // substitution's must (#343); HiGHS drops one at or below 1e-9 instead.
+    constexpr Real kMinEntry = 10.0 * kTol;
+    Index changes = 0;
+
+    // Each row's activity over its active columns, huge bounds infinite,
+    // summed on first use and again once a substitution changes the row.
+    // Column bounds do not change in this pass.
+    struct Activity {
+        CompensatedSum min;
+        CompensatedSum max;
+        Index min_inf = 0;
+        Index max_inf = 0;
+        bool valid = false;
+    };
+    std::vector<Activity> activity(lp.num_rows);
+    auto rowActivity = [&](Index r) -> const Activity& {
+        Activity& act = activity[r];
+        if (!act.valid) {
+            act = Activity{};
+            for (const auto [col, a] : work_->row(r)) {
+                if (col_removed[col] || a == 0.0) {
+                    continue;
+                }
+                const Real at_min = a > 0.0 ? lp.col_lower[col] : lp.col_upper[col];
+                const Real at_max = a > 0.0 ? lp.col_upper[col] : lp.col_lower[col];
+                if (std::abs(at_min) >= kHugeBound) {
+                    ++act.min_inf;
+                } else {
+                    act.min.add(a * at_min);
+                }
+                if (std::abs(at_max) >= kHugeBound) {
+                    ++act.max_inf;
+                } else {
+                    act.max.add(a * at_max);
+                }
+            }
+            act.valid = true;
+        }
+        return act;
+    };
+
+    auto impliedFree = [&](Index j) -> bool {
+        const Real lj = lp.col_lower[j];
+        const Real uj = lp.col_upper[j];
+        bool lower_implied = lj <= -kHugeBound;
+        bool upper_implied = uj >= kHugeBound;
+        for (const auto [r, a] : work_->col(j)) {
+            if (lower_implied && upper_implied) {
+                break;
+            }
+            if (row_removed[r] || a == 0.0) {
+                continue;
+            }
+            const Activity& act = rowActivity(r);
+            // The row's other terms: x_j's own taken back out.
+            const Real j_at_min = a > 0.0 ? lj : uj;
+            const Real j_at_max = a > 0.0 ? uj : lj;
+            Index inf_min = act.min_inf;
+            Index inf_max = act.max_inf;
+            Real r_min = 0.0;
+            Real r_max = 0.0;
+            if (std::abs(j_at_min) >= kHugeBound) {
+                --inf_min;
+                r_min = act.min.value();
+            } else {
+                r_min = act.min.without(a * j_at_min);
+            }
+            if (std::abs(j_at_max) >= kHugeBound) {
+                --inf_max;
+                r_max = act.max.value();
+            } else {
+                r_max = act.max.without(a * j_at_max);
+            }
+            // a x_j in [L - R_max, U - R_min].
+            const bool has_lower = std::abs(lp.row_lower[r]) < kHugeBound;
+            const bool has_upper = std::abs(lp.row_upper[r]) < kHugeBound;
+            const Real ax_lo = has_lower && inf_max == 0 ? lp.row_lower[r] - r_max : -kInf;
+            const Real ax_hi = has_upper && inf_min == 0 ? lp.row_upper[r] - r_min : kInf;
+            const Real lo = a > 0.0 ? ax_lo / a : ax_hi / a;
+            const Real hi = a > 0.0 ? ax_hi / a : ax_lo / a;
+            if (std::isfinite(lo) && lo >= lj - kFreeTol) {
+                lower_implied = true;
+            }
+            if (std::isfinite(hi) && hi <= uj + kFreeTol) {
+                upper_implied = true;
+            }
+        }
+        return lower_implied && upper_implied;
+    };
+
+    // Held at its upper side, as a doubleton equation is.
+    auto isEquation = [&](Index i) {
+        return !row_removed[i] && std::abs(lp.row_lower[i]) < kHugeBound &&
+               std::abs(lp.row_upper[i]) < kHugeBound &&
+               std::abs(lp.row_upper[i] - lp.row_lower[i]) <= kTol;
+    };
+
+    struct Candidate {
+        Index row;
+        Index col;
+        uint64_t hash;
+    };
+    std::vector<Candidate> candidates;
+    std::vector<int8_t> free_status(lp.num_cols, -1);
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (!isEquation(i)) {
+            continue;
+        }
+        for (const auto [j, a] : work_->row(i)) {
+            if (col_removed[j] || std::abs(a) <= kTol || lp.col_type[j] != VarType::Continuous) {
+                continue;
+            }
+            if (free_status[j] < 0) {
+                free_status[j] = impliedFree(j) ? 1 : 0;
+            }
+            if (free_status[j] != 0) {
+                const uint64_t h =
+                    mixHash(mixHash(0, static_cast<uint64_t>(i)), static_cast<uint64_t>(j));
+                candidates.push_back({i, j, h});
+            }
+        }
+    }
+
+    // HiGHS's order: a row or column of length 2 first, then the smallest
+    // product of the lengths, then the smallest of the two; ties by hash.
+    std::sort(candidates.begin(), candidates.end(), [&](const Candidate& c1, const Candidate& c2) {
+        const Index min1 = std::min(row_active_nnz[c1.row], col_active_nnz[c1.col]);
+        const Index min2 = std::min(row_active_nnz[c2.row], col_active_nnz[c2.col]);
+        if ((min1 == 2) != (min2 == 2)) {
+            return min1 == 2;
+        }
+        const int64_t prod1 = int64_t{row_active_nnz[c1.row]} * col_active_nnz[c1.col];
+        const int64_t prod2 = int64_t{row_active_nnz[c2.row]} * col_active_nnz[c2.col];
+        if (prod1 != prod2) {
+            return prod1 < prod2;
+        }
+        if (min1 != min2) {
+            return min1 < min2;
+        }
+        return std::tie(c1.hash, c1.row, c1.col) < std::tie(c2.hash, c2.row, c2.col);
+    });
+
+    struct Update {
+        Index row;
+        Index col;
+        Real value;
+        bool insert;
+    };
+    std::vector<Index> row_cols;
+    std::vector<Real> row_coeffs;
+    std::vector<Index> other_rows;
+    std::vector<Real> other_coeffs;
+    std::vector<Real> shifts;
+    std::vector<Update> updates;
+    Index fill_failures = 0;
+
+    for (const Candidate& cand : candidates) {
+        const Index i = cand.row;
+        const Index j = cand.col;
+        if (!isEquation(i) || col_removed[j] || !work_->contains(i, j)) {
+            continue;
+        }
+        const Real a = work_->coeff(i, j);
+        if (std::abs(a) <= kTol || !std::isfinite(a) || !impliedFree(j)) {
+            continue;
+        }
+        const Index row_size = row_active_nnz[i];
+        const Index col_size = col_active_nnz[j];
+
+        row_cols.clear();
+        row_coeffs.clear();
+        Real row_max = std::abs(a);
+        for (const auto [k, ak] : work_->row(i)) {
+            if (k == j || col_removed[k] || ak == 0.0) {
+                continue;
+            }
+            row_cols.push_back(k);
+            row_coeffs.push_back(ak);
+            row_max = std::max(row_max, std::abs(ak));
+        }
+        other_rows.clear();
+        other_coeffs.clear();
+        Real col_max = std::abs(a);
+        for (const auto [r, ar] : work_->col(j)) {
+            if (r == i || row_removed[r]) {
+                continue;
+            }
+            col_max = std::max(col_max, std::abs(ar));
+            // An explicit zero needs no row added; x_j's removal drops it.
+            if (ar != 0.0) {
+                other_rows.push_back(r);
+                other_coeffs.push_back(ar);
+            }
+        }
+
+        // A row or column of length 2 cannot fill in badly: always taken.
+        if (row_size != 2 && col_size != 2) {
+            // The pivot against the shorter line's largest entry, and failing
+            // that against the longer one's.
+            const bool row_shorter = row_size < col_size;
+            if (std::abs(a) < kPivotThreshold * (row_shorter ? row_max : col_max) &&
+                std::abs(a) < kPivotThreshold * (row_shorter ? col_max : row_max)) {
+                continue;
+            }
+            Index fill = -(row_size + col_size - 1);
+            for (const Index r : other_rows) {
+                for (const Index k : row_cols) {
+                    if (!work_->contains(r, k)) {
+                        ++fill;
+                    }
+                }
+                if (fill > kMaxFillIn) {
+                    break;
+                }
+            }
+            if (fill > kMaxFillIn) {
+                // Too much fill again and again: the rows have grown too
+                // dense for substitutions.
+                if (++fill_failures == kMaxFillFailures) {
+                    break;
+                }
+                continue;
+            }
+            fill_failures = 0;
+        }
+
+        const Real t = lp.row_upper[i];
+        shifts.clear();
+        updates.clear();
+        bool valid = true;
+        for (std::size_t m = 0; m < other_rows.size() && valid; ++m) {
+            const Index r = other_rows[m];
+            const Real scale = -other_coeffs[m] / a;
+            const Real shift = other_coeffs[m] * t / a;
+            if (!std::isfinite(scale) || !std::isfinite(shift)) {
+                valid = false;
+                break;
+            }
+            shifts.push_back(shift);
+            for (std::size_t n = 0; n < row_cols.size(); ++n) {
+                const Index k = row_cols[n];
+                const bool has = work_->contains(r, k);
+                const Real value = (has ? work_->coeff(r, k) : 0.0) + scale * row_coeffs[n];
+                if (!std::isfinite(value) || std::abs(value) <= kMinEntry) {
+                    valid = false;
+                    break;
+                }
+                updates.push_back({r, k, value, !has});
+            }
+        }
+        if (!valid) {
+            continue;
+        }
+
+        const Real cj = lp.obj[j];
+        if (cj != 0.0) {
+            lp.obj_offset += cj * t / a;
+            for (std::size_t n = 0; n < row_cols.size(); ++n) {
+                lp.obj[row_cols[n]] -= cj * row_coeffs[n] / a;
+            }
+            lp.obj[j] = 0.0;
+        }
+        for (std::size_t m = 0; m < other_rows.size(); ++m) {
+            shiftRowSides(lp, other_rows[m], shifts[m]);
+        }
+        // Safe to insert: no walk of these rows or columns is open.
+        for (const Update& u : updates) {
+            work_->set(u.row, u.col, u.value);
+            if (u.insert) {
+                ++row_active_nnz[u.row];
+                ++col_active_nnz[u.col];
+                ++stats_.aggregator_fill_in;
+            }
+        }
+        for (const Index r : other_rows) {
+            activity[r].valid = false;
+            next_dirty_rows[r] = 1;
+            markColsInRow(*work_, r, col_removed, next_dirty_cols);
+        }
+
+        removeActiveColumn(*work_, j, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        removeActiveRow(*work_, i, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                        next_dirty_rows, next_dirty_cols);
+
+        ++stats_.vars_removed;
+        ++stats_.rows_removed;
+        ++changes;
+        postsolve_stack_.push(
+            PostsolveFreeColSubstitution{j, i, a, t, std::move(row_cols), std::move(row_coeffs)});
+        row_cols.clear();
+        row_coeffs.clear();
+    }
+
+    return changes;
+}
+
 void Presolver::shiftRowSides(LpProblem& lp, Index row, Real shift) {
     if (!std::isinf(lp.row_lower[row])) {
         lp.row_lower[row] -= shift;
@@ -3009,6 +3333,20 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                            next_dirty_rows, next_dirty_cols);
             });
             stats_.coeff_tightening_changes += ch;
+            total_changes += ch;
+        }
+
+        // The aggregator runs where HiGHS runs it, once the other reductions
+        // have reached their fixpoint, and the loop goes on if it changes
+        // anything; and in the last round, so it runs where the rounds run
+        // out first.
+        if (options_.enable_aggregator && (total_changes == 0 || round + 1 == max_rounds_)) {
+            ch = timed(stats_.aggregator_seconds, [&] {
+                return aggregateImpliedFreeColumns(lp, col_removed, row_removed, row_active_nnz,
+                                                   col_active_nnz, next_dirty_rows,
+                                                   next_dirty_cols);
+            });
+            stats_.aggregator_changes += ch;
             total_changes += ch;
         }
 

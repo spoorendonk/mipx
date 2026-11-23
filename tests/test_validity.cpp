@@ -811,11 +811,15 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions doubleton_fill = o;
     doubleton_fill.enable_doubleton_fill_in = true;
     cases.push_back({"doubleton fill-in (opt-in)", doubleton_fill});
+    PresolveOptions aggregator = o;
+    aggregator.enable_aggregator = true;
+    cases.push_back({"aggregator (opt-in)", aggregator});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
     all.enable_free_col_substitution = true;
     all.enable_doubleton_fill_in = true;
+    all.enable_aggregator = true;
     cases.push_back({"all opt-in but parallel columns", all});
     all.enable_parallel_cols = true;
     cases.push_back({"all opt-in", all, false});
@@ -853,6 +857,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_parallel_cols; }},
         {"free column substitution", &PresolveStats::free_col_substitution_changes,
          [](const PresolveOptions& o) { return o.enable_free_col_substitution; }},
+        {"aggregator", &PresolveStats::aggregator_changes,
+         [](const PresolveOptions& o) { return o.enable_aggregator; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
@@ -1012,6 +1018,13 @@ std::vector<LpProblem> presolveAuditModels() {
                                {{1, 1, 1}, {0, 1, 1}}, {1, -kInf}, {kInf, 3}));
     models.push_back(makeModel(Sense::Maximize, {0, 1, -1}, {-5, 0, 0}, {5, 2, 2}, {C, I, I},
                                {{1, 1, -1}, {0, 1, 1}}, {0, -kInf}, {3, 3}));
+    // The aggregator (#348): x0 = 4 - x1 - x2 is implied in [0, 4] by its
+    // equation and substituted into its two other rows, filling one with x2;
+    // then x0 free with x0 = 1 - 2 x1 + x2 and a continuous x1.
+    models.push_back(makeModel(Sense::Minimize, {1, -1, 1}, {0, 0, 0}, {10, 2, 2}, {C, I, I},
+                               {{1, 1, 1}, {1, -1, 0}, {1, 0, 1}}, {4, -kInf, 1}, {4, 3, kInf}));
+    models.push_back(makeModel(Sense::Maximize, {1, 0, 1}, {-kInf, 0, 0}, {kInf, 3, 2}, {C, C, I},
+                               {{1, 2, -1}, {1, 0, 1}, {-1, 1, 0}}, {1, -kInf, -kInf}, {1, 4, 2}));
     return models;
 }
 

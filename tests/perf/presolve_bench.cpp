@@ -48,7 +48,7 @@ namespace {
 const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
-    "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in]\n";
+    "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n";
 
 struct Options {
     pb::CommonOptions common;
@@ -58,6 +58,8 @@ struct Options {
     bool free_col_substitution = false;
     /// PresolveOptions::enable_doubleton_fill_in (#343), off by default.
     bool doubleton_fill_in = false;
+    /// PresolveOptions::enable_aggregator (#348), off by default.
+    bool aggregator = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -84,6 +86,8 @@ Options parse(int argc, char** argv) {
             opt.free_col_substitution = true;
         } else if (arg == "--doubleton-fill-in") {
             opt.doubleton_fill_in = true;
+        } else if (arg == "--aggregator") {
+            opt.aggregator = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -272,6 +276,7 @@ constexpr Rule kRules[] = {
     {"empty_col", &PresolveStats::empty_col_changes, &PresolveStats::empty_col_seconds},
     {"coeff_tightening", &PresolveStats::coeff_tightening_changes,
      &PresolveStats::coeff_tightening_seconds},
+    {"aggregator", &PresolveStats::aggregator_changes, &PresolveStats::aggregator_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
     {"implied_bounds_relaxed", &PresolveStats::implied_bounds_relaxed,
      &PresolveStats::implied_bounds_relaxed_seconds},
@@ -309,6 +314,7 @@ int main(int argc, char** argv) {
         popts.enable_parallel_cols = opt.parallel_cols;
         popts.enable_free_col_substitution = opt.free_col_substitution;
         popts.enable_doubleton_fill_in = opt.doubleton_fill_in;
+        popts.enable_aggregator = opt.aggregator;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
@@ -350,6 +356,7 @@ int main(int argc, char** argv) {
     row.addInt("rows_removed", st.rows_removed);
     row.addInt("bounds_tightened", st.bounds_tightened);
     row.addInt("doubleton_fill_in", st.doubleton_fill_in);
+    row.addInt("aggregator_fill_in", st.aggregator_fill_in);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }
