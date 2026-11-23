@@ -2825,7 +2825,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 computePrimals();
                 computeDuals();
                 initDseWeights();
-                degenerate_pivot_streak = 0;
+                // The streak carries over: this refactor fires on a stall
+                // of primal_feasible_adaptive_refactor_stall_pivots (24),
+                // and resetting here kept the streak from ever reaching
+                // bound_perturbation_stall_pivots (512), so a degenerate
+                // primal phase was never perturbed (cycle, #298).
                 resetPrimalFeasibleProgress();
                 primal_feasible_pivots_since_refactor = 0;
                 rebuildInfeasibleSet();

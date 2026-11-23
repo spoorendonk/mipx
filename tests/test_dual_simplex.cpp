@@ -656,11 +656,13 @@ TEST_CASE("DualSimplex: default no-presolve handles degen2 and degen3 within tim
     }
 }
 
-TEST_CASE("DualSimplex: no-presolve pilot and pilot87 solve within time limit (#278)",
+TEST_CASE("DualSimplex: no-presolve #278 Netlib LPs solve within time limit",
           "[dual_simplex][netlib][regression][no_presolve]") {
-    // Both used to stall past 120 s in degenerate pivots; with the cost
-    // perturbation and the dual-feasibility repair before each dual pivot
-    // they take about 6 s and 9 s on one thread.
+    // All three used to stall past 120 s in degenerate pivots. pilot and
+    // pilot87 needed the cost perturbation and the dual-feasibility repair
+    // before each dual pivot (about 6 s and 9 s on one thread); cycle, whose
+    // cold basis is primal feasible, needed bound perturbation to reach the
+    // degenerate primal phase (#298, under 1 s).
     struct NetlibCase {
         const char* name;
         Real expected_obj;
@@ -668,6 +670,7 @@ TEST_CASE("DualSimplex: no-presolve pilot and pilot87 solve within time limit (#
     constexpr NetlibCase kCases[] = {
         {"pilot", -5.5748972927e+02},
         {"pilot87", 3.0171034733e+02},
+        {"cycle", -5.2263930249e+00},
     };
 
     for (const auto& tc : kCases) {
