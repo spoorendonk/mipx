@@ -38,6 +38,10 @@ enum class BarrierIpmOutcome {
     NearOptimal,
     Failed,
     TimeLimit,
+    // The homogeneous self-dual loop's certificates (#371): Farkas rays of
+    // the standard form, so the LP is infeasible, or its dual is.
+    PrimalInfeasible,
+    DualInfeasible,
 };
 
 struct BarrierOptions {

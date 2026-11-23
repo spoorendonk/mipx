@@ -85,6 +85,16 @@ Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::sp
                        std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
                        Real tau, Real kappa);
 
+// The HSD loop's infeasibility test (#371) at an iterate (z, y, s, tau,
+// kappa) with az = A z, at_y = A'y, c'z and b'y, and mu_rel its mu relative
+// to the starting one (scale-invariant, see the definition):
+// PrimalInfeasible or DualInfeasible on a Farkas ray within tol, else
+// Failed. No verdict unless tau <= tol kappa and mu_rel <= tol.
+BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
+                                   std::span<const Real> az, std::span<const Real> at_y,
+                                   std::span<const Real> s, Real tau, Real kappa, Real mu_rel,
+                                   Real ctz, Real bty, Real tol);
+
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
 // No NewtonSolver GPU factories needed.
 

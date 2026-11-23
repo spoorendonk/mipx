@@ -10,6 +10,7 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -114,6 +115,251 @@ TEST_CASE("Barrier HSD: small LP reaches its optimum on the IPM's own point", "[
     CHECK(std::abs(primals[0] - 1.0) <= 1e-6);
     CHECK(std::abs(primals[1] - 1.5) <= 1e-6);
     CHECK(std::abs(primals[2] - 0.5) <= 1e-6);
+}
+
+namespace {
+
+// x + y >= 3 and x + y <= 1 with x, y >= 0: no feasible point.
+LpProblem infeasibleLp() {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.col_names.assign(2, "");
+    lp.row_lower = {3.0, -kInf};
+    lp.row_upper = {kInf, 1.0};
+    lp.row_names.assign(2, "");
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
+    return lp;
+}
+
+// min -x - y s.t. x - y <= 1, x, y >= 0: feasible, unbounded along (1, 1).
+LpProblem unboundedLp() {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 1;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.col_names.assign(2, "");
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.row_names.assign(1, "");
+    lp.matrix = SparseMatrix(1, 2, {{0, 0, 1.0}, {0, 1, -1.0}});
+    return lp;
+}
+
+// min obj'x over two rows lo <= a_i'x <= hi and x >= 0, x in R^2.
+LpProblem twoByTwo(std::vector<Real> obj, std::vector<Real> a, std::vector<Real> lo,
+                   std::vector<Real> hi) {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = std::move(obj);
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.col_names.assign(2, "");
+    lp.row_lower = std::move(lo);
+    lp.row_upper = std::move(hi);
+    lp.row_names.assign(2, "");
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, a[0]}, {0, 1, a[1]}, {1, 0, a[2]}, {1, 1, a[3]}});
+    return lp;
+}
+
+// n columns x >= 0 and n rows lo <= a_i'x <= hi, row 0 first_lo <= a_0'x <= first_hi.
+LpProblem chainLp(Index n, std::vector<Real> obj, std::vector<Triplet> entries, Real lo, Real hi,
+                  Real first_lo, Real first_hi) {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.num_rows = n;
+    lp.obj = std::move(obj);
+    lp.col_lower.assign(static_cast<size_t>(n), 0.0);
+    lp.col_upper.assign(static_cast<size_t>(n), kInf);
+    lp.col_type.assign(static_cast<size_t>(n), VarType::Continuous);
+    lp.col_names.assign(static_cast<size_t>(n), "");
+    lp.row_lower.assign(static_cast<size_t>(n), lo);
+    lp.row_upper.assign(static_cast<size_t>(n), hi);
+    lp.row_lower.front() = first_lo;
+    lp.row_upper.front() = first_hi;
+    lp.row_names.assign(static_cast<size_t>(n), "");
+    lp.matrix = SparseMatrix(n, n, std::move(entries));
+    return lp;
+}
+
+// min sum x s.t. x_0 + x_1 >= 3, x_j - 2 x_{j-1} >= 0 (0 < j < n): b and c
+// of size 1, optimum x_j = 2^j, objective 2^n - 1.
+LpProblem chainPrimal(Index n) {
+    std::vector<Triplet> e{{0, 0, 1.0}, {0, 1, 1.0}};
+    for (Index j = 1; j < n; ++j) {
+        e.push_back({j, j, 1.0});
+        e.push_back({j, j - 1, -2.0});
+    }
+    return chainLp(n, std::vector<Real>(static_cast<size_t>(n), 1.0), e, 0.0, kInf, 3.0, kInf);
+}
+
+// Its dual mirror: min -x_0 - x_1 s.t. x_{n-2} + x_{n-1} <= 3,
+// x_{j-1} - 2 x_j <= 0 (0 < j < n): optimum x_{n-1} = 1, x_j = 2^(n-1-j),
+// objective -3 2^(n-2).
+LpProblem chainDual(Index n) {
+    std::vector<Triplet> e{{0, n - 2, 1.0}, {0, n - 1, 1.0}};
+    for (Index j = 1; j < n; ++j) {
+        e.push_back({j, j - 1, 1.0});
+        e.push_back({j, j, -2.0});
+    }
+    std::vector<Real> obj(static_cast<size_t>(n), 0.0);
+    obj[0] = -1.0;
+    obj[1] = -1.0;
+    return chainLp(n, std::move(obj), e, -kInf, 0.0, -kInf, 3.0);
+}
+
+// min -x with x >= 0 and no rows: unbounded.
+LpProblem noRowsLp() {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 1;
+    lp.num_rows = 0;
+    lp.obj = {-1.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {kInf};
+    lp.col_type.assign(1, VarType::Continuous);
+    lp.col_names.assign(1, "");
+    lp.matrix = SparseMatrix(0, 1);
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("Barrier HSD: feasible LPs with large b or c are not read as infeasible",
+          "[barrier][hsd]") {
+    // The rays' bounds are relative to |b| and |c|: unnormalized, the first
+    // ended Infeasible at tau ~ 5e-9, the second Unbounded at iteration 1.
+    using Case = std::pair<LpProblem, Real>;
+    auto [lp, expected] = GENERATE(
+        // min x + y, x + 2y >= 1e9, 3x + y >= 5e8: optimum (0, 5e8).
+        Case{twoByTwo({1.0, 1.0}, {1.0, 2.0, 3.0, 1.0}, {1e9, 5e8}, {kInf, kInf}), 5e8},
+        // min -1e9 (x + y), x + 2y <= 1, 3x + y <= 0.5: optimum (0, 0.5).
+        Case{twoByTwo({-1e9, -1e9}, {1.0, 2.0, 3.0, 1.0}, {-kInf, -kInf}, {1.0, 0.5}), -5e8});
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    INFO("expected " << expected << " algo " << static_cast<int>(algo));
+    const auto [result, primals, homogeneous] = solveWith(lp, quietOptions(true, algo));
+    CHECK(homogeneous);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - expected) <= 1e-6 * std::abs(expected));
+}
+
+TEST_CASE("Barrier HSD: feasible LPs with solutions far larger than b and c give no certificate",
+          "[barrier][hsd]") {
+    // b and c of size 1, solutions of size 2^30: on the rays alone they ended
+    // Infeasible and Unbounded at iteration 12, mid-run, at tau ~ mu ~ 1e-7;
+    // the mu and tau gate holds the verdict back. Whether the loop then
+    // reaches 1e-8 on them depends on the row order (one stalls at dinf ~ 2e-8
+    // on the sparse factor); the certificate is what this tests.
+    using Case = std::pair<LpProblem, Real>;
+    auto [lp, expected] = GENERATE(Case{chainPrimal(30), std::ldexp(1.0, 30) - 1.0},
+                                   Case{chainDual(30), -3.0 * std::ldexp(1.0, 28)});
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    INFO("expected " << expected << " algo " << static_cast<int>(algo));
+    const auto [result, primals, homogeneous] = solveWith(lp, quietOptions(true, algo));
+    CHECK(homogeneous);
+    CHECK(result.status != Status::Infeasible);
+    CHECK(result.status != Status::Unbounded);
+    if (result.status == Status::Optimal) {
+        CHECK(std::abs(result.objective - expected) <= 1e-6 * std::abs(expected));
+    }
+}
+
+TEST_CASE("Barrier HSD: an infeasible LP ends Infeasible, an unbounded one Unbounded",
+          "[barrier][hsd]") {
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    const bool crossover = GENERATE(false, true);
+    INFO("algo " << static_cast<int>(algo) << " crossover " << crossover);
+    auto opts = quietOptions(true, algo);
+    opts.crossover = crossover;
+    const auto infeasible = solveWith(infeasibleLp(), opts);
+    CHECK(infeasible.homogeneous);
+    CHECK(infeasible.result.status == Status::Infeasible);
+    const auto unbounded = solveWith(unboundedLp(), opts);
+    CHECK(unbounded.homogeneous);
+    CHECK(unbounded.result.status == Status::Unbounded);
+    // Infeasible through its upper bounds, which the HSD loop's standard form
+    // carries as rows: x + y >= 5 with x, y <= 2.
+    const auto bounded = solveWith(readLp(mipx::test::testDataDir() + "/infeasible_lp.lp"), opts);
+    CHECK(bounded.homogeneous);
+    CHECK(bounded.result.status == Status::Infeasible);
+    // Infeasible both ways (x - y >= d, y - x >= d, min -x - y): Infeasible,
+    // whichever ray the loop meets first. With d = 1e-3 the primal ray is
+    // weak and the dual one came first, reading Unbounded before the
+    // zero-objective check.
+    for (const Real d : {1.0, 1e-3}) {
+        INFO("d " << d);
+        const auto both =
+            solveWith(twoByTwo({-1.0, -1.0}, {1.0, -1.0, -1.0, 1.0}, {d, d}, {kInf, kInf}), opts);
+        CHECK(both.homogeneous);
+        CHECK(both.result.status == Status::Infeasible);
+    }
+    // No rows in the standard form: the m = 0 path's dual ray.
+    CHECK(solveWith(noRowsLp(), opts).result.status == Status::Unbounded);
+    // A feasible bounded LP still ends Optimal.
+    CHECK(solveWith(smallLp(), opts).result.status == Status::Optimal);
+}
+
+TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hsd]") {
+    // One row, two columns: az = A z, at_y = A'y.
+    const std::vector<Real> b{1.0};
+    const std::vector<Real> c{1.0, 1.0};
+    const Real tol = 1e-8;
+    const Real tau = 1e-9;  // <= tol kappa at kappa = 1
+    const Real mu = 1e-9;   // <= tol mu0
+    // A'y + s = (1e-12, 0): a primal ray for b'y > 0.
+    const std::vector<Real> at_y{-1.0, -2.0};
+    const std::vector<Real> s{1.0 + 1e-12, 2.0};
+    const std::vector<Real> az_far{1e-3};
+    const std::vector<Real> az_ray{0.0};
+    // b'y = 1 > 0 and |A'y + s| = 1e-12 <= 1e-8: primal infeasible.
+    CHECK(hsdInfeasibility(b, c, az_far, at_y, s, tau, 1.0, mu, 0.0, 1.0, tol) ==
+          BarrierIpmOutcome::PrimalInfeasible);
+    // No verdict before the run gets there: tau above tol kappa, or mu above
+    // tol mu0, whatever the rays.
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, 1e-3, 1.0, mu, -1.0, 1.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, 1e-3, -1.0, 1.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    // b'y <= 0: no primal ray; c'z = -1 < 0 but |A z| = 1e-3 > 1e-8: none.
+    CHECK(hsdInfeasibility(b, c, az_far, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    // A z = 0: a dual ray.
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+          BarrierIpmOutcome::DualInfeasible);
+    // |A z| = 1e-12 meets tol (-c'z) with |c| = 1, not tol (-c'z) / |c| with
+    // |c| = 1e9: the bound is relative to the data.
+    const std::vector<Real> az_near{1e-12};
+    CHECK(hsdInfeasibility(b, c, az_near, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+          BarrierIpmOutcome::DualInfeasible);
+    const std::vector<Real> c_big{1e9, 1e9};
+    CHECK(hsdInfeasibility(b, c_big, az_near, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    // Both: primal first.
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, 1.0, tol) ==
+          BarrierIpmOutcome::PrimalInfeasible);
+    // A NaN gives no verdict: in the ray, or in b'y.
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    const std::vector<Real> s_nan{nan, 2.0};
+    CHECK(hsdInfeasibility(b, c, az_far, at_y, s_nan, tau, 1.0, mu, 0.0, 1.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    const std::vector<Real> az_nan{nan};
+    CHECK(hsdInfeasibility(b, c, az_nan, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, nan, tol) ==
+          BarrierIpmOutcome::Failed);
 }
 
 TEST_CASE("Barrier HSD: implicit upper bounds or Gondzio fall back to Mehrotra's loop",

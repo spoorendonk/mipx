@@ -855,9 +855,9 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
 // whose denominator is positive for an exact solve: from A u_z = b, A'u_y + u_s = c and
 // S u_z + Z u_s = 0, b'u_y - c'u_z = -u_z'u_s = u_z' S Z^-1 u_z. One step
 // length for every variable, as in the paper. Plain standard form only: no
-// implicit upper bounds, no Gondzio correctors. Infeasibility detection
-// (tau / kappa -> 0) is #371; here such a run ends Failed, by the stall test
-// or the iteration limit.
+// implicit upper bounds, no Gondzio correctors. An infeasible LP or dual
+// ends on hsdInfeasibility's certificate (#371); a run that reaches neither
+// that nor optimality ends Failed, by the stall test or the iteration limit.
 BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
                             std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
                             std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
@@ -992,6 +992,24 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
                 }
             }
             return BarrierIpmOutcome::Optimal;
+        }
+
+        // Infeasibility (#371). With tau -> 0 against kappa, c'z - b'y =
+        // -kappa < 0 and (z, y, s) tends to a ray of A z = 0, A'y + s = 0.
+        // mu of the iterate scaled to max(tau, kappa) = 1, against the
+        // start's mu of 1 (z = s = 1, tau = kappa = 1).
+        const Real big = std::max(tau, kappa);
+        const Real mu_rel = mu / (big * big);
+        if (const auto cert = hsdInfeasibility(b, c, az, at_y, s, tau, kappa, mu_rel, ctz, bty,
+                                               opts.primal_dual_tol);
+            cert != BarrierIpmOutcome::Failed) {
+            iters = iter;
+            if (opts.verbose) {
+                std::printf("HSD: %s infeasible at tau=%.2e kappa=%.2e (c'z=% .3e b'y=% .3e)\n",
+                            cert == BarrierIpmOutcome::PrimalInfeasible ? "primal" : "dual", tau,
+                            kappa, ctz, bty);
+            }
+            return cert;
         }
 
         const Real gap_mu = gap / std::max<Real>(static_cast<Real>(n), 1.0);
@@ -1145,8 +1163,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         // z, s, tau and kappa act on: tau's limit is small on
         // an LP whose solution is large, and without this they stop the run
         // at mu ~ 1e-12 far above tolerance (fffff800, forplan). With
-        // tau = 1 the iterate is the LP point; with kappa = 1 (tau -> 0) a
-        // certificate is normalized to b'y - c'z = 1 (#371).
+        // tau = 1 the iterate is the LP point; with kappa = 1 (tau -> 0)
+        // b'y - c'z = kappa - rg tends to 1 as rg falls (#371).
         const Real scale = 1.0 / std::max(tau, kappa);
         for (std::vector<Real>* v : {&z, &y, &s}) {
             for (Real& e : *v) {
@@ -1171,6 +1189,64 @@ Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::sp
         q += s[j] * uz[j] * uz[j] / z[j];
     }
     return std::max(dot(b, uy) - dot(c, uz), q) + kappa / tau;
+}
+
+// The HSD loop's infeasibility test (#371), after Andersen & Andersen (2000),
+// sec. 3. A verdict needs the run to have reached a solution of the
+// homogeneous model with kappa > 0, tau = 0: mu <= tol mu0 (the termination
+// test of MOSEK's homogeneous algorithm, step 4 of "The homogeneous and
+// self-dual model and algorithm for linear optimization", MOSEK whitepaper,
+// 2013, https://docs.mosek.com/whitepapers/homolo.pdf: the residuals fall
+// with mu, eqs. (6)-(7)) and tau <= tol kappa. Both are scale-invariant, as
+// the loop rescales the iterate: tau / kappa, and mu_rel = mu / max(tau,
+// kappa)^2 against the start's mu (tau = kappa = 1). Without that gate the
+// rays alone read feasible LPs whose solutions are far larger than the data
+// (2^30 against |b| = 3) as infeasible mid-run. Then:
+// - b'y > 0 and |A'y + s|_inf <= tol b'y / max(1, |b|_inf): (y, s) is a
+//   Farkas ray. For any x >= 0 with A x = b, b'y = x'(A'y + s) - x's <=
+//   |x|_1 |A'y + s|_inf, so no feasible x has |x|_1 < max(1, |b|_inf) / tol:
+//   primal infeasible.
+// - c'z < 0 and |A z|_inf <= -tol c'z / max(1, |c|_inf): z is a ray of the
+//   dual. For any A'y + s = c, s >= 0, c'z = y'A z + s'z >= -|y|_1 |A z|_inf,
+//   so no dual feasible y has |y|_1 < max(1, |c|_inf) / tol: dual infeasible.
+// The bounds are relative to the data, as A is equilibrated but b and c keep
+// their size: unnormalized, a feasible LP with b ~ 1e9 read as infeasible,
+// and one with c ~ 1e9 as unbounded. Both ratios are invariant under scaling
+// the iterate. Primal is checked first. A dual ray proves the dual
+// infeasible, so the LP is infeasible or unbounded: solve() settles which.
+// A NaN anywhere gives no verdict. Failed means neither.
+BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
+                                   std::span<const Real> az, std::span<const Real> at_y,
+                                   std::span<const Real> s, Real tau, Real kappa, Real mu_rel,
+                                   Real ctz, Real bty, Real tol) {
+    if (!(tau <= tol * kappa) || !(mu_rel <= tol) || !std::isfinite(ctz) || !std::isfinite(bty)) {
+        return BarrierIpmOutcome::Failed;
+    }
+    // |v|_inf, NaN when an entry is: std::max would drop it.
+    auto rayNorm = [](auto&& entry, size_t len) {
+        Real out = 0.0;
+        for (size_t k = 0; k < len; ++k) {
+            const Real v = std::abs(entry(k));
+            if (std::isnan(v)) {
+                return v;
+            }
+            out = std::max(out, v);
+        }
+        return out;
+    };
+    if (bty > 0.0) {
+        const Real ray = rayNorm([&](size_t j) { return at_y[j] + s[j]; }, c.size());
+        if (ray <= tol * bty / std::max(1.0, infNorm(b))) {
+            return BarrierIpmOutcome::PrimalInfeasible;
+        }
+    }
+    if (ctz < 0.0) {
+        const Real ray = rayNorm([&](size_t i) { return az[i]; }, b.size());
+        if (ray <= -tol * ctz / std::max(1.0, infNorm(c))) {
+            return BarrierIpmOutcome::DualInfeasible;
+        }
+    }
+    return BarrierIpmOutcome::Failed;
 }
 
 // ============================================================================
@@ -1678,9 +1754,12 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         s = cstd_;
         for (Index j = 0; j < n; ++j) {
             if (s[j] < -1e-12) {
-                // A negative cost pushes the column to its upper bound.
+                // A negative cost pushes the column to its upper bound;
+                // without one, z = e_j is a dual ray. The HSD loop reports
+                // it (#371); the default path keeps its Failed.
                 if (!isFinite(ustd_[j])) {
-                    return BarrierIpmOutcome::Failed;
+                    return options_.homogeneous ? BarrierIpmOutcome::DualInfeasible
+                                                : BarrierIpmOutcome::Failed;
                 }
                 z[j] = ustd_[j];
             }
@@ -1887,7 +1966,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         // A failed or stopped run has no iterate that solve() reads, and one
         // whose starting point failed (a stop inside its factorization) has
         // none at all: z is empty, and unscaling it would read past its end.
-        if (!ok) {
+        // An infeasibility certificate is a ray, not a point (#371).
+        if (!ok || outcome == BarrierIpmOutcome::PrimalInfeasible ||
+            outcome == BarrierIpmOutcome::DualInfeasible) {
             return outcome;
         }
     }
@@ -2192,6 +2273,56 @@ LpResult BarrierSolver::solve() {
     };
     if (outcome == BarrierIpmOutcome::TimeLimit) {
         return timeLimit(iters);
+    }
+
+    // The HSD loop's certificates (#371): no point to postsolve or cross
+    // over. A dual ray means infeasible or unbounded, so the LP's own
+    // feasibility settles it: the same solve with a zero objective, which
+    // cannot meet a dual ray (c'z = 0), ends Optimal on a feasible LP, so
+    // this one is Unbounded, or Infeasible on its Farkas ray.
+    if (outcome == BarrierIpmOutcome::PrimalInfeasible ||
+        outcome == BarrierIpmOutcome::DualInfeasible) {
+        dual_eq_.clear();
+        reduced_costs_std_.clear();
+        primal_orig_.clear();
+        basis_orig_.clear();
+        objective_ = 0.0;
+        iterations_ = iters;
+        last_error_.clear();
+        status_ = Status::Infeasible;
+        if (outcome == BarrierIpmOutcome::DualInfeasible) {
+            const double left = deadline_.remainingSeconds();
+            if (left == 0.0) {
+                return timeLimit(iters);
+            }
+            LpProblem feasibility = original_;
+            std::fill(feasibility.obj.begin(), feasibility.obj.end(), 0.0);
+            BarrierOptions fopts = options_;
+            fopts.crossover = false;
+            fopts.max_solve_seconds = left;
+            BarrierSolver check;
+            check.setOptions(fopts);
+            check.load(feasibility);
+            const LpResult f = check.solve();
+            iterations_ += f.iterations;
+            if (options_.verbose) {
+                std::printf("HSD: dual ray; zero-objective solve ends %s\n",
+                            f.status == Status::Optimal      ? "Optimal: unbounded"
+                            : f.status == Status::Infeasible ? "Infeasible"
+                                                             : "neither");
+            }
+            if (f.status == Status::TimeLimit) {
+                return timeLimit(iterations_);
+            }
+            if (f.status == Status::Optimal) {
+                status_ = Status::Unbounded;
+            } else if (f.status != Status::Infeasible) {
+                status_ = Status::Error;
+                last_error_ =
+                    "Barrier HSD: dual infeasible, but primal feasibility was not settled.";
+            }
+        }
+        return {status_, objective_, iterations_, 0.0};
     }
 
     if (outcome == BarrierIpmOutcome::Failed) {
