@@ -1975,8 +1975,9 @@ TEST_CASE("Presolve: doubleton fill-in inserts nothing for an explicit zero", "[
 TEST_CASE("Presolve: doubleton fill-in counts the entries it inserts", "[presolve]") {
     // x + y = 1, x + z <= 2, y + w <= 3, min -z: x goes (the tie keeps the
     // first column) and r1 becomes -y + z <= 1, still two entries, y still
-    // in two rows. Counted short, r1 would read as a singleton row in z and
-    // lose y; the optimum z = 2 needs y = 1.
+    // in two rows. Counted short, r1 would read as a singleton row in y (the
+    // inserted entry comes first), losing z, which then goes to 10; the
+    // optimum z = 2 needs y = 1.
     LpProblem lp;
     lp.name = "doubleton_fill_counts";
     lp.sense = Sense::Minimize;
