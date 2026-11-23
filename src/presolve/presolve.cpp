@@ -904,7 +904,11 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
     // A pivot below this fraction of the row's largest coefficient would
     // scale the row's rounding up into x_j and the transferred costs.
     constexpr Real kPivotRatio = 1e-2;
-    constexpr Real kFreeTol = 1e-8;
+    // How far x_j's implied range may reach past a bound and still count as
+    // within it. Absolute: postsolve does not clamp, so this is how far x_j
+    // may come out beyond its bound, and the reduced model gains that
+    // sliver of the row (relative to a bound of 1000 it was 1e-5).
+    constexpr Real kFreeTol = 1e-9;
     Index changes = 0;
 
     for (Index j : dirty_cols) {
@@ -928,7 +932,10 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         }
         const bool has_lower = std::abs(lp.row_lower[i]) < kHugeBound;
         const bool has_upper = std::abs(lp.row_upper[i]) < kHugeBound;
-        if (!has_lower && !has_upper) {
+        // Crossed sides make the model infeasible, which holding the row at
+        // one side and dropping it would hide; later passes report it.
+        if ((!has_lower && !has_upper) ||
+            (has_lower && has_upper && lp.row_lower[i] > lp.row_upper[i])) {
             continue;
         }
 
@@ -978,11 +985,9 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
         const Real lj = lp.col_lower[j];
         const Real uj = lp.col_upper[j];
         const bool lower_implied =
-            lj <= -kHugeBound || (std::isfinite(implied_lo) &&
-                                  implied_lo >= lj - kFreeTol * std::max(1.0, std::abs(lj)));
+            lj <= -kHugeBound || (std::isfinite(implied_lo) && implied_lo >= lj - kFreeTol);
         const bool upper_implied =
-            uj >= kHugeBound || (std::isfinite(implied_hi) &&
-                                 implied_hi <= uj + kFreeTol * std::max(1.0, std::abs(uj)));
+            uj >= kHugeBound || (std::isfinite(implied_hi) && implied_hi <= uj + kFreeTol);
         if (!lower_implied || !upper_implied) {
             continue;
         }
@@ -1009,7 +1014,6 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
             lp.obj_offset += cj * t / a;
             for (std::size_t k = 0; k < row_cols.size(); ++k) {
                 lp.obj[row_cols[k]] -= cj * row_coeffs[k] / a;
-                next_dirty_cols[row_cols[k]] = 1;
             }
             lp.obj[j] = 0.0;
         }

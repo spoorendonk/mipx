@@ -1348,6 +1348,27 @@ void checkSubstituted(const LpProblem& lp) {
     CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
 }
 
+/// Minimize obj . x over l <= x0 + x1 <= u, both columns continuous.
+LpProblem pairRowModel(std::vector<Real> obj, std::vector<Real> lower, std::vector<Real> upper,
+                       Real l, Real u, Real a1 = 1.0) {
+    LpProblem lp;
+    lp.name = "free_col_pair";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = std::move(obj);
+    lp.col_lower = std::move(lower);
+    lp.col_upper = std::move(upper);
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1"};
+    lp.num_rows = 1;
+    lp.row_lower = {l};
+    lp.row_upper = {u};
+    lp.row_names = {"r0"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, a1}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+    return lp;
+}
+
 Index substitutions(const LpProblem& lp, const PresolveOptions& options) {
     Presolver presolver;
     presolver.setOptions(options);
@@ -1395,6 +1416,17 @@ TEST_CASE("Presolve: a zero-cost implied-free singleton is substituted out", "[p
                                   VarType::Continuous, 0.0, 3.0));
 }
 
+TEST_CASE("Presolve: a substituted column keeps a large bound to 1e-9", "[presolve]") {
+    // x0 - x1 = 999.999995 implies x0 >= 999.999995, 5e-6 short of x0 >= 1000:
+    // within a tolerance relative to the bound, but not implied. The optimum
+    // is x0 = 1000, x1 = 5e-6.
+    const LpProblem lp = pairRowModel({1, 0}, {1000, 0}, {2000, 10}, 999.999995, 999.999995, -1.0);
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, withFreeColSubstitution());
+    CHECK(full[0] >= 1000.0 - 1e-9);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(1000.0, 1e-9));
+}
+
 TEST_CASE("Presolve: free column substitution leaves what it cannot take", "[presolve]") {
     const auto eq = [](VarType type, Real x0_upper, Real a0) {
         return freeColModel(Sense::Minimize, {2, -1, 1}, {a0, 1, 1}, 0.0, x0_upper, type, 4.0, 4.0);
@@ -1412,6 +1444,15 @@ TEST_CASE("Presolve: free column substitution leaves what it cannot take", "[pre
         Presolver presolver;
         const auto full = presolveSolvePostsolve(lp, presolver, withFreeColSubstitution());
         CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+    }
+    SECTION("a row with crossed sides") {
+        // 5 <= x0 + x1 <= 1 is infeasible; held at 5 and dropped it was not.
+        const LpProblem lp = pairRowModel({1, 0}, {-10, 0}, {10, 1}, 5.0, 1.0);
+        Presolver presolver;
+        presolver.setOptions(withFreeColSubstitution());
+        presolver.presolve(lp);
+        CHECK(presolver.stats().free_col_substitution_changes == 0);
+        CHECK(presolver.isInfeasible());
     }
     SECTION("a pivot small against the row") {
         // x0 = (4 - x1 - x2) / 1e-3 lies in [0, 4000], implied by [0, 1e5].
