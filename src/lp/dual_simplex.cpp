@@ -661,10 +661,13 @@ void DualSimplexSolver::refactorize() {
 
 LpResult DualSimplexSolver::solve() {
     const auto start = std::chrono::steady_clock::now();
-    return cleanUpUnscaled(solveWithColdFallback(start), start);
+    bool checked = false;
+    LpResult res = solveWithColdFallback(start, checked);
+    return cleanUpUnscaled(res, start, checked);
 }
 
-LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::time_point start) {
+LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::time_point start,
+                                                  bool& checked) {
     const bool warm = has_basis_;
     LpResult res = solveFromCurrentBasis();
     // A warm basis can carry the solve into a corner its tolerances cannot
@@ -680,7 +683,11 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     // verdict is returned as a first cold solve's is, unchecked: the check is
     // stricter than the certificate and rejects many correct cold verdicts
     // (#249's measurements, #282).
-    if (!warm || verdictHolds()) {
+    if (!warm) {
+        return res;
+    }
+    if (verdictHolds()) {
+        checked = true;
         return res;
     }
     // A guard: the loop reaches a verdict only with iterations left, so today
@@ -1019,32 +1026,43 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // (primalHoldsUnscaled(), #307) or, on a point that holds, multipliers of the
 // wrong sign or a duality gap (optimumHoldsUnscaled(), #306): the scaled dual
 // tolerance is kDualTol cs_j on column j in the model's units. It runs within
-// what is left of the iteration and time limits; with none left the verdict
-// is withdrawn to that limit, as an unchecked warm verdict is (#249). Its own
-// verdict is returned unchecked, as a cold one is, with one exception: when
-// the scaled point held and the clean-up's Optimal misses, the scaled optimum
-// is put back. The scaled model is put back exactly as it was afterwards,
-// and the values, the basis and the factors with it, so later solves keep the
-// scaling. A clean-up that stops on a limit keeps its own point, unlike
+// what is left of the iteration and time limits. Its own verdict is returned
+// unchecked, as a cold one is. The scaled model is put back exactly as it was
+// afterwards, and the values, the basis and the factors with it, so later
+// solves keep the scaling. If the scaled basis cannot be refactorized, the
+// verdict stands without factors (has_basis_ false), as on solve()'s cold
+// fallback.
+//
+// A scaled point that missed has no verdict to fall back on: with no budget
+// left the verdict is withdrawn to that limit, as an unchecked warm verdict
+// is (#249), and a clean-up that stops on a limit keeps its own point, unlike
 // solve()'s cold fallback, which puts the warm point back: there the cold run
 // starts over from a slack basis, while the clean-up continues from the
-// scaled optimum's basis, so its point is the later one of the same path. If
-// the scaled basis cannot be refactorized, the verdict stands without
-// factors (has_basis_ false), as on solve()'s cold fallback.
+// scaled optimum's basis, so its point is the later one of the same path.
+// A scaled point that held, refuted only by its multipliers, is a feasible
+// point and a cold verdict, which stood unchecked before #306. It is not
+// traded for less: with no budget left it stands, and it is put back when
+// the clean-up ends on anything but a point that holds (an Optimal that
+// misses, cuts seed 45269; Infeasible, which a feasible point contradicts; a
+// limit; Error) or Unbounded, which agrees with the wrong-sign multipliers.
+//
+// `checked` means solve()'s fallback already ran optimumHoldsUnscaled() on
+// this verdict and it passed, so only the point is checked here.
 //
 // On default, with no option to turn it off (#313): it fires only on a
 // verdict the model's units refute.
 LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
-                                            std::chrono::steady_clock::time_point start) {
+                                            std::chrono::steady_clock::time_point start,
+                                            bool checked) {
     if (res.status != Status::Optimal || !scaled_ || !has_basis_) {
         return res;
     }
     const bool primal_held = primalHoldsUnscaled();
-    if (primal_held && optimumHoldsUnscaled()) {
+    if (primal_held && (checked || optimumHoldsUnscaled())) {
         return res;
     }
     if (res.iterations >= iter_limit_) {
-        return withdrawVerdict(res, Status::IterLimit);
+        return primal_held ? res : withdrawVerdict(res, Status::IterLimit);
     }
     const Int iter_limit = iter_limit_;
     const double time_limit = options_.max_solve_seconds;
@@ -1052,7 +1070,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         const double spent =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         if (spent >= time_limit) {
-            return withdrawVerdict(res, Status::TimeLimit);
+            return primal_held ? res : withdrawVerdict(res, Status::TimeLimit);
         }
         options_.max_solve_seconds = time_limit - spent;
     }
@@ -1103,10 +1121,15 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     buildBasisMatrixSource();
-    if (scaled_point && clean.status == Status::Optimal && !primalHoldsUnscaled()) {
+    const bool restore = scaled_point && clean.status != Status::Unbounded &&
+                         (clean.status != Status::Optimal || !primalHoldsUnscaled());
+    if (restore) {
         // The unscaled factors of an ill-conditioned basis can read its point
         // worse than the scaled ones did (cuts seed 45269): a dual refutation
-        // is not traded for a row miss. The scaled optimum stands, unchecked.
+        // is not traded for a row miss, nor for no point at all. The scaled
+        // optimum stands, unchecked.
+        status_ = Status::Optimal;
+        clean.status = Status::Optimal;
         primal_ = std::move(scaled_point->primal);
         dual_ = std::move(scaled_point->dual);
         reduced_cost_ = std::move(scaled_point->reduced_cost);
@@ -1118,7 +1141,6 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         dual_ray_.clear();
         primal_ray_.clear();
         has_basis_ = true;
-        clean.objective = getObjective();
     }
     if (has_basis_) {
         // Nonbasic values back exactly on the scaled bounds, and the factors
@@ -1131,6 +1153,9 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         } catch (const std::runtime_error&) {
             has_basis_ = false;
         }
+    }
+    if (restore) {
+        clean.objective = getObjective();
     }
     clean.iterations += res.iterations;
     clean.work_units += res.work_units;
