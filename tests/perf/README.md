@@ -51,12 +51,16 @@ simplex on nine Netlib LPs, and barrier and PDLP on a four-instance smoke subset
 (barrier is `dnf` throughout, see #204). PDLP also runs forplan, greenbeb and
 bnl2, which it once reported Optimal up to 7.7% from the optimum (#205): `dnf`
 is expected there, and the gate fails if they disagree again. The MIP list covers flugpl, gen, gt2
-and p0201. gt2 is `dnf` at a 10 s per-row limit: the tree search does not
-finish it since #278 changed the LP vertices it lands on (#341, #350); it
-reports `BETTER` once it solves again. A gate with no instance files exits 77
-(ctest: skipped) and names the listed instances it did not run. Widening them to the full sets is a benchmark-scale run,
-tracked in #223. The gate records no timings; timing baselines belong to
-#213.
+and p0201. gt2 is `dnf`: the tree search has not finished it since #278
+changed the LP vertices it lands on (#341, #350). Its 10 s per-row limit
+keeps the gate from spending 60 s on a known stop. The row still fails on a
+wrong Optimal or Infeasible claim, but a crash, error or hang on gt2 is `dnf`
+too and passes, and it reports `BETTER` once gt2 solves again; then set the
+row to `match_1e-6` and drop its limit by hand (`--write-expected` keeps it).
+A gate with no instance files exits 77 and names the listed instances it did
+not run; ctest shows only `Skipped` for it unless run with `-V`. Widening the
+lists to the full sets is a benchmark-scale run, tracked in #223. The gate
+records no timings; timing baselines belong to #213.
 
 The gate's own tests: `uv run --with pytest pytest tests/perf/test_run_instance_gate.py`.
 

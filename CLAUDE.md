@@ -287,6 +287,8 @@ ctest --test-dir build -L instance-gate --output-on-failure
 ```
 
 See `tests/perf/README.md` for running it directly and regenerating the lists.
+Without instance files it reports `Skipped`, not a pass; `-V` shows which
+listed instances it did not run (#341).
 
 Don't add new wall-clock assertions to the default suite. Timing work belongs
 in a benchmark bed with recorded baselines, not in pass/fail unit tests — see
