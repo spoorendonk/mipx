@@ -378,42 +378,38 @@ static void symbolicAnalyze(Index n, const std::vector<Index>& col_starts,
         }
     }
 
-    // Symbolic factorization: walk etree from each off-diagonal entry.
-    sym.l_col_ptr.resize(static_cast<size_t>(n + 1));
-    sym.l_row_idx.clear();
+    // Symbolic factorization, one row at a time: row k of L is the union of
+    // the etree paths from each j with A(k,j) != 0, j < k, up towards k (the
+    // row subtree; Liu 1986, cs_ereach). Walking up from a column's own
+    // entries instead misses the fill a column inherits from its children,
+    // and the numeric LDL' then drops it (#270).
     sym.l_row_to_cols.assign(static_cast<size_t>(n), {});
-
+    std::vector<Index> col_count(static_cast<size_t>(n), 0);
     std::vector<Index> flag(static_cast<size_t>(n), -1);
-
-    for (Index j = 0; j < n; ++j) {
-        sym.l_col_ptr[j] = static_cast<Index>(sym.l_row_idx.size());
-        flag[j] = j;
-
-        for (Index p = pcptr[j]; p < pcptr[j + 1]; ++p) {
-            Index i = pridx[p];
-            if (i <= j) {
-                continue;
+    for (Index k = 0; k < n; ++k) {
+        flag[k] = k;
+        for (Index j : row_adj[k]) {
+            for (Index c = j; c != -1 && flag[c] != k; c = parent[c]) {
+                flag[c] = k;
+                sym.l_row_to_cols[k].push_back(c);
+                ++col_count[c];
             }
-            Index k = i;
-            while (k != -1 && flag[k] != j) {
-                flag[k] = j;
-                sym.l_row_idx.push_back(k);
-                k = parent[k];
-            }
-        }
-
-        // Sort this column.
-        auto beg = sym.l_row_idx.begin() + sym.l_col_ptr[j];
-        auto end = sym.l_row_idx.end();
-        std::sort(beg, end);
-
-        // Build row→col index.
-        for (auto it = beg; it != end; ++it) {
-            sym.l_row_to_cols[*it].push_back(j);
         }
     }
-    sym.l_col_ptr[n] = static_cast<Index>(sym.l_row_idx.size());
-    sym.l_nnz = static_cast<Index>(sym.l_row_idx.size());
+
+    // Columns in CSC; rows k come in increasing order, so each is sorted.
+    sym.l_col_ptr.assign(static_cast<size_t>(n + 1), 0);
+    for (Index c = 0; c < n; ++c) {
+        sym.l_col_ptr[c + 1] = sym.l_col_ptr[c] + col_count[c];
+    }
+    sym.l_nnz = sym.l_col_ptr[n];
+    sym.l_row_idx.assign(static_cast<size_t>(sym.l_nnz), 0);
+    std::vector<Index> next(sym.l_col_ptr.begin(), sym.l_col_ptr.end() - 1);
+    for (Index k = 0; k < n; ++k) {
+        for (Index c : sym.l_row_to_cols[k]) {
+            sym.l_row_idx[next[c]++] = k;
+        }
+    }
 
     // Report fill-in quality.
     if (verbose) {
@@ -1421,10 +1417,12 @@ public:
 
         // Iterative refinement.
         for (Int ir = 0; ir < ir_steps_; ++ir) {
-            // Unpermute current solution.
+            // Unpermute current solution: the inverse of the permute above,
+            // so iperm, not perm (perm read a different entry unless the
+            // ordering was its own inverse, #270).
             std::vector<Real> sol(static_cast<size_t>(dim_));
             for (Index i = 0; i < dim_; ++i) {
-                sol[i] = rhs_perm[sym_.perm[i]];
+                sol[i] = rhs_perm[sym_.iperm[i]];
             }
 
             // Compute K * sol.
@@ -1472,7 +1470,7 @@ public:
         // Unpermute and recover.
         std::vector<Real> sol(static_cast<size_t>(dim_));
         for (Index i = 0; i < dim_; ++i) {
-            sol[i] = rhs_perm[sym_.perm[i]];
+            sol[i] = rhs_perm[sym_.iperm[i]];
         }
 
         // dz = sol[0..n-1], dy = sol[n..n+m-1]

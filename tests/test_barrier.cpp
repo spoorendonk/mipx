@@ -338,7 +338,8 @@ TEST_CASE("BarrierSolver CPU Cholesky: small Netlib LPs converge without crossov
     opts.verbose = false;
     opts.crossover = false;
     opts.presolve = presolve;
-    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
+                              BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -389,12 +390,32 @@ TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]"
     solver.load(lp);
     auto result = solver.solve();
 
-    // CPU augmented LDL' is not yet numerically stable on this LP (see #162);
-    // the scatterAugColumn ordering fix is necessary but not sufficient.
-    if (result.status != Status::Optimal) {
-        SKIP("CPU augmented backend is not yet stable on triangle LP (#162).");
-    }
+    // Failed until the solve unpermuted with iperm and the symbolic pattern
+    // carried the etree fill (#162, #270).
+    REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
+          "[barrier][cpu-augmented]") {
+    // The second master of mcf's column generation on grid2 (public grid
+    // instance, recorded with lp_dump, #270). CpuAugmented, which Auto picks on
+    // a CPU-only build, diverged from its first step until the fixes above.
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
+                               BarrierAlgorithm::CpuSparseCholesky);
+    const bool presolve = GENERATE(false, true);
+    INFO("algo " << static_cast<int>(algo) << " presolve " << presolve);
+    const auto lp = readMps(mipx::test::testDataDir() + "/grid2_master_0001.mps");
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = presolve;
+    opts.algorithm = algo;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - 2.03902e6) <= 1e-6 * 2.03902e6);
 }
 
 // ============================================================================
@@ -421,9 +442,7 @@ TEST_CASE("BarrierSolver Auto: objectives match across backends", "[barrier][aut
     auto aug_result = aug_solver.solve();
 
     REQUIRE(chol_result.status == Status::Optimal);
-    if (aug_result.status != Status::Optimal) {
-        SKIP("CPU augmented backend is not yet stable on triangle LP (#162).");
-    }
+    REQUIRE(aug_result.status == Status::Optimal);
     CHECK_THAT(chol_result.objective, WithinAbs(aug_result.objective, 1e-6));
 }
 

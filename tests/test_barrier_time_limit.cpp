@@ -71,8 +71,8 @@ TEST_CASE("Barrier with a zero time limit returns TimeLimit", "[barrier][time-li
 }
 
 TEST_CASE("Barrier with a generous time limit still solves", "[barrier][time-limit]") {
-    // Not CpuAugmented: its LDL' fails this LP with no limit at all.
-    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
+                               BarrierAlgorithm::CpuSparseCholesky);
     INFO("algo " << static_cast<int>(algo));
     CHECK(solveWithLimit(algo, 600.0).status == Status::Optimal);
     CHECK(solveWithLimit(algo, -1.0).status == Status::Optimal);

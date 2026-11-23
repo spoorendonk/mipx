@@ -22,6 +22,7 @@ add_executable(mipx-tests
     test_parallel.cpp
     test_symmetry.cpp
     test_barrier.cpp
+    test_barrier_augmented.cpp
     test_barrier_dense_cols.cpp
     test_barrier_implicit_bounds.cpp
     test_barrier_gondzio.cpp
@@ -59,8 +60,10 @@ set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
 
 # The dense-column tests drive a barrier backend through its internal
 # interface (src/lp/newton_solver.h), so those files alone see src/; the
-# time-limit tests do too, for the checks inside factorize() (#275).
+# time-limit tests do too, for the checks inside factorize() (#275), and the
+# augmented-backend tests, to compare its directions with the NE's (#270).
 set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
+    test_barrier_augmented.cpp
     APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )

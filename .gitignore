@@ -28,6 +28,9 @@ tests/data/*_roundtrip.mps
 # A column-generation LP sequence of the public CommaLab grid1, written by
 # mcf's LP recorder (#267's tier-0 replay).
 !tests/data/lpseq/**/*.mps
+# The second cg master of the public CommaLab grid2, from the same recorder:
+# CpuAugmented's regression LP (#270).
+!tests/data/grid2_master_0001.mps
 
 # Scratch planning docs
 plan-barrier.md
