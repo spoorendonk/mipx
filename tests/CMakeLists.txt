@@ -22,6 +22,7 @@ add_executable(mipx-tests
     test_symmetry.cpp
     test_barrier.cpp
     test_barrier_dense_cols.cpp
+    test_barrier_implicit_bounds.cpp
     test_sparse_cholesky.cpp
     test_amd_ordering.cpp
     test_pdlp.cpp

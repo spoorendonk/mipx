@@ -64,6 +64,12 @@ struct BarrierOptions {
     Int ne_max_dense_cols = 100;
     Int ir_steps = 2;
     Int ruiz_iterations = 10;
+    // Upper bounds inside the IPM (#299): a column with finite bounds, and a
+    // ranged row's slack, stays one standard-form column with an upper bound,
+    // its slack and dual carried by the IPM loop, instead of two columns and
+    // a row w + t = u - l. Opt-in, CPU backends only: with it on, a model with
+    // upper bounds skips the GPU path.
+    bool implicit_upper_bounds = false;
     bool verbose = true;
     bool crossover = true;
     bool presolve = true;
@@ -101,8 +107,14 @@ public:
     void setObjective(std::span<const Real> obj) override;
     void setColObjective(Index col, Real cost) override;
 
-    void setOptions(const BarrierOptions& options) { options_ = options; }
+    // Rebuilds the standard form of a loaded model when the options change
+    // its shape (implicit_upper_bounds).
+    void setOptions(const BarrierOptions& options);
     [[nodiscard]] const BarrierOptions& options() const { return options_; }
+    // Size of the standard form the IPM solves (rows = normal-equations
+    // dimension), for tests and diagnostics.
+    [[nodiscard]] Index standardFormRows() const { return aeq_.numRows(); }
+    [[nodiscard]] Index standardFormCols() const { return aeq_.numCols(); }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
@@ -136,6 +148,9 @@ private:
     SparseMatrix aeq_{0, 0};
     std::vector<Real> beq_;
     std::vector<Real> cstd_;
+    // Upper bound of each standard-form column, +inf where none. Finite only
+    // under implicit_upper_bounds; otherwise the bounds are rows of aeq_.
+    std::vector<Real> ustd_;
     std::vector<OriginalColExpr> col_expr_;
     Real std_obj_offset_ = 0.0;
     Real scaled_obj_ = 0.0;  // objective computed before Ruiz unscaling

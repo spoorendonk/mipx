@@ -183,9 +183,16 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
 // A'y + s = c, shifted to be positive and then centred. A start at z = s = 1
 // ignores b and c, so on badly scaled models the first steps are tiny and mu
 // grows instead of shrinking (#204).
+//
+// With upper bounds (#299), each bounded column j also gets its slack
+// v_j = u_j - z_j and the dual w_j of z_j <= u_j, with s_j - w_j the
+// least-squares reduced cost split into its positive and negative parts. The
+// shifts and centring then run over (z, v) and (s, w) together, which keeps
+// s - w and so the dual residual.
 bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::span<const Real> c,
-                           Real reg, std::vector<Real>& z, std::vector<Real>& y,
-                           std::vector<Real>& s) {
+                           std::span<const Real> u, std::span<const Index> upper_cols, Real reg,
+                           std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
+                           std::vector<Real>& v, std::vector<Real>& w) {
     const auto m = b.size();
     const auto n = c.size();
     const std::vector<Real> ones(n, 1.0);
@@ -211,12 +218,22 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
     }
     y = dy;
     s = ds;
+    v.assign(n, 0.0);
+    w.assign(n, 0.0);
+    for (const Index j : upper_cols) {
+        v[j] = u[j] - z[j];
+        w[j] = std::max(-s[j], 0.0);
+        s[j] = std::max(s[j], 0.0);
+    }
 
     Real min_z = 0.0;
     Real min_s = 0.0;
     for (size_t j = 0; j < n; ++j) {
         min_z = std::min(min_z, z[j]);
         min_s = std::min(min_s, s[j]);
+    }
+    for (const Index j : upper_cols) {
+        min_z = std::min(min_z, v[j]);
     }
     const Real shift_z = -1.5 * min_z;
     const Real shift_s = -1.5 * min_s;
@@ -230,12 +247,23 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
         sum_s += s[j];
         zs += z[j] * s[j];
     }
+    for (const Index j : upper_cols) {
+        v[j] += shift_z;
+        w[j] += shift_s;
+        sum_z += v[j];
+        sum_s += w[j];
+        zs += v[j] * w[j];
+    }
     // The centring shifts are undefined when z or s is zero everywhere
     // (b = 0 or c in the row space of A); fall back to a unit start then.
     if (!(sum_z > 0.0) || !(sum_s > 0.0) || !(zs > 0.0) || !std::isfinite(zs)) {
         z.assign(n, 1.0);
         s.assign(n, 1.0);
         y.assign(m, 0.0);
+        for (const Index j : upper_cols) {
+            v[j] = 1.0;
+            w[j] = 1.0;
+        }
         return true;
     }
     const Real centre_z = 0.5 * zs / sum_s;
@@ -244,7 +272,72 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
         z[j] += centre_z;
         s[j] += centre_s;
     }
+    for (const Index j : upper_cols) {
+        v[j] += centre_z;
+        w[j] += centre_s;
+    }
     return true;
+}
+
+// The bounded columns' part of a Newton step (#299). With upper slack v and
+// its dual w, the step solves
+//   A dz = rp,  dz + dv = ru,  A'dy + ds - dw = rd,
+//   S dz + Z ds = rc,  W dv + V dw = rw.
+// Eliminating ds = (rc - S dz)/Z, dv = ru - dz and dw = (rw - W dv)/V leaves
+//   A'dy - (S/Z + W/V) dz = rd - rc/Z + (rw - W ru)/V,
+// which the backend's system with z = 1, s = S/Z + W/V and rc = 0 has, so
+// every NewtonSolver serves unchanged. Columns without an upper bound pass
+// through as they are.
+struct UpperBoundStep {
+    std::vector<Real> z_eff;
+    std::vector<Real> s_eff;
+    std::vector<Real> rd_eff;
+    std::vector<Real> rc_eff;
+
+    void scaling(std::span<const Index> cols, std::span<const Real> z, std::span<const Real> s,
+                 std::span<const Real> v, std::span<const Real> w) {
+        z_eff.assign(z.begin(), z.end());
+        s_eff.assign(s.begin(), s.end());
+        for (const Index j : cols) {
+            z_eff[j] = 1.0;
+            s_eff[j] = s[j] / z[j] + w[j] / v[j];
+        }
+    }
+
+    // rd_eff, rc_eff for residuals rd, rc and the bound rows' ru, rw.
+    void fold(std::span<const Index> cols, std::span<const Real> z, std::span<const Real> v,
+              std::span<const Real> w, std::span<const Real> rd, std::span<const Real> rc,
+              std::span<const Real> ru, std::span<const Real> rw) {
+        rd_eff.assign(rd.begin(), rd.end());
+        rc_eff.assign(rc.begin(), rc.end());
+        for (const Index j : cols) {
+            rd_eff[j] = rd[j] - rc[j] / z[j] + (rw[j] - w[j] * ru[j]) / v[j];
+            rc_eff[j] = 0.0;
+        }
+    }
+
+    // ds, dv, dw of the bounded columns once the backend has given dz.
+    static void recover(std::span<const Index> cols, std::span<const Real> z,
+                        std::span<const Real> s, std::span<const Real> v, std::span<const Real> w,
+                        std::span<const Real> rc, std::span<const Real> ru,
+                        std::span<const Real> rw, std::span<const Real> dz, std::span<Real> ds,
+                        std::span<Real> dv, std::span<Real> dw) {
+        for (const Index j : cols) {
+            ds[j] = (rc[j] - s[j] * dz[j]) / z[j];
+            dv[j] = ru[j] - dz[j];
+            dw[j] = (rw[j] - w[j] * dv[j]) / v[j];
+        }
+    }
+};
+
+inline Real maxStepOn(std::span<const Index> cols, std::span<const Real> x,
+                      std::span<const Real> dx, Real fraction, Real alpha) {
+    for (const Index j : cols) {
+        if (dx[j] < 0.0) {
+            alpha = std::min(alpha, -fraction * x[j] / dx[j]);
+        }
+    }
+    return std::clamp(alpha, 0.0, 1.0);
 }
 
 // A run that stops short of primal_dual_tol (stall, iteration limit, failed
@@ -255,11 +348,32 @@ constexpr Real kNearOptimalTol = 1e-6;
 
 BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                                  std::span<const Real> b, std::span<const Real> c,
-                                 const BarrierOptions& opts, Real obj_offset, std::vector<Real>& z,
-                                 std::vector<Real>& y, std::vector<Real>& s, Int& iters) {
+                                 std::span<const Real> u, const BarrierOptions& opts,
+                                 Real obj_offset, std::vector<Real>& z, std::vector<Real>& y,
+                                 std::vector<Real>& s, Int& iters) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const Real reg = std::max(opts.regularization, 1e-12);
+
+    // Columns with an upper bound (#299); empty unless implicit_upper_bounds,
+    // and then the loop below is the plain standard-form one.
+    std::vector<Index> upper_cols;
+    for (Index j = 0; j < n; ++j) {
+        if (isFinite(u[j])) {
+            upper_cols.push_back(j);
+        }
+    }
+    const bool bounded = !upper_cols.empty();
+    const Index n_compl = n + static_cast<Index>(upper_cols.size());
+    std::vector<Real> v;  // upper slack u - z
+    std::vector<Real> w;  // dual of z <= u
+    std::vector<Real> ru(static_cast<size_t>(n), 0.0);
+    std::vector<Real> rw(static_cast<size_t>(n), 0.0);
+    std::vector<Real> dv(static_cast<size_t>(n), 0.0);
+    std::vector<Real> dw(static_cast<size_t>(n), 0.0);
+    std::vector<Real> dv_aff(static_cast<size_t>(n), 0.0);
+    std::vector<Real> dw_aff(static_cast<size_t>(n), 0.0);
+    UpperBoundStep ub_step;
 
     std::vector<Real> az(static_cast<size_t>(m));
     std::vector<Real> at_y(static_cast<size_t>(n));
@@ -274,16 +388,25 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     std::vector<Real> dy_aff(static_cast<size_t>(m));
     std::vector<Real> ds_aff(static_cast<size_t>(n));
 
-    if (!mehrotraStartingPoint(solver, b, c, reg, z, y, s)) {
+    if (!mehrotraStartingPoint(solver, b, c, u, upper_cols, reg, z, y, s, v, w)) {
         iters = 0;
         return BarrierIpmOutcome::Failed;
     }
+
+    // The caller reads s as the reduced cost c - A'y, which is s - w on a
+    // bounded column (negative at an upper bound).
+    auto reducedCosts = [&](std::vector<Real>& s_out, const std::vector<Real>& w_in) {
+        for (const Index j : upper_cols) {
+            s_out[j] -= w_in[j];
+        }
+    };
 
     // Best iterate seen, by the largest of the three termination measures.
     Real best_err = std::numeric_limits<Real>::infinity();
     std::vector<Real> best_z;
     std::vector<Real> best_y;
     std::vector<Real> best_s;
+    std::vector<Real> best_w;
     auto stopShort = [&](Int iter) {
         iters = iter;
         if (best_err > kNearOptimalTol) {
@@ -292,6 +415,7 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         z = std::move(best_z);
         y = std::move(best_y);
         s = std::move(best_s);
+        reducedCosts(s, best_w);
         return BarrierIpmOutcome::NearOptimal;
     };
 
@@ -302,7 +426,11 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     Index schur_order_shown = -1;
     Index schur_dropped_shown = -1;
 
-    const Real inv_b = 1.0 / (1.0 + infNorm(b));
+    Real b_norm = infNorm(b);
+    for (const Index j : upper_cols) {
+        b_norm = std::max(b_norm, std::abs(u[j]));
+    }
+    const Real inv_b = 1.0 / (1.0 + b_norm);
     const Real inv_c = 1.0 / (1.0 + infNorm(c));
 
     for (Int iter = 0; iter < opts.max_iter; ++iter) {
@@ -323,9 +451,17 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         for (Index j = 0; j < n; ++j) {
             rd[j] = c[j] - at_y[j] - s[j];
         }
+        Real zs_sum = dot(z, s);
+        Real ru_norm = 0.0;
+        for (const Index j : upper_cols) {
+            rd[j] += w[j];
+            ru[j] = u[j] - z[j] - v[j];
+            ru_norm = std::max(ru_norm, std::abs(ru[j]));
+            zs_sum += v[j] * w[j];
+        }
 
-        Real mu = dot(z, s) / std::max<Index>(n, 1);
-        Real pinf = infNorm(rp) * inv_b;
+        Real mu = zs_sum / std::max<Index>(n_compl, 1);
+        Real pinf = std::max(infNorm(rp), ru_norm) * inv_b;
         Real dinf = infNorm(rd) * inv_c;
         Real gap = std::abs(mu) / (1.0 + std::abs(obj_offset + dot(c, z)));
 
@@ -337,6 +473,7 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
             gap < opts.primal_dual_tol) {
             iters = iter;
+            reducedCosts(s, w);
             return BarrierIpmOutcome::Optimal;
         }
 
@@ -346,6 +483,9 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             best_z = z;
             best_y = y;
             best_s = s;
+            if (bounded) {
+                best_w = w;
+            }
         }
 
         // Stall detection.
@@ -360,12 +500,31 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         prev_gap = gap;
 
         // Factorize.
-        if (!solver.factorize(z, s, reg)) {
+        if (bounded) {
+            ub_step.scaling(upper_cols, z, s, v, w);
+        }
+        const std::span<const Real> z_fac = bounded ? ub_step.z_eff : z;
+        const std::span<const Real> s_fac = bounded ? ub_step.s_eff : s;
+        if (!solver.factorize(z_fac, s_fac, reg)) {
             // Retry with boosted regularization.
-            if (!solver.factorize(z, s, reg * 100.0)) {
+            if (!solver.factorize(z_fac, s_fac, reg * 100.0)) {
                 return stopShort(iter);
             }
         }
+        // One Newton solve for the right-hand side (rp, rd, rc, ru, rw).
+        auto newton = [&](std::span<Real> dz_out, std::span<Real> dy_out, std::span<Real> ds_out,
+                          std::span<Real> dv_out, std::span<Real> dw_out) {
+            if (!bounded) {
+                return solver.solveNewton(rp, rd, rc, dz_out, dy_out, ds_out);
+            }
+            ub_step.fold(upper_cols, z, v, w, rd, rc, ru, rw);
+            if (!solver.solveNewton(rp, ub_step.rd_eff, ub_step.rc_eff, dz_out, dy_out, ds_out)) {
+                return false;
+            }
+            UpperBoundStep::recover(upper_cols, z, s, v, w, rc, ru, rw, dz_out, ds_out, dv_out,
+                                    dw_out);
+            return true;
+        };
         if (opts.verbose) {
             // The dense-column Schur complement of the sparse NE backend
             // (#314), printed when it changes: it grows with shifted pivots.
@@ -383,18 +542,28 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         for (Index j = 0; j < n; ++j) {
             rc[j] = -z[j] * s[j];
         }
-        if (!solver.solveNewton(rp, rd, rc, dz_aff, dy_aff, ds_aff)) {
+        for (const Index j : upper_cols) {
+            rw[j] = -v[j] * w[j];
+        }
+        if (!newton(dz_aff, dy_aff, ds_aff, dv_aff, dw_aff)) {
             return stopShort(iter);
         }
 
         Real alpha_aff_p = maxStepToBoundary(z, dz_aff, 1.0);
         Real alpha_aff_d = maxStepToBoundary(s, ds_aff, 1.0);
+        if (bounded) {
+            alpha_aff_p = maxStepOn(upper_cols, v, dv_aff, 1.0, alpha_aff_p);
+            alpha_aff_d = maxStepOn(upper_cols, w, dw_aff, 1.0, alpha_aff_d);
+        }
 
         Real mu_aff = 0.0;
         for (Index j = 0; j < n; ++j) {
             mu_aff += (z[j] + alpha_aff_p * dz_aff[j]) * (s[j] + alpha_aff_d * ds_aff[j]);
         }
-        mu_aff /= std::max<Index>(n, 1);
+        for (const Index j : upper_cols) {
+            mu_aff += (v[j] + alpha_aff_p * dv_aff[j]) * (w[j] + alpha_aff_d * dw_aff[j]);
+        }
+        mu_aff /= std::max<Index>(n_compl, 1);
 
         Real sigma = std::pow(std::max(mu_aff, 0.0) / std::max(mu, 1e-30), 3.0);
         sigma = std::clamp(sigma, 0.0, 1.0);
@@ -403,13 +572,20 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         for (Index j = 0; j < n; ++j) {
             rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
         }
-        if (!solver.solveNewton(rp, rd, rc, dz, dy, ds)) {
+        for (const Index j : upper_cols) {
+            rw[j] = sigma * mu - v[j] * w[j] - dv_aff[j] * dw_aff[j];
+        }
+        if (!newton(dz, dy, ds, dv, dw)) {
             return stopShort(iter);
         }
 
         // Step to boundary.
         Real alpha_p = maxStepToBoundary(z, dz, opts.step_fraction);
         Real alpha_d = maxStepToBoundary(s, ds, opts.step_fraction);
+        if (bounded) {
+            alpha_p = maxStepOn(upper_cols, v, dv, opts.step_fraction, alpha_p);
+            alpha_d = maxStepOn(upper_cols, w, dw, opts.step_fraction, alpha_d);
+        }
 
         if (opts.verbose) {
             Real dz_norm = infNorm(std::span<const Real>(dz.data(), static_cast<size_t>(n)));
@@ -425,6 +601,10 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             s[j] += alpha_d * ds[j];
             z[j] = std::max(z[j], 1e-12);
             s[j] = std::max(s[j], 1e-12);
+        }
+        for (const Index j : upper_cols) {
+            v[j] = std::max(v[j] + alpha_p * dv[j], 1e-12);
+            w[j] = std::max(w[j] + alpha_d * dw[j], 1e-12);
         }
         for (Index i = 0; i < m; ++i) {
             y[i] += alpha_d * dy[i];
@@ -457,6 +637,14 @@ void BarrierSolver::load(const LpProblem& problem) {
     rebuildTransform();
 }
 
+void BarrierSolver::setOptions(const BarrierOptions& options) {
+    const bool reshape = options.implicit_upper_bounds != options_.implicit_upper_bounds;
+    options_ = options;
+    if (loaded_ && reshape) {
+        rebuildTransform();
+    }
+}
+
 bool BarrierSolver::buildStandardForm() {
     // Use the presolved problem if presolve is active, otherwise original.
     const auto& prob = presolve_active_ ? presolved_ : original_;
@@ -464,6 +652,8 @@ bool BarrierSolver::buildStandardForm() {
     transformed_infeasible_ = false;
     beq_.clear();
     cstd_.clear();
+    ustd_.clear();
+    const bool implicit_ub = options_.implicit_upper_bounds;
     col_expr_.assign(static_cast<size_t>(prob.num_cols), OriginalColExpr{});
     // The standard form minimises obj_sign * c, so its offset carries the same sign.
     const Real obj_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
@@ -471,9 +661,10 @@ bool BarrierSolver::buildStandardForm() {
 
     std::vector<Triplet> trips;
 
-    auto addStdCol = [&](Real cost) {
+    auto addStdCol = [&](Real cost, Real upper = kInf) {
         Index idx = static_cast<Index>(cstd_.size());
         cstd_.push_back(cost);
+        ustd_.push_back(upper);
         return idx;
     };
 
@@ -502,13 +693,15 @@ bool BarrierSolver::buildStandardForm() {
                 transformed_infeasible_ = true;
                 return false;
             }
-            Index w = addStdCol(obj);
-            Index t = addStdCol(0.0);
+            Index w = addStdCol(obj, implicit_ub ? std::max(ub - lb, 0.0) : kInf);
             expr.offset = lb;
             expr.col_a = w;
             expr.coeff_a = 1.0;
             std_obj_offset_ += obj * lb;
-            addEqRow({{w, 1.0}, {t, 1.0}}, ub - lb);
+            if (!implicit_ub) {
+                Index t = addStdCol(0.0);
+                addEqRow({{w, 1.0}, {t, 1.0}}, ub - lb);
+            }
         } else if (lb_finite && !ub_finite) {
             Index w = addStdCol(obj);
             expr.offset = lb;
@@ -582,10 +775,11 @@ bool BarrierSolver::buildStandardForm() {
             addEqRow(entries, rhs);
             continue;
         }
-        Index slack = addStdCol(0.0);
+        const bool ranged = rl_finite && ru_finite;
+        Index slack = addStdCol(0.0, implicit_ub && ranged ? ru - rl : kInf);
         entries.push_back({slack, 1.0});
         addEqRow(entries, rhs);
-        if (rl_finite && ru_finite) {
+        if (ranged && !implicit_ub) {
             Index t = addStdCol(0.0);
             addEqRow({{slack, 1.0}, {t, 1.0}}, ru - rl);
         }
@@ -925,7 +1119,11 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         s = cstd_;
         for (Index j = 0; j < n; ++j) {
             if (s[j] < -1e-12) {
-                return BarrierIpmOutcome::Failed;
+                // A negative cost pushes the column to its upper bound.
+                if (!isFinite(ustd_[j])) {
+                    return BarrierIpmOutcome::Failed;
+                }
+                z[j] = ustd_[j];
             }
         }
         iters = 0;
@@ -934,6 +1132,14 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 
     // Ruiz equilibration.
     computeRuizScaling(aeq_, beq_, cstd_, row_scale_, col_scale_, options_.ruiz_iterations);
+    // Column scaling x = C x_s moves an upper bound to u / C.
+    bool has_upper = false;
+    for (Index j = 0; j < n; ++j) {
+        if (isFinite(ustd_[j])) {
+            ustd_[j] /= col_scale_[j];
+            has_upper = true;
+        }
+    }
 
     // Density detection for backend selection.
     auto density = detectDensity(aeq_, options_.dense_col_fraction);
@@ -951,6 +1157,16 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 #else
         algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
 #endif
+    }
+
+    // The GPU path solves the standard form without upper bounds; implicit
+    // ones (#299) are carried by the CPU loop only.
+    if (has_upper &&
+        (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented)) {
+        if (options_.verbose) {
+            std::printf("Barrier: implicit upper bounds are CPU-only; using the CPU backend.\n");
+        }
+        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
     }
 
     bool ok = false;
@@ -1021,8 +1237,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 }
                 return BarrierIpmOutcome::Failed;
             }
-            outcome = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s,
-                                     iters);
+            outcome = runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
+                                     z, y, s, iters);
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
