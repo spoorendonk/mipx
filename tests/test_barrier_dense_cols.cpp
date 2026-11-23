@@ -344,7 +344,8 @@ TEST_CASE("SparseCholesky: shift_tol is measured against shift_reference when gi
     const std::vector<Index> ptr = {0, 1, 2};
     const std::vector<Index> idx = {0, 1};
     const std::vector<Real> val = {1.0, 1.0};
-    const std::vector<Index> perm = {0, 1};
+    // Reversed too: shift_reference is read by original row, not pivot order.
+    const std::vector<Index> perm = GENERATE(std::vector<Index>{0, 1}, std::vector<Index>{1, 0});
     const std::vector<Real> shift = {1.0, 1e9};
     const bool with_reference = GENERATE(false, true);
     SparseCholesky chol;
