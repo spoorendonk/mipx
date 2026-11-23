@@ -299,6 +299,8 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     Real prev_gap = 1e30;
     Int stall_count = 0;
     constexpr Int max_stall = 10;
+    Index schur_order_shown = -1;
+    Index schur_dropped_shown = -1;
 
     const Real inv_b = 1.0 / (1.0 + infNorm(b));
     const Real inv_c = 1.0 / (1.0 + infNorm(c));
@@ -362,6 +364,18 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             // Retry with boosted regularization.
             if (!solver.factorize(z, s, reg * 100.0)) {
                 return stopShort(iter);
+            }
+        }
+        if (opts.verbose) {
+            // The dense-column Schur complement of the sparse NE backend
+            // (#314), printed when it changes: it grows with shifted pivots.
+            const auto st = solver.factorStats();
+            if (st.dense_cols > 0 &&
+                (st.schur_order != schur_order_shown || st.schur_dropped != schur_dropped_shown)) {
+                std::printf("  NE Schur: order=%d (dense_cols=%d) dropped=%d\n", st.schur_order,
+                            st.dense_cols, st.schur_dropped);
+                schur_order_shown = st.schur_order;
+                schur_dropped_shown = st.schur_dropped;
             }
         }
 
