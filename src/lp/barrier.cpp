@@ -1471,8 +1471,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             // The stop flag too, so a raised one ends a long factorization
             // rather than waiting it out (the MIP root race joins this arm).
             solver->setDeadline(deadline_.orStop(options_.stop_flag));
-            // Setup can take seconds (the dense NE's memory, the sparse NE's
-            // ordering and analysis), so it starts only with time left, and a
+            // Setup can take seconds (the sparse NE's pattern, ordering and
+            // analysis; the dense NE's memory is first touched later, in the
+            // first factorize), so it starts only with time left, and a
             // setup cut short by the deadline is a time limit, not a failure
             // (#347). A stop ends as Failed, which solve() reads as a stop.
             const Deadline& backend_deadline = solver->deadline();

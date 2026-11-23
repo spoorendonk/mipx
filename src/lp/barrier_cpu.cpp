@@ -821,6 +821,7 @@ private:
         const std::size_t entries = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
         if (ne_dense_size_ != entries) {
             ne_dense_.reset();
+            ne_dense_size_ = 0;
             ne_dense_ = std::make_unique_for_overwrite<Real[]>(entries);
             ne_dense_size_ = entries;
         }
@@ -1031,18 +1032,27 @@ private:
                                          : "time limit reached in the normal-equations analysis";
             return true;
         };
+        // Checked by work done, not by rows: a row costs the lengths of its
+        // columns, which can be thousands each.
+        constexpr std::size_t kCheckEvery = std::size_t{1} << 20;
+        std::size_t work = 0;
         for (Index k = 0; k < m; ++k) {
-            if (k % 1024 == 0 && timedOut()) {
-                return false;
+            if (work >= kCheckEvery) {
+                work = 0;
+                if (timedOut()) {
+                    return false;
+                }
             }
             mark[k] = k;
             ne_idx_.push_back(k);
             const auto rk = a_->row(k);
+            work += static_cast<std::size_t>(rk.size()) + 1;
             for (Index q = 0; q < rk.size(); ++q) {
                 if (is_dense_[rk.indices[q]] != 0) {
                     continue;
                 }
                 const auto cj = a_->col(rk.indices[q]);
+                work += static_cast<std::size_t>(cj.size());
                 for (Index p = 0; p < cj.size(); ++p) {
                     const Index i = cj.indices[p];
                     if (i > k && mark[i] != k) {
@@ -1131,6 +1141,9 @@ private:
         }
         if (analyzePattern()) {
             return true;
+        }
+        if (deadline_.passed()) {
+            return false;  // cut short, not refused: nothing to fall back to
         }
         if (opts_.verbose) {
             std::printf("  NE Cholesky: that factor does not fit (%s); dense columns kept out\n",

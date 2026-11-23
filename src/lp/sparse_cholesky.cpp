@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -384,8 +385,10 @@ bool SparseCholesky::analyze(Index n, std::span<const Index> col_starts,
                              std::span<const Index> row_indices, std::span<const Index> perm,
                              std::size_t max_bytes, const Deadline& deadline) {
     error_.clear();
+    analyzed_ = false;
     try {
-        return analyzeImpl(n, col_starts, row_indices, perm, max_bytes, deadline);
+        analyzed_ = analyzeImpl(n, col_starts, row_indices, perm, max_bytes, deadline);
+        return analyzed_;
     } catch (const std::bad_alloc&) {
         // Release everything the analysis built; keep the stats it reached.
         const Stats reached = stats_;
@@ -596,9 +599,15 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
 
     // Block position of each input entry: column min, row max (permuted).
     entry_pos_.resize(stats_.nnz_input);
+    // Checked every ~1M entries, not every so many columns: a dense column
+    // of the normal equations holds n of them.
+    std::int64_t next_check = 0;
     for (Index c = 0; c < n; ++c) {
-        if (c % 1024 == 0 && timedOut()) {
-            return false;
+        if (col_starts[c] >= next_check) {
+            next_check = std::int64_t{col_starts[c]} + (std::int64_t{1} << 20);
+            if (timedOut()) {
+                return false;
+            }
         }
         for (Index p = col_starts[c]; p < col_starts[c + 1]; ++p) {
             const Index a = iperm_[row_indices[p]];
@@ -618,7 +627,12 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
         }
     }
 
-    values_.assign(stats_.stored, 0.0);
+    if (values_size_ != stats_.stored) {
+        values_.reset();
+        values_size_ = 0;
+        values_ = std::make_unique_for_overwrite<Real[]>(stats_.stored);
+        values_size_ = stats_.stored;
+    }
     orig_diag_.assign(static_cast<size_t>(n), 0.0);
     relpos_.assign(static_cast<size_t>(n), 0);
     std::size_t max_rows = 0;
@@ -641,7 +655,29 @@ std::size_t SparseCholesky::factorBytes() const {
 bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& rule,
                                const Deadline& deadline) {
     error_.clear();
-    std::fill(values_.begin(), values_.end(), 0.0);
+    if (!analyzed_) {
+        error_ = "factorize without a completed analysis";
+        return false;
+    }
+    auto timedOut = [&] {
+        if (!deadline.passed()) {
+            return false;
+        }
+        error_ = deadline.stopped() ? "stopped in the factorization"
+                                    : "time limit reached in the factorization";
+        return true;
+    };
+    // Zeroed in chunks of 128 MB with a check between them: on the first
+    // factorize this is also the factor's first touch, seconds for a factor
+    // of many GB (#347).
+    constexpr std::size_t kZeroChunk = std::size_t{1} << 24;
+    for (std::size_t lo = 0; lo < values_size_; lo += kZeroChunk) {
+        if (timedOut()) {
+            return false;
+        }
+        const std::size_t hi = std::min(values_size_, lo + kZeroChunk);
+        std::fill(values_.get() + lo, values_.get() + hi, 0.0);
+    }
     for (std::size_t p = 0; p < entry_pos_.size(); ++p) {
         values_[entry_pos_[p]] += values[p];
     }
@@ -663,7 +699,7 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
         const Index first = snode_start_[s];
         const Index nc = snode_start_[s + 1] - first;
         const auto ld = static_cast<Index>(snode_row_ptr_[s + 1] - snode_row_ptr_[s]);
-        Real* blk = values_.data() + snode_val_ptr_[s];
+        Real* blk = values_.get() + snode_val_ptr_[s];
         const Index* rows = snode_rows_.data() + snode_row_ptr_[s];
         auto at = [&](Index r, Index c) { return blk + r + static_cast<std::ptrdiff_t>(c) * ld; };
 
@@ -674,9 +710,7 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
         for (Index k0 = 0; k0 < nc; k0 += kPanel) {
             // Once per panel, so a large supernode is not one unbroken block
             // of work (#275).
-            if (deadline.passed()) {
-                error_ = deadline.stopped() ? "stopped in the factorization"
-                                            : "time limit reached in the factorization";
+            if (timedOut()) {
                 return false;
             }
             const Index k1 = std::min(nc, k0 + kPanel);
@@ -761,7 +795,7 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
                     relpos_[r] = q;
                 }
             }
-            Real* tblk = values_.data() + snode_val_ptr_[tgt];
+            Real* tblk = values_.get() + snode_val_ptr_[tgt];
             // W = L21[c0:ld, :]·L21[c0:c1, :]ᵀ in column chunks [c0, c1) that
             // keep W within the scratch, then scatter W's lower part.
             const auto width = static_cast<Index>(
@@ -802,7 +836,7 @@ void SparseCholesky::solve(std::span<Real> b) const {
         const Index first = snode_start_[s];
         const auto nc = static_cast<std::size_t>(snode_start_[s + 1] - first);
         const std::size_t ld = snode_row_ptr_[s + 1] - snode_row_ptr_[s];
-        const Real* blk = values_.data() + snode_val_ptr_[s];
+        const Real* blk = values_.get() + snode_val_ptr_[s];
         const Index* rows = snode_rows_.data() + snode_row_ptr_[s];
         for (std::size_t k = 0; k < nc; ++k) {
             const Real* colk = blk + k * ld;
@@ -817,7 +851,7 @@ void SparseCholesky::solve(std::span<Real> b) const {
         const Index first = snode_start_[s];
         const auto nc = static_cast<std::size_t>(snode_start_[s + 1] - first);
         const std::size_t ld = snode_row_ptr_[s + 1] - snode_row_ptr_[s];
-        const Real* blk = values_.data() + snode_val_ptr_[s];
+        const Real* blk = values_.get() + snode_val_ptr_[s];
         const Index* rows = snode_rows_.data() + snode_row_ptr_[s];
         for (std::size_t k = nc; k-- > 0;) {
             const Real* colk = blk + k * ld;

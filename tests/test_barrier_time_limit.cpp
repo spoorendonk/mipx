@@ -61,9 +61,11 @@ LpResult solveWithLimit(BarrierAlgorithm algo, Real seconds) {
 
 TEST_CASE("Barrier with a zero time limit returns TimeLimit", "[barrier][time-limit]") {
     // A limit already passed ends the solve before its first iteration, on
-    // every CPU backend. Which check stops it (the backend's factorization or
-    // the loop's own) is not observable here; the factorize() test below
-    // covers the backends' checks.
+    // every CPU backend: since #347 at the check before the backend's setup.
+    // The backends' own checks are covered by the setup() and factorize()
+    // tests below. A deadline passing between setup and the starting point's
+    // factorization (mapped to TimeLimit in the IPM loop) cannot be arranged
+    // deterministically through solve(), so no test here reaches it.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     INFO("algo " << static_cast<int>(algo));
@@ -120,7 +122,9 @@ TEST_CASE("Barrier backends stop factorizing once the deadline has passed",
 TEST_CASE("Sparse normal equations stop their setup once the deadline has passed",
           "[barrier][time-limit][sparse-ne]") {
     // Its ordering and analysis take seconds on a large LP (#347). The same
-    // chain of rows as above.
+    // chain of rows as above: far below the pattern loop's first check, so
+    // the ordering's own check (AMD's per pivot, ND's per subgraph) is what
+    // stops it here.
     constexpr Index kRows = 30;
     constexpr Index kCols = kRows + 1;
     std::vector<Triplet> t;
@@ -150,10 +154,12 @@ TEST_CASE("Sparse normal equations stop their setup once the deadline has passed
 
 TEST_CASE("Barrier with a raised stop flag returns IterLimit, not TimeLimit",
           "[barrier][time-limit]") {
-    // The flag is up before the starting point's factorization, which then
-    // fails inside the backend: that must still read as a stop, and the
-    // empty iterate must not be unscaled (an ASan build catches that). The
-    // backend test above is the one that shows the factorization stopping.
+    // The flag is up before the solve, so it stops at the check before the
+    // backend's setup (#347): that must still read as a stop. A flag raised
+    // later, inside the starting point's factorization, leaves z empty, and
+    // solve() must not unscale it; like the deadline above, that cannot be
+    // timed deterministically from here. The backend tests above show the
+    // setup and the factorization stopping.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     INFO("algo " << static_cast<int>(algo));

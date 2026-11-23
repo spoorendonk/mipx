@@ -76,9 +76,9 @@ The `barrier` suite runs the CPU barrier over every Netlib LP in
 (`--barrier --barrier-ne sparse --no-gpu`), one thread each, classified as
 above against `instance_gate/barrier_expected.csv`, with `--time-limit 10`
 per instance (the barrier honours it since #275; a time-limit stop reads as
-`dnf`). Its backend setup is not yet on the clock (#347): the dense normal
-equations are allocated before the first check, about 2.2 GB on stocfor3
-(m ≈ 16.7k), so the dense backend needs that much memory free. It takes
+`dnf`), its backends' setup included (#347). The dense backend still holds
+its m × m normal equations, about 2.2 GB on stocfor3 (m ≈ 16.7k), so it
+needs that much memory free; the limit bounds the time, not the memory. It takes
 minutes, so it has its own ctest label and stays out of `instance-gate` and
 the commit and push gates.
 

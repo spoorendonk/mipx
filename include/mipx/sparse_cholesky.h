@@ -4,6 +4,7 @@
 #include "mipx/deadline.h"
 
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -145,8 +146,15 @@ private:
     std::vector<Index> col_snode_;  // supernode of each permuted column
 
     std::vector<std::size_t> entry_pos_;  // block position of each input entry
-    std::vector<Real> values_;
+    // The factor's blocks, stored entries long: allocated uninitialized by
+    // analyze() and zeroed by factorize() supernode by supernode, inside its
+    // deadline checks, so a many-GB factor is not one unbroken fill (#347).
+    std::unique_ptr<Real[]> values_;
+    std::size_t values_size_ = 0;
     std::vector<Real> orig_diag_;  // M's diagonal before elimination, permuted
+    // Set by a completed analyze(); a refused or cut-short one leaves the
+    // structure half built, and factorize() refuses to run on it.
+    bool analyzed_ = false;
 
     // Numeric scratch.
     std::vector<Index> relpos_;
