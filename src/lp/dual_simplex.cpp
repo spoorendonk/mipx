@@ -2276,7 +2276,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     // and let the main loop take the shifts off.
                     in_cleanup_phase = false;
                 } else {
-                    // Budget exhausted. Accept current solution.
+                    // Budget exhausted. Accept current solution, with
+                    // reduced costs priced from fresh duals if the ray guard
+                    // priced a column out since the last ones (#319).
+                    if (guard_fired_since_duals) {
+                        guard_fired_since_duals = false;
+                        computeDuals();
+                    }
                     status_ = Status::Optimal;
                     break;
                 }
@@ -2324,6 +2330,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             clearBoundPerturbation();
             bound_perturb_level_ = 0;
             clearCostShifts();
+            ++basis_epoch;
             setupCrashBasis();
             try {
                 refactorize();
@@ -2950,7 +2957,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 // that d_j can be real in the model's units and still below
                 // what the basis resolves, about |c_B|^T |B^-1 a_q| eps (cuts
                 // seed 2609: d2 = -1.4e-6 exactly, against ray terms of 3e10,
-                // on an LP that sits on the Optimal/Unbounded edge).
+                // on an LP that sits on the Optimal/Unbounded edge). A column
+                // the guard already priced out on fresh factors in this solve
+                // is priced out on updated ones too: its kept d_j brings it
+                // back after every basis change, and a refactor each time
+                // would trade the LU updates for one refactor per pivot.
                 Real ray_gain = varCost(entering_p);
                 Real ray_mag = std::abs(ray_gain);
                 for (Index i = 0; i < num_rows_; ++i) {
@@ -2960,7 +2971,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
                 ray_gain *= delta_dir;
                 if (ray_gain >= -kRayGainRelTol * ray_mag) {
-                    if (lu_.numUpdates() > 0) {
+                    if (lu_.numUpdates() > 0 &&
+                        guard_priced[static_cast<std::size_t>(entering_p)] < 0) {
                         try {
                             refactorize();
                         } catch (const std::runtime_error&) {
