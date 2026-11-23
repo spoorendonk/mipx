@@ -834,7 +834,344 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     return stopShort(opts.max_iter);
 }
 
+// Mehrotra's predictor-corrector on the homogeneous self-dual model of the
+// standard form min c'x, A x = b, x >= 0 (#292, #370): Y. Xu, P.-F. Hung and
+// Y. Ye, "A simplified homogeneous and self-dual linear programming
+// algorithm and its implementation", Annals of OR 62, 1996; E. D. Andersen
+// and K. D. Andersen, "The MOSEK interior point optimizer for linear
+// programming", 2000, sec. 2-3. With tau, kappa >= 0 the model is
+//   A z - b tau = 0,  A'y + s - c tau = 0,  -c'z + b'y - kappa = 0,
+//   z's = 0,  tau kappa = 0,
+// and x = z / tau, (y, s) / tau solve the LP when tau > 0. Its Newton system,
+// with eta = 1 - sigma and rp = b tau - A z, rd = c tau - A'y - s,
+// rg = kappa + c'z - b'y, is
+//   A dz - b dtau = eta rp,  A'dy + ds - c dtau = eta rd,
+//   -c'dz + b'dy - dkappa = eta rg,  S dz + Z ds = rc,  kappa dtau + tau dkappa = rk.
+// The backend's system (A dz = rp, A'dy + ds = rd, S dz + Z ds = rc) solves it
+// twice per direction: once for (b, c, 0), giving u, after each
+// factorization, and once for (eta rp, eta rd, rc), giving p. Then
+// d = p + dtau u, dkappa = (rk - kappa dtau) / tau, and the gap row gives
+//   dtau = (eta rg + c'p_z - b'p_y + rk / tau) / (b'u_y - c'u_z + kappa / tau),
+// whose denominator is positive for an exact solve: from A u_z = b, A'u_y + u_s = c and
+// S u_z + Z u_s = 0, b'u_y - c'u_z = -u_z'u_s = u_z' S Z^-1 u_z. One step
+// length for every variable, as in the paper. Plain standard form only: no
+// implicit upper bounds, no Gondzio correctors. Infeasibility detection
+// (tau / kappa -> 0) is #371; here such a run ends Failed, by the stall test
+// or the iteration limit.
+BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
+                            std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
+                            std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
+                            Int& iters) {
+    const Index m = A.numRows();
+    const Index n = A.numCols();
+    const auto mm = static_cast<size_t>(m);
+    const auto nn = static_cast<size_t>(n);
+    const Real reg = std::max(opts.regularization, 1e-12);
+
+    std::vector<Real> az(mm);
+    std::vector<Real> at_y(nn);
+    std::vector<Real> rp(mm);
+    std::vector<Real> rd(nn);
+    std::vector<Real> rc(nn);
+    std::vector<Real> rp_eta(mm);
+    std::vector<Real> rd_eta(nn);
+    const std::vector<Real> zero_n(nn, 0.0);
+    // u: the solve for (b, c, 0); p: the one for the direction's residuals.
+    std::vector<Real> uz(nn);
+    std::vector<Real> uy(mm);
+    std::vector<Real> us(nn);
+    std::vector<Real> pz(nn);
+    std::vector<Real> py(mm);
+    std::vector<Real> ps(nn);
+    std::vector<Real> dz(nn);
+    std::vector<Real> dy(mm);
+    std::vector<Real> ds(nn);
+    std::vector<Real> dz_aff(nn);
+    std::vector<Real> dy_aff(mm);
+    std::vector<Real> ds_aff(nn);
+
+    // The time limit and the stop flag, as in runMehrotraIpm.
+    const Deadline& deadline = solver.deadline();
+    auto interrupted = [&] {
+        return deadline.stopped() ? BarrierIpmOutcome::Failed : BarrierIpmOutcome::TimeLimit;
+    };
+
+    z.assign(nn, 1.0);
+    s.assign(nn, 1.0);
+    y.assign(mm, 0.0);
+    Real tau = 1.0;
+    Real kappa = 1.0;
+    // The product of the rescalings applied so far (see the end of the loop).
+    Real scale_total = 1.0;
+
+    // out = in / t, the LP point of a homogeneous iterate.
+    auto unscale = [](std::vector<Real>& out, std::span<const Real> in, Real t) {
+        out.assign(in.begin(), in.end());
+        for (Real& v : out) {
+            v /= t;
+        }
+    };
+
+    // Best iterate seen, by the largest of the three measures; the gap
+    // measure is mu / (1 + |pobj|) of the LP point, kNearOptimalTol's scale.
+    Real best_err = std::numeric_limits<Real>::infinity();
+    std::vector<Real> best_z;
+    std::vector<Real> best_y;
+    std::vector<Real> best_s;
+    auto stopShort = [&](Int iter) {
+        iters = iter;
+        if (best_err > kNearOptimalTol) {
+            return BarrierIpmOutcome::Failed;
+        }
+        z = std::move(best_z);
+        y = std::move(best_y);
+        s = std::move(best_s);
+        return BarrierIpmOutcome::NearOptimal;
+    };
+
+    // Stall detection: an iteration stalls when none of mu, pinf and dinf
+    // gets 0.1% below its smallest value so far; pinf and dinf count only
+    // above tolerance. mu, not the relative gap, which can rise early on
+    // a converging run (pilot87, #369).
+    Real low_mu = std::numeric_limits<Real>::infinity();
+    Real low_pinf = std::numeric_limits<Real>::infinity();
+    Real low_dinf = std::numeric_limits<Real>::infinity();
+    Int stall_count = 0;
+    constexpr Int max_stall = 10;
+
+    const Real inv_b = 1.0 / (1.0 + infNorm(b));
+    const Real inv_c = 1.0 / (1.0 + infNorm(c));
+    const Real n_compl = static_cast<Real>(n) + 1.0;  // the pairs (z, s) and (tau, kappa)
+
+    for (Int iter = 0; iter < opts.max_iter; ++iter) {
+        if (opts.stop_flag != nullptr && opts.stop_flag->load(std::memory_order_relaxed)) {
+            iters = iter;
+            return BarrierIpmOutcome::Failed;
+        }
+
+        // Residuals of the homogeneous model.
+        std::fill(az.begin(), az.end(), 0.0);
+        std::fill(at_y.begin(), at_y.end(), 0.0);
+        A.multiply(z, az);
+        A.multiplyTranspose(y, at_y);
+        for (Index i = 0; i < m; ++i) {
+            rp[i] = b[i] * tau - az[i];
+        }
+        for (Index j = 0; j < n; ++j) {
+            rd[j] = c[j] * tau - at_y[j] - s[j];
+        }
+        const Real ctz = dot(c, z);
+        const Real bty = dot(b, y);
+        const Real rg = kappa + ctz - bty;
+        const Real zs = dot(z, s);
+        const Real mu = (zs + tau * kappa) / n_compl;
+
+        // The measures of the LP point (z, y, s) / tau, scaled as in
+        // runMehrotraIpm (#253). The gap is its complementarity x's, not
+        // |pobj - dobj|: (c'z - b'y) tau = z's - y'rp + z'rd, and on a run
+        // whose tau ends small the residual terms can cancel z's, so the
+        // objectives agree while x's is far above tolerance (pilot87).
+        const Real pinf = infNorm(rp) / tau * inv_b;
+        const Real dinf = infNorm(rd) / tau * inv_c;
+        const Real pobj = obj_offset + ctz / tau;
+        const Real gap = zs / (tau * tau) / (1.0 + std::abs(pobj));
+
+        if (opts.verbose) {
+            std::printf(
+                "HSD %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e  mu=% .2e  tau=% .2e  "
+                "kappa=% .2e\n",
+                iter, pobj, pinf, dinf, gap, mu, tau, kappa);
+        }
+
+        if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
+            gap < opts.primal_dual_tol) {
+            iters = iter;
+            for (std::vector<Real>* v : {&z, &y, &s}) {
+                for (Real& e : *v) {
+                    e /= tau;
+                }
+            }
+            return BarrierIpmOutcome::Optimal;
+        }
+
+        const Real gap_mu = gap / std::max<Real>(static_cast<Real>(n), 1.0);
+        const Real err = std::max({pinf, dinf, gap_mu});
+        if (err < best_err) {
+            best_err = err;
+            unscale(best_z, z, tau);
+            unscale(best_y, y, tau);
+            unscale(best_s, s, tau);
+        }
+
+        const Real tol = opts.primal_dual_tol;
+        auto improved = [](Real now, Real& low, Real floor) {
+            const bool better = low > floor && now < low * 0.999;
+            low = std::min(low, now);
+            return better;
+        };
+        // Each measure is updated, so no short-circuit. mu is that of the
+        // homogeneous iterate before any rescaling (below), which falls
+        // steadily; mu / tau^2, the LP point's, rises for many iterations
+        // on a run whose tau falls (fffff800).
+        const bool mu_better = improved(mu / (scale_total * scale_total), low_mu, 0.0);
+        const bool pinf_better = improved(pinf, low_pinf, tol);
+        const bool dinf_better = improved(dinf, low_dinf, tol);
+        if (!(mu_better || pinf_better || dinf_better)) {
+            if (++stall_count >= max_stall) {
+                return stopShort(iter);
+            }
+        } else {
+            stall_count = 0;
+        }
+
+        if (deadline.passed()) {
+            iters = iter;
+            return interrupted();
+        }
+
+        if (!solver.factorize(z, s, reg)) {
+            // Retry with boosted regularization, unless out of time.
+            if (deadline.passed() || !solver.factorize(z, s, reg * 100.0)) {
+                if (deadline.passed()) {
+                    iters = iter;
+                    return interrupted();
+                }
+                return stopShort(iter);
+            }
+        }
+        if (!solver.solveNewton(b, c, zero_n, uz, uy, us)) {
+            return stopShort(iter);
+        }
+        // b'u_y - c'u_z as computed keeps the gap row exact for the computed
+        // direction (well above q on fffff800); q bounds it below (blend's
+        // last step on the dense backend went below zero).
+        const Real denom = hsdGapDenominator(b, c, uz, uy, z, s, tau, kappa);
+        if (!(denom > 0.0) || !std::isfinite(denom)) {
+            return stopShort(iter);
+        }
+
+        // One direction for eta, rc (set by the caller) and rk.
+        Real dtau = 0.0;
+        Real dkappa = 0.0;
+        auto direction = [&](Real eta, Real rk, std::span<Real> dz_out, std::span<Real> dy_out,
+                             std::span<Real> ds_out) {
+            for (Index i = 0; i < m; ++i) {
+                rp_eta[i] = eta * rp[i];
+            }
+            for (Index j = 0; j < n; ++j) {
+                rd_eta[j] = eta * rd[j];
+            }
+            if (!solver.solveNewton(rp_eta, rd_eta, rc, pz, py, ps)) {
+                return false;
+            }
+            dtau = (eta * rg + dot(c, pz) - dot(b, py) + rk / tau) / denom;
+            dkappa = (rk - kappa * dtau) / tau;
+            for (Index j = 0; j < n; ++j) {
+                dz_out[j] = pz[j] + dtau * uz[j];
+                ds_out[j] = ps[j] + dtau * us[j];
+            }
+            for (Index i = 0; i < m; ++i) {
+                dy_out[i] = py[i] + dtau * uy[i];
+            }
+            return std::isfinite(dtau) && std::isfinite(dkappa);
+        };
+        // The largest step in [0, 1] keeping z, s, tau and kappa positive,
+        // times fraction.
+        auto stepFor = [&](std::span<const Real> dz_in, std::span<const Real> ds_in, Real dt,
+                           Real dk, Real fraction) {
+            Real alpha = std::min(maxStepToBoundary(z, dz_in, fraction),
+                                  maxStepToBoundary(s, ds_in, fraction));
+            if (dt < 0.0) {
+                alpha = std::min(alpha, -fraction * tau / dt);
+            }
+            if (dk < 0.0) {
+                alpha = std::min(alpha, -fraction * kappa / dk);
+            }
+            return std::clamp(alpha, 0.0, 1.0);
+        };
+
+        // Affine direction (predictor): eta = 1, sigma = 0.
+        for (Index j = 0; j < n; ++j) {
+            rc[j] = -z[j] * s[j];
+        }
+        if (!direction(1.0, -tau * kappa, dz_aff, dy_aff, ds_aff)) {
+            return stopShort(iter);
+        }
+        const Real dtau_aff = dtau;
+        const Real dkappa_aff = dkappa;
+        const Real alpha_aff = stepFor(dz_aff, ds_aff, dtau_aff, dkappa_aff, 1.0);
+        Real mu_aff = (tau + alpha_aff * dtau_aff) * (kappa + alpha_aff * dkappa_aff);
+        for (Index j = 0; j < n; ++j) {
+            mu_aff += (z[j] + alpha_aff * dz_aff[j]) * (s[j] + alpha_aff * ds_aff[j]);
+        }
+        mu_aff /= n_compl;
+        const Real sigma =
+            std::clamp(std::pow(std::max(mu_aff, 0.0) / std::max(mu, 1e-30), 3.0), 0.0, 1.0);
+
+        // Corrector, with the affine second-order terms.
+        for (Index j = 0; j < n; ++j) {
+            rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
+        }
+        const Real rk = sigma * mu - tau * kappa - dtau_aff * dkappa_aff;
+        if (!direction(1.0 - sigma, rk, dz, dy, ds)) {
+            return stopShort(iter);
+        }
+        const Real alpha = stepFor(dz, ds, dtau, dkappa, opts.step_fraction);
+
+        if (opts.verbose) {
+            std::printf(
+                "        alpha=%.4e |dz|=%.2e |dy|=%.2e |ds|=%.2e dtau=% .2e dkappa=% .2e "
+                "sigma=%.4e\n",
+                alpha, infNorm(dz), infNorm(dy), infNorm(ds), dtau, dkappa, sigma);
+        }
+
+        for (Index j = 0; j < n; ++j) {
+            z[j] = std::max(z[j] + alpha * dz[j], 1e-12);
+            s[j] = std::max(s[j] + alpha * ds[j], 1e-12);
+        }
+        for (Index i = 0; i < m; ++i) {
+            y[i] += alpha * dy[i];
+        }
+        tau = std::max(tau + alpha * dtau, 1e-12);
+        kappa = std::max(kappa + alpha * dkappa, 1e-12);
+
+        // Rescale the iterate to max(tau, kappa) = 1. The model is
+        // homogeneous: at lambda (z, y, s, tau, kappa) the residuals scale by
+        // lambda and rc, rk by lambda^2, so u, the dtau denominator, sigma
+        // and the step length are unchanged and the direction scales by
+        // lambda. The LP point (z, y, s) / tau is therefore the same in exact
+        // arithmetic (the regularized matrix A Z S^-1 A' + reg I is the same
+        // at every scale). What it changes is the scale the 1e-12 clamps on
+        // z, s, tau and kappa act on: tau's limit is small on
+        // an LP whose solution is large, and without this they stop the run
+        // at mu ~ 1e-12 far above tolerance (fffff800, forplan). With
+        // tau = 1 the iterate is the LP point; with kappa = 1 (tau -> 0) a
+        // certificate is normalized to b'y - c'z = 1 (#371).
+        const Real scale = 1.0 / std::max(tau, kappa);
+        for (std::vector<Real>* v : {&z, &y, &s}) {
+            for (Real& e : *v) {
+                e *= scale;
+            }
+        }
+        tau *= scale;
+        kappa *= scale;
+        scale_total *= scale;
+    }
+
+    return stopShort(opts.max_iter);
+}
+
 }  // anonymous namespace
+
+Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::span<const Real> uz,
+                       std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
+                       Real tau, Real kappa) {
+    Real q = 0.0;
+    for (size_t j = 0; j < uz.size(); ++j) {
+        q += s[j] * uz[j] * uz[j] / z[j];
+    }
+    return std::max(dot(b, uy) - dot(c, uz), q) + kappa / tau;
+}
 
 // ============================================================================
 // BarrierSolver public interface (unchanged from before)
@@ -1327,6 +1664,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     const Index m = aeq_.numRows();
     const Index n = aeq_.numCols();
     gondzio_corrections_ = 0;
+    used_homogeneous_ = false;
     if (n == 0) {
         z.clear();
         y.assign(static_cast<size_t>(m), 0.0);
@@ -1384,13 +1722,23 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
     // The CPU backend is the one a build without CUDA picks under Auto; the
     // CPU default itself (dense or sparse NE) is #295's.
-    const bool cpu_only = has_upper || options_.gondzio_correctors > 0;
+    // The homogeneous self-dual loop (#370) runs the plain standard form;
+    // with upper bounds in the IPM or Gondzio correctors (#335) the solve
+    // keeps Mehrotra's loop.
+    const bool hsd = options_.homogeneous && !has_upper && options_.gondzio_correctors <= 0;
+    if (options_.homogeneous && !hsd && options_.verbose) {
+        std::printf(
+            "Barrier: the homogeneous self-dual loop does not yet take %s; using Mehrotra's "
+            "loop.\n",
+            has_upper ? "implicit upper bounds" : "Gondzio correctors");
+    }
+    const bool cpu_only = has_upper || options_.gondzio_correctors > 0 || options_.homogeneous;
     if (cpu_only &&
         (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented)) {
         if (options_.verbose) {
             std::printf(
-                "Barrier: implicit upper bounds and Gondzio correctors are CPU-only; using the "
-                "CPU backend.\n");
+                "Barrier: implicit upper bounds, Gondzio correctors and the homogeneous loop are "
+                "CPU-only; using the CPU backend.\n");
         }
         algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
     }
@@ -1512,8 +1860,11 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 }
                 return BarrierIpmOutcome::Failed;
             }
-            outcome = runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
-                                     z, y, s, iters, gondzio_corrections_);
+            used_homogeneous_ = hsd;
+            outcome = hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y,
+                                      s, iters)
+                          : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_,
+                                           std_obj_offset_, z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
@@ -1804,6 +2155,7 @@ bool BarrierSolver::runCrossover() {
 LpResult BarrierSolver::solve() {
     last_error_.clear();
     gondzio_corrections_ = 0;
+    used_homogeneous_ = false;
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
         status_ = Status::Error;

@@ -81,6 +81,13 @@ struct BarrierOptions {
     // Opt-in, CPU backends only: above 0 the GPU path is skipped, an explicit
     // GPU backend included (reported when verbose).
     Int gondzio_correctors = 0;
+    // The CPU IPM on the homogeneous self-dual model (#292; Xu, Hung & Ye
+    // 1996, as in Andersen & Andersen 2000) instead of Mehrotra's loop on the
+    // LP itself. Opt-in, CPU backends only: on, the GPU path is skipped. Not
+    // yet combined with implicit_upper_bounds on a model with upper bounds,
+    // or with gondzio_correctors (#335): the solve then runs Mehrotra's loop
+    // and says so when verbose.
+    bool homogeneous = false;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its
     // factorizations, and solve() then returns Status::TimeLimit; crossover
@@ -140,6 +147,8 @@ public:
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
     // Gondzio correctors accepted over the last IPM run, for tests.
     [[nodiscard]] Int gondzioCorrections() const { return gondzio_corrections_; }
+    // Whether the last IPM run was the homogeneous self-dual loop, for tests.
+    [[nodiscard]] bool usedHomogeneous() const { return used_homogeneous_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:
@@ -195,6 +204,7 @@ private:
         Status::Error;  // Infeasible/Unbounded if either crossover run proved it
     bool used_gpu_ = false;
     Int gondzio_corrections_ = 0;
+    bool used_homogeneous_ = false;
     Deadline deadline_;  // of the current solve(), from max_solve_seconds
     std::string last_error_;
 };

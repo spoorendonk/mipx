@@ -75,6 +75,16 @@ std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
 std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver(Index max_schur_order = 4096);
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
+// The denominator of the homogeneous self-dual loop's dtau (#370), given
+// u = (u_z, u_y) solved from (b, c, 0) at the iterate (z, s, tau, kappa):
+// max(b'u_y - c'u_z, q) + kappa / tau, with q = u_z' S Z^-1 u_z. For an exact
+// solve b'u_y - c'u_z = q; the backends' regularization and pivot shifts add
+// u_y'(reg I + shifts) u_y >= 0, and rounding near the optimum can take the
+// computed value below q, even below zero, where q bounds it.
+Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::span<const Real> uz,
+                       std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
+                       Real tau, Real kappa);
+
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
 // No NewtonSolver GPU factories needed.
 

@@ -68,6 +68,7 @@ void printUsage(FILE* out) {
                  "[--pdlp-opt-norm l2|linf] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
+                 "[--barrier-hsd] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
                  "[--verbose|--quiet] [--print-backend]\n"
@@ -109,6 +110,7 @@ int main(int argc, char* argv[]) {
     bool barrier_sparse_ne = false;
     mipx::Int barrier_dense_cols = mipx::BarrierOptions{}.ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
+    bool barrier_hsd = false;
     mipx::Int barrier_gondzio = 0;
     mipx::PdlpOptimalityNorm pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
     bool relax_integrality = false;
@@ -439,6 +441,9 @@ int main(int argc, char* argv[]) {
             // (#293); 0 (the default) is off.
             barrier_gondzio =
                 static_cast<mipx::Int>(std::clamp<long long>(std::atoll(argv[++i]), 0, 1000));
+        } else if (arg == "--barrier-hsd") {
+            // The CPU IPM on the homogeneous self-dual model (#370).
+            barrier_hsd = true;
         } else if (arg == "--format" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "auto") {
@@ -733,6 +738,7 @@ int main(int argc, char* argv[]) {
                     bopts.ne_max_dense_cols = barrier_dense_cols;
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
                     bopts.gondzio_correctors = barrier_gondzio;
+                    bopts.homogeneous = barrier_hsd;
                     bopts.threads = std::max(1, num_threads);
                     bopts.max_solve_seconds = seconds;  // #275
                     solver.setOptions(bopts);
