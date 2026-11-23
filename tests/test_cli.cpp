@@ -14,6 +14,7 @@
 
 #include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -165,9 +166,10 @@ TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]
 
 TEST_CASE("CLI: an LP whose postsolved point misses a row is solved again", "[cli]") {
     // Issue #257: the LP path postsolved and printed Optimal unchecked. The
-    // model's doubleton aggregation leaves xe = -5e-5, clamped to 0, so the
-    // postsolved point misses the row by 5e-5. It must be caught and the
-    // model solved again without presolve, on every LP backend.
+    // model's postsolve rebuilds x2 through a 1e6 coefficient from an x1 off
+    // by 3e-10, so a row misses by 3e-4 (the data file says how). It must be
+    // caught and the model solved again without presolve, on every LP
+    // backend.
     for (const char* backend : {"--dual", "--barrier", "--pdlp"}) {
         INFO(backend);
         const auto run = runSolver("'" + testDataDir() + "/presolve_misses_row_lp.lp' " + backend +
@@ -176,7 +178,11 @@ TEST_CASE("CLI: an LP whose postsolved point misses a row is solved again", "[cl
         CHECK(run.exit_code == 0);
         CHECK(run.mentions("Postsolved point misses the model as loaded"));
         CHECK(run.mentions("Status: Optimal"));
-        CHECK(run.mentions("Objective: 0.0000000000e+00"));
+        // PDLP's relative tolerance leaves it at 10.0000076.
+        const auto at = run.output.find("Objective: ");
+        REQUIRE(at != std::string::npos);
+        const double objective = std::stod(run.output.substr(at + 11));
+        CHECK(std::abs(objective - 9999999.0 / 999999.0) <= 1e-6 * 10.0);
     }
 }
 

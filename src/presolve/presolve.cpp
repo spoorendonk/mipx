@@ -1253,41 +1253,30 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             markColsInRow(lp, update.row, col_removed, next_dirty_cols);
         }
 
-        // Project eliminated variable bounds into kept variable bounds.
-        bool keep_bound_tightened = false;
+        // Project eliminated variable bounds into kept variable bounds. Any
+        // tighter projection is taken, however little: skipping one within
+        // kTol let the reduced LP put x_k where x_e = alpha + beta x_k left
+        // its bounds, and postsolve's clamp then moved x_e off the row; on
+        // the #257 model x1 <= 1 was skipped against x1 <= 1 + 5e-9, and the
+        // row missed by 5e-5 (#325).
+        bool lower_projected = false;
+        bool upper_projected = false;
         auto tightenKeptBound = [&](Real bound, bool eliminated_lower) {
             if (std::isinf(bound) || std::abs(beta) <= kTol) {
                 return;
             }
             const Real implied = (bound - alpha) / beta;
-            if (beta > 0.0) {
-                if (eliminated_lower) {
-                    if (implied > lp.col_lower[best_keep] + kTol) {
-                        lp.col_lower[best_keep] = implied;
-                        keep_bound_tightened = true;
-                        ++stats_.bounds_tightened;
-                    }
-                } else {
-                    if (implied < lp.col_upper[best_keep] - kTol) {
-                        lp.col_upper[best_keep] = implied;
-                        keep_bound_tightened = true;
-                        ++stats_.bounds_tightened;
-                    }
+            // x_e >= bound bounds x_k from below when beta > 0.
+            if ((beta > 0.0) == eliminated_lower) {
+                if (implied > lp.col_lower[best_keep]) {
+                    lp.col_lower[best_keep] = implied;
+                    lower_projected = true;
+                    ++stats_.bounds_tightened;
                 }
-            } else {
-                if (eliminated_lower) {
-                    if (implied < lp.col_upper[best_keep] - kTol) {
-                        lp.col_upper[best_keep] = implied;
-                        keep_bound_tightened = true;
-                        ++stats_.bounds_tightened;
-                    }
-                } else {
-                    if (implied > lp.col_lower[best_keep] + kTol) {
-                        lp.col_lower[best_keep] = implied;
-                        keep_bound_tightened = true;
-                        ++stats_.bounds_tightened;
-                    }
-                }
+            } else if (implied < lp.col_upper[best_keep]) {
+                lp.col_upper[best_keep] = implied;
+                upper_projected = true;
+                ++stats_.bounds_tightened;
             }
         };
         tightenKeptBound(elim_lb, true);
@@ -1297,7 +1286,19 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             infeasible_ = true;
             return changes;
         }
-        if (keep_bound_tightened) {
+        // Bounds crossed within kTol fix x_k, uncrossed so the reduced LP does
+        // not read them as infeasible. The projected side wins: it keeps x_e
+        // within its bounds, and so on the row, while x_k misses its own
+        // bound by at most kTol. Its own side would put x_e off by up to
+        // kTol |beta| (5e-5 on the #257 model with x1 >= 1 + 5e-9).
+        if (lp.col_lower[best_keep] > lp.col_upper[best_keep]) {
+            if (upper_projected && !lower_projected) {
+                lp.col_lower[best_keep] = lp.col_upper[best_keep];
+            } else {
+                lp.col_upper[best_keep] = lp.col_lower[best_keep];
+            }
+        }
+        if (lower_projected || upper_projected) {
             markRowsTouchingCol(lp, best_keep, row_removed, next_dirty_rows);
             next_dirty_cols[best_keep] = 1;
         }

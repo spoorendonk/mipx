@@ -179,9 +179,9 @@ TEST_CASE("Presolve bench: the reference comes from --solu", "[presolve][bench]"
 
 TEST_CASE("Presolve bench: the check's verdict follows the violation it reports",
           "[presolve][bench]") {
-    // Issue #257's LP: its presolved answer, postsolved, has missed its one
-    // row by 5e-5. Whatever presolve does with it, the verdict must follow
-    // the violation it reports.
+    // An LP whose presolved answer, postsolved, has missed a row by 3e-4 (the
+    // data file says how). Whatever presolve does with it, the verdict must
+    // follow the violation it reports.
     const auto run = runBench(dataFile("presolve_misses_row_lp.lp") + " --check-postsolve");
     INFO(run.output);
     REQUIRE_FALSE(run.row.empty());

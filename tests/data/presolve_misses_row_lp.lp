@@ -1,13 +1,12 @@
-\ An LP whose presolved answer misses its one row (issue #257). Doubleton
-\ aggregation eliminates xe = 10000 - 10000 xk; xe >= 0 implies xk <= 1, a
-\ projection within presolve's 1e-8 of xk's own bound, so it is skipped. The
-\ reduced LP then takes xk = 1 + 5e-9, postsolve clamps xe = -5e-5 to 0, and
-\ the row misses by 5e-5. The optimum is xe = 0, xk = 1, objective 0.
+\ An LP whose presolved answer misses a row. Doubleton aggregation of r1
+\ substitutes x2 = 1 + 1000000 x1 into r0, leaving 999999 x1 = 9999999; x1 is
+\ set from that row's bound, off its exact value by about 3e-10, and postsolve
+\ rebuilds x2 through the 1e6 coefficient, so r0 misses by about 3e-4. (Issue
+\ #257's model missed through a skipped projection instead, fixed by #325.)
+\ The optimum is x1 = 9999999 / 999999, objective 10.000009000009.
 Minimize
- obj: xe
+ obj: x1
 Subject To
- r1: xe + 10000 xk = 10000
-Bounds
- 0 <= xe <= 10000
- 0 <= xk <= 1.000000005
+ r0: x2 - x1 = 10000000
+ r1: x2 - 1000000 x1 = 1
 End

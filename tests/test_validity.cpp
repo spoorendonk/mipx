@@ -2397,11 +2397,10 @@ TEST_CASE("Regression #244: presolve keeps a ranged row of an LP", "[validity]")
 }
 
 TEST_CASE("Regression #257: MipSolver checks an LP's postsolved point", "[validity]") {
-    // Doubleton aggregation eliminates x0 = 10000 - 10000 x1 and skips the
-    // projection x1 <= 1, within 1e-8 of x1's own bound. Presolved, x1 sits at
-    // 1 + 5e-9 and postsolve clamps x0 = -5e-5 to 0: the row misses by 5e-5.
-    // tests/data/presolve_misses_row_lp.lp drives the same model through the
-    // CLI.
+    // Doubleton aggregation eliminates x0 = 10000 - 10000 x1 and skipped the
+    // projection x1 <= 1, within 1e-8 of x1's own bound. Presolved, x1 sat at
+    // 1 + 5e-9 and postsolve clamped x0 = -5e-5 to 0: the row missed by 5e-5.
+    // Presolve now takes the projection (#325); the check must hold either way.
     constexpr auto C = VarType::Continuous;
     const LpProblem lp = makeModel(Sense::Minimize, {1, 0}, {0, 0}, {10000, 1.000000005}, {C, C},
                                    {{1, 10000}}, {10000}, {10000});

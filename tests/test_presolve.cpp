@@ -1826,6 +1826,69 @@ TEST_CASE("Presolve: doubleton aggregation detects infeasibility from bound proj
     CHECK(presolver.isInfeasible());
 }
 
+namespace {
+
+// x0 + 10000 x1 = 10000, min x0, x0 in [0, 10000]: doubleton aggregation
+// takes x0 = 10000 - 10000 x1, so x0 >= 0 projects to x1 <= 1.
+LpProblem buildDoubletonNearBoundProblem(Real x1_lower, Real x1_upper) {
+    LpProblem lp;
+    lp.name = "doubleton_near_bound";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, x1_lower};
+    lp.col_upper = {10000.0, x1_upper};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x0", "x1"};
+    lp.num_rows = 1;
+    lp.row_lower = {10000.0};
+    lp.row_upper = {10000.0};
+    lp.row_names = {"eq"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 10000.0}});
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: a doubleton's projected bound is taken however close", "[presolve]") {
+    // The #257 model: x1 <= 1 projected from x0 >= 0 lies within 1e-8 of
+    // x1 <= 1 + 5e-9. Skipped, x1 sat at 1 + 5e-9 and postsolve clamped
+    // x0 = -5e-5 to 0, missing the row by 5e-5 (#325).
+    const auto lp = buildDoubletonNearBoundProblem(0.0, 1.000000005);
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, PresolveOptions{});
+    CHECK(presolver.stats().doubleton_eq_changes >= 1);
+    CHECK(pointViolation(lp, full) <= 1e-6);
+    CHECK(std::abs(full[0] + 10000.0 * full[1] - 10000.0) <= 1e-9 * 10000.0);
+}
+
+TEST_CASE("Presolve: a doubleton's bounds crossed within tolerance keep the row", "[presolve]") {
+    // x1 >= 1 + 5e-9 crosses the projected x1 <= 1 by 5e-9: feasible within
+    // tolerance. x1 fixed at its own 1 + 5e-9 would give x0 = -5e-5, clamped
+    // to 0 off the row; fixed at the projected 1, x0 = 0 holds it.
+    // Within tolerance, x1 misses its own bound by 5e-9; the shared helper
+    // holds bounds to 1e-9, so this solves inline.
+    const auto lp = buildDoubletonNearBoundProblem(1.000000005, 2.0);
+    Presolver presolver;
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().doubleton_eq_changes >= 1);
+    std::vector<Real> x;
+    if (reduced.num_cols > 0) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.load(reduced);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        x = result.solution;
+    }
+    const auto full = presolver.postsolve(x);
+    REQUIRE(full.size() == 2);
+    CHECK(pointViolation(lp, full) <= 1e-6);
+    CHECK(std::abs(full[0] + 10000.0 * full[1] - 10000.0) <= 1e-9 * 10000.0);
+}
+
 TEST_CASE("Presolve: doubleton equality skips fill-creating substitutions", "[presolve]") {
     auto lp = buildDoubletonNoFillProblem();
 
