@@ -155,6 +155,9 @@ struct PresolveStats {
     /// Implied-free column singletons substituted out with their row (#324).
     Index free_col_substitution_changes = 0;
     Index doubleton_eq_changes = 0;
+    /// Entries a doubleton equation's substitution inserted into rows that
+    /// did not hold the kept column (enable_doubleton_fill_in, #343).
+    Index doubleton_fill_in = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -199,6 +202,12 @@ struct PresolveOptions {
     bool enable_dual_fixing = true;
     bool enable_coefficient_tightening = false;
     bool enable_doubleton_aggregation = true;
+    /// Let a doubleton equation's substitution x_e = (r - a_k x_k) / a_e
+    /// insert x_k into x_e's rows that do not hold it, instead of refusing
+    /// the candidate (#343). Off by default until benchmarked. No cap on the
+    /// entries added: one substitution never grows the matrix (see
+    /// aggregateDoubletonEqualities).
+    bool enable_doubleton_fill_in = false;
     bool enable_parallel_rows = true;
     /// Fix dominated and merge equal-cost parallel continuous columns (#308).
     /// Off by default until benchmarked, like every new reduction.

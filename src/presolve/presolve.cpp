@@ -1076,7 +1076,15 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
 
                 Real a_row_keep = 0.0;
                 if (!findRowCoeff(row, keep_col, a_row_keep)) {
-                    return false;  // Would create fill-in.
+                    if (!options_.enable_doubleton_fill_in) {
+                        return false;  // Would create fill-in.
+                    }
+                    // x_k enters this row as -a_row_elim * ratio, held to the
+                    // rule a cancelling entry is held to below.
+                    if (a_row_elim != 0.0 && std::abs(a_row_elim * ratio) <= 10.0 * kTol) {
+                        return false;
+                    }
+                    continue;
                 }
                 if (std::abs(a_row_keep) <= kTol) {
                     return false;
@@ -1128,10 +1136,16 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
         const Real elim_lb = lp.col_lower[best_elim];
         const Real elim_ub = lp.col_upper[best_elim];
 
+        // With fill-in, a row of x_e without x_k gets x_k: at most |col_e| - 1
+        // inserts against the |col_e| entries of x_e and the x_k of row i
+        // that go, so one substitution shrinks the active matrix by at least
+        // two entries and needs no cap on what it adds.
         struct RowUpdate {
             Index row = -1;
             Real shift = 0.0;
             Real new_keep = 0.0;
+            bool write = true;    // false: x_e's entry is an explicit zero
+            bool insert = false;  // x_k is not yet an entry of this row
         };
         std::vector<RowUpdate> updates;
         bool valid_updates = true;
@@ -1154,7 +1168,7 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
 
             Real a_row_keep = 0.0;
             const bool has_keep = findRowCoeff(row, best_keep, a_row_keep);
-            if (!has_keep) {
+            if (!has_keep && !options_.enable_doubleton_fill_in) {
                 valid_updates = false;
                 break;
             }
@@ -1163,7 +1177,8 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                 valid_updates = false;
                 break;
             }
-            updates.push_back({row, shift, new_keep});
+            const bool write = has_keep || a_row_elim != 0.0;
+            updates.push_back({row, shift, new_keep, write, !has_keep && write});
         }
         if (!valid_updates) {
             continue;
@@ -1179,7 +1194,15 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
             // Exact, however small the change: on a row of small coefficients
             // a change below kTol is still the whole substitution (#244:
             // 1.875e-6 became 1.883e-6).
-            work_->set(update.row, best_keep, update.new_keep);
+            if (update.write) {
+                // Safe to insert: the walk of col(best_elim) is over.
+                work_->set(update.row, best_keep, update.new_keep);
+            }
+            if (update.insert) {
+                ++row_active_nnz[update.row];
+                ++col_active_nnz[best_keep];
+                ++stats_.doubleton_fill_in;
+            }
             next_dirty_rows[update.row] = 1;
             markColsInRow(*work_, update.row, col_removed, next_dirty_cols);
         }

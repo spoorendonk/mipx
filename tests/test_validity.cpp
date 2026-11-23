@@ -808,10 +808,14 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions free_cols = o;
     free_cols.enable_free_col_substitution = true;
     cases.push_back({"free column substitution (opt-in)", free_cols});
+    PresolveOptions doubleton_fill = o;
+    doubleton_fill.enable_doubleton_fill_in = true;
+    cases.push_back({"doubleton fill-in (opt-in)", doubleton_fill});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
     all.enable_free_col_substitution = true;
+    all.enable_doubleton_fill_in = true;
     cases.push_back({"all opt-in but parallel columns", all});
     all.enable_parallel_cols = true;
     cases.push_back({"all opt-in", all, false});
@@ -835,6 +839,10 @@ std::vector<PresolveReduction> presolveReductions() {
         {"singleton columns", &PresolveStats::singleton_col_changes, always},
         {"doubleton equations", &PresolveStats::doubleton_eq_changes,
          [](const PresolveOptions& o) { return o.enable_doubleton_aggregation; }},
+        {"doubleton fill-in", &PresolveStats::doubleton_fill_in,
+         [](const PresolveOptions& o) {
+             return o.enable_doubleton_aggregation && o.enable_doubleton_fill_in;
+         }},
         {"forcing rows", &PresolveStats::forcing_row_changes,
          [](const PresolveOptions& o) { return o.enable_forcing_rows; }},
         {"dominated rows", &PresolveStats::dominated_row_changes, always},

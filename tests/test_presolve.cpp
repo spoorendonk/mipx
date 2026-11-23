@@ -1904,6 +1904,122 @@ TEST_CASE("Presolve: doubleton equality skips fill-creating substitutions", "[pr
     CHECK(reduced.num_cols == lp.num_cols);
 }
 
+namespace {
+
+/// The options of the fill-in tests: forcing rows and dual fixing off, so the
+/// doubleton equation is what reduces the model.
+PresolveOptions doubletonFillOptions(bool fill_in) {
+    PresolveOptions opts;
+    opts.enable_forcing_rows = false;
+    opts.enable_dual_fixing = false;
+    opts.enable_doubleton_fill_in = fill_in;
+    return opts;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: doubleton fill-in substitutes into rows without the kept column",
+          "[presolve]") {
+    // x + y = 1, x + z <= 2, y + z <= 2: either elimination fills in (#343).
+    auto lp = buildDoubletonNoFillProblem();
+    lp.obj = {-1.0, -2.0, -1.0};
+
+    SECTION("refused with the flag off") {
+        Presolver presolver;
+        presolver.setOptions(doubletonFillOptions(false));
+        (void)presolver.presolve(lp);
+        CHECK(presolver.stats().doubleton_eq_changes == 0);
+        CHECK(presolver.stats().doubleton_fill_in == 0);
+    }
+    SECTION("substituted with the flag on, and postsolved to the optimum") {
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver, doubletonFillOptions(true));
+        CHECK(presolver.stats().doubleton_eq_changes >= 1);
+        CHECK(presolver.stats().doubleton_fill_in >= 1);
+        CHECK(pointViolation(lp, full) <= 1e-6);
+        const Real direct = directOptimum(lp);
+        CHECK_THAT(objectiveAt(lp, full),
+                   WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+    }
+}
+
+TEST_CASE("Presolve: doubleton fill-in keeps refusing integer columns", "[presolve]") {
+    auto lp = buildDoubletonNoFillProblem();
+    lp.col_type = {VarType::Integer, VarType::Integer, VarType::Continuous};
+    Presolver presolver;
+    presolver.setOptions(doubletonFillOptions(true));
+    (void)presolver.presolve(lp);
+    CHECK(presolver.stats().doubleton_eq_changes == 0);
+    CHECK(presolver.stats().doubleton_fill_in == 0);
+}
+
+TEST_CASE("Presolve: doubleton fill-in refuses an entry too small to insert", "[presolve]") {
+    // x + y = 1, 5e-8 x + z <= 2, 5e-8 y + z <= 2: either substitution would
+    // insert a 5e-8 entry, below the 1e-7 a cancelling entry must keep.
+    auto lp = buildDoubletonNoFillProblem();
+    lp.matrix = SparseMatrix(
+        3, 3,
+        std::vector<Triplet>{
+            {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 5e-8}, {1, 2, 1.0}, {2, 1, 5e-8}, {2, 2, 1.0}});
+    Presolver presolver;
+    presolver.setOptions(doubletonFillOptions(true));
+    (void)presolver.presolve(lp);
+    CHECK(presolver.stats().doubleton_eq_changes == 0);
+    CHECK(presolver.stats().doubleton_fill_in == 0);
+}
+
+TEST_CASE("Presolve: doubleton fill-in keeps refusing a tiny ratio", "[presolve]") {
+    // 2x + 1.5e-8 y = 1, 20x + w <= 40, y + z <= 3, y - z >= -4, x in
+    // [0, 10], y free. x, in fewer rows, is the column the score prefers, and
+    // filling r1 with y would take one entry of 1.5e-7, large enough to
+    // insert; but it projects x's bounds through 7.5e-9, too small (#244), so
+    // it stays refused with fill-in on. y goes instead, filling r2 and r3
+    // with x: two entries.
+    LpProblem lp;
+    lp.name = "doubleton_tiny_ratio";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {0.0, 0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, -kInf, 0.0, 0.0};
+    lp.col_upper = {10.0, kInf, 10.0, 10.0};
+    lp.col_type = std::vector<VarType>(4, VarType::Continuous);
+    lp.col_names = {"x", "y", "z", "w"};
+    lp.num_rows = 4;
+    lp.row_lower = {1.0, -kInf, -kInf, -4.0};
+    lp.row_upper = {1.0, 40.0, 3.0, kInf};
+    lp.row_names = {"eq", "r1", "r2", "r3"};
+    lp.matrix = SparseMatrix(4, 4,
+                             std::vector<Triplet>{{0, 0, 2.0},
+                                                  {0, 1, 1.5e-8},
+                                                  {1, 0, 20.0},
+                                                  {1, 3, 1.0},
+                                                  {2, 1, 1.0},
+                                                  {2, 2, 1.0},
+                                                  {3, 1, 1.0},
+                                                  {3, 2, -1.0}});
+    Presolver presolver;
+    presolver.setOptions(doubletonFillOptions(true));
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().doubleton_eq_changes == 1);
+    CHECK(presolver.stats().doubleton_fill_in == 2);
+    // Postsolve recovers y through 1 / 1.5e-8, which scales x's error by
+    // 1.3e8: held to 1e-6, not the shared helper's 1e-9, so solved inline.
+    std::vector<Real> x;
+    if (reduced.num_cols > 0) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.load(reduced);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        x = result.solution;
+    }
+    const auto full = presolver.postsolve(x);
+    REQUIRE(full.size() == 4);
+    CHECK(pointViolation(lp, full) <= 1e-6);
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2

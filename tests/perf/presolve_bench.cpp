@@ -48,7 +48,7 @@ namespace {
 const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
-    "       [--parallel-cols] [--free-col-substitution]\n";
+    "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in]\n";
 
 struct Options {
     pb::CommonOptions common;
@@ -56,6 +56,8 @@ struct Options {
     bool parallel_cols = false;  ///< PresolveOptions::enable_parallel_cols (#308), off by default.
     /// PresolveOptions::enable_free_col_substitution (#324), off by default.
     bool free_col_substitution = false;
+    /// PresolveOptions::enable_doubleton_fill_in (#343), off by default.
+    bool doubleton_fill_in = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -80,6 +82,8 @@ Options parse(int argc, char** argv) {
             opt.parallel_cols = true;
         } else if (arg == "--free-col-substitution") {
             opt.free_col_substitution = true;
+        } else if (arg == "--doubleton-fill-in") {
+            opt.doubleton_fill_in = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -304,6 +308,7 @@ int main(int argc, char** argv) {
         PresolveOptions popts = presolver.options();
         popts.enable_parallel_cols = opt.parallel_cols;
         popts.enable_free_col_substitution = opt.free_col_substitution;
+        popts.enable_doubleton_fill_in = opt.doubleton_fill_in;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
@@ -344,6 +349,7 @@ int main(int argc, char** argv) {
     row.addInt("vars_removed", st.vars_removed);
     row.addInt("rows_removed", st.rows_removed);
     row.addInt("bounds_tightened", st.bounds_tightened);
+    row.addInt("doubleton_fill_in", st.doubleton_fill_in);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }
