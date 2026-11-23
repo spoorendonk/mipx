@@ -106,9 +106,11 @@ TEST_CASE("Barrier implicit bounds: reduced cost at an upper bound is negative",
 
 TEST_CASE("Barrier implicit bounds: ranged row slack carries the range",
           "[barrier][implicit-bounds]") {
-    // max x  s.t.  1 <= x - y <= 2 (ranged),  x + y <= 4,  x, y >= 0,
-    // x <= 10: optimum x = 3, y = 1, the range's upper side active.
-    auto lp = makeLp(Sense::Maximize, {1.0, 0.0}, {0.0, 0.0}, {10.0, kInf}, {1.0, -kInf},
+    // max y  s.t.  1 <= x - y <= 2 (ranged),  x + y <= 4,  x, y >= 0,
+    // x <= 10: optimum x = 2.5, y = 1.5 with the range's lower side active,
+    // i.e. the slack of x - y + s = 2 at its upper bound s = 1. Without that
+    // bound the optimum moves to y = 4.
+    auto lp = makeLp(Sense::Maximize, {0.0, 1.0}, {0.0, 0.0}, {10.0, kInf}, {1.0, -kInf},
                      {2.0, 4.0}, {{0, 0, 1.0}, {0, 1, -1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
     const bool implicit = GENERATE(false, true);
     INFO("implicit " << implicit);
@@ -119,10 +121,10 @@ TEST_CASE("Barrier implicit bounds: ranged row slack carries the range",
     CHECK(solver.standardFormRows() == (implicit ? 2 : 4));
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(3.0, 1e-6));
+    CHECK_THAT(result.objective, WithinAbs(1.5, 1e-6));
     const auto x = solver.getPrimalValues();
-    CHECK_THAT(x[0], WithinAbs(3.0, 1e-6));
-    CHECK_THAT(x[1], WithinAbs(1.0, 1e-6));
+    CHECK_THAT(x[0], WithinAbs(2.5, 1e-6));
+    CHECK_THAT(x[1], WithinAbs(1.5, 1e-6));
 }
 
 TEST_CASE("Barrier implicit bounds: scaled columns keep their upper bounds",
