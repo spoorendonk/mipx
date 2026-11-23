@@ -987,7 +987,14 @@ bool DualSimplexSolver::optimumHoldsUnscaled() const {
 // point that holds scaled miss grossly. Cuts seed 1498 (#307): the cut
 // R5: 5000 C0 >= 0.0631 on a column fixed at 0, so an infeasible model, was
 // scaled to a side of 1.7e-8 and read as met at C0 = 0.
-bool DualSimplexSolver::primalHoldsUnscaled() const {
+//
+// `tight` holds every row and column to kUnscaledAbsTol, or kResolvableRelTol
+// of its largest term where that is more, with no allowance for columns: the
+// measure of pointViolation(), which a point that holds relatively can still
+// miss (presolved grow15, #304: equality rows with rhs 0 missed by 2.1e-5
+// against terms of 1.2e5, 1.7e-10 of them, where the scaled tolerance is
+// kPrimalTol / rs_i).
+bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
     const auto uz = [](Index k) { return static_cast<std::size_t>(k); };
     const std::vector<Real> x = getPrimalValues();
     std::vector<Real> reach(uz(num_cols_), kInf);
@@ -1012,9 +1019,13 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
         if (std::isfinite(up)) {
             mag = std::max(mag, std::abs(up));
         }
-        const Real tol = kUnscaledRelTol * mag;
+        const Real tol =
+            tight ? std::max(kUnscaledAbsTol, kResolvableRelTol * mag) : kUnscaledRelTol * mag;
         if (act < lo - tol || act > up + tol) {
             return false;
+        }
+        if (tight) {
+            continue;
         }
         for (Index k = 0; k < rv.size(); ++k) {
             const Real a = std::abs(entry(k));
@@ -1036,8 +1047,9 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
         if (std::isfinite(up)) {
             mag = std::max(mag, std::abs(up));
         }
-        Real tol = kUnscaledRelTol * mag;
-        if (std::isfinite(reach[uz(j)])) {
+        Real tol =
+            tight ? std::max(kUnscaledAbsTol, kResolvableRelTol * mag) : kUnscaledRelTol * mag;
+        if (!tight && std::isfinite(reach[uz(j)])) {
             tol = std::max(tol, reach[uz(j)]);
         }
         if (xj < lo - tol || xj > up + tol) {
@@ -1052,7 +1064,9 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // model's units kPrimalTol and kDualTol are what the rows, bounds and
 // multipliers are held to, and the basis is the scaled optimum's, so the
 // clean-up starts close. Refuted means a point that misses
-// (primalHoldsUnscaled(), #307) or, on a point that holds, multipliers of the
+// (primalHoldsUnscaled(), #307), a point that holds but misses a row or bound
+// absolutely (primalHoldsUnscaled(true), #304; it counts as one that holds
+// below), or, on a point that holds, multipliers of the
 // wrong sign or a duality gap (optimumHoldsUnscaled(), #306): the scaled dual
 // tolerance is kDualTol cs_j on column j in the model's units. It runs within
 // what is left of the iteration and time limits. Its own verdict is returned
@@ -1098,7 +1112,9 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     bool primal_held = false;
     if (res.status == Status::Optimal) {
         primal_held = primalHoldsUnscaled();
-        if (primal_held && (checked || optimumHoldsUnscaled())) {
+        // A point that holds relatively but misses absolutely is cleaned up
+        // too, and kept as one that holds (#304).
+        if (primal_held && primalHoldsUnscaled(true) && (checked || optimumHoldsUnscaled())) {
             return res;
         }
     } else if (res.status != Status::Infeasible || checked || dualRayMeetsContract()) {

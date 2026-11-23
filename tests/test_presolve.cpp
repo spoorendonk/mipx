@@ -2564,3 +2564,30 @@ TEST_CASE("Presolve: netlib bore3d stays feasible and keeps its optimum", "[pres
     }
     CHECK(max_row_violation <= 1e-6);
 }
+
+// Issue #304: on the presolved grow15 the dual simplex returned Optimal with
+// equality rows (rhs 0, terms up to 1.2e5) missed by 2.1e-5 in the model's
+// units: the scaled point held kPrimalTol / rs_i, and the unscaled check held
+// rows only relative to their terms. pilot-ja missed by 1.8e-4 in the bench
+// runs of #288. The point must hold pointViolation() or the status must say
+// otherwise.
+TEST_CASE("Presolve: netlib grow15 and pilot-ja optima hold the reduced LP absolutely",
+          "[presolve][netlib]") {
+    const std::string name = GENERATE(std::string("grow15"), std::string("pilot-ja"));
+    const std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!std::filesystem::exists(path)) {
+        SKIP(name + " not downloaded. Run tests/data/download_netlib.sh");
+    }
+    const auto problem = readMps(path);
+    Presolver presolver;
+    const auto reduced = presolver.presolve(problem);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    INFO(name);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(pointViolation(reduced, solver.getPrimalValues()) <= 1e-6);
+}
