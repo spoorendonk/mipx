@@ -180,6 +180,18 @@ def test_gate_skips_loudly_without_instances(
     assert "SKIPPED" in capsys.readouterr().err
 
 
+def test_gate_skip_names_the_listed_instances_it_did_not_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, expected = setup_suite(tmp_path, "good,mip,match_1e-6\nslow,mip,dnf\n")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    argv = ["mip", "--data-dir", str(empty), "--binary", "/nonexistent"]
+    code = gate.main([*argv, "--expected-file", str(expected)])
+    assert code == gate.SKIP_EXIT
+    assert "not run: good, slow." in capsys.readouterr().err
+
+
 def test_write_expected_regenerates_and_keeps_other_rows(tmp_path: Path) -> None:
     data, expected = setup_suite(tmp_path, "instance,backend,expected,time_limit\n", header=False)
     expected.write_text(

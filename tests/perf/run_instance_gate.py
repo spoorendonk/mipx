@@ -358,9 +358,13 @@ def main(argv: list[str]) -> int:
         suite = replace(suite, data_dir=Path(args.data_dir))
     if args.expected_file:
         suite = replace(suite, expected=Path(args.expected_file))
+    listed = read_expected(suite.expected)
     if not find_instances(suite.data_dir):
+        # Name what was not gated, so a skip cannot read as a pass (#341).
+        names = sorted({row.instance for row in listed})
         print(
-            f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}. "
+            f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}, "
+            f"not run: {', '.join(names) or 'none listed'}. "
             f"Download them with {suite.download}.",
             file=sys.stderr,
         )
@@ -368,7 +372,6 @@ def main(argv: list[str]) -> int:
     if not Path(args.binary).is_file():
         raise SystemExit(f"Solver binary not found: {args.binary} (build first)")
 
-    listed = read_expected(suite.expected)
     plan = build_plan(args, suite, listed)
     backends = selected_backends(args, suite)
     print(f"Instance gate '{args.suite}': {len(plan.runs)} runs, backends {','.join(backends)}")
