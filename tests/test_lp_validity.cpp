@@ -1716,6 +1716,66 @@ TEST_CASE("Regression #306: a cold optimum holds its reduced-cost signs in the m
                    {2, 5, 1250}}));
 }
 
+TEST_CASE("Regression #319: a column the ray guard prices out keeps a reduced cost y agrees with",
+          "[lp_validity]") {
+    // Audit cuts seed 2609, round 1 (degenerate max: every cost cancels
+    // through the equality row). Column 2's ray has a gain of one ulp of its
+    // terms (3e10), so the #241 guard prices it out; it used to report d2 =
+    // 0.0 where c - A^T y gives -5.8e-6. On the double data the LP is
+    // unbounded along that ray in exact arithmetic, with gain -1.4e-6 per
+    // unit, so the d_j itself is a tolerance call; HiGHS reports Optimal
+    // 44.1387 at another vertex.
+    const LpProblem lp =
+        literalLp(Sense::Maximize, 1.5,
+                  {-10390.625, 4156.25, -0.017812500000000002, 0.0, 0.97968750000000004},
+                  {-kInf, -0.005875, 37.5, -kInf, -kInf}, {kInf, kInf, kInf, kInf, kInf},
+                  {-kInf, -kInf, -0.017953125, -1.063412214487327, -165064.88031677148},
+                  {0.36250000000000004, -16953.125, -0.017953125, kInf, kInf},
+                  {{0, 4, 0.010000000000000002},
+                   {1, 0, 4000000},
+                   {1, 2, 7.5},
+                   {1, 4, -337.5},
+                   {2, 0, 4.375},
+                   {2, 1, -1.75},
+                   {2, 2, 7.5000000000000002e-06},
+                   {2, 4, -0.00041250000000000005},
+                   {3, 0, -0.0047499999999999999},
+                   {3, 2, -0.029999999999999999},
+                   {3, 3, 0.036249999999999998},
+                   {3, 4, 0.043750000000000004},
+                   {4, 0, -0.0016250000000000001},
+                   {4, 1, 0.004875},
+                   {4, 2, -4500}});
+    DualSimplexSolver solver;
+    const LpResult res = solveLiteral(solver, lp);
+    INFO(describe(lp));
+    REQUIRE(res.status == Status::Optimal);
+    CHECK(res.iterations < 1000);
+    CHECK(std::abs(res.objective - 44.13867576598027) <= 1e-6 * 44.13867576598027);
+    const std::vector<Real> y = solver.getDualValues();
+    const std::vector<Real> rc = solver.getReducedCosts();
+    REQUIRE(y.size() == static_cast<std::size_t>(lp.num_rows));
+    REQUIRE(rc.size() == static_cast<std::size_t>(lp.num_cols));
+    std::vector<long double> d(lp.obj.begin(), lp.obj.end());
+    std::vector<long double> mag(lp.num_cols);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        mag[j] = std::abs(d[j]);
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const long double t = static_cast<long double>(rv.values[k]) * y[i];
+            d[rv.indices[k]] -= t;
+            mag[rv.indices[k]] = std::max(mag[rv.indices[k]], std::abs(t));
+        }
+    }
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        INFO("column " << j << ": reported " << rc[j] << ", c - A^T y "
+                       << static_cast<double>(d[j]));
+        CHECK(std::abs(rc[j] - d[j]) <= 1e-9L * std::max(1.0L, mag[j]));
+    }
+}
+
 TEST_CASE("Regression #306: a clean-up that misses a row keeps the scaled optimum",
           "[lp_validity]") {
     // Audit cuts seed 45269, variant 1, round 1. The cold Optimal held its

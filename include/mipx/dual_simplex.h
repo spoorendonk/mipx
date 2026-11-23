@@ -201,6 +201,10 @@ public:
 
     std::vector<Real> getPrimalValues() const override;
     std::vector<Real> getDualValues() const override;
+    /// After Optimal: c - A^T y of getDualValues(), to round-off. On an
+    /// ill-conditioned basis a column can show a wrong-signed d_j below what
+    /// the basis resolves (about |c_B|^T |B^-1 a_j| eps): the primal path
+    /// prices out a ray whose gain is round-off of its terms (#241, #319).
     std::vector<Real> getReducedCosts() const override;
     /// See LpSolver::getDualRay(). The ray is the row of B^{-1} for the basic
     /// variable that the dual ratio test proved cannot reach its bound.
