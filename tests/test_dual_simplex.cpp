@@ -1388,6 +1388,7 @@ TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
         LpResult result;
         std::vector<BasisStatus> basis;
         DualSimplexSolver::RowPriceStats stats;
+        DualSimplexSolver::DseFallbackStats dse;
     };
     auto solve = [&](bool actual_work, bool force_dense) {
         DualSimplexSolver solver;
@@ -1397,7 +1398,7 @@ TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
         opts.force_dense_pivot_row = force_dense;
         solver.setOptions(opts);
         solver.load(lp);
-        Run run{solver.solve(), {}, solver.getRowPriceStats()};
+        Run run{solver.solve(), {}, solver.getRowPriceStats(), solver.getDseFallbackStats()};
         run.basis = solver.getBasis();
         return run;
     };
@@ -1411,7 +1412,12 @@ TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
         CHECK(run->result.iterations == flat.result.iterations);
         CHECK_THAT(run->result.objective, WithinULP(flat.result.objective, 0));
         CHECK(run->basis == flat.basis);
+        // The cost check reads work units, but on this model it fires the
+        // same way under either charge.
+        CHECK(run->dse.cost == flat.dse.cost);
+        CHECK(run->dse.degenerate == flat.dse.degenerate);
     }
+    CHECK(flat.dse.cost >= 1);
     REQUIRE(actual.stats.sparse_assemblies > 0);
     REQUIRE(actual_dense.stats.sparse_assemblies == 0);
 
@@ -1420,6 +1426,41 @@ TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
     CHECK(flat.result.work_units == flat_dense.result.work_units);
     CHECK(actual_dense.result.work_units < flat.result.work_units);
     CHECK(actual.result.work_units < actual_dense.result.work_units);
+}
+
+// #379: an abandoned sparse walk is charged the rows it reached and the dense
+// scan that resumes after it, so on the same pivots the fallback assembly costs
+// the dense one less only the rows the walk skipped (zero in BTRAN): at most m
+// a fallback. Losing the walk's or the resumed scan's share breaks the bound.
+TEST_CASE("DualSimplex: row_price_actual_work charges a fill-in fallback's walk and resume",
+          "[dual_simplex][row_price]") {
+    const Index m = 40;
+    const auto lp = buildDenseLP(m, 30);
+
+    auto solve = [&](bool force_dense, DualSimplexSolver::RowPriceStats& stats) {
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        DualSimplexOptions opts;
+        opts.row_price_actual_work = true;
+        opts.force_dense_pivot_row = force_dense;
+        solver.setOptions(opts);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        stats = solver.getRowPriceStats();
+        return std::pair{result.iterations, solver.workUnits().ticks()};
+    };
+    DualSimplexSolver::RowPriceStats adaptive_stats;
+    DualSimplexSolver::RowPriceStats dense_stats;
+    const auto [adaptive_iters, adaptive_ticks] = solve(false, adaptive_stats);
+    const auto [dense_iters, dense_ticks] = solve(true, dense_stats);
+
+    REQUIRE(adaptive_stats.fill_in_fallbacks > 0);
+    REQUIRE(adaptive_stats.sparse_assemblies == 0);
+    REQUIRE(adaptive_iters == dense_iters);
+    REQUIRE(adaptive_ticks <= dense_ticks);
+    CHECK(dense_ticks - adaptive_ticks <=
+          static_cast<uint64_t>(adaptive_stats.fill_in_fallbacks) * static_cast<uint64_t>(m));
 }
 
 TEST_CASE("DualSimplex: row_price_actual_work defaults to off", "[dual_simplex][options]") {

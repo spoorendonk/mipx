@@ -191,8 +191,9 @@ struct DualSimplexOptions {
     // kernels can be compared directly; the adaptive path is the default.
     bool force_dense_pivot_row = false;
     // Charge each pivot-row assembly the work it does (one unit per row
-    // scanned, plus the nonzeros of each row with a nonzero BTRAN entry)
-    // instead of the whole matrix's nonzero count (#379, decided in #378).
+    // scanned, plus the nonzeros and slack entry of each row with a nonzero
+    // BTRAN entry) instead of the whole matrix's nonzero count (#379, decided
+    // in #378).
     // Off by default: work units pace the DSE fallback and the MIP's
     // heuristics, so the default waits on an LP and MIP benchmark.
     bool row_price_actual_work = false;
