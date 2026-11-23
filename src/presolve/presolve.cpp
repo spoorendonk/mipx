@@ -1,3 +1,40 @@
+// Parts of this file are translated from HiGHS 1.16; the rest is mipx's own.
+// The translated parts:
+//
+// - Presolver::dualFixing, its single-equation dual fixing: the lambdas
+//   checkColumn, computeActivity, handleSingleEquation and fixCols of
+//   HPresolve::dualFixing in highs/presolve/HPresolveDualFixing.cpp.
+// - Presolver::aggregateImpliedFreeColumns, its candidate order, pivot choice,
+//   fill-in limit and give-up rule: HPresolve::aggregator in
+//   highs/presolve/HPresolveAggregator.cpp. The implied-free test and the
+//   substitution are mipx's own.
+// - Presolver::removeDominatedColumns, the dominated and forcing column tests:
+//   HPresolve::detectDominatedCol in highs/presolve/HPresolve.cpp.
+//
+// HiGHS's licence:
+//
+// MIT License
+//
+// Copyright (c) 2026 HiGHS
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
 #include "mipx/presolve.h"
 
 #include "../heuristics/common.h"

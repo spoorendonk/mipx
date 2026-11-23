@@ -16,6 +16,20 @@ Translated in mipx:
 - `src/presolve/dependent_equations.h`, `src/presolve/dependent_equations.cpp`:
   `HPresolve::removeDependentEquations()` up to the removal (HiGHS 1.16:
   `highs/presolve/HPresolveDependent.cpp`).
+- `src/presolve/dual_bounds.h`, `src/presolve/dual_bounds.cpp`: the implied
+  column and row-dual bounds of `HPresolve` and the sums of
+  `HighsLinearSumBounds` (HiGHS 1.16: `highs/presolve/HPresolve.cpp`,
+  `highs/util/HighsLinearSumBounds.h`, `highs/util/HighsLinearSumBounds.cpp`).
+- `src/presolve/presolve.cpp`, in part: single-equation dual fixing,
+  the selection loop of `HPresolve::aggregator()` and
+  `HPresolve::detectDominatedCol()` (HiGHS 1.16:
+  `highs/presolve/HPresolveDualFixing.cpp`,
+  `highs/presolve/HPresolveAggregator.cpp`, `highs/presolve/HPresolve.cpp`).
+- `src/lp/dual_simplex.cpp`, in part: the dual ratio test of `HEkkDualRow`
+  and the cost perturbation of `HEkk::initialiseCost()`, with the deviations
+  the file's head names (first translated from an unrecorded version,
+  following HiGHS 1.16:
+  `highs/simplex/HEkkDualRow.cpp`, `highs/simplex/HEkk.cpp`).
 
 ```
 MIT License
