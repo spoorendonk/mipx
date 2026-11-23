@@ -1526,7 +1526,6 @@ Index Presolver::aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& c
                 }
                 continue;
             }
-            fill_failures = 0;
         }
 
         const Real t = lp.row_upper[i];
@@ -1555,6 +1554,11 @@ Index Presolver::aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& c
         }
         if (!valid) {
             continue;
+        }
+        // Only a substitution ends a run of fill refusals (as in HiGHS, where
+        // nothing refuses a pair after its fill test).
+        if (row_size != 2 && col_size != 2) {
+            fill_failures = 0;
         }
 
         const Real cj = lp.obj[j];
