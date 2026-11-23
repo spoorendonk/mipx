@@ -1631,7 +1631,7 @@ TEST_CASE("Regression #282: a tiny reduced cost on a large fixed column leaves n
 
 TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
           "[lp_validity]") {
-    // A capacitated transportation LP whose costs take two values, so most
+    // A capacitated transportation LP whose costs take three values, so most
     // optimal bases tie and the dual simplex meets zero reduced costs on
     // nearly every pivot: the degeneracy that made it stall on Netlib. The
     // cold solve perturbs the costs and takes the perturbation off at the

@@ -1672,6 +1672,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // numerically zero on fresh factors, or -1; cleared by the next basis
     // change.
     Index repair_rejected_row = -1;
+    // The iteration at which the dual ratio test last restored dual
+    // feasibility before pivoting, so it does so at most once per pivot.
+    Int last_dual_repair_iteration = -1;
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
     Int iters_since_pinf_improve = 0;
@@ -1921,9 +1924,17 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         if (in_cleanup_phase) {
             --cleanup_iters_remaining;
             if (cleanup_iters_remaining <= 0) {
-                // Budget exhausted. Accept current solution.
-                status_ = Status::Optimal;
-                break;
+                if (has_cost_perturb || has_cost_shift) {
+                    // The cleanup's dual pivots shifted costs (a zero step,
+                    // correctDualInfeasibilities at a refactor): the basis
+                    // is optimal only for the shifted costs. Leave cleanup
+                    // and let the main loop take the shifts off.
+                    in_cleanup_phase = false;
+                } else {
+                    // Budget exhausted. Accept current solution.
+                    status_ = Status::Optimal;
+                    break;
+                }
             }
         }
 
@@ -3173,9 +3184,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // row then steps zero onto a tiny pivot and shifts its cost by the
         // whole error, and the iterates blow up. Restore the invariant first,
         // as HiGHS's correctDual does at each rebuild, and choose again.
-        if (std::ranges::any_of(bfrt_cands, [td = kDualTol](const BfrtCand& c) {
+        // Once per pivot: should round-off leave a candidate wrong after the
+        // repair, the ratio test below copes rather than repairing forever.
+        if (last_dual_repair_iteration != iterations_ &&
+            std::ranges::any_of(bfrt_cands, [td = kDualTol](const BfrtCand& c) {
                 return c.tight < -td && std::isfinite(c.tight);
             })) {
+            last_dual_repair_iteration = iterations_;
             bool shifted = false;
             const bool flipped = correctDualInfeasibilities(&shifted);
             if (flipped || shifted) {
@@ -3467,11 +3482,18 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         if (zero_dual_step) {
             // A wrong-signed (within Harris) reduced cost steps zero; shift
             // the entering cost so the reduced cost it leaves is zero, as
-            // HiGHS's shiftCost. A logical has no cost slot and keeps its
-            // round-off, which the next computeDuals settles.
+            // HiGHS's shiftCost. A logical's shift goes through its row, as
+            // in correctDualInfeasibilities: that moves its reduced cost
+            // alone, so the other reduced costs stay those of the new basis.
             theta_d = 0.0;
+            const Real delta = -reduced_cost_[entering_var];
             if (entering_var < num_cols_) {
-                addCostShift(entering_var, -reduced_cost_[entering_var]);
+                addCostShift(entering_var, delta);
+            } else {
+                const auto rv = matrix_.row(entering_var - num_cols_);
+                for (Index p = 0; p < rv.size(); ++p) {
+                    addCostShift(rv.indices[p], delta * rv.values[p]);
+                }
             }
         }
         for (Index k : nonbasic_) {
@@ -3710,10 +3732,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     }
 
     clearBoundPerturbation();
-    clearCostShifts();
-    if (has_cost_perturb) {
-        // Stopped before the perturbation came off (a limit, an infeasibility
-        // proof): report duals for the true costs.
+    if (has_cost_perturb || has_cost_shift) {
+        // Stopped before the shifts or the perturbation came off (a limit,
+        // an infeasibility proof): report duals for the true costs.
+        clearCostShifts();
         clearCostPerturbation();
         if (status_ != Status::Error) {
             computeDuals();

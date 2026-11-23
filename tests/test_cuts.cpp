@@ -1466,9 +1466,11 @@ LpProblem buildStrongCgKnapsackMip() {
     return lp;
 }
 
-// min -x - 1.5y  s.t.  x + y <= 2.5, x integer in [0,10], y continuous in [0,10].
-// The LP and the MIP share the unique optimum x = 0, y = 2.5 (objective -3.75).
-LpProblem buildStrongCgMixedMip() {
+// min x_cost x - 1.5y  s.t.  x + y <= 2.5, x integer in [0,10], y continuous
+// in [0,10]. At the default x_cost = -1 the LP and the MIP share the unique
+// optimum x = 0, y = 2.5 (objective -3.75). Below -1.5 the LP optimum moves
+// to the fractional x = 2.5, y = 0, and the MIP's to x = 2, y = 0.5.
+LpProblem buildStrongCgMixedMip(Real x_cost = -1.0) {
     LpProblem lp;
     lp.name = "strongcg_mixed";
     lp.sense = Sense::Minimize;
@@ -1477,7 +1479,7 @@ LpProblem buildStrongCgMixedMip() {
     // y is worth more than x, so the LP optimum is the vertex x = 0, y = 2.5
     // alone; with equal costs the whole face ties and the vertex returned
     // turns on the dual simplex's tie-breaking (its cost perturbation, #278).
-    lp.obj = {-1.0, -1.5};
+    lp.obj = {x_cost, -1.5};
     lp.col_lower = {0.0, 0.0};
     lp.col_upper = {10.0, 10.0};
     lp.col_type = {VarType::Integer, VarType::Continuous};
@@ -1743,11 +1745,14 @@ TEST_CASE("MipSolver: Strong CG cuts do not cut off the optimum", "[cuts][strong
         solver.setVerbose(false);
         solver.setPresolve(false);
         solver.setCutFamilyConfig(onlyStrongCgConfig());
-        solver.load(buildStrongCgMixedMip());
+        // x worth more than y, so the root LP vertex x = 2.5 is fractional
+        // and the separator has a point to cut; the optimum is x = 2,
+        // y = 0.5.
+        solver.load(buildStrongCgMixedMip(-2.0));
         auto result = solver.solve();
 
         REQUIRE(result.status == Status::Optimal);
-        CHECK_THAT(result.objective, WithinAbs(-3.75, 1e-6));
+        CHECK_THAT(result.objective, WithinAbs(-4.75, 1e-6));
     }
 }
 

@@ -1582,7 +1582,7 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
         // with root cuts on those rarely branch: the case above reached it on
         // a single model, and only while the LP happened to return a
         // fractional vertex there (#297). Without root cuts several models
-        // branch, so the coverage check below does not hang on one vertex.
+        // branch, so the coverage check below does not hinge on one vertex.
         {"tree presolve at every node, no root cuts",
          [](MipSolver& s) {
              s.setCutsEnabled(false);
