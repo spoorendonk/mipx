@@ -1466,15 +1466,18 @@ LpProblem buildStrongCgKnapsackMip() {
     return lp;
 }
 
-// min -x - y  s.t.  x + y <= 2.5, x integer in [0,10], y continuous in [0,10].
-// Optimum -2.5, attained anywhere on x + y = 2.5 with x integral.
+// min -x - 1.5y  s.t.  x + y <= 2.5, x integer in [0,10], y continuous in [0,10].
+// The LP and the MIP share the unique optimum x = 0, y = 2.5 (objective -3.75).
 LpProblem buildStrongCgMixedMip() {
     LpProblem lp;
     lp.name = "strongcg_mixed";
     lp.sense = Sense::Minimize;
     lp.num_cols = 2;
     lp.num_rows = 1;
-    lp.obj = {-1.0, -1.0};
+    // y is worth more than x, so the LP optimum is the vertex x = 0, y = 2.5
+    // alone; with equal costs the whole face ties and the vertex returned
+    // turns on the dual simplex's tie-breaking (its cost perturbation, #278).
+    lp.obj = {-1.0, -1.5};
     lp.col_lower = {0.0, 0.0};
     lp.col_upper = {10.0, 10.0};
     lp.col_type = {VarType::Integer, VarType::Continuous};
@@ -1710,7 +1713,7 @@ TEST_CASE("SeparatorManager: Strong CG cuts keep the knapsack optimum", "[cuts][
 
 TEST_CASE("SeparatorManager: Strong CG cuts keep the mixed-row optimum", "[cuts][strongcg]") {
     const auto problem = buildStrongCgMixedMip();
-    // x = 0, y = 2.5 is integer-feasible and optimal (objective -2.5). Keeping
+    // x = 0, y = 2.5 is integer-feasible and optimal (objective -3.75). Keeping
     // the continuous column produced 0.75y <= 1 from the multiplier t = 0.75,
     // which this point violates by 0.875. Once the column is relaxed away the
     // only integer term left is x, and no multiplier rounds it into a violated
@@ -1744,7 +1747,7 @@ TEST_CASE("MipSolver: Strong CG cuts do not cut off the optimum", "[cuts][strong
         auto result = solver.solve();
 
         REQUIRE(result.status == Status::Optimal);
-        CHECK_THAT(result.objective, WithinAbs(-2.5, 1e-6));
+        CHECK_THAT(result.objective, WithinAbs(-3.75, 1e-6));
     }
 }
 

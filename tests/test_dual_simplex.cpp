@@ -656,6 +656,42 @@ TEST_CASE("DualSimplex: default no-presolve handles degen2 and degen3 within tim
     }
 }
 
+TEST_CASE("DualSimplex: no-presolve pilot and pilot87 solve within time limit (#278)",
+          "[dual_simplex][netlib][regression][no_presolve]") {
+    // Both used to stall past 120 s in degenerate pivots; with the cost
+    // perturbation and the dual-feasibility repair before each dual pivot
+    // they take about 6 s and 9 s on one thread.
+    struct NetlibCase {
+        const char* name;
+        Real expected_obj;
+    };
+    constexpr NetlibCase kCases[] = {
+        {"pilot", -5.5748972927e+02},
+        {"pilot87", 3.0171034733e+02},
+    };
+
+    for (const auto& tc : kCases) {
+        std::string path = testDataDir() + "/netlib/" + tc.name + ".mps.gz";
+        if (!fs::exists(path)) {
+            SKIP(std::string("Netlib instance missing: ") + tc.name);
+        }
+
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.max_solve_seconds = 60.0;
+        solver.setOptions(opts);
+        solver.setVerbose(false);
+        solver.load(readMps(path));
+
+        const auto result = solver.solve();
+        INFO("instance=" << tc.name);
+        REQUIRE(result.status == Status::Optimal);
+        Real denom = std::max(1.0, std::abs(tc.expected_obj));
+        Real rel_err = std::abs(result.objective - tc.expected_obj) / denom;
+        CHECK(rel_err < 1e-6);
+    }
+}
+
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
           "[dual_simplex][basis]") {
     // Two structural columns are identical, so choosing both as basic creates a

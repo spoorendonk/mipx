@@ -1196,7 +1196,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     }
     lu_.setFtDropTolerance(lu_ft_drop_tol);
 
-    if (!has_basis_) {
+    const bool cold_start = !has_basis_;
+    if (cold_start) {
         // Cold start: set up crash basis (all-slack + optional crash passes).
         setupCrashBasis();
     }
@@ -1297,6 +1298,144 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
         devex_reset_count_ = 0;
     };
+
+    // Cost perturbation against dual degeneracy (#278). With many zero costs
+    // every dual ratio is zero, the dual objective never moves and the bound
+    // flipping ratio test can cycle forever (woodw after presolve keeps 4
+    // nonzero costs of 2297). This follows HiGHS's HEkk::initialiseCost: the
+    // scale C is max |c_j|, damped to C^(1/4) above 100 and capped at 1 when
+    // under 1% of the variables are boxed; each structural with a finite
+    // bound moves by (1 + |c_j|) * 5e-7 * C * (1 + u_j), u_j in [0, 1), the
+    // way that keeps it dual feasible at that bound. HiGHS also gives the
+    // logicals a +-5e-13 jitter; logicals here have no cost slot, so they are
+    // left out. The perturbation comes off once the perturbed LP is optimal.
+    std::vector<Real> cost_perturb;
+    bool has_cost_perturb = false;
+    auto clearCostPerturbation = [&]() {
+        if (!has_cost_perturb) {
+            return;
+        }
+        for (Index j = 0; j < num_cols_; ++j) {
+            obj_[j] -= cost_perturb[static_cast<std::size_t>(j)];
+        }
+        cost_perturb.clear();
+        has_cost_perturb = false;
+    };
+    auto addCostShift = [&](Index j, Real shift) {
+        if (!has_cost_perturb) {
+            cost_perturb.assign(static_cast<std::size_t>(num_cols_), 0.0);
+            has_cost_perturb = true;
+        }
+        cost_perturb[static_cast<std::size_t>(j)] += shift;
+        obj_[j] += shift;
+    };
+    // HiGHS's HEkkDual::correctDual, run after a rebuild in the dual phase:
+    // a nonbasic whose reduced cost is wrong by Td or more flips to its other
+    // bound when it has one, else its cost shifts to leave the reduced cost
+    // (1 + u) Td on the right side; a logical's shift goes through its row
+    // (below). A free column has no side and is left to the ratio test,
+    // which steps zero on it. Returns whether anything flipped (primals then
+    // change); `shifted` (when given) reports whether any cost moved, which
+    // also moves y when a logical was shifted.
+    auto correctDualInfeasibilities = [&](bool* shifted = nullptr) -> bool {
+        bool flipped = false;
+        for (Index k : nonbasic_) {
+            const BasisStatus st = var_status_[k];
+            Real move = 0.0;
+            if (st == BasisStatus::AtLower) {
+                move = 1.0;
+            } else if (st == BasisStatus::AtUpper) {
+                move = -1.0;
+            } else {
+                continue;
+            }
+            const Real rc = reduced_cost_[k];
+            if (move * rc > -kDualTol) {
+                continue;
+            }
+            const Real lb = varLower(k);
+            const Real ub = varUpper(k);
+            if (lb != -kInf && ub != kInf) {
+                if (st == BasisStatus::AtLower) {
+                    primal_[k] = ub;
+                    var_status_[k] = BasisStatus::AtUpper;
+                } else {
+                    primal_[k] = lb;
+                    var_status_[k] = BasisStatus::AtLower;
+                }
+                flipped = true;
+            } else {
+                const uint32_t hash = static_cast<uint32_t>(k + 1) * 2246822519u;
+                const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
+                const Real new_rc = move * (1.0 + u) * kDualTol;
+                const Real delta = new_rc - rc;
+                if (k < num_cols_) {
+                    addCostShift(k, delta);
+                } else {
+                    // A logical has no cost slot, but on the feasible set
+                    // s_i = a_i x, so moving its cost by delta is the same
+                    // LP as moving each c_j of row i by delta * a_ij. That
+                    // changes the reduced cost of s_i alone, by delta.
+                    const auto rv = matrix_.row(k - num_cols_);
+                    for (Index p = 0; p < rv.size(); ++p) {
+                        addCostShift(rv.indices[p], delta * rv.values[p]);
+                    }
+                }
+                reduced_cost_[k] = new_rc;
+                if (shifted != nullptr) {
+                    *shifted = true;
+                }
+            }
+        }
+        return flipped;
+    };
+    if (cold_start && options_.enable_cost_perturbation &&
+        options_.cost_perturbation_multiplier > 0.0) {
+        Real bigc = 0.0;
+        for (Index j = 0; j < num_cols_; ++j) {
+            bigc = std::max(bigc, std::abs(obj_[j]));
+        }
+        if (bigc > 100.0) {
+            bigc = std::sqrt(std::sqrt(bigc));
+        }
+        Index num_boxed = 0;
+        for (Index k = 0; k < numVars(); ++k) {
+            const Real lb = varLower(k);
+            const Real ub = varUpper(k);
+            if (lb != -kInf && ub != kInf && ub - lb < 1e30) {
+                ++num_boxed;
+            }
+        }
+        if (static_cast<Real>(num_boxed) < 0.01 * static_cast<Real>(numVars())) {
+            bigc = std::min(bigc, 1.0);
+        }
+        const Real base = options_.cost_perturbation_multiplier * 5e-7 * bigc;
+        if (base > 0.0) {
+            cost_perturb.assign(static_cast<std::size_t>(num_cols_), 0.0);
+            for (Index j = 0; j < num_cols_; ++j) {
+                const Real lb = col_lower_[j];
+                const Real ub = col_upper_[j];
+                const uint32_t hash = static_cast<uint32_t>(j + 1) * 2654435761u;
+                const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
+                const Real xpert = (1.0 + u) * (std::abs(obj_[j]) + 1.0) * base;
+                Real delta = 0.0;
+                if (lb == -kInf && ub == kInf) {
+                    continue;  // free: no side to keep
+                }
+                if (ub == kInf) {
+                    delta = xpert;
+                } else if (lb == -kInf) {
+                    delta = -xpert;
+                } else if (lb != ub) {
+                    delta = obj_[j] >= 0.0 ? xpert : -xpert;
+                }
+                cost_perturb[static_cast<std::size_t>(j)] = delta;
+                obj_[j] += delta;
+            }
+            has_cost_perturb = true;
+            computeDuals();
+        }
+    }
 
     // Cost shifting for dual feasibility (Phase 1).
     std::vector<Real> cost_shift(num_cols_, 0.0);
@@ -2052,6 +2191,15 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
                 continue;  // Flipping may have created primal infeasibility.
             }
+            if (has_cost_perturb) {
+                // Optimal for the perturbed costs: restore the true costs.
+                // The primal-feasible phase below repairs any reduced cost
+                // that now has the wrong sign.
+                clearCostPerturbation();
+                computeDuals();
+                resetPrimalFeasibleProgress();
+                continue;
+            }
 
             // No cost shifts active. Check dual feasibility.
             Index entering_p = -1;
@@ -2690,14 +2838,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
         // ---- CHUZC: Dual ratio test with BFRT (Bound Flipping) ----
         Index entering_var = -1;
-        // Standard Harris tolerance. The previous phase-aware variant widened
-        // to 1e-5 in the primal-infeasible phase and tightened to 1e-7 near
-        // optimality. Combined with the relative-pivot tie-breaker the
-        // widened window admitted poorly-scaled pivots and produced long
-        // oscillation tails on numerically tricky LPs (e.g. greenbea, where
-        // the wider window prevented convergence). Stick with 1e-6, which is
-        // the textbook value and matches the legacy behavior.
-        Real harris_tol = 1e-6;
 
         auto isEligible = [&](Index k, Real alpha) -> bool {
             if (std::abs(alpha) < kPivotTol) {
@@ -2734,8 +2874,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             Index nonbasic_pos;
             Real ratio;
             Real alpha;
-            Real gap;        // ub - lb, kInf if no finite opposite bound
-            Real rel_pivot;  // |alpha| / ||column|| for pivot quality
+            Real gap;          // ub - lb, kInf if no finite opposite bound
+            Real rel_pivot;    // |alpha| / ||column|| for pivot quality
+            Real tight = 0.0;  // move * rc: the dual slack (ratio test)
+            Real value = 0.0;  // |alpha|
         };
         static thread_local std::vector<BfrtCand> bfrt_cands;
         bfrt_cands.clear();
@@ -2988,160 +3130,226 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         empty_candidate_retry_streak = 0;
 
-        auto cand_ratio_pos_less = [](const BfrtCand& a, const BfrtCand& b) {
-            if (a.ratio != b.ratio) {
-                return a.ratio < b.ratio;
+        // Harris ratio test with bound flipping (#278), after HiGHS's
+        // HEkkDualRow::choosePossible, chooseFinal and
+        // chooseFinalWorkGroupQuad. For candidate k, value_k = |alpha_k| and
+        // tight_k = move_k * rc_k, its dual slack, with move_k = +1 at lower
+        // and -1 at upper (a free column takes the side that helps the row).
+        // The dual step is theta = tight_q / value_q for the entering q.
+        //   1. Harris bound: theta_h = min (tight_k + Td) / value_k.
+        //   2. Large-step prefilter: keep the candidates with
+        //      tight_k <= value_k * s, s = 10 theta_h + 1e-7 and growing
+        //      tenfold, until moving them all to their other bounds would
+        //      overshoot the row's infeasibility.
+        //   3. Groups: group 1 takes tight_k <= value_k * theta_h, group g + 1
+        //      those within the Harris bound of the rest, until the bound
+        //      ranges passed (sum value_k * range_k) cover the infeasibility.
+        //   4. From the last group back, the first whose largest value
+        //      exceeds min(0.1 * max value, 1) gives the entering column; the
+        //      groups before it flip to their other bounds.
+        // A wrong-signed tight_q steps zero (no flips) and q's cost is
+        // shifted so its reduced cost is zero, as HiGHS's updateDual does;
+        // the shift comes off with the cost perturbation.
+        constexpr Real kQuadInitialTotalChange = 1e-12;
+        constexpr Real kQuadInitialRemainTheta = 1e100;
+        constexpr Real kQuadMaxSelectTheta = 1e18;
+        const Real td = kDualTol;
+        const Real total_delta = std::abs(leaving_val - target);
+        for (auto& c : bfrt_cands) {
+            const BasisStatus st = var_status_[c.var];
+            Real move = 1.0;
+            if (st == BasisStatus::AtUpper) {
+                move = -1.0;
+            } else if (st == BasisStatus::Free) {
+                move = sigma * c.alpha < 0.0 ? 1.0 : -1.0;
             }
-            if (a.nonbasic_pos != b.nonbasic_pos) {
-                return a.nonbasic_pos < b.nonbasic_pos;
-            }
-            return a.var < b.var;
-        };
-
-        bool has_finite_gap_cand = false;
-        Index best_ci = -1;
-        for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
-            const auto& c = bfrt_cands[ci];
-            if (need_bfrt_gap_scan && c.gap != kInf) {
-                has_finite_gap_cand = true;
-            }
-            if (best_ci < 0 || cand_ratio_pos_less(c, bfrt_cands[best_ci])) {
-                best_ci = ci;
+            c.tight = move * reducedCostForPricing(c.var);
+            c.value = std::abs(c.alpha);
+        }
+        // The groups below assume HiGHS's invariant: no reduced cost is
+        // wrong by more than Td. Removing the phase-1 shifts or the
+        // perturbation, and the primal pivots that follow, can leave a
+        // nonbasic wrong by far more (greenbea: 2e3); a dual pivot on that
+        // row then steps zero onto a tiny pivot and shifts its cost by the
+        // whole error, and the iterates blow up. Restore the invariant first,
+        // as HiGHS's correctDual does at each rebuild, and choose again.
+        if (std::ranges::any_of(bfrt_cands, [td = kDualTol](const BfrtCand& c) {
+                return c.tight < -td && std::isfinite(c.tight);
+            })) {
+            bool shifted = false;
+            const bool flipped = correctDualInfeasibilities(&shifted);
+            if (flipped || shifted) {
+                if (flipped) {
+                    computePrimals();
+                }
+                if (shifted) {
+                    computeDuals();  // a logical's shift moves y
+                }
+                rebuildInfeasibleSet();
+                continue;
             }
         }
-
-        const bool use_bfrt = need_bfrt_gap_scan && has_finite_gap_cand;
-
-        if (!use_bfrt) {
-            // Common LP fast path: all candidates are effectively unflippable
-            // (one-sided bounds), so BFRT reduces to min-ratio selection.
-            Real enter_ratio = bfrt_cands[best_ci].ratio;
-            Real harris_threshold = enter_ratio + harris_tol;
-            entering_var = bfrt_cands[best_ci].var;
-            Real best_pivot_score = bfrt_cands[best_ci].rel_pivot;
-            Index best_pos = bfrt_cands[best_ci].nonbasic_pos;
-
-            for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
-                const auto& c = bfrt_cands[ci];
-                if (c.ratio > harris_threshold) {
-                    continue;
+        const Index num_cands = static_cast<Index>(bfrt_cands.size());
+        Real harris_theta = kInf;
+        for (const auto& c : bfrt_cands) {
+            if (c.tight + td < c.value * harris_theta) {
+                harris_theta = (c.tight + td) / c.value;
+            }
+        }
+        // HiGHS keeps every dual infeasibility within Td (correctDual at each
+        // rebuild), so the bound is never negative there. Round-off between
+        // rebuilds can still push one past it; a negative bound would drive
+        // the tenfold growth below to -inf, so clamp it: the wrong-signed
+        // candidates then form the first group and the step is zero.
+        harris_theta = std::max(harris_theta, 0.0);
+        const bool row_finite =
+            std::isfinite(harris_theta) && std::ranges::all_of(bfrt_cands, [](const BfrtCand& c) {
+                return std::isfinite(c.tight) && std::isfinite(c.value);
+            });
+        // Stage 2: large-step prefilter.
+        Index work_count = 0;
+        if (row_finite) {
+            Real total_change = 0.0;
+            Real select_theta = 10.0 * harris_theta + 1e-7;
+            for (;;) {
+                for (Index i = work_count; i < num_cands; ++i) {
+                    const auto& c = bfrt_cands[static_cast<std::size_t>(i)];
+                    if (c.value * select_theta >= c.tight) {
+                        total_change += c.gap * c.value;
+                        std::swap(bfrt_cands[static_cast<std::size_t>(work_count)],
+                                  bfrt_cands[static_cast<std::size_t>(i)]);
+                        ++work_count;
+                    }
                 }
-                // Prefer candidates with better relative pivot quality.
-                if (c.rel_pivot > best_pivot_score ||
-                    (c.rel_pivot == best_pivot_score && c.nonbasic_pos < best_pos)) {
-                    best_pivot_score = c.rel_pivot;
-                    best_pos = c.nonbasic_pos;
-                    entering_var = c.var;
+                select_theta *= 10.0;
+                if (total_change >= total_delta || work_count == num_cands) {
+                    break;
                 }
             }
-            // No BFRT flips in this path, reset high-flip counter.
-            bfrt_high_flip_iters_ = 0;
-        } else {
-            // Sort by ratio for BFRT sweep.
-            // Keep legacy ordering when SIP scan is disabled to avoid behavior drift.
-            if (!options_.enable_sip_parallel_candidates) {
-                std::sort(bfrt_cands.begin(), bfrt_cands.end(),
-                          [](const BfrtCand& a, const BfrtCand& b) { return a.ratio < b.ratio; });
-            } else {
-                auto cmp = [](const BfrtCand& a, const BfrtCand& b) {
-                    if (a.ratio != b.ratio) {
-                        return a.ratio < b.ratio;
+        }
+        // Stage 3: Harris groups.
+        static thread_local std::vector<Index> work_group;
+        work_group.clear();
+        work_group.push_back(0);
+        bool groups_ok = row_finite;
+        if (groups_ok) {
+            const Index full_count = work_count;
+            work_count = 0;
+            Real total_change = kQuadInitialTotalChange;
+            Real select_theta = harris_theta;
+            Index prev_work_count = work_count;
+            Real prev_remain_theta = kQuadInitialRemainTheta;
+            Real prev_select_theta = select_theta;
+            while (select_theta < kQuadMaxSelectTheta) {
+                Real remain_theta = kQuadInitialRemainTheta;
+                for (Index i = work_count; i < full_count; ++i) {
+                    const auto& c = bfrt_cands[static_cast<std::size_t>(i)];
+                    if (c.tight <= select_theta * c.value) {
+                        total_change += c.value * c.gap;
+                        std::swap(bfrt_cands[static_cast<std::size_t>(work_count)],
+                                  bfrt_cands[static_cast<std::size_t>(i)]);
+                        ++work_count;
+                    } else if (c.tight + td < remain_theta * c.value) {
+                        remain_theta = (c.tight + td) / c.value;
                     }
-                    if (a.nonbasic_pos != b.nonbasic_pos) {
-                        return a.nonbasic_pos < b.nonbasic_pos;
-                    }
-                    return a.var < b.var;
-                };
-#ifdef MIPX_HAS_TBB
-                if (options_.enable_sip_parallel_candidate_sort &&
-                    static_cast<Index>(bfrt_cands.size()) >=
-                        options_.sip_parallel_sort_min_candidates &&
-                    sipThreadGatePass() && sip_numerical_gate) {
-                    tbb::parallel_sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
-                } else
-#endif
-                {
-                    std::sort(bfrt_cands.begin(), bfrt_cands.end(), cmp);
+                }
+                work_group.push_back(work_count);
+                select_theta = remain_theta;
+                if (work_count == prev_work_count && prev_select_theta == select_theta &&
+                    prev_remain_theta == remain_theta) {
+                    groups_ok = false;  // no progress: NaN or inf in the row
+                    break;
+                }
+                prev_work_count = work_count;
+                prev_select_theta = select_theta;
+                prev_remain_theta = remain_theta;
+                if (total_change >= total_delta || work_count == full_count) {
+                    break;
                 }
             }
-
-            // BFRT sweep: flip bounded variables until the leaving variable's
-            // infeasibility can be resolved by the next candidate entering.
-            // Numerical hygiene: track accumulated primal change and flip count.
-            Real needed = std::abs(leaving_val - target);
-            Real accumulated = 0.0;
-            Real accumulated_primal_change = 0.0;
-            Int flip_count = 0;
-            Index entering_ci = -1;
-            const Real bfrt_max_change = options_.bfrt_max_accumulated_change;
-            const Int bfrt_max_flips = options_.bfrt_max_flips;
-
-            for (Index ci = 0; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
-                auto& c = bfrt_cands[ci];
-
-                if (c.gap == kInf) {
-                    entering_ci = ci;
+            if (work_group.size() <= 1) {
+                groups_ok = false;
+            }
+        }
+        if (!groups_ok) {
+            // HiGHS rebuilds when no group forms; refactorize and choose again.
+            try {
+                refactorize();
+            } catch (const std::runtime_error&) {
+                if (!recoverFromSingularBasis()) {
                     break;
                 }
-
-                Real contribution = std::abs(c.alpha) * c.gap;
-                if (accumulated + contribution >= needed) {
-                    entering_ci = ci;
-                    break;
+                repair_rejected_row = -1;
+            }
+            computePrimals();
+            computeDuals();
+            initDseWeights();
+            rebuildInfeasibleSet();
+            degenerate_pivot_streak = 0;
+            ++iterations_;
+            continue;
+        }
+        // Stage 4: the entering column, then the flips.
+        Real final_compare = 0.0;
+        for (Index i = 0; i < work_count; ++i) {
+            final_compare = std::max(final_compare, bfrt_cands[static_cast<std::size_t>(i)].value);
+        }
+        final_compare = std::min(0.1 * final_compare, 1.0);
+        Index break_group = -1;
+        Index break_index = -1;
+        for (Index g = static_cast<Index>(work_group.size()) - 2; g >= 0; --g) {
+            Real max_value = 0.0;
+            Index max_index = -1;
+            for (Index i = work_group[static_cast<std::size_t>(g)];
+                 i < work_group[static_cast<std::size_t>(g) + 1]; ++i) {
+                const auto& c = bfrt_cands[static_cast<std::size_t>(i)];
+                if (max_value < c.value) {
+                    max_value = c.value;
+                    max_index = i;
+                } else if (max_value == c.value && max_index >= 0 &&
+                           c.var < bfrt_cands[static_cast<std::size_t>(max_index)].var) {
+                    max_index = i;
                 }
-
-                // Numerical hygiene: stop flipping if accumulated primal
-                // change is too large or flip count exceeded.
-                if (options_.enable_adaptive_harris &&
-                    (accumulated_primal_change + c.gap > bfrt_max_change ||
-                     flip_count >= bfrt_max_flips)) {
-                    entering_ci = ci;
-                    break;
-                }
-
-                // Flip this variable to its opposite bound.
-                if (var_status_[c.var] == BasisStatus::AtLower) {
-                    primal_[c.var] = upperBoundFast(c.var);
-                    var_status_[c.var] = BasisStatus::AtUpper;
+            }
+            if (max_index >= 0 &&
+                bfrt_cands[static_cast<std::size_t>(max_index)].value > final_compare) {
+                break_index = max_index;
+                break_group = g;
+                break;
+            }
+        }
+        if (break_index < 0) {
+            // Only when every value is zero, which eligibility rules out.
+            break_index = 0;
+            break_group = 0;
+        }
+        const BfrtCand& chosen = bfrt_cands[static_cast<std::size_t>(break_index)];
+        entering_var = chosen.var;
+        const bool zero_dual_step = !(chosen.tight > 0.0);
+        Int flip_count = 0;
+        if (!zero_dual_step) {
+            for (Index i = 0; i < work_group[static_cast<std::size_t>(break_group)]; ++i) {
+                const Index k = bfrt_cands[static_cast<std::size_t>(i)].var;
+                if (var_status_[k] == BasisStatus::AtLower) {
+                    primal_[k] = upperBoundFast(k);
+                    var_status_[k] = BasisStatus::AtUpper;
+                } else if (var_status_[k] == BasisStatus::AtUpper) {
+                    primal_[k] = lowerBoundFast(k);
+                    var_status_[k] = BasisStatus::AtLower;
                 } else {
-                    primal_[c.var] = lowerBoundFast(c.var);
-                    var_status_[c.var] = BasisStatus::AtLower;
+                    continue;  // a free column has no bound to flip to
                 }
                 has_flips = true;
-                bfrt_flipped.push_back(c.var);
-                accumulated += contribution;
-                accumulated_primal_change += c.gap;
+                bfrt_flipped.push_back(k);
                 ++flip_count;
             }
-
-            if (entering_ci < 0) {
-                entering_ci = static_cast<Index>(bfrt_cands.size()) - 1;
-            }
-
-            // Track high-flip iterations for early refactorization.
-            if (options_.enable_adaptive_harris &&
-                flip_count >= options_.bfrt_high_flip_refactor_threshold) {
-                ++bfrt_high_flip_iters_;
-            } else {
-                bfrt_high_flip_iters_ = 0;
-            }
-
-            // Harris refinement: among candidates near the entering ratio,
-            // pick the one with best relative pivot quality for numerical stability.
-            Real enter_ratio = bfrt_cands[entering_ci].ratio;
-            Real harris_threshold = enter_ratio + harris_tol;
-            entering_var = bfrt_cands[entering_ci].var;
-            Real best_pivot_score_bfrt = bfrt_cands[entering_ci].rel_pivot;
-
-            for (Index ci = entering_ci + 1; ci < static_cast<Index>(bfrt_cands.size()); ++ci) {
-                if (bfrt_cands[ci].ratio > harris_threshold) {
-                    break;
-                }
-                if (bfrt_cands[ci].rel_pivot > best_pivot_score_bfrt) {
-                    best_pivot_score_bfrt = bfrt_cands[ci].rel_pivot;
-                    entering_var = bfrt_cands[ci].var;
-                }
-            }
+        }
+        // Track high-flip iterations for early refactorization.
+        if (options_.enable_adaptive_harris &&
+            flip_count >= options_.bfrt_high_flip_refactor_threshold) {
+            ++bfrt_high_flip_iters_;
+        } else {
+            bfrt_high_flip_iters_ = 0;
         }
 
         Real alpha_entering = pivot_row_alpha[entering_var];
@@ -3256,6 +3464,16 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
         // Update reduced costs.
         Real theta_d = reduced_cost_[entering_var] / alpha_entering;
+        if (zero_dual_step) {
+            // A wrong-signed (within Harris) reduced cost steps zero; shift
+            // the entering cost so the reduced cost it leaves is zero, as
+            // HiGHS's shiftCost. A logical has no cost slot and keeps its
+            // round-off, which the next computeDuals settles.
+            theta_d = 0.0;
+            if (entering_var < num_cols_) {
+                addCostShift(entering_var, -reduced_cost_[entering_var]);
+            }
+        }
         for (Index k : nonbasic_) {
             if (k == entering_var) {
                 continue;
@@ -3453,6 +3671,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (has_cost_shift) {
                 computeDuals();
             }
+            bool shifted = false;
+            if (correctDualInfeasibilities(&shifted)) {
+                computePrimals();
+            }
+            if (shifted) {
+                computeDuals();  // a logical's shift moves y
+            }
             rebuildInfeasibleSet();
         } else if (has_flips) {
             // BFRT flipped nonbasic variables, so the incremental primal
@@ -3486,6 +3711,14 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
     clearBoundPerturbation();
     clearCostShifts();
+    if (has_cost_perturb) {
+        // Stopped before the perturbation came off (a limit, an infeasibility
+        // proof): report duals for the true costs.
+        clearCostPerturbation();
+        if (status_ != Status::Error) {
+            computeDuals();
+        }
+    }
 
     // Preserve warm-start basis only when solve did not end in internal error.
     has_basis_ = (status_ != Status::Error);

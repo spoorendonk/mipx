@@ -1578,6 +1578,17 @@ TEST_CASE("Validity: the solver finds the enumerated optimum under every propaga
              s.setTreePresolveAutoTuning(false);
              s.setTreePresolveControls(100, 0, 1);
          }},
+        // Tree presolve runs only on all-discrete models below the root, and
+        // with root cuts on those rarely branch: the case above reached it on
+        // a single model, and only while the LP happened to return a
+        // fractional vertex there (#297). Without root cuts several models
+        // branch, so the coverage check below does not hang on one vertex.
+        {"tree presolve at every node, no root cuts",
+         [](MipSolver& s) {
+             s.setCutsEnabled(false);
+             s.setTreePresolveAutoTuning(false);
+             s.setTreePresolveControls(100, 0, 1);
+         }},
         {"symmetry off", [](MipSolver& s) { s.setSymmetryEnabled(false); }},
         {"no tree pseudocosts", [](MipSolver& s) { s.setTreePseudocostsEnabled(false); }},
         {"objective propagation (opt-in)",

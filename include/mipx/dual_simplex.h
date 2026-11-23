@@ -119,6 +119,15 @@ struct DualSimplexOptions {
     // Solve time limit for stand-alone LP usage. Negative means disabled.
     double max_solve_seconds = -1.0;
 
+    // Cost perturbation against dual degeneracy (#278), after HiGHS's
+    // HEkk::initialiseCost: each bounded structural's cost moves by
+    // (1 + |c_j|) * base * (1 + u_j) toward its dual-feasible side, base =
+    // multiplier * 5e-7 * C with C from max |c_j|. Taken off when the
+    // perturbed LP is optimal; the primal-feasible phase then repairs the
+    // dual infeasibilities that leaves. Applied on a cold start only.
+    bool enable_cost_perturbation = true;
+    Real cost_perturbation_multiplier = 1.0;
+
     // Deterministic anti-degeneracy reduced-cost perturbation.
     bool enable_dual_perturbation = false;
     Int dual_perturbation_stall_pivots = 64;

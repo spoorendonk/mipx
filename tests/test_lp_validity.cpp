@@ -1629,6 +1629,55 @@ TEST_CASE("Regression #282: a tiny reduced cost on a large fixed column leaves n
     CHECK(checkOptimal(lp, solver.getPrimalValues(), solver.getDualValues(), warm.objective) == "");
 }
 
+TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
+          "[lp_validity]") {
+    // A capacitated transportation LP whose costs take two values, so most
+    // optimal bases tie and the dual simplex meets zero reduced costs on
+    // nearly every pivot: the degeneracy that made it stall on Netlib. The
+    // cold solve perturbs the costs and takes the perturbation off at the
+    // end; the answer must be certified against the costs as loaded, and
+    // match the solve without perturbation.
+    constexpr Index kSupply = 4;
+    constexpr Index kDemand = 5;
+    const std::vector<Real> supply = {7.0, 5.0, 6.0, 4.0};
+    for (const Sense sense : {Sense::Minimize, Sense::Maximize}) {
+        std::vector<Real> obj;
+        std::vector<Triplet> entries;
+        for (Index i = 0; i < kSupply; ++i) {
+            for (Index j = 0; j < kDemand; ++j) {
+                const Index col = i * kDemand + j;
+                const Real c = (i + j) % 3 == 0 ? 0.0 : 1.0 + static_cast<Real>((i + j) % 2);
+                obj.push_back(sense == Sense::Minimize ? c : -c);
+                entries.push_back({i, col, 1.0});
+                entries.push_back({kSupply + j, col, 1.0});
+            }
+        }
+        const auto n = static_cast<std::size_t>(kSupply * kDemand);
+        std::vector<Real> rl(static_cast<std::size_t>(kSupply), -kInf);
+        std::vector<Real> ru = supply;
+        rl.resize(static_cast<std::size_t>(kSupply + kDemand), 4.0);
+        ru.resize(static_cast<std::size_t>(kSupply + kDemand), kInf);
+        const LpProblem lp = literalLp(sense, 0.0, obj, std::vector<Real>(n, 0.0),
+                                       std::vector<Real>(n, 3.0), rl, ru, entries);
+        INFO("sense " << (sense == Sense::Minimize ? "min" : "max"));
+
+        std::vector<Real> objective;
+        for (const bool perturb : {true, false}) {
+            INFO("cost perturbation " << perturb);
+            DualSimplexSolver solver;
+            DualSimplexOptions options = solver.getOptions();
+            options.enable_cost_perturbation = perturb;
+            solver.setOptions(options);
+            const LpResult res = solveLiteral(solver, lp);
+            REQUIRE(res.status == Status::Optimal);
+            CHECK(checkOptimal(lp, solver.getPrimalValues(), solver.getDualValues(),
+                               res.objective) == "");
+            objective.push_back(res.objective);
+        }
+        CHECK(std::abs(objective[0] - objective[1]) <= 1e-9);
+    }
+}
+
 TEST_CASE("Regression #245: observed incumbents hold the model as loaded", "[lp_validity]") {
     // A model of the #244 sweep: presolved, its root LP incumbent held the
     // reduced model but missed row 2 of this one by 1.24e-6.
