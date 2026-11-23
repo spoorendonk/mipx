@@ -1919,9 +1919,12 @@ struct GpuBarrierImpl {
             bool factorized = false;
             double cur_reg = reg_primal;
 
-            if (active_backend == Backend::NE && gap < 1e-4) {
+            // The regularization boosts were tuned on mu / (1 + |pobj|), the
+            // stopping measure before #253; they stay on that scale.
+            const double gap_mu = gap / std::max(n, 1);
+            if (active_backend == Backend::NE && gap_mu < 1e-4) {
                 cur_reg *= 100.0;
-                if (gap < 5e-5) {
+                if (gap_mu < 5e-5) {
                     cur_reg *= 10.0;
                 }
             }
@@ -1954,7 +1957,7 @@ struct GpuBarrierImpl {
                 cur_reg = reg_primal;
                 // Boost regularization near convergence for LDL' stability.
                 double cur_reg_dual = reg_dual;
-                if (gap < 1e-4) {
+                if (gap_mu < 1e-4) {
                     cur_reg = std::max(cur_reg, 1e-8) * 10.0;
                     cur_reg_dual = std::max(cur_reg_dual, 1e-6) * 10.0;
                 }

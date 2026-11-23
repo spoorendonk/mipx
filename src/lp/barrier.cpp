@@ -494,6 +494,7 @@ Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
 // factorization) still hands its best iterate on when every measure is within
 // this tolerance. Such a point is only ever used as a crossover start, which
 // proves optimality by simplex, so it need not meet primal_dual_tol itself.
+// Its gap measure is mu / (1 + |pobj|), not the stop's relative gap (#253).
 constexpr Real kNearOptimalTol = 1e-6;
 
 BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
@@ -634,7 +635,10 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             return BarrierIpmOutcome::Optimal;
         }
 
-        const Real err = std::max({pinf, dinf, gap});
+        // The crossover hand-off keeps mu / (1 + |pobj|), the scale
+        // kNearOptimalTol was set on: crossover proves optimality itself.
+        const Real gap_mu = gap / static_cast<Real>(std::max<Index>(n_compl, 1));
+        const Real err = std::max({pinf, dinf, gap_mu});
         if (err < best_err) {
             best_err = err;
             best_z = z;
