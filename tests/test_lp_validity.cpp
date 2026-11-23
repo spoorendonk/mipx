@@ -1716,6 +1716,44 @@ TEST_CASE("Regression #306: a cold optimum holds its reduced-cost signs in the m
                    {2, 5, 1250}}));
 }
 
+TEST_CASE("Regression #306: a clean-up that misses a row keeps the scaled optimum",
+          "[lp_validity]") {
+    // Audit cuts seed 45269, variant 1, round 1. The cold Optimal held its
+    // rows but not its multipliers in the model's units; the unscaled
+    // clean-up's Optimal left R2 at 0.0342467 over its side 0.0342187. The
+    // scaled optimum is put back, and it certifies.
+    requireCertifiedOptimal(literalLp(
+        Sense::Minimize, 1.25,
+        {0.265625, 0.12484375, -0.00021875, 34.53125, 0.0, 1357.8125, -0.00075000000000000002},
+        {-kInf, 62.5, -7750, 0.1875, -0.0625, -0.037499999999999999, -1125},
+        {kInf, 262.5, 1000, kInf, kInf, -0.037499999999999999, -1125},
+        {-kInf, -0.015046874999999999, -kInf, 0.00054062499999999998 - 0.00027499999999999996,
+         -kInf, -kInf},
+        {kInf, -0.015046874999999999, 0.034218749999999999, 0.00054062499999999998,
+         -58642805.359828077, -54881666.357542016},
+        {{0, 0, 4.2500000000000003e-05},
+         {0, 5, 0.01375},
+         {1, 0, 3.7500000000000003e-05},
+         {1, 1, 3.7499999999999997e-05},
+         {1, 5, 0.48749999999999999},
+         {2, 0, -0.0021250000000000002},
+         {2, 1, -0.0002875},
+         {2, 2, 2.5000000000000002e-06},
+         {2, 3, -0.13750000000000001},
+         {2, 5, -4.25},
+         {2, 6, 2.0000000000000002e-05},
+         {3, 0, 2.6250000000000004e-05},
+         {3, 1, -3.7500000000000006e-07},
+         {3, 6, 1.7499999999999999e-07},
+         {4, 1, -3.75},
+         {4, 2, 3250},
+         {4, 4, -0.0037499999999999999},
+         {4, 6, 38750},
+         {5, 2, 15000},
+         {5, 4, -0.000175},
+         {5, 6, 1625}}));
+}
+
 TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
           "[lp_validity]") {
     // A capacitated transportation LP whose costs take three values, so most

@@ -360,11 +360,13 @@ private:
     void rescaleKeepingBasis();
     LpResult solveFromCurrentBasis();
     // solve() less the unscaled clean-up: a warm verdict that fails its check
-    // gets a cold re-solve.
-    LpResult solveWithColdFallback(std::chrono::steady_clock::time_point start);
-    // An Optimal whose point misses a row or bound in the model's units gets a
-    // re-solve of the unscaled model from its basis (#307).
-    LpResult cleanUpUnscaled(LpResult res, std::chrono::steady_clock::time_point start);
+    // gets a cold re-solve. `checked` says the verdict returned passed
+    // verdictHolds(), so the clean-up need not run it again.
+    LpResult solveWithColdFallback(std::chrono::steady_clock::time_point start, bool& checked);
+    // An Optimal the model's units refute gets a re-solve of the unscaled
+    // model from its basis (#307, #306).
+    LpResult cleanUpUnscaled(LpResult res, std::chrono::steady_clock::time_point start,
+                             bool checked);
     bool dualRayMeetsContract() const;
     bool optimumHoldsUnscaled() const;
     bool primalHoldsUnscaled() const;
