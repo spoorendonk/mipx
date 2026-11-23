@@ -833,6 +833,58 @@ TEST_CASE("Presolve: activity-based bound tightening", "[presolve]") {
     CHECK(presolver.stats().bounds_tightened >= 1);
 }
 
+/// min -x - 2y s.t. x + y <= 4, x - y >= -1, x, y >= 0: the first row bounds
+/// both columns above, so activity tightening gives them upper bounds the
+/// row still implies.
+static LpProblem buildImpliedUpperBoundProblem(VarType y_type) {
+    LpProblem lp;
+    lp.name = "implied_ub";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, y_type};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -1.0};
+    lp.row_upper = {4.0, kInf};
+    lp.row_names = {"cap", "diff"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, -1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+    return lp;
+}
+
+// The barrier gives each boxed column a row, so an LP's bounds that its rows
+// imply are put back after presolve (#279); a MIP keeps them.
+TEST_CASE("Presolve: an LP's implied bounds are put back, a MIP's kept", "[presolve]") {
+    {
+        Presolver presolver;
+        const auto reduced = presolver.presolve(buildImpliedUpperBoundProblem(VarType::Continuous));
+        REQUIRE_FALSE(presolver.isInfeasible());
+        CHECK(presolver.stats().activity_bound_tightening_changes >= 1);
+        CHECK(presolver.stats().implied_bounds_relaxed >= 1);
+        REQUIRE(reduced.num_cols == 2);
+        CHECK(std::isinf(reduced.col_upper[0]));
+        CHECK(std::isinf(reduced.col_upper[1]));
+
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        solver.load(reduced);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        // x = 1.5, y = 2.5.
+        CHECK_THAT(result.objective, WithinAbs(-6.5, 1e-9));
+    }
+    {
+        Presolver presolver;
+        const auto reduced = presolver.presolve(buildImpliedUpperBoundProblem(VarType::Integer));
+        REQUIRE_FALSE(presolver.isInfeasible());
+        CHECK(presolver.stats().implied_bounds_relaxed == 0);
+        CHECK(presolver.stats().bounds_tightened >= 1);
+    }
+}
+
 TEST_CASE("Presolve: dual fixing", "[presolve]") {
     auto lp = buildDualFixingProblem();
 

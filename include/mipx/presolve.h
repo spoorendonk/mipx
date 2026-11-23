@@ -125,6 +125,11 @@ struct PresolveStats {
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
+    /// Bounds of an LP's columns that presolve tightened and then put back
+    /// to their original value, as the remaining rows still imply the
+    /// tightened ones; bounds_tightened still counts them. The barrier pays
+    /// a row for every column boxed by a bound it does not need (#279).
+    Index implied_bounds_relaxed = 0;
     Index rounds = 0;
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
@@ -289,6 +294,13 @@ private:
                               std::vector<bool>& row_removed, const std::vector<Index>& dirty_rows,
                               std::vector<uint8_t>& next_dirty_rows,
                               std::vector<uint8_t>& next_dirty_cols);
+
+    /// For an LP, puts back each column's original bound where presolve
+    /// tightened it and a remaining row still implies the tightened one
+    /// (#279). Returns the number of bounds put back.
+    Index relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
+                             const std::vector<bool>& col_removed,
+                             const std::vector<bool>& row_removed);
 
     // Build the reduced problem from the original with removed rows/cols.
     LpProblem buildReducedProblem(const LpProblem& lp, const std::vector<bool>& col_removed,

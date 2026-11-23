@@ -815,6 +815,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_probing; }},
         {"probing coefficient strengthening", &PresolveStats::probing_coeff_strengthenings,
          [](const PresolveOptions& o) { return o.enable_probing; }},
+        // Runs on LPs only; presolveAuditModels() carries pure LPs for it.
+        {"implied bounds relaxed", &PresolveStats::implied_bounds_relaxed, always},
     };
 }
 
@@ -899,7 +901,8 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
 // reductions those never trigger (#258). Doubleton aggregation needs an
 // equality over two continuous columns; implied equations, in a case with
 // forcing rows on, a row forcing rows declines, which one with a column it
-// cannot pin (a coefficient at or below presolve's 1e-8) is.
+// cannot pin (a coefficient at or below presolve's 1e-8) is. Putting back an
+// LP's implied bounds (#279) needs a model with no integer column.
 std::vector<LpProblem> presolveAuditModels() {
     constexpr auto I = VarType::Integer;
     constexpr auto B = VarType::Binary;
@@ -920,6 +923,18 @@ std::vector<LpProblem> presolveAuditModels() {
         spec.continuous_pair = true;
         spec.max_int = 3;
         models.push_back(randomModel(rng, spec));
+    }
+    // An LP: x0 + x1 <= 4 bounds both columns, and activity tightening makes
+    // those bounds explicit, which the row still implies.
+    models.push_back(makeModel(Sense::Minimize, {-1, -2}, {0, 0}, {kInf, kInf}, {C, C},
+                               {{1, 1}, {1, -1}}, {-kInf, -1}, {4, kInf}));
+    std::mt19937 lp_rng(279);
+    for (int t = 0; t < 50; ++t) {
+        ModelSpec spec;
+        spec.continuous_pair = true;
+        spec.min_int = 0;
+        spec.max_int = 0;
+        models.push_back(randomModel(lp_rng, spec));
     }
     return models;
 }

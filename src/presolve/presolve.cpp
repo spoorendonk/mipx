@@ -2632,10 +2632,138 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         }
     }
 
+    if (!infeasible_ && std::none_of(lp.col_type.begin(), lp.col_type.end(),
+                                     [](VarType t) { return t != VarType::Continuous; })) {
+        stats_.implied_bounds_relaxed = relaxImpliedBounds(lp, problem, col_removed, row_removed);
+    }
+
     stats_.time_seconds =
         std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count();
 
     return buildReducedProblem(lp, col_removed, row_removed);
+}
+
+// Activity bound tightening and singleton rows write the bounds they derive
+// into the LP, so a half-bounded column comes out boxed. The barrier gives
+// every boxed column a row of its own and factors a dense m x m matrix, so on
+// ship08l the 2706 bounds activity tightening made explicit took its standard
+// form from 680 rows to 3197 and its solve from 0.6 s to 150 s (#279).
+//
+// A tightened bound that a remaining row implies, given the other columns'
+// current bounds, cuts nothing off the reduced LP, so putting the original
+// bound back leaves its feasible set, and so postsolve, as they were. Each
+// column is put back against the bounds as they stand after the earlier
+// ones, never against bounds this pass has already loosened: two columns
+// whose tightened bounds each follow from the other's would otherwise both
+// lose theirs. Integer columns keep their bounds, and the caller runs this
+// only on an LP: a MIP's search and cuts reason from the tightened bounds.
+Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
+                                    const std::vector<bool>& col_removed,
+                                    const std::vector<bool>& row_removed) {
+    // Finite part and count of infinite terms of each row's minimum and
+    // maximum activity over its active columns.
+    struct Activity {
+        Real min_finite = 0.0;
+        Real max_finite = 0.0;
+        Index min_inf = 0;
+        Index max_inf = 0;
+    };
+    std::vector<Activity> act(lp.num_rows);
+    // Adds (sign +1) or removes (sign -1) the term a*x of a row's activities
+    // for x in [lb, ub].
+    auto addTerm = [](Activity& r, Real a, Real lb, Real ub, int sign) {
+        if (a == 0.0) {
+            return;
+        }
+        const Real at_min = a > 0.0 ? lb : ub;
+        const Real at_max = a > 0.0 ? ub : lb;
+        if (std::isinf(at_min)) {
+            r.min_inf += sign;
+        } else {
+            r.min_finite += sign * a * at_min;
+        }
+        if (std::isinf(at_max)) {
+            r.max_inf += sign;
+        } else {
+            r.max_finite += sign * a * at_max;
+        }
+    };
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (row_removed[i]) {
+            continue;
+        }
+        auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index j = rv.indices[k];
+            if (!col_removed[j]) {
+                addTerm(act[i], effectiveCoeff(coeff_overrides_, i, j, rv.values[k]),
+                        lp.col_lower[j], lp.col_upper[j], 1);
+            }
+        }
+    }
+
+    // Whether a remaining row bounds column j by `bound` or tighter from
+    // above (upper) or below, the column's own term taken out.
+    auto implied = [&](Index j, bool upper, Real bound) {
+        const Real tol = 1e-9 * std::max<Real>(1.0, std::abs(bound));
+        auto cv = lp.matrix.col(j);
+        for (Index k = 0; k < cv.size(); ++k) {
+            const Index i = cv.indices[k];
+            if (row_removed[i]) {
+                continue;
+            }
+            const Real a = effectiveCoeff(coeff_overrides_, i, j, cv.values[k]);
+            if (a == 0.0) {
+                continue;
+            }
+            Activity rest = act[i];
+            addTerm(rest, a, lp.col_lower[j], lp.col_upper[j], -1);
+            // a*x <= row_upper - rest_min and a*x >= row_lower - rest_max;
+            // dividing by a < 0 swaps which side bounds x from above.
+            const bool use_upper_side = upper == (a > 0.0);
+            const Real side = use_upper_side ? lp.row_upper[i] : lp.row_lower[i];
+            const Index rest_inf = use_upper_side ? rest.min_inf : rest.max_inf;
+            if (std::isinf(side) || rest_inf > 0) {
+                continue;
+            }
+            const Real rest_finite = use_upper_side ? rest.min_finite : rest.max_finite;
+            const Real value = (side - rest_finite) / a;
+            if (upper ? value <= bound + tol : value >= bound - tol) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    Index relaxed = 0;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (col_removed[j]) {
+            continue;
+        }
+        for (const bool upper : {true, false}) {
+            const Real current = upper ? lp.col_upper[j] : lp.col_lower[j];
+            const Real orig = upper ? original.col_upper[j] : original.col_lower[j];
+            const bool tightened = upper ? current < orig : current > orig;
+            if (!tightened || !implied(j, upper, current)) {
+                continue;
+            }
+            const Real old_lb = lp.col_lower[j];
+            const Real old_ub = lp.col_upper[j];
+            (upper ? lp.col_upper[j] : lp.col_lower[j]) = orig;
+            auto cv = lp.matrix.col(j);
+            for (Index k = 0; k < cv.size(); ++k) {
+                const Index i = cv.indices[k];
+                if (row_removed[i]) {
+                    continue;
+                }
+                const Real a = effectiveCoeff(coeff_overrides_, i, j, cv.values[k]);
+                addTerm(act[i], a, old_lb, old_ub, -1);
+                addTerm(act[i], a, lp.col_lower[j], lp.col_upper[j], 1);
+            }
+            ++relaxed;
+        }
+    }
+    return relaxed;
 }
 
 LpProblem Presolver::buildReducedProblem(const LpProblem& lp, const std::vector<bool>& col_removed,
