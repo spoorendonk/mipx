@@ -3500,3 +3500,209 @@ TEST_CASE("Presolve: implied row-dual bounds behind the dominated-columns flag",
     CHECK(on.stats().implied_row_dual_bounds >= 2);
     CHECK_THAT(objectiveAt(lp, on_x), WithinAbs(objectiveAt(lp, off_x), 1e-9));
 }
+
+namespace {
+
+/// min cx * x + f + 2z, x and z in [0, 10], f free: sign*x + f >= 1 and
+/// sign*x + f + z >= 0 (-9 and -10 when sign < 0). f's upper bound is
+/// infinite, so its dual constraint has y0 + y1 <= 1 (its lower bound is
+/// tightened to a finite one first, so not the >= side); with y0, y1 >= 0
+/// from the sides, that bounds y0, y1 in [0, 1], and the dual sums put x's
+/// reduced cost cx - sign * (y0 + y1) in [cx - 2 * sign, cx] for sign > 0
+/// and [cx, cx + 2] for sign < 0.
+LpProblem dominatedModel(Real cx, Real sign, Real f_lower = -kInf, Real f_upper = kInf) {
+    return rowsModel({cx, 1.0, 2.0}, {0.0, f_lower, 0.0}, {10.0, f_upper, 10.0},
+                     {{sign > 0.0 ? 1.0 : -9.0, kInf, {{0, sign}, {1, 1.0}}},
+                      {sign > 0.0 ? 0.0 : -10.0, kInf, {{0, sign}, {1, 1.0}, {2, 1.0}}}});
+}
+
+PresolveOptions dominatedOptions(bool on) {
+    PresolveOptions o;
+    o.enable_dominated_columns = on;
+    return o;
+}
+
+/// Presolves `lp` with and without dominated columns; checks both
+/// postsolve to a feasible point of the same objective and returns the
+/// full solution of the run with them.
+std::vector<Real> checkDominated(const LpProblem& lp, Presolver& on) {
+    Presolver off;
+    const auto off_x = presolveSolvePostsolve(lp, off, dominatedOptions(false));
+    const auto on_x = presolveSolvePostsolve(lp, on, dominatedOptions(true));
+    CHECK_THAT(objectiveAt(lp, on_x), WithinAbs(objectiveAt(lp, off_x), 1e-9));
+    CHECK(off.stats().dominated_col_changes == 0);
+    return on_x;
+}
+
+/// Whether original column `col` is still in `presolver`'s reduced model.
+bool keepsColumn(const Presolver& presolver, Index col) {
+    const auto& mapping = presolver.colMapping();
+    return std::find(mapping.begin(), mapping.end(), col) != mapping.end();
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: dominated columns from implied row-dual bounds", "[presolve]") {
+    // z (cost 2, in row 1 only) has d_z in [1, 2] and is strongly dominated
+    // in every model below but the last two; one round, so the counts are
+    // the pass's own and x is removed by it.
+    auto negated = [](LpProblem lp) {
+        for (Real& c : lp.obj) {
+            c = -c;
+        }
+        lp.sense = Sense::Maximize;
+        return lp;
+    };
+    SECTION("strongly dominated, fixed at its lower bound") {
+        // d_x in [1, 3].
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(dominatedModel(3.0, 1.0), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 0);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("strongly dominated, fixed at its upper bound") {
+        // d_x in [-3, -1].
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(dominatedModel(-3.0, -1.0), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 0);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+    }
+    SECTION("strongly dominated at an infinite bound is left alone") {
+        // d_x in [1, 3] as in the first section, but x has no lower bound:
+        // the LP is unbounded (its dual infeasible), and only z is fixed.
+        LpProblem lp = dominatedModel(3.0, 1.0);
+        lp.col_lower[0] = -kInf;
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        presolver.setOptions(dominatedOptions(true));
+        static_cast<void>(presolver.presolve(lp));
+        CHECK_FALSE(presolver.isInfeasible());
+        CHECK(presolver.stats().dominated_col_changes == 1);
+        CHECK(keepsColumn(presolver, 0));
+    }
+    SECTION("weakly dominated, fixed at its lower bound") {
+        // d_x in [0, 2].
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(dominatedModel(2.0, 1.0), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("weakly dominated, fixed at its upper bound") {
+        // d_x in [-2, 0].
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(dominatedModel(-2.0, -1.0), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+    }
+    SECTION("maximizing, strongly dominated downward") {
+        // max -3x - f - 2z is the first section's LP.
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(negated(dominatedModel(3.0, 1.0)), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 0);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(0.0, 1e-12));
+    }
+    SECTION("maximizing, weakly dominated upward") {
+        // max 2x - f - 2z is the weak upward section's LP.
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(negated(dominatedModel(-2.0, -1.0)), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+    }
+    SECTION("weakly dominated with no lower bound, fixed at its upper bound") {
+        // min 0: x + g >= 1, x + 2g >= -5, x <= 10 with no lower bound,
+        // g >= 0 with no upper. g's dual constraint y0 + 2y1 <= 0 puts y0
+        // and y1 at 0, so d_x = -y0 - y1 is 0: weakly dominated downward,
+        // but at an infinite bound, so upward instead.
+        const LpProblem lp =
+            rowsModel({0.0, 0.0}, {-kInf, 0.0}, {10.0, kInf},
+                      {{1.0, kInf, {{0, 1.0}, {1, 1.0}}}, {-5.0, kInf, {{0, 1.0}, {1, 2.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(lp, presolver);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
+    }
+    SECTION("two columns dominated by the row sides alone, in one pass") {
+        // min k + j: k + j <= 5, -k - 2j >= -8, k >= 0, j in [0, 10]. With
+        // y0 <= 0 and y1 >= 0 from the sides, d_k = 1 - y0 + y1 >= 1 and
+        // d_j = 1 - y0 + 2y1 >= 1. Fixing k first must not hold j back.
+        const LpProblem lp =
+            rowsModel({1.0, 1.0}, {0.0, 0.0}, {kInf, 10.0},
+                      {{-kInf, 5.0, {{0, 1.0}, {1, 1.0}}}, {-8.0, kInf, {{0, -1.0}, {1, -2.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        checkDominated(lp, presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+    }
+    SECTION("a bound a fixed column sourced, no tighter than its side, does not hold back") {
+        // min k + j + w: -k - j + w >= -8, k - j + w >= -9, k and w >= 0,
+        // j in [0, 10] (w keeps the rows from bounding k). w's dual
+        // constraint y0 + y1 <= 1 puts y0, y1 in [0, 1]. k's, -y0 + y1 <= 1,
+        // sources y0 >= -1, looser than the side's y0 >= 0, and
+        // d_k = 1 + y0 - y1 >= 0 fixes k weakly at 0. The sums read the side
+        // for y0, so j (d_j = 1 + y0 + y1 >= 1) is fixed in the same pass.
+        const LpProblem lp = rowsModel({1.0, 1.0, 1.0}, {0.0, 0.0, 0.0}, {kInf, 10.0, kInf},
+                                       {{-8.0, kInf, {{0, -1.0}, {1, -1.0}, {2, 1.0}}},
+                                        {-9.0, kInf, {{0, 1.0}, {1, -1.0}, {2, 1.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        checkDominated(lp, presolver);
+        CHECK(presolver.stats().dominated_col_changes == 2);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 1));
+    }
+    SECTION("a bound tighter than its side, from a weak fix, holds the next back") {
+        // min -5e-8 k - 4e-5 j: 1e-3 k + j <= 10, k >= 0, j in [0, 10]. k's
+        // dual constraint 1e-3 y0 <= -5e-8 sources y0 <= -5e-5, tighter than
+        // the side's y0 <= 0, and d_k = -5e-8 - 1e-3 y0 >= -5e-8 is within
+        // tol, so k is weakly fixed at 0. On that bound d_j = -4e-5 - y0
+        // would be at least 1e-5 and fix j at 0 too, though with k at 0 the
+        // optimum puts j at 10; so j waits for the next pass. (The weak fix
+        // itself gives up 1e-4 of objective: k's cost is within tol of 0,
+        // but k ranges up to 1e4.)
+        const LpProblem lp = rowsModel({-5e-8, -4e-5}, {0.0, 0.0}, {kInf, 10.0},
+                                       {{-kInf, 10.0, {{0, 1e-3}, {1, 1.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        presolver.setOptions(dominatedOptions(true));
+        static_cast<void>(presolver.presolve(lp));
+        CHECK(presolver.stats().dominated_col_changes == 1);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK(keepsColumn(presolver, 1));
+    }
+    SECTION("a column the bounds do not settle is left alone") {
+        // f in [0, 20], neither bound strictly implied: f's dual constraint
+        // has no side, so y0, y1 >= 0 only and d_x = 3 - y0 - y1 has no
+        // lower bound; nor do f's and z's.
+        Presolver presolver;
+        checkDominated(dominatedModel(3.0, 1.0, 0.0, 20.0), presolver);
+        CHECK(presolver.stats().dominated_col_changes == 0);
+    }
+    SECTION("a mixed-integer model is left alone") {
+        LpProblem lp = dominatedModel(3.0, 1.0);
+        lp.col_type[2] = VarType::Integer;
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, dominatedOptions(true));
+        CHECK(presolver.stats().dominated_col_changes == 0);
+    }
+}

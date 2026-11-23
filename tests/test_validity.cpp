@@ -825,6 +825,11 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions single_equation = o;
     single_equation.enable_single_equation_dual_fixing = true;
     cases.push_back({"single-equation dual fixing (opt-in)", single_equation, false});
+    // Weak domination fixes a column with a zero reduced cost, so with no
+    // objective it drops feasible points, as dual fixing does.
+    PresolveOptions dominated = o;
+    dominated.enable_dominated_columns = true;
+    cases.push_back({"dominated columns (opt-in)", dominated, false});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
@@ -836,6 +841,7 @@ std::vector<PresolveCase> presolveCases() {
     cases.push_back({"all opt-in but parallel columns and single equations", all});
     all.enable_parallel_cols = true;
     all.enable_single_equation_dual_fixing = true;
+    all.enable_dominated_columns = true;
     cases.push_back({"all opt-in", all, false});
     return cases;
 }
@@ -887,6 +893,9 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) {
              return o.enable_dual_fixing && o.enable_single_equation_dual_fixing;
          }},
+        // Runs on LPs only, as the put-back below.
+        {"dominated columns", &PresolveStats::dominated_col_changes,
+         [](const PresolveOptions& o) { return o.enable_dominated_columns; }},
         {"empty columns", &PresolveStats::empty_col_changes, always},
         {"coefficient tightening", &PresolveStats::coeff_tightening_changes,
          [](const PresolveOptions& o) { return o.enable_coefficient_tightening; }},

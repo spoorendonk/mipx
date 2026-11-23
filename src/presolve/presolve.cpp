@@ -2715,6 +2715,146 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
     return changes;
 }
 
+// Dominated columns, HiGHS 1.16.0's detectDominatedCol (HPresolve.cpp; #376,
+// part 2 of #361), on an LP. With the row duals' implied bounds (#375), the
+// reduced cost d_j = c_j - sum_i a_ij y_i of x_j lies in
+// [c_j - sumUpper_j, c_j - sumLower_j] in every optimal dual. A lower bound
+// above the dual feasibility tolerance puts x_j at its lower bound in every
+// optimum (strongly dominated); one at or above -tolerance leaves an optimum
+// there (weakly dominated). The same upward. Either way x_j is fixed at
+// that bound when it is finite. HiGHS calls it as it presolves each column,
+// before dual fixing, and here it is one pass before dual fixing.
+//
+// The bounds are derived once per pass (DualBounds recomputes; HiGHS keeps
+// them by events). Fixing x_k drops its dual constraint, and so every
+// implied row-dual bound x_k was the source of, which HiGHS resets
+// (resetRowDualImpliedBoundsDerivedFromCol): a column with such a bound in
+// one of its rows waits for the next pass, which derives them again, so no
+// two columns are each fixed through a bound from the other. Every other
+// bound still holds: a fix keeps the optimal primal set or shrinks it, so
+// what the other columns' bounds rest on holds there too.
+//
+// The wait matters within tolerance. Say x_k is fixed at its lower bound,
+// so c_k - max(sum_i a_ik y_i) >= -tol, the max over the bounds its sums
+// read (the side, in a row whose bound k sourced). A bound k sourced on y_r
+// comes from one side of its dual constraint with its other rows at their
+// extremes over the sides: sum_i a_ik y_i <= c_k (x_k unbounded above), or
+// >= c_k (x_k's lower bound strictly implied). Beside a strong fix the
+// first is no tighter than r's side and the second crosses bounds (a dual
+// infeasible LP). A weak fix leaves room within tol: y_r can then be
+// tighter than its side by up to about tol/|a_kr|, enough for another
+// column's fix to rest on. Only the effective bound, the tighter of the
+// implied one and the side, lies within the sides, so the guard compares
+// the implied bound against the side.
+//
+// A strongly dominated column at an infinite bound makes the LP dual
+// infeasible, which presolve has no status for; it is left to the solver.
+// As for #366's fixes, a dual postsolve (#323) must recompute d_j for these
+// fixes: the reduced LP's duals need not give d_j its sign at the bound.
+//
+// The column bounds are the presolved model's, including those activity
+// bound tightening wrote in from the rows. So a column that was half-free
+// can be weakly fixed at an implied bound where HiGHS, which keeps implied
+// bounds apart, sees an infinite one and tries a forcing column (#377).
+// Both are valid (the tightened LP has the same optima), but the counts
+// differ from HiGHS's.
+Index Presolver::removeDominatedColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                                        std::vector<bool>& row_removed,
+                                        std::vector<Index>& row_active_nnz,
+                                        std::vector<Index>& col_active_nnz,
+                                        std::vector<uint8_t>& next_dirty_rows,
+                                        std::vector<uint8_t>& next_dirty_cols) {
+    if (infeasible_) {
+        return 0;
+    }
+    DualBounds bounds;
+    bounds.compute(lp, *work_, col_removed, row_removed);
+    const Real sense = lp.sense == Sense::Maximize ? -1.0 : 1.0;
+    constexpr Real tol = DualBounds::kDualFeasTol;
+
+    Index changes = 0;
+    // Columns this pass fixed, allocated on the first fix.
+    std::vector<uint8_t> fixed_here;
+    auto sourcedByFixed = [&](Index j) {
+        for (const auto [row, a] : work_->col(j)) {
+            if (row_removed[row] || a == 0.0) {
+                continue;
+            }
+            // Only a bound tighter than the row's side counts: the sums read
+            // the side otherwise, so dropping the bound changes nothing.
+            const Index lo = bounds.rowDualLowerSource(row);
+            const Index up = bounds.rowDualUpperSource(row);
+            if (lo >= 0 && fixed_here[lo] != 0 &&
+                bounds.implRowDualLower(row) > bounds.rowDualLower(row)) {
+                return true;
+            }
+            if (up >= 0 && fixed_here[up] != 0 &&
+                bounds.implRowDualUpper(row) < bounds.rowDualUpper(row)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (col_removed[j] || col_active_nnz[j] == 0 || lp.col_lower[j] == lp.col_upper[j]) {
+            continue;
+        }
+        if (!fixed_here.empty() && sourcedByFixed(j)) {
+            continue;
+        }
+        const Real cost = sense * lp.obj[j];
+        const Real dual_lower = -bounds.sumUpper(j, -cost);
+        const Real dual_upper = -bounds.sumLower(j, -cost);
+        const Real lower = lp.col_lower[j];
+        const Real upper = lp.col_upper[j];
+        const bool lower_finite = lower > -kHugeBound;
+        const bool upper_finite = upper < kHugeBound;
+
+        // HiGHS's order: strong downward, strong upward, weak downward, weak
+        // upward; the first that applies with a finite bound fixes x_j.
+        Real value = 0.0;
+        bool fix = false;
+        bool weak = false;
+        if (dual_lower > tol) {
+            fix = lower_finite;
+            value = lower;
+        } else if (dual_upper < -tol) {
+            fix = upper_finite;
+            value = upper;
+        } else if (dual_lower >= -tol && lower_finite) {
+            fix = weak = true;
+            value = lower;
+        } else if (dual_upper <= tol && upper_finite) {
+            fix = weak = true;
+            value = upper;
+        }
+        if (!fix) {
+            continue;
+        }
+
+        removeActiveColumn(*work_, j, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        ++changes;
+        ++stats_.vars_removed;
+        if (weak) {
+            ++stats_.weakly_dominated_col_changes;
+        }
+        lp.obj_offset += lp.obj[j] * value;
+        postsolve_stack_.push(PostsolveFixVariable{j, value});
+        for (const auto [row, a] : work_->col(j)) {
+            if (!row_removed[row]) {
+                shiftRowSides(lp, row, a * value);
+            }
+        }
+        if (fixed_here.empty()) {
+            fixed_here.resize(static_cast<size_t>(lp.num_cols), 0);
+        }
+        fixed_here[j] = 1;
+    }
+    return changes;
+}
+
 Index Presolver::removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
                                     std::vector<bool>& row_removed,
                                     std::vector<Index>& row_active_nnz,
@@ -3652,6 +3792,11 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         return changes;
     };
 
+    // Dominated columns read LP duals, so they run on an LP only (#376).
+    const bool dominated_columns = options_.enable_dominated_columns &&
+                                   std::none_of(lp.col_type.begin(), lp.col_type.end(),
+                                                [](VarType t) { return t != VarType::Continuous; });
+
     // Iterative reduction loop.
     for (Index round = 0; round < max_rounds_ && !infeasible_; ++round) {
         Index total_changes = 0;
@@ -3787,6 +3932,15 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         });
         stats_.activity_bound_tightening_changes += ch;
         total_changes += ch;
+
+        if (dominated_columns) {
+            ch = timed(stats_.dominated_col_seconds, [&] {
+                return removeDominatedColumns(lp, col_removed, row_removed, row_active_nnz,
+                                              col_active_nnz, next_dirty_rows, next_dirty_cols);
+            });
+            stats_.dominated_col_changes += ch;
+            total_changes += ch;
+        }
 
         if (options_.enable_dual_fixing) {
             ch = timed(stats_.dual_fixing_seconds, [&] {

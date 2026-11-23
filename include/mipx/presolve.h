@@ -235,6 +235,12 @@ struct PresolveStats {
     /// enable_dominated_columns derivation found (#375).
     Index implied_row_dual_bounds = 0;
     Real dual_bounds_seconds = 0.0;
+    /// Columns the enable_dominated_columns pass fixed as dominated, strongly
+    /// or weakly (#376).
+    Index dominated_col_changes = 0;
+    /// Of dominated_col_changes, the weakly dominated ones.
+    Index weakly_dominated_col_changes = 0;
+    Real dominated_col_seconds = 0.0;
 };
 
 struct PresolveOptions {
@@ -282,10 +288,13 @@ struct PresolveOptions {
     /// Off by default until benchmarked.
     bool enable_single_equation_dual_fixing = false;
     /// Dominated columns from implied row-dual bounds, as HiGHS's
-    /// detectDominatedCol (#361), on an LP. So far (#375) this only derives
-    /// the bounds it will read, once before the #279 put-back, and counts
-    /// them in PresolveStats::implied_row_dual_bounds; it reduces nothing.
-    /// Off by default until benchmarked.
+    /// detectDominatedCol (#361), on an LP: a column whose reduced cost the
+    /// implied row-dual bounds (#375) keep positive (negative) is fixed at
+    /// its lower (upper) bound, and one they keep nonnegative (nonpositive)
+    /// too, as weakly dominated, when that bound is finite (#376). The
+    /// bounds are also counted once before the #279 put-back, in
+    /// PresolveStats::implied_row_dual_bounds. Off by default until
+    /// benchmarked.
     bool enable_dominated_columns = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
@@ -381,6 +390,11 @@ private:
                      std::vector<Index>& row_active_nnz, std::vector<Index>& col_active_nnz,
                      const std::vector<Index>& dirty_cols, std::vector<uint8_t>& next_dirty_rows,
                      std::vector<uint8_t>& next_dirty_cols);
+    Index removeDominatedColumns(LpProblem& lp, std::vector<bool>& col_removed,
+                                 std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                                 std::vector<Index>& col_active_nnz,
+                                 std::vector<uint8_t>& next_dirty_rows,
+                                 std::vector<uint8_t>& next_dirty_cols);
     Index removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_removed,
                              std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
                              std::vector<Index>& col_active_nnz,

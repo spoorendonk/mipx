@@ -290,6 +290,7 @@ constexpr Rule kRules[] = {
      &PresolveStats::implied_equation_seconds},
     {"activity_bound_tightening", &PresolveStats::activity_bound_tightening_changes,
      &PresolveStats::activity_bound_tightening_seconds},
+    {"dominated_col", &PresolveStats::dominated_col_changes, &PresolveStats::dominated_col_seconds},
     {"dual_fixing", &PresolveStats::dual_fixing_changes, &PresolveStats::dual_fixing_seconds},
     {"empty_col", &PresolveStats::empty_col_changes, &PresolveStats::empty_col_seconds},
     {"coeff_tightening", &PresolveStats::coeff_tightening_changes,
@@ -385,6 +386,7 @@ int main(int argc, char** argv) {
     row.addInt("single_equation_dual_fixing", st.single_equation_dual_fixing_changes);
     row.addInt("implied_row_dual_bounds", st.implied_row_dual_bounds);
     row.addReal("dual_bounds_seconds", st.dual_bounds_seconds);
+    row.addInt("weakly_dominated_col", st.weakly_dominated_col_changes);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }
