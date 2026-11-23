@@ -118,7 +118,9 @@ TEST_CASE("Barrier backends stop factorizing once the deadline has passed",
 TEST_CASE("Barrier with a raised stop flag returns IterLimit, not TimeLimit",
           "[barrier][time-limit]") {
     // The flag is up before the starting point's factorization, which then
-    // fails inside the backend: that must still read as a stop.
+    // fails inside the backend: that must still read as a stop, and the
+    // empty iterate must not be unscaled (an ASan build catches that). The
+    // backend test above is the one that shows the factorization stopping.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     INFO("algo " << static_cast<int>(algo));

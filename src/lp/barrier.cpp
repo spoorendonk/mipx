@@ -1409,8 +1409,14 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, gpu_opts, std_obj_offset_, prefer_aug, z, y,
                              s, iters, &gpu_error);
         watcher = std::jthread();  // stops and joins it
+        // No CPU fallback after a stop or at the time limit. A stop reads as
+        // one (Failed, then IterLimit in solve()), as on the CPU path.
+        if (!ok && options_.stop_flag != nullptr &&
+            options_.stop_flag->load(std::memory_order_relaxed)) {
+            return BarrierIpmOutcome::Failed;
+        }
         if (!ok && deadline_.passed()) {
-            return BarrierIpmOutcome::TimeLimit;  // no time for a CPU fallback
+            return BarrierIpmOutcome::TimeLimit;
         }
         if (ok) {
             used_gpu_ = true;
@@ -1804,6 +1810,12 @@ LpResult BarrierSolver::solve() {
 
     if (outcome == BarrierIpmOutcome::Failed) {
         if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
+            // Clear as the other early ends do, so a reused solver does not
+            // hand out the previous solve's results.
+            dual_eq_.clear();
+            reduced_costs_std_.clear();
+            primal_orig_.clear();
+            basis_orig_.clear();
             status_ = Status::IterLimit;
             objective_ = 0.0;
             iterations_ = iters;
