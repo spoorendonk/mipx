@@ -426,6 +426,7 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     const std::vector<Index> count = columnCounts(n, pat, parent);
     for (Index j = 0; j < n; ++j) {
         stats_.nnz_l += static_cast<std::size_t>(count[j]);
+        stats_.factor_flops += static_cast<double>(count[j]) * static_cast<double>(count[j]);
     }
 
     std::vector<Index> nchild(static_cast<size_t>(n), 0);

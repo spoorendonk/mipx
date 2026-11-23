@@ -36,6 +36,7 @@ public:
         Index n = 0;
         std::size_t nnz_input = 0;  // entries of the pattern (each pair once)
         std::size_t nnz_l = 0;      // nonzeros of L counted by column counts, diagonal included
+        double factor_flops = 0.0;  // sum of squared column counts: the factorization's flops
         std::size_t stored = 0;     // reals in the supernode blocks (nnz_l plus relaxation zeros
                                     // and the upper halves of the diagonal blocks)
         Index num_supernodes = 0;

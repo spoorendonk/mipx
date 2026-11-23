@@ -70,6 +70,10 @@ struct BarrierOptions {
     // a row w + t = u - l. Opt-in, CPU backends only: with it on, a model with
     // upper bounds skips the GPU path.
     bool implicit_upper_bounds = false;
+    // Gondzio's multiple centrality correctors (#293) after Mehrotra's
+    // corrector in the CPU IPM loop: at most this many per iteration, fewer
+    // when the backend's factorization is cheap next to its solve. 0: off.
+    Int gondzio_correctors = 0;
     bool verbose = true;
     bool crossover = true;
     bool presolve = true;

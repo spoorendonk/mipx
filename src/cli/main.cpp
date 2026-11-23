@@ -67,7 +67,7 @@ void printUsage(FILE* out) {
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
                  "[--pdlp-opt-norm l2|linf] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
-                 "[--barrier-dense-cols N] [--barrier-implicit-bounds] "
+                 "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
                  "[--verbose|--quiet] [--print-backend]\n"
@@ -109,6 +109,7 @@ int main(int argc, char* argv[]) {
     bool barrier_sparse_ne = false;
     mipx::Int barrier_dense_cols = mipx::BarrierOptions{}.ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
+    mipx::Int barrier_gondzio = 0;
     mipx::PdlpOptimalityNorm pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
@@ -428,6 +429,10 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--barrier-implicit-bounds") {
             // Upper bounds inside the CPU IPM instead of as rows (#299).
             barrier_implicit_bounds = true;
+        } else if (arg == "--barrier-gondzio" && i + 1 < argc) {
+            // At most N Gondzio centrality correctors per CPU IPM iteration
+            // (#293); 0 (the default) is off.
+            barrier_gondzio = std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--format" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "auto") {
@@ -719,6 +724,7 @@ int main(int argc, char* argv[]) {
                     bopts.ordering = barrier_ordering;
                     bopts.ne_max_dense_cols = barrier_dense_cols;
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
+                    bopts.gondzio_correctors = barrier_gondzio;
                     bopts.threads = std::max(1, num_threads);
                     solver.setOptions(bopts);
                     solver.load(model);

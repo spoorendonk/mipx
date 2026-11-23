@@ -340,6 +340,135 @@ inline Real maxStepOn(std::span<const Index> cols, std::span<const Real> x,
     return std::clamp(alpha, 0.0, 1.0);
 }
 
+// Gondzio's multiple centrality correctors (J. Gondzio, "Multiple centrality
+// corrections in a primal-dual method for linear programming", COAP 6, 1996;
+// as restated in M. Colombo and J. Gondzio, "Further development of multiple
+// centrality correctors for interior point methods", COAP 41, 2008, sec. 2.2).
+//
+// Given the predictor-corrector direction d with feasible steps a_p, a_d,
+// aim at the enlarged steps a~ = min(a + delta, 1) in each space, form the
+// trial products v~ = (z + a~_p dz)(s + a~_d ds), and move only the outliers
+// into [beta_min, beta_max] * sigma mu (CG08 eq. 7, gamma = 0.1 there):
+//   t = beta_min sigma mu - v~  where v~ <= beta_min sigma mu,
+//   t = beta_max sigma mu - v~  where v~ >= beta_max sigma mu,  0 otherwise.
+// The corrector d_m solves the Newton system for (0, 0, t) with the current
+// factorization, and d + d_m replaces d while its steps grow by at least a
+// fraction of the increase aimed at, at most k times. The bound pairs (v, w)
+// of #299 are complementarity pairs like (z, s) and take part the same way.
+struct GondzioCorrectors {
+    static constexpr Real kAspiration = 0.1;  // delta, Gondzio 1996
+    static constexpr Real kBetaMin = 0.1;     // gamma of CG08's neighbourhood
+    static constexpr Real kBetaMax = 10.0;    // 1 / gamma
+    static constexpr Real kAcceptFraction = 0.1;
+
+    std::span<const Index> cols;  // bounded columns
+    std::span<const Real> z, s, v, w;
+    std::span<Real> dz, dy, ds, dv, dw;
+
+    std::vector<Real> zero_m{}, zero_n{}, t_c{}, t_w{};
+    std::vector<Real> mz{}, my{}, ms{}, mv{}, mw{};  // corrector
+    std::vector<Real> tz{}, ty{}, ts{}, tv{}, tw{};  // d + d_m
+
+    void steps(std::span<const Real> ddz, std::span<const Real> dds, std::span<const Real> ddv,
+               std::span<const Real> ddw, Real& a_p, Real& a_d) const {
+        a_p = maxStepToBoundary(z, ddz, 1.0);
+        a_d = maxStepToBoundary(s, dds, 1.0);
+        if (!cols.empty()) {
+            a_p = maxStepOn(cols, v, ddv, 1.0, a_p);
+            a_d = maxStepOn(cols, w, ddw, 1.0, a_d);
+        }
+    }
+
+    static Real target(Real product, Real lo, Real hi) {
+        if (product <= lo) {
+            return lo - product;
+        }
+        return product >= hi ? hi - product : 0.0;
+    }
+
+    // Correctors accepted into d. solve(rp, rd, rc, ru, rw, dz, dy, ds, dv, dw)
+    // is the Newton solve with the current factorization.
+    template <class Solve>
+    Int correct(Int k_max, Real sigma_mu, const Solve& solve) {
+        const auto n = dz.size();
+        const auto m = dy.size();
+        if (zero_n.size() != n || zero_m.size() != m) {
+            zero_m.assign(m, 0.0);
+            zero_n.assign(n, 0.0);
+            for (auto* vec : {&t_c, &t_w, &mz, &ms, &mv, &mw, &tz, &ts, &tv, &tw}) {
+                vec->assign(n, 0.0);
+            }
+            my.assign(m, 0.0);
+            ty.assign(m, 0.0);
+        }
+        const Real lo = kBetaMin * sigma_mu;
+        const Real hi = kBetaMax * sigma_mu;
+        Real a_p = 0.0;
+        Real a_d = 0.0;
+        steps(dz, ds, dv, dw, a_p, a_d);
+        Int used = 0;
+        while (used < k_max && (a_p < 1.0 || a_d < 1.0)) {
+            const Real aim_p = std::min(a_p + kAspiration, 1.0);
+            const Real aim_d = std::min(a_d + kAspiration, 1.0);
+            for (std::size_t j = 0; j < n; ++j) {
+                t_c[j] = target((z[j] + aim_p * dz[j]) * (s[j] + aim_d * ds[j]), lo, hi);
+            }
+            for (const Index j : cols) {
+                t_w[j] = target((v[j] + aim_p * dv[j]) * (w[j] + aim_d * dw[j]), lo, hi);
+            }
+            if (!solve(zero_m, zero_n, t_c, zero_n, t_w, mz, my, ms, mv, mw)) {
+                break;
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                tz[j] = dz[j] + mz[j];
+                ts[j] = ds[j] + ms[j];
+            }
+            for (const Index j : cols) {
+                tv[j] = dv[j] + mv[j];
+                tw[j] = dw[j] + mw[j];
+            }
+            Real new_p = 0.0;
+            Real new_d = 0.0;
+            steps(tz, ts, tv, tw, new_p, new_d);
+            if (new_p < a_p + kAcceptFraction * (aim_p - a_p) ||
+                new_d < a_d + kAcceptFraction * (aim_d - a_d)) {
+                break;
+            }
+            for (std::size_t i = 0; i < m; ++i) {
+                ty[i] = dy[i] + my[i];
+            }
+            std::copy(tz.begin(), tz.end(), dz.begin());
+            std::copy(ty.begin(), ty.end(), dy.begin());
+            std::copy(ts.begin(), ts.end(), ds.begin());
+            for (const Index j : cols) {
+                dv[j] = tv[j];
+                dw[j] = tw[j];
+            }
+            a_p = new_p;
+            a_d = new_d;
+            ++used;
+        }
+        return used;
+    }
+};
+
+// Correctors per iteration: k with (1 + k) solves costing about one
+// factorization, at least 1 (the first corrector is always worth its solve),
+// capped by BarrierOptions::gondzio_correctors. Gondzio 1996 (sec. 3.3) sets
+// it from this ratio of factorization to solve effort; the estimate
+// (1 + k) E_s ~ E_f is the one of arXiv:2508.04370 without its refinement
+// terms. The cap alone where the backend gives no cost estimate.
+Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
+    if (cap <= 0) {
+        return 0;
+    }
+    if (st.factor_flops <= 0.0 || st.solve_flops <= 0.0) {
+        return cap;
+    }
+    const double k = std::floor(st.factor_flops / st.solve_flops) - 1.0;
+    return static_cast<Int>(std::clamp(k, 1.0, static_cast<double>(cap)));
+}
+
 // A run that stops short of primal_dual_tol (stall, iteration limit, failed
 // factorization) still hands its best iterate on when every measure is within
 // this tolerance. Such a point is only ever used as a crossover start, which
@@ -392,6 +521,9 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         iters = 0;
         return BarrierIpmOutcome::Failed;
     }
+    // After the starting point, which sizes v and w.
+    GondzioCorrectors gondzio{upper_cols, z, s, v, w, dz, dy, ds, dv, dw};
+    Int gondzio_k = -1;  // set once the backend has factorized
 
     // The caller reads s as the reduced cost c - A'y, which is s - w on a
     // bounded column (negative at an upper bound).
@@ -511,19 +643,30 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                 return stopShort(iter);
             }
         }
-        // One Newton solve for the right-hand side (rp, rd, rc, ru, rw).
-        auto newton = [&](std::span<Real> dz_out, std::span<Real> dy_out, std::span<Real> ds_out,
-                          std::span<Real> dv_out, std::span<Real> dw_out) {
+        if (gondzio_k < 0) {
+            gondzio_k = gondzioCorrectorCount(opts.gondzio_correctors, solver.factorStats());
+        }
+        // One Newton solve for a right-hand side (rp, rd, rc, ru, rw).
+        auto newtonFor = [&](std::span<const Real> rp_in, std::span<const Real> rd_in,
+                             std::span<const Real> rc_in, std::span<const Real> ru_in,
+                             std::span<const Real> rw_in, std::span<Real> dz_out,
+                             std::span<Real> dy_out, std::span<Real> ds_out, std::span<Real> dv_out,
+                             std::span<Real> dw_out) {
             if (!bounded) {
-                return solver.solveNewton(rp, rd, rc, dz_out, dy_out, ds_out);
+                return solver.solveNewton(rp_in, rd_in, rc_in, dz_out, dy_out, ds_out);
             }
-            ub_step.fold(upper_cols, z, v, w, rd, rc, ru, rw);
-            if (!solver.solveNewton(rp, ub_step.rd_eff, ub_step.rc_eff, dz_out, dy_out, ds_out)) {
+            ub_step.fold(upper_cols, z, v, w, rd_in, rc_in, ru_in, rw_in);
+            if (!solver.solveNewton(rp_in, ub_step.rd_eff, ub_step.rc_eff, dz_out, dy_out,
+                                    ds_out)) {
                 return false;
             }
-            UpperBoundStep::recover(upper_cols, z, s, v, w, rc, ru, rw, dz_out, ds_out, dv_out,
-                                    dw_out);
+            UpperBoundStep::recover(upper_cols, z, s, v, w, rc_in, ru_in, rw_in, dz_out, ds_out,
+                                    dv_out, dw_out);
             return true;
+        };
+        auto newton = [&](std::span<Real> dz_out, std::span<Real> dy_out, std::span<Real> ds_out,
+                          std::span<Real> dv_out, std::span<Real> dw_out) {
+            return newtonFor(rp, rd, rc, ru, rw, dz_out, dy_out, ds_out, dv_out, dw_out);
         };
         if (opts.verbose) {
             // The dense-column Schur complement of the sparse NE backend
@@ -577,6 +720,13 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         }
         if (!newton(dz, dy, ds, dv, dw)) {
             return stopShort(iter);
+        }
+
+        if (gondzio_k > 0) {
+            const Int used = gondzio.correct(gondzio_k, sigma * mu, newtonFor);
+            if (opts.verbose) {
+                std::printf("        gondzio correctors: %d of %d\n", used, gondzio_k);
+            }
         }
 
         // Step to boundary.
@@ -1160,11 +1310,14 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     }
 
     // The GPU path solves the standard form without upper bounds; implicit
-    // ones (#299) are carried by the CPU loop only.
-    if (has_upper &&
+    // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
+    const bool cpu_only = has_upper || options_.gondzio_correctors > 0;
+    if (cpu_only &&
         (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented)) {
         if (options_.verbose) {
-            std::printf("Barrier: implicit upper bounds are CPU-only; using the CPU backend.\n");
+            std::printf(
+                "Barrier: implicit upper bounds and Gondzio correctors are CPU-only; using the "
+                "CPU backend.\n");
         }
         algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
     }

@@ -43,6 +43,11 @@ public:
         Index dense_cols = 0;     // columns of A left out of the factor
         Index schur_order = 0;    // dense columns + shifted pivots, last factorize
         Index schur_dropped = 0;  // of those, rows dropped as dependent in M
+        // Flop estimates of one factorize() and one solveNewton(), for the
+        // number of centrality correctors worth a factorization (#293); zero
+        // where the backend does not estimate them.
+        double factor_flops = 0.0;
+        double solve_flops = 0.0;
     };
     [[nodiscard]] virtual FactorStats factorStats() const { return {}; }
 

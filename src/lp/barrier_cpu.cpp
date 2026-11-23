@@ -628,6 +628,20 @@ public:
         ir_steps_ = opts.ir_steps;
         theta_.assign(static_cast<size_t>(n), 0.0);
         s_copy_.assign(static_cast<size_t>(n), 0.0);
+        // M = sum_k theta_k a_k a_k' costs nnz(a_k)^2 per column k.
+        std::vector<double> col_nnz(static_cast<size_t>(n), 0.0);
+        a_nnz_ = 0.0;
+        for (Index i = 0; i < m; ++i) {
+            const auto row = A.row(i);
+            for (Index k = 0; k < row.size(); ++k) {
+                col_nnz[row.indices[k]] += 1.0;
+            }
+            a_nnz_ += static_cast<double>(row.size());
+        }
+        form_flops_ = 0.0;
+        for (const double c : col_nnz) {
+            form_flops_ += c * c;
+        }
         return setupFactor(opts);
     }
 
@@ -709,6 +723,18 @@ protected:
     virtual bool factorM() = 0;
     // Overwrite b with M^{-1} b.
     virtual void solveM(std::span<Real> b) const = 0;
+    // Flops of factoring M once formed, and of one solveM.
+    [[nodiscard]] virtual double factorMFlops() const = 0;
+    [[nodiscard]] virtual double solveMFlops() const = 0;
+
+    // The cost estimates of FactorStats: forming and factoring M; and one
+    // solveNewton, i.e. 1 + ir_steps solves with M and 2 + 2 ir_steps
+    // products with A or A' (2 nnz(A) flops each).
+    void addCostEstimates(FactorStats& st) const {
+        const double ir = static_cast<double>(std::max<Int>(ir_steps_, 0));
+        st.factor_flops = form_flops_ + factorMFlops();
+        st.solve_flops = (1.0 + ir) * solveMFlops() + (2.0 + 2.0 * ir) * 2.0 * a_nnz_;
+    }
 
     // A pivot that cancels to (near) zero relative to its diagonal marks a
     // row linearly dependent on the earlier ones (or a row whose columns all
@@ -724,6 +750,8 @@ protected:
     Index m_ = 0, n_ = 0;
     Int ir_steps_ = 2;
     Real reg_ = 1e-8;
+    double a_nnz_ = 0.0;
+    double form_flops_ = 0.0;
     std::vector<Real> theta_;
     std::vector<Real> s_copy_;
 };
@@ -737,7 +765,23 @@ protected:
 // orderings selected by BarrierOptions::ordering do not apply here.
 
 class CpuCholeskySolver final : public NormalEquationsSolver {
+public:
+    [[nodiscard]] FactorStats factorStats() const override {
+        FactorStats st;
+        addCostEstimates(st);
+        return st;
+    }
+
 private:
+    [[nodiscard]] double factorMFlops() const override {
+        const auto m = static_cast<double>(m_);
+        return m * m * m / 3.0;
+    }
+    [[nodiscard]] double solveMFlops() const override {
+        const auto m = static_cast<double>(m_);
+        return 2.0 * m * m;
+    }
+
     bool setupFactor(const BarrierOptions& opts) override {
         const std::size_t bytes =
             static_cast<std::size_t>(m_) * static_cast<std::size_t>(m_) * sizeof(Real);
@@ -877,11 +921,20 @@ public:
     explicit CpuSparseCholeskySolver(Index max_schur_order) : max_schur_order_(max_schur_order) {}
 
     [[nodiscard]] FactorStats factorStats() const override {
-        return {chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size()), schur_order_,
-                schur_dropped_};
+        FactorStats st{chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size()), schur_order_,
+                       schur_dropped_};
+        addCostEstimates(st);
+        return st;
     }
 
 private:
+    // The Cholesky factor of M_s; the dense columns' Schur complement adds to
+    // both, and is left out of the estimate.
+    [[nodiscard]] double factorMFlops() const override { return chol_.stats().factor_flops; }
+    [[nodiscard]] double solveMFlops() const override {
+        return 4.0 * static_cast<double>(chol_.stats().nnz_l);
+    }
+
     // With dense columns out, a pivot of M_s at or below this fraction of the
     // row's diagonal in M (net of reg) is shifted too: a near-dependent row
     // (its pivot left at about reg) would otherwise make M_s' as
