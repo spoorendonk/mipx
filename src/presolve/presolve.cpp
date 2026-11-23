@@ -386,7 +386,16 @@ std::vector<Real> PostsolveStack::postsolve(const std::vector<Real>& presolved_s
                     }
                     // A finite end, so the point is a vertex where it can be;
                     // rounding may cross lo and hi by a hair, lo then wins.
-                    Real x = std::isfinite(lo) ? lo : (std::isfinite(hi) ? hi : 0.0);
+                    // A huge bound (1e30 from MPS) counts as infinite: at it,
+                    // y - s * x loses y to rounding.
+                    constexpr Real kHugeBound = 1e20;
+                    auto usable = [](Real v) { return std::abs(v) < kHugeBound; };
+                    Real x = std::max(std::min(0.0, hi), lo);
+                    if (usable(lo)) {
+                        x = lo;
+                    } else if (usable(hi)) {
+                        x = hi;
+                    }
                     x = std::max(std::min(x, op.removed_upper), op.removed_lower);
                     full[op.removed_col] = x;
                     full[op.kept_col] = y - s * x;
@@ -2249,11 +2258,11 @@ Index Presolver::removeParallelCols(LpProblem& lp, std::vector<bool>& col_remove
                 continue;
             }
             for (const auto& m : members) {
-                const Real end = up ? zLowBound(m) : zHighBound(m);
+                const Real z_end = up ? zLowBound(m) : zHighBound(m);
                 Real s = 0.0;
                 Real diff = 0.0;
                 Real tol = 0.0;
-                if (m.col == absorber->col || col_removed[m.col] || !fixable(end) ||
+                if (m.col == absorber->col || col_removed[m.col] || !fixable(z_end) ||
                     !pairDiff(absorber->col, m.col, s, diff, tol)) {
                     continue;
                 }
@@ -2261,7 +2270,7 @@ Index Presolver::removeParallelCols(LpProblem& lp, std::vector<bool>& col_remove
                 // at most zero to go high.
                 const bool cheaper_to_move = (m.a > 0.0) == up ? diff >= -tol : diff <= tol;
                 if (cheaper_to_move) {
-                    fixAt(m.col, end);
+                    fixAt(m.col, z_end);
                 }
             }
         }

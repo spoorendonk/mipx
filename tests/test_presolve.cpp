@@ -1193,6 +1193,23 @@ TEST_CASE("Presolve: a dominated column at a huge bound is merged, not fixed", "
     }
 }
 
+TEST_CASE("Presolve: a merge with a huge bound splits back to a finite point", "[presolve]") {
+    // y = x0 + 2 x1 with x1 >= -1e30: the split must not put x1 at -1e30,
+    // where x0 = y - 2 x1 loses y to rounding. The optimum is -2 (x1 = -1).
+    LpProblem lp = parallelColumnsModel(1.0, 2.0, -1.0, kInf, 5.0, VarType::Continuous);
+    lp.col_lower[1] = -1e30;
+    SECTION("inequality rows") {}
+    SECTION("r1 an equality") {
+        lp.row_upper[1] = -2.0;
+    }
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver);
+    CHECK(presolver.stats().parallel_col_changes == 1);
+    CHECK(std::abs(full[1]) < 1e20);
+    CHECK_THAT(full[0] + 2.0 * full[1], WithinAbs(-2.0, 1e-9));
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(-2.0, 1e-9));
+}
+
 TEST_CASE("Presolve: equal-cost parallel columns merge and keep the optimum", "[presolve]") {
     // c1 = 2 * c0 and both bounded: y = x0 + 2 x1 in [0, 3 + 2]. The optimum
     // has y = 4, x2 = 0, at -4.
