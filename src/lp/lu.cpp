@@ -837,10 +837,14 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         // The first admissible one is taken: eliminating a column singleton
         // does no arithmetic (its column has no other entry, so no L eta), and
         // the set of columns that singleton peeling reaches does not depend on
-        // the order, so the factor values come out the same in any order, only
-        // permuted. Scanning the whole bucket for the largest |a| instead made
-        // every step O(#singletons), O(dim^2) on a slack-heavy basis: 97% of
-        // the time on pds-100, ~17 s per factorization (#281).
+        // the order. So the singleton prefix of the factors has the same
+        // values in any order. The bucket lists' order after it does depend
+        // on the removal order, so the later row-singleton pick, the general
+        // search's ties and its per-bucket cap can choose differently: equally
+        // valid factors, not identical ones. Scanning the whole bucket for the
+        // largest |a| instead made every step O(#singletons), O(dim^2) on a
+        // slack-heavy basis: 97% of the time on pds-100, ~17 s per
+        // factorization (#281).
         for (Index j = col_bucket_head[1]; j >= 0;
              j = col_bucket_next[static_cast<std::size_t>(j)]) {
             if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != 1) {
