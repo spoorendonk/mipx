@@ -373,7 +373,8 @@ private:
                              bool checked);
     bool dualRayMeetsContract() const;
     bool optimumHoldsUnscaled() const;
-    bool primalHoldsUnscaled() const;
+    // `tight`: absolute, as pointViolation() reads a point (#304).
+    bool primalHoldsUnscaled(bool tight = false) const;
     // False for an Optimal or Infeasible status whose certificate fails the
     // checks above; true for any other status.
     bool verdictHolds() const;
@@ -487,6 +488,12 @@ private:
     static constexpr Real kRayGainRelTol = 1e-9;
     // Relative tolerance of the check of an optimum in the model's units.
     static constexpr Real kUnscaledRelTol = 1e-6;
+    // An optimum's point is cleaned up unscaled when it misses a row or bound
+    // by more than kUnscaledAbsTol in the model's units, unless that is below
+    // what double arithmetic resolves on the row: kResolvableRelTol of its
+    // largest term (#304).
+    static constexpr Real kUnscaledAbsTol = 1e-6;
+    static constexpr Real kResolvableRelTol = 1e-12;
     // addRows rescales the whole model when a new row's coefficients, in the
     // current column scaling, spread more than this or sit further than this
     // from 1.
