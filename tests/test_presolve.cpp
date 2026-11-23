@@ -921,6 +921,45 @@ TEST_CASE("Presolve: a large bound's rounding does not put back a needed bound",
     }
 }
 
+// min -x - 2y s.t. x + y <= 3, x >= -1e17, 0.5 <= y <= 1. Activity tightening
+// gives x <= 2.5, which the row implies. The row's running minimum activity
+// -1e17 + 0.5 rounds to -1e17, so taking x's term back out leaves 0 and
+// x <= 3, which kept the bound before #311. Its error bound now counts x's
+// term, so the check is left to the rescan without x, which finds 0.5.
+TEST_CASE("Presolve: a bound is put back when the column's own term is large", "[presolve]") {
+    LpProblem lp;
+    lp.name = "large_own_term";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -2.0};
+    lp.col_lower = {-1e17, 0.5};
+    lp.col_upper = {kInf, 1.0};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {3.0};
+    lp.row_names = {"cap"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, 1.0}};
+    lp.matrix = SparseMatrix(1, 2, std::move(trips));
+
+    Presolver presolver;
+    const auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().activity_bound_tightening_changes >= 1);
+    CHECK(presolver.stats().implied_bounds_relaxed >= 1);
+    REQUIRE(reduced.num_cols == 2);
+    CHECK(std::isinf(reduced.col_upper[0]));
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    // x = 2, y = 1.
+    CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-9));
+}
+
 // max x + y s.t. x <= 4, x - y <= 0, y - x <= 0, x, y >= 0. The singleton row
 // gives x <= 4 and activity tightening y <= 4; each follows from the other
 // through a row, so only one may be put back, or x = y grows without bound.

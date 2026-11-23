@@ -4301,37 +4301,49 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
                                     const std::vector<bool>& col_removed,
                                     const std::vector<bool>& row_removed) {
-    // Finite part and count of infinite terms of each row's minimum and
-    // maximum activity over its active columns.
+    // One of a row's two activities over its active columns, the minimum or
+    // the maximum: the count of infinite terms and the finite terms' running
+    // sum, with what bounds the sum's rounding. `added` counts the products
+    // added and `magnitude` sums their absolute values, removals included:
+    // a running sum of n rounded products, whatever their signs and order,
+    // is off by at most gamma_n * magnitude, gamma_n = n*u/(1-n*u) with unit
+    // roundoff u = eps/2 (the inner-product bound, Higham, Accuracy and Stability of Numerical
+    // Algorithms, 2nd ed., section 3.1). #311: a column's check then costs
+    // O(1) per row; the full rescan runs only when that bound leaves the
+    // check undecided.
     struct Activity {
-        Real min_finite = 0.0;
-        Real max_finite = 0.0;
-        Index min_inf = 0;
-        Index max_inf = 0;
+        Real finite = 0.0;
+        Real magnitude = 0.0;
+        Index added = 0;
+        Index inf = 0;
     };
-    std::vector<Activity> act(lp.num_rows);
+    struct RowActivity {
+        Activity min;
+        Activity max;
+    };
+    std::vector<RowActivity> act(lp.num_rows);
     // A finite bound this large (an MPS file's 1e30 for "none") counts as
     // infinite: as a finite term it would swamp the row's other terms, and
     // the rounding could imply a bound the row does not. Counting it as
     // infinite only keeps more bounds.
+    auto addProduct = [](Activity& s, Real a, Real b, int sign) {
+        if (std::abs(b) >= kHugeBound) {
+            s.inf += sign;
+            return;
+        }
+        const Real p = sign * a * b;
+        s.finite += p;
+        s.magnitude += std::abs(p);
+        ++s.added;
+    };
     // Adds (sign +1) or removes (sign -1) the term a*x of a row's activities
     // for x in [lb, ub].
-    auto addTerm = [](Activity& r, Real a, Real lb, Real ub, int sign) {
+    auto addTerm = [&](RowActivity& r, Real a, Real lb, Real ub, int sign) {
         if (a == 0.0) {
             return;
         }
-        const Real at_min = a > 0.0 ? lb : ub;
-        const Real at_max = a > 0.0 ? ub : lb;
-        if (std::abs(at_min) >= kHugeBound) {
-            r.min_inf += sign;
-        } else {
-            r.min_finite += sign * a * at_min;
-        }
-        if (std::abs(at_max) >= kHugeBound) {
-            r.max_inf += sign;
-        } else {
-            r.max_finite += sign * a * at_max;
-        }
+        addProduct(r.min, a, a > 0.0 ? lb : ub, sign);
+        addProduct(r.max, a, a > 0.0 ? ub : lb, sign);
     };
     for (Index i = 0; i < lp.num_rows; ++i) {
         if (row_removed[i]) {
@@ -4345,13 +4357,13 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
     }
 
     // Whether a remaining row bounds column j by `bound` or tighter from
-    // above (upper) or below, the column's own term taken out.
-    //
-    // The running activities only pick the rows worth a look: taking a large
-    // term out of a sum rounds away the small ones beside it (x <= 1e12 in a
-    // row leaves its other terms good to about 1e-4), so a bound they say is
-    // implied may not be. rowImplies decides, from a fresh scan of the row
-    // without column j, with the scan's rounding error counted against it.
+    // above (upper) or below, the column's own term taken out, from a fresh
+    // scan of the row without column j, with the scan's rounding error
+    // counted against it. The running activities settle nearly every check;
+    // this decides the ones they leave within their error bound. Their bound
+    // counts the column's own term, the rescan's does not: taking a large
+    // term out of a running sum rounds away the small ones beside it (x <=
+    // 1e12 in a row leaves its other terms good to about 1e-4).
     constexpr Real kEps = std::numeric_limits<Real>::epsilon();
     auto rowImplies = [&](Index i, Index j, Real a, bool use_upper_side, bool upper, Real bound,
                           Real tol) {
@@ -4382,11 +4394,11 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
         return upper ? value + err <= bound + tol : value - err >= bound - tol;
     };
 
+    // The relative bound misses a product that underflows; this much per
+    // product covers it.
+    constexpr Real kTiny = std::numeric_limits<Real>::min();
     auto implied = [&](Index j, bool upper, Real bound) {
         const Real tol = 1e-9 * std::max<Real>(1.0, std::abs(bound));
-        // Room for the running activities' rounding, so the filter seldom
-        // passes over a row that does imply the bound.
-        const Real filter_tol = 1e-6 * std::max<Real>(1.0, std::abs(bound));
         for (const auto [i, a] : work_->col(j)) {
             if (row_removed[i]) {
                 continue;
@@ -4394,20 +4406,35 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
             if (a == 0.0) {
                 continue;
             }
-            Activity rest = act[i];
-            addTerm(rest, a, lp.col_lower[j], lp.col_upper[j], -1);
             // a*x <= row_upper - rest_min and a*x >= row_lower - rest_max;
             // dividing by a < 0 swaps which side bounds x from above.
             const bool use_upper_side = upper == (a > 0.0);
             const Real side = use_upper_side ? lp.row_upper[i] : lp.row_lower[i];
-            const Index rest_inf = use_upper_side ? rest.min_inf : rest.max_inf;
-            if (std::abs(side) >= kHugeBound || rest_inf > 0) {
+            if (std::abs(side) >= kHugeBound) {
                 continue;
             }
-            const Real rest_finite = use_upper_side ? rest.min_finite : rest.max_finite;
-            const Real value = (side - rest_finite) / a;
-            const Real slack = filter_tol + 1e-6 * std::abs(rest_finite / a);
-            if ((upper ? value <= bound + slack : value >= bound - slack) &&
+            // Column j's own term in that activity, taken back out.
+            Activity rest = use_upper_side ? act[i].min : act[i].max;
+            const Real own = (a > 0.0) == use_upper_side ? lp.col_lower[j] : lp.col_upper[j];
+            addProduct(rest, a, own, -1);
+            if (rest.inf > 0) {
+                continue;
+            }
+            // The side is one more term, side - rest one more addition. err
+            // bounds the sum's rounding over |a| and the division's; 2*n*eps
+            // is 4*n*u, room for gamma_n over n*u and the rounding of
+            // magnitude itself.
+            const Real n = static_cast<Real>(rest.added + 1);
+            const Real magnitude = rest.magnitude + std::abs(side);
+            const Real value = (side - rest.finite) / a;
+            const Real err = 2.0 * kEps * std::abs(value) +
+                             2.0 * n * kEps * magnitude / std::abs(a) + n * kTiny / std::abs(a);
+            if (upper ? value + err <= bound + tol : value - err >= bound - tol) {
+                return true;
+            }
+            // Within err of the test: the rescan decides, so no bound it
+            // would put back is kept.
+            if ((upper ? value - err <= bound + tol : value + err >= bound - tol) &&
                 rowImplies(i, j, a, use_upper_side, upper, bound, tol)) {
                 return true;
             }
@@ -4427,15 +4454,16 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
             if (!tightened || !implied(j, upper, current)) {
                 continue;
             }
-            const Real old_lb = lp.col_lower[j];
-            const Real old_ub = lp.col_upper[j];
             (upper ? lp.col_upper[j] : lp.col_lower[j]) = orig;
             for (const auto [i, a] : work_->col(j)) {
-                if (row_removed[i]) {
+                if (row_removed[i] || a == 0.0) {
                     continue;
                 }
-                addTerm(act[i], a, old_lb, old_ub, -1);
-                addTerm(act[i], a, lp.col_lower[j], lp.col_upper[j], 1);
+                // Only the activity that reads the changed bound moves: the
+                // maximum for an upper bound with a > 0 or a lower with a < 0.
+                Activity& s = upper == (a > 0.0) ? act[i].max : act[i].min;
+                addProduct(s, a, current, -1);
+                addProduct(s, a, orig, 1);
             }
             ++relaxed;
         }
