@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
@@ -1208,6 +1209,36 @@ TEST_CASE("Presolve: a merge with a huge bound splits back to a finite point", "
     CHECK(std::abs(full[1]) < 1e20);
     CHECK_THAT(full[0] + 2.0 * full[1], WithinAbs(-2.0, 1e-9));
     CHECK_THAT(objectiveAt(lp, full), WithinAbs(-2.0, 1e-9));
+}
+
+TEST_CASE("Presolve: a huge finite bound does not swallow a row's activity", "[presolve]") {
+    // min 2x + y s.t. x >= 2.5, x + y >= 3, y in [0, 0.50005], with x's
+    // missing bound written as a huge finite one. Summed in, 1e30 swallowed
+    // y's 0.50005, and taking it back out implied x >= 3, so presolve gave 6
+    // (#300). The optimum is 5.5 at x = 2.5, y = 0.5. Negated, x's huge bound
+    // is a lower one under a -1 coefficient.
+    const Real huge = GENERATE(1e20, 1e30);
+    const Real s = GENERATE(1.0, -1.0);
+    LpProblem lp;
+    lp.name = "huge_bound";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {2.0 * s, 1.0};
+    lp.col_lower = {s > 0 ? 0.0 : -huge, 0.0};
+    lp.col_upper = {s > 0 ? huge : 0.0, 0.50005};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 2;
+    lp.row_lower = {2.5, 3.0};
+    lp.row_upper = {kInf, kInf};
+    lp.row_names = {"r1", "r2"};
+    std::vector<Triplet> trips = {{0, 0, s}, {1, 0, s}, {1, 1, 1.0}};
+    lp.matrix = SparseMatrix(2, 2, std::move(trips));
+
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver);
+    CHECK_THAT(s * full[0], WithinAbs(2.5, 1e-9));
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(5.5, 1e-9));
 }
 
 TEST_CASE("Presolve: equal-cost parallel columns merge and keep the optimum", "[presolve]") {

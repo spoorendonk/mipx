@@ -20,6 +20,11 @@ namespace mipx {
 
 namespace {
 
+// A finite bound this large (an MPS file's 1e30 for "none") counts as
+// infinite where activities are summed: added in, it swallows every smaller
+// term, and taking it back out leaves 0 where the rest of the row was (#300).
+constexpr Real kHugeBound = 1e20;
+
 inline void markRowsTouchingCol(const LpProblem& lp, Index col,
                                 const std::vector<bool>& row_removed,
                                 std::vector<uint8_t>& dirty_rows) {
@@ -388,7 +393,6 @@ std::vector<Real> PostsolveStack::postsolve(const std::vector<Real>& presolved_s
                     // rounding may cross lo and hi by a hair, lo then wins.
                     // A huge bound (1e30 from MPS) counts as infinite: at it,
                     // y - s * x loses y to rounding.
-                    constexpr Real kHugeBound = 1e20;
                     auto usable = [](Real v) { return std::abs(v) < kHugeBound; };
                     Real x = std::max(std::min(0.0, hi), lo);
                     if (usable(lo)) {
@@ -1588,6 +1592,16 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
         Index inf_max_count = 0;
         Index inf_min_col = -1;
         Index inf_max_col = -1;
+        // a * x at the bound that gives the row its min (at_min) or max
+        // activity; infinite when that bound is huge (kHugeBound), so the
+        // residual activities below never subtract a 1e30 term back out.
+        auto contrib = [&](Real a, Index j, bool at_min) {
+            const Real b = (a > 0) == at_min ? lp.col_lower[j] : lp.col_upper[j];
+            if (std::abs(b) >= kHugeBound) {
+                return (a > 0) == (b > 0) ? kInf : -kInf;
+            }
+            return a * b;
+        };
 
         for (Index k = 0; k < rv.size(); ++k) {
             Index j = rv.indices[k];
@@ -1596,8 +1610,8 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
             }
             Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
 
-            Real contrib_min = (a > 0) ? a * lp.col_lower[j] : a * lp.col_upper[j];
-            Real contrib_max = (a > 0) ? a * lp.col_upper[j] : a * lp.col_lower[j];
+            Real contrib_min = contrib(a, j, true);
+            Real contrib_max = contrib(a, j, false);
 
             if (std::isinf(contrib_min)) {
                 ++inf_min_count;
@@ -1627,8 +1641,7 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
 
             if (inf_min_count == 0) {
                 res_min_finite = true;
-                Real contrib_min_j = (a > 0) ? a * lp.col_lower[j] : a * lp.col_upper[j];
-                res_min = act_min - contrib_min_j;
+                res_min = act_min - contrib(a, j, true);
             } else if (inf_min_count == 1 && inf_min_col == j) {
                 res_min_finite = true;
                 res_min = act_min;
@@ -1636,24 +1649,34 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
 
             if (inf_max_count == 0) {
                 res_max_finite = true;
-                Real contrib_max_j = (a > 0) ? a * lp.col_upper[j] : a * lp.col_lower[j];
-                res_max = act_max - contrib_max_j;
+                res_max = act_max - contrib(a, j, false);
             } else if (inf_max_count == 1 && inf_max_col == j) {
                 res_max_finite = true;
                 res_max = act_max;
             }
 
+            // Huge sides count as infinite too, and a huge derived bound is
+            // dropped: either would only put a 1e30-sized finite bound where
+            // an infinite one was. Dropping a bound is always valid.
+            const bool has_row_lower = std::abs(lp.row_lower[i]) < kHugeBound;
+            const bool has_row_upper = std::abs(lp.row_upper[i]) < kHugeBound;
             Real new_ub = kInf;
-            if (a > 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
+            if (a > 0 && has_row_upper && res_min_finite) {
                 new_ub = (lp.row_upper[i] - res_min) / a;
-            } else if (a < 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
+            } else if (a < 0 && has_row_lower && res_max_finite) {
                 new_ub = (lp.row_lower[i] - res_max) / a;
             }
             Real new_lb = -kInf;
-            if (a > 0 && !std::isinf(lp.row_lower[i]) && res_max_finite) {
+            if (a > 0 && has_row_lower && res_max_finite) {
                 new_lb = (lp.row_lower[i] - res_max) / a;
-            } else if (a < 0 && !std::isinf(lp.row_upper[i]) && res_min_finite) {
+            } else if (a < 0 && has_row_upper && res_min_finite) {
                 new_lb = (lp.row_upper[i] - res_min) / a;
+            }
+            if (std::abs(new_ub) >= kHugeBound) {
+                new_ub = kInf;
+            }
+            if (std::abs(new_lb) >= kHugeBound) {
+                new_lb = -kInf;
             }
             if (lp.col_type[j] != VarType::Continuous) {
                 const Real round_tol = integerRoundTol(a, false);
@@ -2147,7 +2170,6 @@ Index Presolver::removeParallelCols(LpProblem& lp, std::vector<bool>& col_remove
     const Real sense = lp.sense == Sense::Maximize ? -1.0 : 1.0;
     // A finite bound this large (an MPS file's 1e30 for "none") is not fixed
     // at: shifting the rows by it would swamp their other terms.
-    constexpr Real kHugeBound = 1e20;
     // Every candidate is hashed, but a bucket is looked at only when one of
     // its columns is dirty: a clean column's partner may be dirty, e.g. a
     // bound of the dirty one turned finite since the pair was last seen.
@@ -3007,7 +3029,6 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
     // infinite: as a finite term it would swamp the row's other terms, and
     // the rounding could imply a bound the row does not. Counting it as
     // infinite only keeps more bounds.
-    constexpr Real kHugeBound = 1e20;
     // Adds (sign +1) or removes (sign -1) the term a*x of a row's activities
     // for x in [lb, ub].
     auto addTerm = [](Activity& r, Real a, Real lb, Real ub, int sign) {
