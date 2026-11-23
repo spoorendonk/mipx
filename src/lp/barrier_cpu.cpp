@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -145,9 +146,13 @@ void bfsBisect(const std::vector<std::vector<Index>>& adj, const std::vector<Ind
     }
 }
 
-// Recursive nested dissection.
-void ndRecurse(const std::vector<std::vector<Index>>& adj, const std::vector<Index>& nodes,
-               std::vector<Index>& perm, Index& next_slot) {
+// Recursive nested dissection. False when the deadline passed (checked once
+// per subgraph, before its bisection).
+bool ndRecurse(const std::vector<std::vector<Index>>& adj, const std::vector<Index>& nodes,
+               std::vector<Index>& perm, Index& next_slot, const Deadline& deadline) {
+    if (deadline.passed()) {
+        return false;
+    }
     if (nodes.size() <= 64) {
         // Base case: for small subgraphs, use local AMD ordering via
         // a simple minimum-degree selection.
@@ -175,30 +180,34 @@ void ndRecurse(const std::vector<std::vector<Index>>& adj, const std::vector<Ind
         for (Index k = 0; k < nv; ++k) {
             perm[next_slot++] = nodes[local_perm[k]];
         }
-        return;
+        return true;
     }
 
     std::vector<Index> part0, part1, separator;
     bfsBisect(adj, nodes, part0, part1, separator);
 
     // Recurse on each partition.
-    ndRecurse(adj, part0, perm, next_slot);
-    ndRecurse(adj, part1, perm, next_slot);
+    if (!ndRecurse(adj, part0, perm, next_slot, deadline) ||
+        !ndRecurse(adj, part1, perm, next_slot, deadline)) {
+        return false;
+    }
 
     // Separator is numbered last.
     for (Index v : separator) {
         perm[next_slot++] = v;
     }
+    return true;
 }
 
 }  // namespace nd_detail
 
-void computeNd(Index n, const std::vector<Index>& col_starts, const std::vector<Index>& row_indices,
-               std::vector<Index>& perm, std::vector<Index>& iperm) {
+// False, with perm and iperm not an ordering, when the deadline passed.
+bool computeNd(Index n, const std::vector<Index>& col_starts, const std::vector<Index>& row_indices,
+               std::vector<Index>& perm, std::vector<Index>& iperm, const Deadline& deadline = {}) {
     perm.resize(static_cast<size_t>(n));
     iperm.resize(static_cast<size_t>(n));
     if (n == 0) {
-        return;
+        return true;
     }
 
     // Build symmetric adjacency lists (no self-loops).
@@ -247,12 +256,15 @@ void computeNd(Index n, const std::vector<Index>& col_starts, const std::vector<
     // Apply nested dissection to each connected component.
     Index next_slot = 0;
     for (auto& comp : components) {
-        nd_detail::ndRecurse(adj, comp, perm, next_slot);
+        if (!nd_detail::ndRecurse(adj, comp, perm, next_slot, deadline)) {
+            return false;
+        }
     }
 
     for (Index k = 0; k < n; ++k) {
         iperm[perm[k]] = k;
     }
+    return true;
 }
 
 // Auto-select ordering based on problem size.
@@ -802,7 +814,16 @@ private:
     // triangle).
     bool factorM() override {
         const Index m = m_;
-        ne_dense_.assign(static_cast<size_t>(m) * static_cast<size_t>(m), 0.0);
+        // Not zero-filled: the loop below writes every entry, column by
+        // column, so the m^2 memory is first touched inside its deadline
+        // checks rather than in one unbroken fill before them, seconds on a
+        // large m (#347).
+        const std::size_t entries = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
+        if (ne_dense_size_ != entries) {
+            ne_dense_.reset();
+            ne_dense_ = std::make_unique_for_overwrite<Real[]>(entries);
+            ne_dense_size_ = entries;
+        }
 
         // Build dense NE matrix M = A * Theta * A' + reg * I.
         // Column-major storage: M[i,j] = ne_dense_[i + j*m].
@@ -892,7 +913,10 @@ private:
         }
     }
 
-    std::vector<Real> ne_dense_;  // Dense NE matrix / Cholesky factor (col-major)
+    // Dense NE matrix / Cholesky factor (col-major, m x m), allocated
+    // uninitialized (see factorM).
+    std::unique_ptr<Real[]> ne_dense_;
+    std::size_t ne_dense_size_ = 0;
 };
 
 // ============================================================================
@@ -997,7 +1021,20 @@ private:
         ne_ptr_.assign(static_cast<size_t>(m) + 1, 0);
         ne_idx_.clear();
         std::vector<Index> mark(static_cast<size_t>(m), -1);
+        // The pattern, the ordering and the analysis all check the deadline
+        // (#347): on a large LP each takes seconds.
+        auto timedOut = [&] {
+            if (!deadline_.passed()) {
+                return false;
+            }
+            error_ = deadline_.stopped() ? "stopped in the normal-equations analysis"
+                                         : "time limit reached in the normal-equations analysis";
+            return true;
+        };
         for (Index k = 0; k < m; ++k) {
+            if (k % 1024 == 0 && timedOut()) {
+                return false;
+            }
             mark[k] = k;
             ne_idx_.push_back(k);
             const auto rk = a_->row(k);
@@ -1029,10 +1066,13 @@ private:
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<Index> perm;
         std::vector<Index> iperm;
-        if (ordering == BarrierOrdering::Nd) {
-            computeNd(m, ne_ptr_, ne_idx_, perm, iperm);
-        } else {
-            amdOrder(m, ne_ptr_, ne_idx_, perm, iperm);
+        const bool ordered =
+            ordering == BarrierOrdering::Nd
+                ? computeNd(m, ne_ptr_, ne_idx_, perm, iperm, deadline_)
+                : amdOrder(m, ne_ptr_, ne_idx_, perm, iperm, {}, nullptr, deadline_);
+        if (!ordered) {
+            timedOut();  // the only way an ordering ends early
+            return false;
         }
         const double order_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1047,7 +1087,7 @@ private:
                 static_cast<std::size_t>(m) * (sizeof(Index) + sizeof(Real));
             cap = cap > ne_bytes ? cap - ne_bytes : 1;
         }
-        const bool analyzed = chol_.analyze(m, ne_ptr_, ne_idx_, perm, cap);
+        const bool analyzed = chol_.analyze(m, ne_ptr_, ne_idx_, perm, cap, deadline_);
         // Printed also when the factor is refused: its size is the finding.
         if (opts.verbose) {
             const auto& st = chol_.stats();

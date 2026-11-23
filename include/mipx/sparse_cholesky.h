@@ -82,9 +82,11 @@ public:
     /// (CSC-style: entries col_starts[j]..col_starts[j+1]-1 have column j).
     /// perm[new] = old is the fill-reducing ordering. Returns false, with
     /// error() set, when the factor would exceed max_bytes (0: no cap) or
-    /// cannot be allocated.
+    /// cannot be allocated, or when `deadline` passes or its stop flag is
+    /// raised (checked between its passes and inside the long ones, #347).
     bool analyze(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
-                 std::span<const Index> perm, std::size_t max_bytes = 0);
+                 std::span<const Index> perm, std::size_t max_bytes = 0,
+                 const Deadline& deadline = {});
 
     /// Numeric factorization of the matrix whose entries are `values`, aligned
     /// with the analyzed pattern. Returns false when a pivot is not finite, or
@@ -126,7 +128,7 @@ public:
 
 private:
     bool analyzeImpl(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
-                     std::span<const Index> perm, std::size_t max_bytes);
+                     std::span<const Index> perm, std::size_t max_bytes, const Deadline& deadline);
 
     Index n_ = 0;
     std::vector<Index> perm_;   // perm_[new] = old (fill-reducing then postorder)

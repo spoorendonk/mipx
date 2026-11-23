@@ -1,6 +1,8 @@
-// The barrier honours BarrierOptions::max_solve_seconds (#275).
+// The barrier honours BarrierOptions::max_solve_seconds (#275), in its
+// backends' setup too (#347).
 
 #include "lp/newton_solver.h"
+#include "mipx/amd_ordering.h"
 #include "mipx/barrier.h"
 #include "mipx/sparse_cholesky.h"
 
@@ -115,6 +117,37 @@ TEST_CASE("Barrier backends stop factorizing once the deadline has passed",
     CHECK(solver->factorize(ones, ones, 1e-8));
 }
 
+TEST_CASE("Sparse normal equations stop their setup once the deadline has passed",
+          "[barrier][time-limit][sparse-ne]") {
+    // Its ordering and analysis take seconds on a large LP (#347). The same
+    // chain of rows as above.
+    constexpr Index kRows = 30;
+    constexpr Index kCols = kRows + 1;
+    std::vector<Triplet> t;
+    for (Index i = 0; i < kRows; ++i) {
+        t.push_back({i, i, 1.0});
+        t.push_back({i, i + 1, 2.0});
+    }
+    const SparseMatrix A(kRows, kCols, t);
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ordering = GENERATE(BarrierOrdering::Amd, BarrierOrdering::Nd);
+    INFO("ordering " << static_cast<int>(opts.ordering));
+
+    auto solver = createCpuSparseCholeskySolver();
+    solver->setDeadline(Deadline::after(0.0));
+    CHECK_FALSE(solver->setup(A, kRows, kCols, opts));
+    CHECK(solver->lastError().find("time limit") != std::string::npos);
+
+    const std::atomic<bool> stop{true};
+    solver->setDeadline(Deadline{}.orStop(&stop));
+    CHECK_FALSE(solver->setup(A, kRows, kCols, opts));
+    CHECK(solver->lastError().find("stopped") != std::string::npos);
+
+    solver->setDeadline(Deadline{});
+    CHECK(solver->setup(A, kRows, kCols, opts));
+}
+
 TEST_CASE("Barrier with a raised stop flag returns IterLimit, not TimeLimit",
           "[barrier][time-limit]") {
     // The flag is up before the starting point's factorization, which then
@@ -157,4 +190,65 @@ TEST_CASE("SparseCholesky stops at a passed deadline and says so", "[time-limit]
     const std::atomic<bool> stop{true};
     CHECK_FALSE(chol.factorize(values, rule, Deadline{}.orStop(&stop)));
     CHECK(chol.error().find("stopped") != std::string::npos);
+}
+
+TEST_CASE("SparseCholesky analysis stops at a passed deadline and says so",
+          "[time-limit][sparse-ne]") {
+    // A tridiagonal pattern on 50 rows, lower triangle.
+    constexpr Index kN = 50;
+    std::vector<Index> starts = {0};
+    std::vector<Index> rows;
+    for (Index j = 0; j < kN; ++j) {
+        rows.push_back(j);
+        if (j + 1 < kN) {
+            rows.push_back(j + 1);
+        }
+        starts.push_back(static_cast<Index>(rows.size()));
+    }
+    std::vector<Index> perm(kN);
+    for (Index k = 0; k < kN; ++k) {
+        perm[k] = k;
+    }
+    SparseCholesky chol;
+    CHECK_FALSE(chol.analyze(kN, starts, rows, perm, 0, Deadline::after(0.0)));
+    CHECK(chol.error().find("time limit") != std::string::npos);
+
+    const std::atomic<bool> stop{true};
+    CHECK_FALSE(chol.analyze(kN, starts, rows, perm, 0, Deadline{}.orStop(&stop)));
+    CHECK(chol.error().find("stopped") != std::string::npos);
+
+    // Without one it analyzes, and the factor is usable.
+    REQUIRE(chol.analyze(kN, starts, rows, perm));
+    CHECK(chol.error().empty());
+    std::vector<Real> values;
+    for (Index j = 0; j < kN; ++j) {
+        values.push_back(4.0);
+        if (j + 1 < kN) {
+            values.push_back(1.0);
+        }
+    }
+    CHECK(chol.factorize(values, SparseCholesky::PivotRule{}));
+}
+
+TEST_CASE("AMD stops at a passed deadline", "[time-limit][amd]") {
+    // A path on 40 nodes, lower triangle.
+    constexpr Index kN = 40;
+    std::vector<Index> starts = {0};
+    std::vector<Index> rows;
+    for (Index j = 0; j < kN; ++j) {
+        if (j + 1 < kN) {
+            rows.push_back(j + 1);
+        }
+        starts.push_back(static_cast<Index>(rows.size()));
+    }
+    std::vector<Index> perm;
+    std::vector<Index> iperm;
+    CHECK_FALSE(amdOrder(kN, starts, rows, perm, iperm, {}, nullptr, Deadline::after(0.0)));
+    const std::atomic<bool> stop{true};
+    CHECK_FALSE(amdOrder(kN, starts, rows, perm, iperm, {}, nullptr, Deadline{}.orStop(&stop)));
+    REQUIRE(amdOrder(kN, starts, rows, perm, iperm));
+    REQUIRE(iperm.size() == static_cast<std::size_t>(kN));
+    for (Index k = 0; k < kN; ++k) {
+        CHECK(iperm[perm[k]] == k);
+    }
 }

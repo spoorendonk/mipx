@@ -382,10 +382,10 @@ bool SparseCholesky::blasAvailable() {
 
 bool SparseCholesky::analyze(Index n, std::span<const Index> col_starts,
                              std::span<const Index> row_indices, std::span<const Index> perm,
-                             std::size_t max_bytes) {
+                             std::size_t max_bytes, const Deadline& deadline) {
     error_.clear();
     try {
-        return analyzeImpl(n, col_starts, row_indices, perm, max_bytes);
+        return analyzeImpl(n, col_starts, row_indices, perm, max_bytes, deadline);
     } catch (const std::bad_alloc&) {
         // Release everything the analysis built; keep the stats it reached.
         const Stats reached = stats_;
@@ -398,13 +398,26 @@ bool SparseCholesky::analyze(Index n, std::span<const Index> col_starts,
 
 bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
                                  std::span<const Index> row_indices, std::span<const Index> perm,
-                                 std::size_t max_bytes) {
+                                 std::size_t max_bytes, const Deadline& deadline) {
     const auto t0 = std::chrono::steady_clock::now();
     n_ = n;
     stats_ = Stats{};
     stats_.n = n;
     stats_.nnz_input = static_cast<std::size_t>(col_starts[n]);
     num_dependent_ = 0;
+    // Between the passes, each linear in the pattern or the factor's row
+    // structure, and inside the two that loop over the supernodes and the
+    // input entries. A cut-short analysis leaves no factor to use.
+    auto timedOut = [&] {
+        if (!deadline.passed()) {
+            return false;
+        }
+        error_ =
+            deadline.stopped() ? "stopped in the analysis" : "time limit reached in the analysis";
+        stats_.analyze_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return true;
+    };
 
     // Fill-reducing order, then the etree's postorder on top of it, which
     // keeps the fill and makes every supernode a contiguous range of columns.
@@ -414,6 +427,9 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     }
     PermutedPattern pat;
     buildPermutedPattern(n, col_starts, row_indices, iperm0, pat);
+    if (timedOut()) {
+        return false;
+    }
     const std::vector<Index> post = postorder(n, eliminationTree(n, pat));
     perm_.resize(static_cast<size_t>(n));
     iperm_.resize(static_cast<size_t>(n));
@@ -421,9 +437,18 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
         perm_[k] = perm[post[k]];
         iperm_[perm_[k]] = k;
     }
+    if (timedOut()) {
+        return false;
+    }
     buildPermutedPattern(n, col_starts, row_indices, iperm_, pat);
     const std::vector<Index> parent = eliminationTree(n, pat);
+    if (timedOut()) {
+        return false;
+    }
     const std::vector<Index> count = columnCounts(n, pat, parent);
+    if (timedOut()) {
+        return false;
+    }
     for (Index j = 0; j < n; ++j) {
         stats_.nnz_l += static_cast<std::size_t>(count[j]);
         stats_.factor_flops += static_cast<double>(count[j]) * static_cast<double>(count[j]);
@@ -517,6 +542,9 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     std::vector<Index> mark(static_cast<size_t>(n), -1);
     std::vector<Index> below;
     for (Index s = 0; s < ns; ++s) {
+        if (timedOut()) {
+            return false;
+        }
         const Index first = snode_start_[s];
         const Index last = snode_start_[s + 1] - 1;
         below.clear();
@@ -569,6 +597,9 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     // Block position of each input entry: column min, row max (permuted).
     entry_pos_.resize(stats_.nnz_input);
     for (Index c = 0; c < n; ++c) {
+        if (c % 1024 == 0 && timedOut()) {
+            return false;
+        }
         for (Index p = col_starts[c]; p < col_starts[c + 1]; ++p) {
             const Index a = iperm_[row_indices[p]];
             const Index b = iperm_[c];

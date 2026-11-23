@@ -50,9 +50,9 @@ constexpr Index flip(Index j) {
 // The algorithm is one loop of six steps over shared state; it is kept in
 // one function, as in the paper, rather than split along artificial seams.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
+bool amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
               std::vector<Index>& perm, std::vector<Index>& iperm, const AmdOptions& opts,
-              AmdInfo* info) {
+              AmdInfo* info, const Deadline& deadline) {
     const auto nn = static_cast<std::size_t>(std::max<Index>(n, 0));
     perm.assign(nn, 0);
     iperm.assign(nn, 0);
@@ -61,7 +61,7 @@ void amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index>
         if (info != nullptr) {
             *info = stats;
         }
-        return;
+        return true;
     }
     assert(col_starts.size() >= nn + 1);
 
@@ -220,6 +220,13 @@ void amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index>
     Mark wflg = clearFlag(0);
 
     while (nel < n) {
+        // Once per pivot: an ordering of a large NE pattern takes seconds.
+        if (deadline.passed()) {
+            if (info != nullptr) {
+                *info = stats;
+            }
+            return false;
+        }
         // --- 1. Pivot of least approximate degree ---
         Index deg = mindeg;
         while (deg < n && head[deg] == kEmpty) {
@@ -529,6 +536,7 @@ void amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index>
     if (info != nullptr) {
         *info = stats;
     }
+    return true;
 }
 
 }  // namespace mipx

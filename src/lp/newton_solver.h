@@ -40,7 +40,8 @@ public:
     /// The solve's time limit (#275), with the caller's stop flag. A CPU
     /// backend checks it inside its factorization, so one long factorize()
     /// cannot overrun it (or a stop) by minutes, and returns false once it
-    /// has passed.
+    /// has passed; the sparse normal equations also inside setup()'s
+    /// ordering and analysis (#347). Set it before setup().
     void setDeadline(const Deadline& deadline) { deadline_ = deadline; }
     [[nodiscard]] const Deadline& deadline() const { return deadline_; }
 

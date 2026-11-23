@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 
 #include <span>
 #include <vector>
@@ -34,9 +35,11 @@ struct AmdInfo {
 /// triangle or both, duplicates and the diagonal ignored; col_starts has
 /// n + 1 entries and every row index lies in [0, n). On return perm[k] is
 /// the k-th node to eliminate and iperm its inverse. info, if given, is
-/// filled in.
-void amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
+/// filled in. Returns false, with perm and iperm not an ordering, when
+/// `deadline` passes or its stop flag is raised (checked once per pivot,
+/// #347); true otherwise, always so without a deadline.
+bool amdOrder(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
               std::vector<Index>& perm, std::vector<Index>& iperm, const AmdOptions& opts = {},
-              AmdInfo* info = nullptr);
+              AmdInfo* info = nullptr, const Deadline& deadline = {});
 
 }  // namespace mipx
