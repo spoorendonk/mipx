@@ -39,6 +39,8 @@ enum class BarrierIpmOutcome {
 
 struct BarrierOptions {
     Int max_iter = 100;
+    // The IPM stops at scaled primal and dual infeasibility and relative
+    // duality gap x'z / (1 + |c'x|) all below this (#253).
     Real primal_dual_tol = 1e-8;
     Real regularization = 1e-8;
     Real step_fraction = 0.995;

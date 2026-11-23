@@ -61,5 +61,6 @@ TEST_CASE("Barrier stops on the relative duality gap, not x'z/n, at large n", "[
     solver.load(halfKnapsackLp(kN));
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    CHECK(std::abs(result.objective - expected) <= 1e-6 * std::abs(expected));
+    // 1e-7: the old rule's point is off by ~1.1e-6 here, the new one's ~1e-8.
+    CHECK(std::abs(result.objective - expected) <= 1e-7 * std::abs(expected));
 }
