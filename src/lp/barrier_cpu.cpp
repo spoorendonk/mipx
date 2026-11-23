@@ -3,6 +3,7 @@
 //   CpuSparseCholeskySolver — Normal Equations + sparse supernodal LL' (MOSEK style)
 //   CpuAugmentedSolver      — Augmented system + sparse LDL' (HiPO/Zanetti-Gondzio)
 
+#include "mipx/amd_ordering.h"
 #include "mipx/sparse_cholesky.h"
 #include "newton_solver.h"
 
@@ -20,331 +21,11 @@
 #include <string>
 #include <unistd.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace mipx {
 
 namespace {
-
-// ============================================================================
-// Approximate Minimum Degree (AMD) ordering
-// ============================================================================
-// Based on Amestoy, Davis, Duff (1996) "An Approximate Minimum Degree
-// Ordering Algorithm".  Key features vs. the naive implementation:
-//   - Approximate external degree (upper bound) instead of exact degree.
-//   - Mass elimination of indistinguishable nodes (supervariables).
-//   - Aggressive absorption to keep adjacency lists compact.
-//   - O(nnz) expected complexity.
-//
-// Terminology:
-//   - Variable (v): an original graph node, possibly absorbed into a principal.
-//   - Element (e): an eliminated variable; represents its reach set implicitly.
-//   - Supervariable: a set of indistinguishable variables sharing identical
-//     adjacency; one is the principal, others are non-principal.
-
-void computeAmd(Index n, const std::vector<Index>& col_starts,
-                const std::vector<Index>& row_indices, std::vector<Index>& perm,
-                std::vector<Index>& iperm) {
-    perm.resize(static_cast<size_t>(n));
-    iperm.resize(static_cast<size_t>(n));
-    if (n == 0) {
-        return;
-    }
-
-    // --- Data structures ---
-    // For each variable: adjacency to other variables + elements.
-    // We store these in a flat array with linked lists per node.
-    // adj_var[i] = set of variable neighbors of i (principal only).
-    // adj_elem[i] = set of element neighbors of i.
-
-    std::vector<std::unordered_set<Index>> adj_var(static_cast<size_t>(n));
-    std::vector<std::unordered_set<Index>> adj_elem(static_cast<size_t>(n));
-
-    // Build symmetric adjacency (no self-loops).
-    for (Index j = 0; j < n; ++j) {
-        for (Index p = col_starts[j]; p < col_starts[j + 1]; ++p) {
-            Index i = row_indices[p];
-            if (i != j) {
-                adj_var[j].insert(i);
-                adj_var[i].insert(j);
-            }
-        }
-    }
-
-    // Element reach sets: for eliminated element e, the set of variables
-    // reachable through e that are still alive.
-    std::vector<std::unordered_set<Index>> elem_vars(static_cast<size_t>(n));
-
-    // Supervariable tracking.
-    // principal[i] = the principal variable for i's supervariable.
-    // If principal[i] == i, then i is a principal.
-    // weight[i] = number of variables in this supervariable (only valid for principals).
-    std::vector<Index> principal(static_cast<size_t>(n));
-    std::iota(principal.begin(), principal.end(), 0);
-    std::vector<Index> weight(static_cast<size_t>(n), 1);
-
-    // Approximate external degree (upper bound).
-    std::vector<Index> degree(static_cast<size_t>(n));
-    for (Index i = 0; i < n; ++i) {
-        degree[i] = static_cast<Index>(adj_var[i].size());
-    }
-
-    // alive[i] = true if variable i has not been eliminated and is a principal.
-    std::vector<bool> alive(static_cast<size_t>(n), true);
-
-    // Priority queue: (degree, node). We use lazy deletion.
-    using PQ = std::priority_queue<std::pair<Index, Index>, std::vector<std::pair<Index, Index>>,
-                                   std::greater<>>;
-    PQ heap;
-    for (Index i = 0; i < n; ++i) {
-        heap.emplace(degree[i], i);
-    }
-
-    Index num_eliminated = 0;
-
-    while (num_eliminated < n) {
-        // Pick the minimum-degree alive principal variable.
-        Index pivot = -1;
-        while (!heap.empty()) {
-            auto [d, v] = heap.top();
-            heap.pop();
-            if (alive[v] && principal[v] == v && d == degree[v]) {
-                pivot = v;
-                break;
-            }
-        }
-        if (pivot < 0) {
-            // All remaining nodes must be isolated or non-principal.
-            // Find any alive principal.
-            for (Index i = 0; i < n; ++i) {
-                if (alive[i] && principal[i] == i) {
-                    pivot = i;
-                    break;
-                }
-            }
-            if (pivot < 0) {
-                break;
-            }
-        }
-
-        // --- Eliminate pivot ---
-        // Collect the reach set of pivot: all alive principal variables
-        // adjacent to pivot either directly or through shared elements.
-        std::unordered_set<Index> reach;
-
-        // Direct variable neighbors.
-        for (Index v : adj_var[pivot]) {
-            Index pv = principal[v];
-            while (pv != principal[pv]) {
-                pv = principal[pv];
-            }
-            principal[v] = pv;
-            if (alive[pv] && pv != pivot) {
-                reach.insert(pv);
-            }
-        }
-
-        // Variables reachable through element neighbors.
-        for (Index e : adj_elem[pivot]) {
-            for (Index v : elem_vars[e]) {
-                Index pv = principal[v];
-                while (pv != principal[pv]) {
-                    pv = principal[pv];
-                }
-                principal[v] = pv;
-                if (alive[pv] && pv != pivot) {
-                    reach.insert(pv);
-                }
-            }
-            elem_vars[e].clear();  // Element e is absorbed into new element pivot.
-        }
-
-        // Record the elimination of the principal.
-        // Non-principal members of its supervariable were already assigned
-        // slots during mass elimination.
-        perm[num_eliminated] = pivot;
-        iperm[pivot] = num_eliminated;
-        ++num_eliminated;
-
-        alive[pivot] = false;
-
-        // Create element for pivot.
-        elem_vars[pivot] = reach;
-
-        // --- Update reach set ---
-        // For each variable v in reach:
-        //   1. Remove pivot from adj_var[v].
-        //   2. Replace element neighbors that were absorbed.
-        //   3. Compute approximate external degree.
-        //   4. Detect indistinguishable variables (mass elimination).
-
-        // Aggressive absorption: merge all elements adjacent to pivot into
-        // the new element (pivot). For each v in reach, remove old element
-        // neighbors that were also adjacent to pivot (they are subsumed).
-        std::unordered_set<Index> pivot_elems(adj_elem[pivot].begin(), adj_elem[pivot].end());
-
-        for (Index v : reach) {
-            adj_var[v].erase(pivot);
-
-            // Remove absorbed elements, add new element (pivot).
-            for (auto it = adj_elem[v].begin(); it != adj_elem[v].end();) {
-                if (pivot_elems.count(*it)) {
-                    it = adj_elem[v].erase(it);
-                } else {
-                    ++it;
-                }
-            }
-            adj_elem[v].insert(pivot);
-
-            // Approximate external degree: upper bound.
-            // d(v) <= |adj_var(v) \ {pivot}| + sum_{e in adj_elem(v)} |Le|
-            //         - weight(v) + 1  (don't count v itself)
-            // Clamped to n - num_eliminated - 1.
-            Index d = 0;
-            for (Index u : adj_var[v]) {
-                Index pu = principal[u];
-                while (pu != principal[pu]) {
-                    pu = principal[pu];
-                }
-                principal[u] = pu;
-                if (alive[pu] && pu != v) {
-                    d += weight[pu];
-                }
-            }
-            for (Index e : adj_elem[v]) {
-                for (Index u : elem_vars[e]) {
-                    Index pu = principal[u];
-                    while (pu != principal[pu]) {
-                        pu = principal[pu];
-                    }
-                    principal[u] = pu;
-                    if (alive[pu] && pu != v) {
-                        d += weight[pu];
-                    }
-                }
-            }
-            degree[v] = std::min(d, n - num_eliminated - 1);
-        }
-
-        // Mass elimination: detect indistinguishable variables in reach.
-        // Two variables u, v are indistinguishable if adj_var(u) == adj_var(v)
-        // and adj_elem(u) == adj_elem(v). We use a hash-based approach.
-        // For each variable in reach, compute a hash of (adj_var, adj_elem).
-        // Group by hash, then verify equality within each group.
-        if (reach.size() > 1) {
-            auto hash_adj = [&](Index v) -> size_t {
-                size_t h = 0;
-                for (Index u : adj_var[v]) {
-                    Index pu = principal[u];
-                    while (pu != principal[pu]) {
-                        pu = principal[pu];
-                    }
-                    if (alive[pu]) {
-                        h ^= std::hash<Index>{}(pu) * 2654435761u;
-                    }
-                }
-                for (Index e : adj_elem[v]) {
-                    h ^= std::hash<Index>{}(e) * 2246822519u;
-                }
-                h ^= std::hash<Index>{}(static_cast<Index>(adj_var[v].size()));
-                h ^= std::hash<Index>{}(static_cast<Index>(adj_elem[v].size())) << 16;
-                return h;
-            };
-
-            std::unordered_map<size_t, std::vector<Index>> groups;
-            for (Index v : reach) {
-                groups[hash_adj(v)].push_back(v);
-            }
-
-            for (auto& [h, group] : groups) {
-                if (group.size() <= 1) {
-                    continue;
-                }
-                // For each pair in the group, check true equality.
-                // Keep first as principal, merge others.
-                Index p0 = group[0];
-                for (size_t k = 1; k < group.size(); ++k) {
-                    Index v = group[k];
-                    // Verify same adjacency (sorted comparison).
-                    // For efficiency, just check size match + subset (since hash matched).
-                    if (adj_var[v].size() != adj_var[p0].size()) {
-                        continue;
-                    }
-                    if (adj_elem[v].size() != adj_elem[p0].size()) {
-                        continue;
-                    }
-                    bool same = true;
-                    for (Index u : adj_var[v]) {
-                        if (!adj_var[p0].count(u) && u != v && u != p0) {
-                            // Account for v being in adj_var[p0] and p0 in adj_var[v].
-                            same = false;
-                            break;
-                        }
-                    }
-                    if (!same) {
-                        continue;
-                    }
-                    for (Index e : adj_elem[v]) {
-                        if (!adj_elem[p0].count(e)) {
-                            same = false;
-                            break;
-                        }
-                    }
-                    if (!same) {
-                        continue;
-                    }
-
-                    // Merge v into p0.
-                    weight[p0] += weight[v];
-                    principal[v] = p0;
-                    alive[v] = false;
-
-                    // Clean up v's adjacency (it's no longer principal).
-                    for (Index u : adj_var[v]) {
-                        adj_var[u].erase(v);
-                        if (u != p0) {
-                            adj_var[u].insert(p0);
-                        }
-                    }
-                    adj_var[p0].erase(v);
-                    adj_var[v].clear();
-                    adj_elem[v].clear();
-
-                    // Update element reach sets.
-                    for (auto& ev : elem_vars) {
-                        if (ev.erase(v)) {
-                            ev.insert(p0);
-                        }
-                    }
-
-                    // v gets eliminated right after p0.
-                    perm[num_eliminated] = v;
-                    iperm[v] = num_eliminated;
-                    ++num_eliminated;
-                }
-            }
-        }
-
-        // Re-insert updated variables into heap.
-        for (Index v : reach) {
-            if (alive[v] && principal[v] == v) {
-                heap.emplace(degree[v], v);
-            }
-        }
-
-        adj_var[pivot].clear();
-        adj_elem[pivot].clear();
-    }
-
-    // Fix up: the perm/iperm for supervariable members assigned above may have
-    // the principal's slot. We already handle this inline during elimination,
-    // but verify correctness.
-    // Re-derive iperm from perm.
-    for (Index k = 0; k < n; ++k) {
-        iperm[perm[k]] = k;
-    }
-}
 
 // ============================================================================
 // Nested Dissection ordering
@@ -490,7 +171,7 @@ void ndRecurse(const std::vector<std::vector<Index>>& adj, const std::vector<Ind
             local_cptr[li + 1] = static_cast<Index>(local_ridx.size());
         }
         std::vector<Index> local_perm, local_iperm;
-        computeAmd(nv, local_cptr, local_ridx, local_perm, local_iperm);
+        amdOrder(nv, local_cptr, local_ridx, local_perm, local_iperm);
         for (Index k = 0; k < nv; ++k) {
             perm[next_slot++] = nodes[local_perm[k]];
         }
@@ -660,7 +341,7 @@ static void symbolicAnalyze(Index n, const std::vector<Index>& col_starts,
     if (effective == BarrierOrdering::Nd) {
         computeNd(n, col_starts, row_indices, sym.perm, sym.iperm);
     } else {
-        computeAmd(n, col_starts, row_indices, sym.perm, sym.iperm);
+        amdOrder(n, col_starts, row_indices, sym.perm, sym.iperm);
     }
 
     // Permute pattern.
@@ -1207,7 +888,7 @@ private:
         if (ordering == BarrierOrdering::Nd) {
             computeNd(m, ne_ptr_, ne_idx_, perm, iperm);
         } else {
-            computeAmd(m, ne_ptr_, ne_idx_, perm, iperm);
+            amdOrder(m, ne_ptr_, ne_idx_, perm, iperm);
         }
         const double order_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

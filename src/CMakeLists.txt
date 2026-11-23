@@ -9,6 +9,7 @@ add_library(mipx STATIC
     lp/barrier.cpp
     lp/barrier_cpu.cpp
     lp/barrier_presolve.cpp
+    lp/amd_ordering.cpp
     lp/sparse_cholesky.cpp
     lp/pdlp.cpp
     io/mps_reader.cpp

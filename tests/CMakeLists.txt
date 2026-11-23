@@ -22,6 +22,7 @@ add_executable(mipx-tests
     test_symmetry.cpp
     test_barrier.cpp
     test_sparse_cholesky.cpp
+    test_amd_ordering.cpp
     test_pdlp.cpp
     test_exact_refinement.cpp
     test_conflict_graph.cpp
