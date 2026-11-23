@@ -479,7 +479,8 @@ mcf recorded.
 
 ```bash
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
-    --arm dual-warm --arm dual-cold --arm barrier --arm pdlp [--primal-devex] [--csv out.csv]
+    --arm dual-warm --arm dual-cold --arm barrier --arm barrier-hsd --arm pdlp \
+    [--barrier-ne dense|sparse] [--primal-devex] [--csv out.csv]
 ```
 
 Format (`format = mcf-lpseq 1` in `manifest.txt`; specified in mcf's
@@ -492,8 +493,14 @@ LP it applies to (`add_cols`, `del_cols`, `add_rows`, `del_rows`,
 
 Arms: `dual-warm` keeps one dual simplex and applies each change to it, so its
 basis carries over (a `coeffs` change, which `LpSolver` has no call for,
-reloads it, flagged in the `reloaded` column); `dual-cold`, `barrier` and
-`pdlp` load the LP afresh for every solve. One CSV line per solve and arm:
+reloads it, flagged in the `reloaded` column); `dual-cold`, `barrier`,
+`barrier-hsd` (the homogeneous self-dual loop of #370) and `pdlp` load the
+LP afresh for every solve. `--barrier-ne dense|sparse` runs both barrier
+arms on that CPU normal-equations factor, as `mipx-solve --barrier-ne X
+--no-gpu` does. Without it they take the default: `barrier` the GPU when
+there is one, `barrier-hsd` always the CPU (the HSD loop has no GPU path),
+on the normal equations or the augmented system as the LP's density picks.
+One CSV line per solve and arm:
 `seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded`.
 Exit 0 when every solve matches the recorded status and objective (relative
 to max(1, |recorded|), `--rel-tol` 1e-6, `--pdlp-rel-tol` 1e-4), 1 when one
@@ -501,8 +508,9 @@ does not, 2 on a format error. A master with a free row (written as an `N`
 row, which the MPS reader drops) is refused rather than replayed shifted.
 
 `tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
-HiGHS simplex, 9 masters); ctest replays it on all four arms with primal
-Devex off and on.
+HiGHS simplex, 9 masters); ctest replays it on `dual-warm`, `dual-cold`,
+`barrier` and `pdlp` with primal Devex off and on, and it and the edits
+sequence on `barrier-hsd` with each `--barrier-ne` factor.
 
 **The HiGHS side** (#268): configure with `-DMIPX_BENCH_HIGHS=ON` (OFF by
 default; fetches HiGHS v1.16.0 with HiPO, needs a BLAS such as

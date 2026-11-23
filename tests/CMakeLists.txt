@@ -120,6 +120,18 @@ if(TARGET mipx-lpseq-replay)
         COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/edits"
             --arm dual-warm --arm dual-cold --arm barrier
             --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_edits.csv")
+    # The homogeneous self-dual barrier's arm (#370, #372) on both CPU
+    # normal-equations factors: grid1's masters and the edits. The edits'
+    # infeasible solve is settled before the IPM; the HSD loop's own
+    # certificates are tested in test_barrier_hsd.cpp (#371).
+    foreach(ne dense sparse)
+        foreach(seq grid1 edits)
+            add_test(NAME "LP sequence replay: ${seq} on the HSD barrier, ${ne} NE"
+                COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/${seq}"
+                    --arm barrier-hsd --barrier-ne ${ne}
+                    --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_${seq}_hsd_${ne}.csv")
+        endforeach()
+    endforeach()
     add_test(NAME "LP sequence replay: an out-of-range index is a format error"
         COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/malformed")
     set_tests_properties("LP sequence replay: an out-of-range index is a format error"

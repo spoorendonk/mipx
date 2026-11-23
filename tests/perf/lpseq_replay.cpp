@@ -4,8 +4,8 @@
 // objective against the recorded one (#267).
 //
 // Arms: dual-warm keeps one DualSimplexSolver and applies the ops to it (its
-// basis carries over); dual-cold, barrier and pdlp load the LP afresh for
-// each solve. A coeffs op, which LpSolver has no call for, makes dual-warm
+// basis carries over); dual-cold, barrier, barrier-hsd and pdlp load the LP
+// afresh for each solve. A coeffs op, which LpSolver has no call for, makes dual-warm
 // reload the LP at that point, keeping its basis (counted as a reload).
 //
 // Output: one CSV line per (solve, arm) on stdout, or to --csv FILE:
@@ -131,7 +131,7 @@ void mirrorSetCoeffs(LpProblem& lp, const lpseq::Op& op) {
     rebuild(lp, std::move(t));
 }
 
-enum class ArmKind { DualWarm, DualCold, Barrier, Pdlp };
+enum class ArmKind { DualWarm, DualCold, Barrier, BarrierHsd, Pdlp };
 
 struct Arm {
     ArmKind kind;
@@ -144,6 +144,9 @@ struct Options {
     std::string dir;
     std::vector<ArmKind> arms;
     bool primal_devex = false;
+    // CPU factor for both barrier arms (--barrier-ne); Auto, the solver's
+    // default, unless set.
+    BarrierAlgorithm barrier_algorithm = BarrierAlgorithm::Auto;
     Real rel_tol = 1e-6;
     Real pdlp_rel_tol = 1e-4;
     std::string csv;
@@ -175,10 +178,13 @@ std::unique_ptr<LpSolver> coldSolver(ArmKind kind, const Options& opt) {
         d->setOptions(dualOptions(opt));
         return d;
     }
-    if (kind == ArmKind::Barrier) {
+    if (kind == ArmKind::Barrier || kind == ArmKind::BarrierHsd) {
         auto b = std::make_unique<BarrierSolver>();
         BarrierOptions bo;
         bo.verbose = false;
+        bo.algorithm = opt.barrier_algorithm;
+        // The homogeneous self-dual model (#370) runs in the CPU IPM loop.
+        bo.homogeneous = kind == ArmKind::BarrierHsd;
         b->setOptions(bo);
         return b;
     }
@@ -288,6 +294,9 @@ int run(const Options& opt) {
             case ArmKind::Barrier:
                 a.name = "barrier";
                 break;
+            case ArmKind::BarrierHsd:
+                a.name = "barrier-hsd";
+                break;
             case ArmKind::Pdlp:
                 a.name = "pdlp";
                 break;
@@ -353,8 +362,10 @@ int run(const Options& opt) {
 }
 
 void usage() {
-    std::cerr << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|pdlp]... "
-                 "[--primal-devex] [--rel-tol T] [--pdlp-rel-tol T] [--csv FILE]\n";
+    std::cerr
+        << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|barrier-hsd|pdlp]... "
+           "[--barrier-ne dense|sparse] [--primal-devex] [--rel-tol T] [--pdlp-rel-tol T] "
+           "[--csv FILE]\n";
 }
 
 }  // namespace
@@ -371,8 +382,21 @@ int main(int argc, char** argv) {
                 opt.arms.push_back(ArmKind::DualCold);
             } else if (v == "barrier") {
                 opt.arms.push_back(ArmKind::Barrier);
+            } else if (v == "barrier-hsd") {
+                opt.arms.push_back(ArmKind::BarrierHsd);
             } else if (v == "pdlp") {
                 opt.arms.push_back(ArmKind::Pdlp);
+            } else {
+                usage();
+                return 2;
+            }
+        } else if (a == "--barrier-ne" && i + 1 < argc) {
+            // CPU normal-equations factor, as mipx-solve --barrier-ne X --no-gpu.
+            const std::string v = argv[++i];
+            if (v == "dense") {
+                opt.barrier_algorithm = BarrierAlgorithm::CpuCholesky;
+            } else if (v == "sparse") {
+                opt.barrier_algorithm = BarrierAlgorithm::CpuSparseCholesky;
             } else {
                 usage();
                 return 2;
