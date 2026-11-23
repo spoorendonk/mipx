@@ -231,6 +231,10 @@ struct PresolveStats {
     Real coeff_tightening_seconds = 0.0;
     Real probing_seconds = 0.0;
     Real implied_bounds_relaxed_seconds = 0.0;
+    /// Finite implied row-dual bounds (lower and upper counted apart) the
+    /// enable_dominated_columns derivation found (#375).
+    Index implied_row_dual_bounds = 0;
+    Real dual_bounds_seconds = 0.0;
 };
 
 struct PresolveOptions {
@@ -277,6 +281,12 @@ struct PresolveOptions {
     /// its cost push the same way, when the equation's activity bounds allow.
     /// Off by default until benchmarked.
     bool enable_single_equation_dual_fixing = false;
+    /// Dominated columns from implied row-dual bounds, as HiGHS's
+    /// detectDominatedCol (#361), on an LP. So far (#375) this only derives
+    /// the bounds it will read, once before the #279 put-back, and counts
+    /// them in PresolveStats::implied_row_dual_bounds; it reduces nothing.
+    /// Off by default until benchmarked.
+    bool enable_dominated_columns = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.

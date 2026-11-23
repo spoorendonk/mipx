@@ -3480,3 +3480,23 @@ TEST_CASE("Presolve: single-equation dual fixing fixes a side of an equation", "
         CHECK_THAT(full[1], WithinAbs(-6.0, 1e-12));
     }
 }
+
+TEST_CASE("Presolve: implied row-dual bounds behind the dominated-columns flag", "[presolve]") {
+    // min 2x + z + w, x free, z, w in [0, 5]: x + z >= 1, x + w >= 1,
+    // z + w <= 8. x's dual constraint y0 + y1 = 2 bounds y0, y1 <= 2 (#375).
+    const LpProblem lp = rowsModel({2.0, 1.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, 5.0, 5.0},
+                                   {{1.0, kInf, {{0, 1.0}, {1, 1.0}}},
+                                    {1.0, kInf, {{0, 1.0}, {2, 1.0}}},
+                                    {-kInf, 8.0, {{1, 1.0}, {2, 1.0}}}});
+    Presolver off;
+    const auto off_x = presolveSolvePostsolve(lp, off, PresolveOptions{});
+    CHECK_FALSE(PresolveOptions{}.enable_dominated_columns);
+    CHECK(off.stats().implied_row_dual_bounds == 0);
+
+    PresolveOptions options;
+    options.enable_dominated_columns = true;
+    Presolver on;
+    const auto on_x = presolveSolvePostsolve(lp, on, options);
+    CHECK(on.stats().implied_row_dual_bounds >= 2);
+    CHECK_THAT(objectiveAt(lp, on_x), WithinAbs(objectiveAt(lp, off_x), 1e-9));
+}

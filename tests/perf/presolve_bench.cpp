@@ -49,7 +49,8 @@ const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
     "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n"
-    "       [--zero-cost-singletons] [--extended-dual-fixing] [--single-equation-dual-fixing]\n";
+    "       [--zero-cost-singletons] [--extended-dual-fixing] [--single-equation-dual-fixing]\n"
+    "       [--dominated-columns]\n";
 
 struct Options {
     pb::CommonOptions common;
@@ -67,6 +68,8 @@ struct Options {
     bool extended_dual_fixing = false;
     /// PresolveOptions::enable_single_equation_dual_fixing (#367), off by default.
     bool single_equation_dual_fixing = false;
+    /// PresolveOptions::enable_dominated_columns (#361), off by default.
+    bool dominated_columns = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -101,6 +104,8 @@ Options parse(int argc, char** argv) {
             opt.extended_dual_fixing = true;
         } else if (arg == "--single-equation-dual-fixing") {
             opt.single_equation_dual_fixing = true;
+        } else if (arg == "--dominated-columns") {
+            opt.dominated_columns = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -333,6 +338,7 @@ int main(int argc, char** argv) {
         popts.enable_zero_cost_singletons = opt.zero_cost_singletons;
         popts.enable_extended_dual_fixing = opt.extended_dual_fixing;
         popts.enable_single_equation_dual_fixing = opt.single_equation_dual_fixing;
+        popts.enable_dominated_columns = opt.dominated_columns;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
@@ -377,6 +383,8 @@ int main(int argc, char** argv) {
     row.addInt("aggregator_fill_in", st.aggregator_fill_in);
     row.addInt("extended_dual_fixing", st.extended_dual_fixing_changes);
     row.addInt("single_equation_dual_fixing", st.single_equation_dual_fixing_changes);
+    row.addInt("implied_row_dual_bounds", st.implied_row_dual_bounds);
+    row.addReal("dual_bounds_seconds", st.dual_bounds_seconds);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }

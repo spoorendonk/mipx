@@ -1,6 +1,8 @@
 #include "mipx/presolve.h"
 
 #include "../heuristics/common.h"
+#include "compensated_sum.h"
+#include "dual_bounds.h"
 #include "mipx/implication_graph.h"
 #include "mipx/probing.h"
 #include "mipx/variable_bounds.h"
@@ -25,30 +27,6 @@ namespace {
 // infinite where activities are summed: added in, it swallows every smaller
 // term, and taking it back out leaves 0 where the rest of the row was (#300).
 constexpr Real kHugeBound = 1e20;
-
-/// A sum kept as hi + lo with the rounding error of every addition in lo
-/// (Knuth's TwoSum), as HiGHS keeps activities (HighsCDouble). A term much
-/// larger than the rest, e.g. 1e17 next to 0.5, can then be taken back out
-/// and leave the rest, where a plain sum leaves 0 (#300).
-struct CompensatedSum {
-    Real hi = 0.0;
-    Real lo = 0.0;
-
-    void add(Real x) {
-        const Real s = hi + x;
-        const Real bb = s - hi;
-        lo += (hi - (s - bb)) + (x - bb);
-        hi = s;
-    }
-    /// The sum less x, rounded once.
-    [[nodiscard]] Real without(Real x) const {
-        const Real s = hi - x;
-        const Real bb = s - hi;
-        const Real err = (hi - (s - bb)) + (-x - bb);
-        return s + (err + lo);
-    }
-    [[nodiscard]] Real value() const { return hi + lo; }
-};
 
 inline void markRowsTouchingCol(const PresolveMatrix& m, Index col,
                                 const std::vector<bool>& row_removed,
@@ -3931,6 +3909,13 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
     if (!infeasible_ && std::none_of(lp.col_type.begin(), lp.col_type.end(),
                                      [](VarType t) { return t != VarType::Continuous; })) {
+        if (options_.enable_dominated_columns) {
+            stats_.implied_row_dual_bounds = timed(stats_.dual_bounds_seconds, [&] {
+                DualBounds bounds;
+                bounds.compute(lp, *work_, col_removed, row_removed);
+                return bounds.numImpliedRowDualBounds();
+            });
+        }
         stats_.implied_bounds_relaxed = timed(stats_.implied_bounds_relaxed_seconds, [&] {
             return relaxImpliedBounds(lp, problem, col_removed, row_removed);
         });
