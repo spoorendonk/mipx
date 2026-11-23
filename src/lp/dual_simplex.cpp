@@ -1013,19 +1013,26 @@ bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
             act += t;
             mag = std::max(mag, std::abs(t));
         }
+        if (tight) {
+            // Each side by its own size: a ranged row [0, 1e8] resolves 1e-6
+            // at 0. An infinite side gets an infinite allowance.
+            const auto side_tol = [&](Real side) {
+                return std::max(kUnscaledAbsTol, kResolvableRelTol * std::max(mag, std::abs(side)));
+            };
+            if (act < lo - side_tol(lo) || act > up + side_tol(up)) {
+                return false;
+            }
+            continue;
+        }
         if (std::isfinite(lo)) {
             mag = std::max(mag, std::abs(lo));
         }
         if (std::isfinite(up)) {
             mag = std::max(mag, std::abs(up));
         }
-        const Real tol =
-            tight ? std::max(kUnscaledAbsTol, kResolvableRelTol * mag) : kUnscaledRelTol * mag;
+        const Real tol = kUnscaledRelTol * mag;
         if (act < lo - tol || act > up + tol) {
             return false;
-        }
-        if (tight) {
-            continue;
         }
         for (Index k = 0; k < rv.size(); ++k) {
             const Real a = std::abs(entry(k));
@@ -1040,6 +1047,15 @@ bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
         const Real lo = col_lower_[j] == -kInf ? -kInf : col_lower_[j] * cs;
         const Real up = col_upper_[j] == kInf ? kInf : col_upper_[j] * cs;
         const Real xj = x[uz(j)];
+        if (tight) {
+            const auto side_tol = [&](Real side) {
+                return std::max(kUnscaledAbsTol, kResolvableRelTol * std::abs(side));
+            };
+            if (xj < lo - side_tol(lo) || xj > up + side_tol(up)) {
+                return false;
+            }
+            continue;
+        }
         Real mag = std::max(1.0, std::abs(xj));
         if (std::isfinite(lo)) {
             mag = std::max(mag, std::abs(lo));
@@ -1047,9 +1063,8 @@ bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
         if (std::isfinite(up)) {
             mag = std::max(mag, std::abs(up));
         }
-        Real tol =
-            tight ? std::max(kUnscaledAbsTol, kResolvableRelTol * mag) : kUnscaledRelTol * mag;
-        if (!tight && std::isfinite(reach[uz(j)])) {
+        Real tol = kUnscaledRelTol * mag;
+        if (std::isfinite(reach[uz(j)])) {
             tol = std::max(tol, reach[uz(j)]);
         }
         if (xj < lo - tol || xj > up + tol) {
@@ -1088,7 +1103,10 @@ bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
 // the clean-up ends on anything but a point that holds (an Optimal that
 // misses, cuts seed 45269; Infeasible, which a feasible point contradicts; a
 // limit; Error), Unbounded included: the refutation may be the check's
-// strictness, not the optimum's (#282), and the ray is unchecked.
+// strictness, not the optimum's (#282), and the ray is unchecked. A scaled
+// point that held, with multipliers that held, refuted only absolutely
+// (#304), is kept the same way, and put back also when the clean-up's point
+// misses absolutely or its multipliers fail.
 //
 // An Infeasible whose ray fails the getDualRay() contract in the model's
 // units (dualRayMeetsContract()) is cleaned up the same way (#305): on scaled
@@ -1110,12 +1128,18 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         return res;
     }
     bool primal_held = false;
+    // Refuted only by the absolute check: a certified optimum whose point
+    // misses rows or bounds by more than kUnscaledAbsTol (#304).
+    bool tight_only = false;
     if (res.status == Status::Optimal) {
         primal_held = primalHoldsUnscaled();
         // A point that holds relatively but misses absolutely is cleaned up
-        // too, and kept as one that holds (#304).
-        if (primal_held && primalHoldsUnscaled(true) && (checked || optimumHoldsUnscaled())) {
-            return res;
+        // too, and kept as one that holds.
+        if (primal_held && (checked || optimumHoldsUnscaled())) {
+            if (primalHoldsUnscaled(true)) {
+                return res;
+            }
+            tight_only = true;
         }
     } else if (res.status != Status::Infeasible || checked || dualRayMeetsContract()) {
         return res;
@@ -1148,8 +1172,9 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     // A DSE-to-Devex fallback tripped on the unscaled model says nothing of
     // the scaled one, which later warm solves (every B&B node) run on.
     const bool dse_fell_back = dse_fell_back_;
-    // A scaled optimum refuted only by its multipliers holds its rows and
-    // bounds; keep its point to put back if the clean-up's does not (#306).
+    // A scaled optimum refuted only by its multipliers (#306) or only
+    // absolutely (#304) holds its rows and bounds relatively; keep its point
+    // to put back if the clean-up's does not.
     struct Point {
         std::vector<Real> primal, dual, reduced_cost;
         std::vector<BasisStatus> var_status;
@@ -1184,8 +1209,12 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     buildBasisMatrixSource();
+    // A certified optimum refuted only absolutely is traded only for a point
+    // that holds absolutely, with multipliers that hold (#304): the unscaled
+    // factors can read an ill-conditioned basis's point worse.
     const bool restore =
-        scaled_point && (clean.status != Status::Optimal || !primalHoldsUnscaled());
+        scaled_point && (clean.status != Status::Optimal || !primalHoldsUnscaled() ||
+                         (tight_only && (!primalHoldsUnscaled(true) || !optimumHoldsUnscaled())));
     if (restore) {
         // The unscaled factors of an ill-conditioned basis can read its point
         // worse than the scaled ones did (cuts seed 45269): a dual refutation
