@@ -205,8 +205,11 @@ struct PresolveOptions {
     /// Let a doubleton equation's substitution x_e = (r - a_k x_k) / a_e
     /// insert x_k into x_e's rows that do not hold it, instead of refusing
     /// the candidate (#343). Off by default until benchmarked. No cap on the
-    /// entries added: one substitution never grows the matrix (see
-    /// aggregateDoubletonEqualities).
+    /// entries added: one substitution never grows the active matrix (the
+    /// working matrix's pool of entries does grow; see
+    /// aggregateDoubletonEqualities). Nor on their size: an inserted entry
+    /// is -a_row_e times the ratio a_k / a_e, however large, as a changed
+    /// one already was without fill-in.
     bool enable_doubleton_fill_in = false;
     bool enable_parallel_rows = true;
     /// Fix dominated and merge equal-cost parallel continuous columns (#308).

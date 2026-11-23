@@ -1943,6 +1943,66 @@ TEST_CASE("Presolve: doubleton fill-in substitutes into rows without the kept co
     }
 }
 
+TEST_CASE("Presolve: doubleton fill-in inserts nothing for an explicit zero", "[presolve]") {
+    // x + y = 1, 0 x + z <= 2, y + w <= 3, y - w >= -4, all in [0, 10]: x's
+    // entry in r1 is an explicit zero, so eliminating x (two entries against
+    // y's three) leaves r1 as it is; y would fill r2 and r3.
+    LpProblem lp;
+    lp.name = "doubleton_explicit_zero";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {1.0, 0.0, -1.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {10.0, 10.0, 10.0, 10.0};
+    lp.col_type = std::vector<VarType>(4, VarType::Continuous);
+    lp.col_names = {"x", "y", "z", "w"};
+    lp.num_rows = 4;
+    lp.row_lower = {1.0, -kInf, -kInf, -4.0};
+    lp.row_upper = {1.0, 2.0, 3.0, kInf};
+    lp.row_names = {"eq", "r1", "r2", "r3"};
+    // CSR, as the triplet constructor drops the zero.
+    lp.matrix = SparseMatrix(4, 4, {1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0},
+                             {0, 1, 0, 2, 1, 3, 1, 3}, {0, 2, 4, 6, 8});
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, doubletonFillOptions(true));
+    CHECK(presolver.stats().doubleton_eq_changes == 1);
+    CHECK(presolver.stats().doubleton_fill_in == 0);
+    CHECK(pointViolation(lp, full) <= 1e-6);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+}
+
+TEST_CASE("Presolve: doubleton fill-in counts the entries it inserts", "[presolve]") {
+    // x + y = 1, x + z <= 2, y + w <= 3, min -z: x goes (the tie keeps the
+    // first column) and r1 becomes -y + z <= 1, still two entries, y still
+    // in two rows. Counted short, r1 would read as a singleton row in z and
+    // lose y; the optimum z = 2 needs y = 1.
+    LpProblem lp;
+    lp.name = "doubleton_fill_counts";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {0.0, 0.0, -1.0, 0.0};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {10.0, 10.0, 10.0, 10.0};
+    lp.col_type = std::vector<VarType>(4, VarType::Continuous);
+    lp.col_names = {"x", "y", "z", "w"};
+    lp.num_rows = 3;
+    lp.row_lower = {1.0, -kInf, -kInf};
+    lp.row_upper = {1.0, 2.0, 3.0};
+    lp.row_names = {"eq", "r1", "r2"};
+    lp.matrix = SparseMatrix(
+        3, 4,
+        std::vector<Triplet>{
+            {0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 2, 1.0}, {2, 1, 1.0}, {2, 3, 1.0}});
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, doubletonFillOptions(true));
+    CHECK(presolver.stats().doubleton_eq_changes >= 1);
+    CHECK(presolver.stats().doubleton_fill_in >= 1);
+    CHECK(pointViolation(lp, full) <= 1e-6);
+    const Real direct = directOptimum(lp);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+}
+
 TEST_CASE("Presolve: doubleton fill-in keeps refusing integer columns", "[presolve]") {
     auto lp = buildDoubletonNoFillProblem();
     lp.col_type = {VarType::Integer, VarType::Integer, VarType::Continuous};

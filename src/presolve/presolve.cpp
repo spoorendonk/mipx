@@ -1086,7 +1086,9 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
                     }
                     continue;
                 }
-                if (std::abs(a_row_keep) <= kTol) {
+                // A zero or tiny x_k entry is as good as none: with fill-in it
+                // is held to the rule on new_keep below, as an absent one is.
+                if (std::abs(a_row_keep) <= kTol && !options_.enable_doubleton_fill_in) {
                     return false;
                 }
                 const Real new_keep = a_row_keep - a_row_elim * ratio;
@@ -1139,7 +1141,8 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
         // With fill-in, a row of x_e without x_k gets x_k: at most |col_e| - 1
         // inserts against the |col_e| entries of x_e and the x_k of row i
         // that go, so one substitution shrinks the active matrix by at least
-        // two entries and needs no cap on what it adds.
+        // two entries and needs no cap on what it adds. (The working
+        // matrix's pool grows by the inserts: removal is only logical.)
         struct RowUpdate {
             Index row = -1;
             Real shift = 0.0;
