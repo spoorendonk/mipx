@@ -36,8 +36,9 @@ public:
     /// (e.g. the factor does not fit in memory); empty otherwise.
     [[nodiscard]] const std::string& lastError() const { return error_; }
 
-    /// The factor's size once set up, where the backend counts it (the sparse
-    /// normal equations; zeros elsewhere), for tests and diagnostics.
+    /// The factor's size once set up, where the backend counts it (the sizes:
+    /// sparse normal equations; the flop estimates: both normal-equations
+    /// backends; zeros elsewhere), for tests, diagnostics and #293's K.
     struct FactorStats {
         std::size_t nnz_l = 0;
         Index dense_cols = 0;     // columns of A left out of the factor

@@ -432,7 +432,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--barrier-gondzio" && i + 1 < argc) {
             // At most N Gondzio centrality correctors per CPU IPM iteration
             // (#293); 0 (the default) is off.
-            barrier_gondzio = std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+            barrier_gondzio =
+                static_cast<mipx::Int>(std::clamp<long long>(std::atoll(argv[++i]), 0, 1000));
         } else if (arg == "--format" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "auto") {

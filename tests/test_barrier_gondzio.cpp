@@ -81,7 +81,9 @@ TEST_CASE("Barrier Gondzio: small LP reaches the same optimum with correctors",
     INFO("algo " << static_cast<int>(algo) << " implicit " << implicit);
     const auto lp = smallLp();
     const auto off = solveWith(lp, quietOptions(0, algo, implicit)).result;
-    const auto on = solveWith(lp, quietOptions(4, algo, implicit)).result;
+    const auto [on, corrections] = solveWith(lp, quietOptions(4, algo, implicit));
+    // Taken, not all rejected: a wrong target or acceptance test shows here.
+    CHECK(corrections > 0);
     REQUIRE(off.status == Status::Optimal);
     REQUIRE(on.status == Status::Optimal);
     // Crossover is off, so this is the IPM's own point: its stop on x'z/n at

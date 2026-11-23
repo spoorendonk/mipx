@@ -436,8 +436,11 @@ struct GondzioCorrectors {
             Real new_p = 0.0;
             Real new_d = 0.0;
             steps(tz, ts, tv, tw, new_p, new_d);
-            // Each space takes the corrector on its own (CG08 sec. 5): A dz_m
-            // = 0, dz_m + dv_m = 0 and A' dy_m + ds_m - dw_m = 0, so either
+            // Each space takes the corrector on its own, as in CG08 sec. 5,
+            // when its step grows by a fraction of the aspiration (sec. 2.2's
+            // test; sec. 5's 1.01 a goes with its weighted correctors, not
+            // used here). A dz_m = 0 (up to the primal regularization, reg
+            // dy_m), dz_m + dv_m = 0 and A' dy_m + ds_m - dw_m = 0, so either
             // half keeps its feasibility equations whatever the other does. A
             // space already at a full step keeps its direction.
             const bool take_p = a_p < 1.0 && new_p >= a_p + kAcceptFraction * (aim_p - a_p);
@@ -1332,6 +1335,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 
     // The GPU path solves the standard form without upper bounds; implicit
     // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
+    // The CPU backend is the one a build without CUDA picks under Auto; the
+    // CPU default itself (dense or sparse NE) is #295's.
     const bool cpu_only = has_upper || options_.gondzio_correctors > 0;
     if (cpu_only &&
         (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented)) {
@@ -1684,6 +1689,7 @@ bool BarrierSolver::runCrossover() {
 
 LpResult BarrierSolver::solve() {
     last_error_.clear();
+    gondzio_corrections_ = 0;
     if (!loaded_) {
         status_ = Status::Error;
         last_error_ = "Barrier solver has no loaded problem.";
