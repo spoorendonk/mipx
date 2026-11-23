@@ -365,10 +365,27 @@ TEST_CASE("FractionalDiving: LP state restored after dive", "[heuristics]") {
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+namespace {
+// FractionalDiving that counts its dive steps: one selectVariable() call per
+// step, so the count tells an ended dive from one that backtracks.
+class CountingFractionalDiving : public FractionalDiving {
+public:
+    mutable Int steps = 0;
+
+protected:
+    std::pair<Index, Real> selectVariable(const LpProblem& problem, std::span<const Real> primals,
+                                          std::span<const Real> obj) const override {
+        ++steps;
+        return FractionalDiving::selectVariable(problem, primals, obj);
+    }
+};
+}  // namespace
+
 TEST_CASE("FractionalDiving: a TimeLimit LP ends the dive with no solution", "[heuristics]") {
     // #354: once the deadline on the LP has passed, every dive step stops
-    // with TimeLimit. That is no result: the dive ends, finds nothing, and
-    // leaves the LP's bounds as they were.
+    // with TimeLimit. That is no result: the dive ends after its first step
+    // instead of backtracking, finds nothing, and leaves the LP's bounds as
+    // they were.
     auto problem = buildKnapsack();
 
     DualSimplexSolver lp;
@@ -383,10 +400,11 @@ TEST_CASE("FractionalDiving: a TimeLimit LP ends the dive with no solution", "[h
     opts.deadline = Deadline::after(0.0);
     lp.setOptions(opts);
 
-    FractionalDiving diving;
+    CountingFractionalDiving diving;
     diving.setMaxDives(50);
     diving.setBacktrackLimit(1000);
     CHECK(!diving.run(problem, lp, primals, kInf).has_value());
+    CHECK(diving.steps == 1);
 
     lp.setOptions(saved);
     auto lr2 = lp.solve();
