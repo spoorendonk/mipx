@@ -680,9 +680,10 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     // returned (#249): with no budget left for the cold start it becomes that
     // limit's status on the warm point, and when the cold start stops on a
     // limit or Error, the cold status on the restored warm point. The cold
-    // verdict is returned as a first cold solve's is, unchecked: the check is
-    // stricter than the certificate and rejects many correct cold verdicts
-    // (#249's measurements, #282).
+    // verdict is returned as a first cold solve's is, not withdrawn: the check
+    // is stricter than the certificate and rejects many correct cold verdicts
+    // (#249's measurements, #282). solve()'s unscaled clean-up still re-solves
+    // a scaled cold Optimal the model's units refute (#307, #306).
     if (!warm) {
         return res;
     }
@@ -1044,7 +1045,8 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // traded for less: with no budget left it stands, and it is put back when
 // the clean-up ends on anything but a point that holds (an Optimal that
 // misses, cuts seed 45269; Infeasible, which a feasible point contradicts; a
-// limit; Error) or Unbounded, which agrees with the wrong-sign multipliers.
+// limit; Error), Unbounded included: the refutation may be the check's
+// strictness, not the optimum's (#282), and the ray is unchecked.
 //
 // `checked` means solve()'s fallback already ran optimumHoldsUnscaled() on
 // this verdict and it passed, so only the point is checked here.
@@ -1121,8 +1123,8 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     buildBasisMatrixSource();
-    const bool restore = scaled_point && clean.status != Status::Unbounded &&
-                         (clean.status != Status::Optimal || !primalHoldsUnscaled());
+    const bool restore =
+        scaled_point && (clean.status != Status::Optimal || !primalHoldsUnscaled());
     if (restore) {
         // The unscaled factors of an ill-conditioned basis can read its point
         // worse than the scaled ones did (cuts seed 45269): a dual refutation
