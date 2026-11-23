@@ -1834,15 +1834,20 @@ bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
 // and usually lands inside the gate. The cap keeps a model that fails this
 // at many nodes from spending its time limit here.
 std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<const Real> x,
-                                                                  Real node_obj,
-                                                                  double& work_units) const {
-    return completeIncumbent(problem_, x, node_obj, work_units, Deadline::after(timeLeft()));
+                                                                  Real node_obj, double& work_units,
+                                                                  Deadline deadline,
+                                                                  Status* completion_status) const {
+    return completeIncumbent(problem_, x, node_obj, work_units, deadline, completion_status);
 }
 
 std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& model,
                                                               std::span<const Real> x,
                                                               Real node_obj, double& work_units,
-                                                              Deadline deadline) {
+                                                              Deadline deadline,
+                                                              Status* completion_status) {
+    if (completion_status != nullptr) {
+        *completion_status = Status::Optimal;
+    }
     const auto acceptable = [&model](std::span<const Real> point) {
         return pointHoldsModel(model, point);
     };
@@ -1872,6 +1877,9 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
         completion.load(fixed);
         const auto result = completion.solve();
         work_units += result.work_units;
+        if (completion_status != nullptr) {
+            *completion_status = result.status;
+        }
         if (result.status != Status::Optimal) {
             return std::nullopt;
         }
@@ -2894,8 +2902,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         // split an unfixed integer column at its value so the point's value
         // is left in one child with a smaller domain. Once every integer is
         // fixed the completion is the node's whole answer, and the node is
-        // fathomed as a tolerance call.
-        auto repaired = integralNodeIncumbent(node_primals_out, node_obj_out, node_work_out);
+        // fathomed as a tolerance call, unless the deadline stopped the
+        // completion: that is no answer, and the node is dropped with its
+        // bound kept (#351).
+        Status completion_status = Status::Optimal;
+        auto repaired = integralNodeIncumbent(node_primals_out, node_obj_out, node_work_out,
+                                              Deadline::after(timeLeft()), &completion_status);
         if (repaired.has_value()) {
             node_primals_out = std::move(repaired->values);
             node_obj_out = repaired->objective;
@@ -2912,6 +2924,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
         }
         if (branch_var < 0) {
+            if (completion_status == Status::TimeLimit) {
+                recordNodeDroppedWithoutVerdict(node_obj_out, completion_status);
+            }
             return false;
         }
     } else {
@@ -4015,7 +4030,10 @@ MipResult MipSolver::solveMinimization() {
         return result;
     }
     double repair_work = 0.0;
-    auto repaired = integralNodeIncumbent(result.solution, result.objective, repair_work);
+    // No deadline: the incumbent is already found, and a run the limit
+    // stopped has no time left to repair it in (#351).
+    auto repaired =
+        integralNodeIncumbent(result.solution, result.objective, repair_work, Deadline{}, nullptr);
     result.work_units += repair_work;
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

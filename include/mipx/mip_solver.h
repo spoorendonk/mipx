@@ -90,8 +90,8 @@ struct MipLpStats {
     /// (#351): the tree stopped on the limit, whatever the queue holds.
     Int nodes_dropped_time_limit = 0;
     /// The least bound among the nodes of either count; +inf when none was
-    /// dropped. The
-    /// search counts as complete only while this is not below the incumbent.
+    /// dropped. The search counts as complete only while this is not below
+    /// the incumbent.
     Real dropped_node_bound = kInf;
 };
 
@@ -594,15 +594,18 @@ private:
     // An integral node LP point as an incumbent: the point itself when it
     // passes the gate, else the LP completion of its integer values when that
     // passes, else nothing. The completion's work is added to work_units.
+    // The completion LP stops by `deadline` (#351), and its status goes to
+    // `*completion_status` when given (Optimal when no LP was needed).
     std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x, Real node_obj,
-                                                           double& work_units) const;
+                                                           double& work_units, Deadline deadline,
+                                                           Status* completion_status) const;
     /// integralNodeIncumbent() against `model`, the gate being
-    /// heuristic_detail::isFeasiblePoint on it. The completion LP stops by
-    /// `deadline` (#351).
+    /// heuristic_detail::isFeasiblePoint on it.
     static std::optional<HeuristicSolution> completeIncumbent(const LpProblem& model,
                                                               std::span<const Real> x,
                                                               Real node_obj, double& work_units,
-                                                              Deadline deadline = {});
+                                                              Deadline deadline = {},
+                                                              Status* completion_status = nullptr);
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;

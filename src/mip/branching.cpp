@@ -307,7 +307,13 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 lp.setColBounds(c.var, orig_lb, orig_ub);
 
                 if (up.status == Status::TimeLimit) {
-                    break;  // as for the down probe; its sample stands
+                    // As for the down probe; its sample stands, and a down
+                    // side proven infeasible still scores the candidate.
+                    if (down_gain >= kStrongInfeasibleGain && down_gain > best_strong_score) {
+                        best_strong_score = down_gain;
+                        best_strong = c.var;
+                    }
+                    break;
                 }
                 if (up.status == Status::Infeasible) {
                     up_gain = kStrongInfeasibleGain;
