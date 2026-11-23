@@ -58,8 +58,10 @@ set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
 )
 
 # The dense-column tests drive a barrier backend through its internal
-# interface (src/lp/newton_solver.h), so that file alone sees src/.
-set_property(SOURCE test_barrier_dense_cols.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+# interface (src/lp/newton_solver.h), so those files alone see src/; the
+# time-limit tests do too, for the checks inside factorize() (#275).
+set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
+    APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
 # Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326).

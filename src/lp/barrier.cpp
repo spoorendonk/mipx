@@ -4,12 +4,16 @@
 #include "newton_solver.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace mipx {
@@ -595,10 +599,6 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             iters = iter;
             return BarrierIpmOutcome::Failed;
         }
-        if (deadline.passed()) {
-            iters = iter;
-            return BarrierIpmOutcome::TimeLimit;
-        }
 
         // Residuals.
         std::fill(az.begin(), az.end(), 0.0);
@@ -665,6 +665,13 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             stall_count = 0;
         }
         prev_gap = gap;
+
+        // After the stopping test, so an iterate that converged on the last
+        // step is still reported optimal.
+        if (deadline.passed()) {
+            iters = iter;
+            return BarrierIpmOutcome::TimeLimit;
+        }
 
         // Factorize.
         if (bounded) {
@@ -1374,8 +1381,32 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
         bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
         std::string gpu_error;
-        ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, options_, std_obj_offset_, prefer_aug, z, y,
+        // The GPU loop checks only a stop flag, so under a time limit (#275)
+        // it gets one of its own, raised by a watcher at the deadline or when
+        // the caller's flag is.
+        BarrierOptions gpu_opts = options_;
+        std::atomic<bool> gpu_stop{false};
+        std::jthread watcher;
+        if (deadline_.isSet()) {
+            gpu_opts.stop_flag = &gpu_stop;
+            watcher = std::jthread([this, &gpu_stop](const std::stop_token& token) {
+                while (!token.stop_requested()) {
+                    if (deadline_.passed() ||
+                        (options_.stop_flag != nullptr &&
+                         options_.stop_flag->load(std::memory_order_relaxed))) {
+                        gpu_stop.store(true, std::memory_order_relaxed);
+                        return;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            });
+        }
+        ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, gpu_opts, std_obj_offset_, prefer_aug, z, y,
                              s, iters, &gpu_error);
+        watcher = std::jthread();  // stops and joins it
+        if (!ok && deadline_.passed()) {
+            return BarrierIpmOutcome::TimeLimit;  // no time for a CPU fallback
+        }
         if (ok) {
             used_gpu_ = true;
             outcome = BarrierIpmOutcome::Optimal;
@@ -1666,9 +1697,12 @@ bool BarrierSolver::runCrossover() {
         objective_ = result.objective;
         return true;
     }
-    if (result.status == Status::TimeLimit || deadline_.passed()) {
+    // No time left for a cold run. A warm proof of infeasibility or
+    // unboundedness stands, even when the deadline passed as it ended.
+    if (result.status != Status::Infeasible && result.status != Status::Unbounded &&
+        (result.status == Status::TimeLimit || deadline_.passed())) {
         crossover_status_ = Status::TimeLimit;
-        return false;  // no time left for a cold run
+        return false;
     }
 
     // Crossover failed — fall back to cold dual simplex.

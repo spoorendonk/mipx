@@ -1,9 +1,13 @@
 // The barrier honours BarrierOptions::max_solve_seconds (#275).
 
+#include "lp/newton_solver.h"
 #include "mipx/barrier.h"
+#include "mipx/sparse_cholesky.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
+#include <memory>
+#include <string>
 #include <vector>
 
 using namespace mipx;
@@ -69,4 +73,51 @@ TEST_CASE("Barrier with a generous time limit still solves", "[barrier][time-lim
     INFO("algo " << static_cast<int>(algo));
     CHECK(solveWithLimit(algo, 600.0).status == Status::Optimal);
     CHECK(solveWithLimit(algo, -1.0).status == Status::Optimal);
+}
+
+TEST_CASE("Barrier backends stop factorizing once the deadline has passed",
+          "[barrier][time-limit]") {
+    // The checks inside factorize() themselves: a solve through solve() is
+    // caught by the IPM loop's own check too, so it cannot tell them apart.
+    // A chain of rows: row i holds columns i and i + 1.
+    constexpr Index kRows = 30;
+    constexpr Index kCols = kRows + 1;
+    std::vector<Triplet> t;
+    for (Index i = 0; i < kRows; ++i) {
+        t.push_back({i, i, 1.0});
+        t.push_back({i, i + 1, 2.0});
+    }
+    const SparseMatrix A(kRows, kCols, t);
+    const std::vector<Real> ones(kCols, 1.0);
+    BarrierOptions opts;
+    opts.verbose = false;
+
+    const int backend = GENERATE(0, 1, 2);
+    INFO("backend " << backend);
+    std::unique_ptr<NewtonSolver> solver = backend == 0   ? createCpuCholeskySolver()
+                                           : backend == 1 ? createCpuAugmentedSolver()
+                                                          : createCpuSparseCholeskySolver();
+    REQUIRE(solver->setup(A, kRows, kCols, opts));
+    REQUIRE(solver->factorize(ones, ones, 1e-8));
+    solver->setDeadline(Deadline::after(0.0));
+    CHECK_FALSE(solver->factorize(ones, ones, 1e-8));
+    solver->setDeadline(Deadline{});
+    CHECK(solver->factorize(ones, ones, 1e-8));
+}
+
+TEST_CASE("SparseCholesky stops at a passed deadline and says so", "[time-limit][sparse-ne]") {
+    // M = 4 I on 3 rows, the diagonal pattern only.
+    const std::vector<Index> starts = {0, 1, 2, 3};
+    const std::vector<Index> rows = {0, 1, 2};
+    const std::vector<Index> perm = {0, 1, 2};
+    const std::vector<Real> values = {4.0, 4.0, 4.0};
+    SparseCholesky chol;
+    REQUIRE(chol.analyze(3, starts, rows, perm));
+    const SparseCholesky::PivotRule rule;
+
+    CHECK_FALSE(chol.factorize(values, rule, Deadline::after(0.0)));
+    CHECK(chol.error().find("time limit") != std::string::npos);
+    // A later factorization without one succeeds and clears the message.
+    CHECK(chol.factorize(values, rule));
+    CHECK(chol.error().empty());
 }

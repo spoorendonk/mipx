@@ -609,6 +609,7 @@ std::size_t SparseCholesky::factorBytes() const {
 
 bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& rule,
                                const Deadline& deadline) {
+    error_.clear();
     std::fill(values_.begin(), values_.end(), 0.0);
     for (std::size_t p = 0; p < entry_pos_.size(); ++p) {
         values_[entry_pos_[p]] += values[p];
