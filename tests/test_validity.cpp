@@ -254,7 +254,10 @@ std::vector<Point2> slicePolygon(const LpProblem& lp, const std::vector<Real>& x
 }
 
 // Calls `fn` for every integral assignment that has a feasible completion.
-void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)>& fn) {
+// A model with two continuous columns needs `two_continuous`: the audits
+// that read a slice's `cont_set` assume a 1-D slice, and refuse one.
+void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)>& fn,
+                     bool two_continuous = false) {
     Index cont = -1;
     Index cont2 = -1;
     std::vector<std::vector<Real>> values(lp.num_cols);
@@ -268,6 +271,7 @@ void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)
             // The enumeration handles two continuous columns, and two only
             // when neither is semi-continuous.
             REQUIRE(cont2 < 0);
+            REQUIRE((cont < 0 || two_continuous));
             (cont < 0 ? cont : cont2) = j;
             values[j] = {0.0};
         }
@@ -287,7 +291,7 @@ void forEachFeasible(const LpProblem& lp, const std::function<void(const Slice&)
             slice.x[j] = values[j][pos[j]];
         }
         bool feasible = true;
-        slice.cont_set = cont >= 0 ? columnDomain(lp, cont) : std::vector<Interval>{};
+        slice.cont_set = cont >= 0 && cont2 < 0 ? columnDomain(lp, cont) : std::vector<Interval>{};
         if (cont2 >= 0) {
             slice.poly = slicePolygon(lp, slice.x, cont, cont2, kSliceBox);
             feasible = !slice.poly.empty();
@@ -446,21 +450,24 @@ struct Enumeration {
     std::vector<Real> argbest;
 };
 
-Enumeration enumerate(const LpProblem& lp) {
+Enumeration enumerate(const LpProblem& lp, bool two_continuous = false) {
     Enumeration e;
-    forEachFeasible(lp, [&](const Slice& s) {
-        std::vector<Real> x;
-        if (!bestOfSlice(lp, s, x)) {
-            e.unbounded = true;
-            return;
-        }
-        const Real value = objective(lp, x);
-        if (!e.feasible || minTerms(lp, value) < minTerms(lp, e.best)) {
-            e.best = value;
-            e.argbest = x;
-        }
-        e.feasible = true;
-    });
+    forEachFeasible(
+        lp,
+        [&](const Slice& s) {
+            std::vector<Real> x;
+            if (!bestOfSlice(lp, s, x)) {
+                e.unbounded = true;
+                return;
+            }
+            const Real value = objective(lp, x);
+            if (!e.feasible || minTerms(lp, value) < minTerms(lp, e.best)) {
+                e.best = value;
+                e.argbest = x;
+            }
+            e.feasible = true;
+        },
+        two_continuous);
     return e;
 }
 
@@ -815,16 +822,22 @@ std::vector<PresolveReduction> presolveReductions() {
 // reduction must keep the projection of each feasible point; with an
 // objective, dual reductions may drop points but never the optimum.
 // With `fired`, adds each reduction's change count to its entry, in the
-// order of presolveReductions().
+// order of presolveReductions(), when presolve keeps the model feasible:
+// on one it reads as infeasible, only that verdict is checked.
 void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
                    std::vector<Index>* fired = nullptr) {
-    const Enumeration orig = enumerate(lp);
+    const Enumeration orig = enumerate(lp, true);
     if (orig.unbounded) {
         return;
     }
     Presolver presolver;
     presolver.setOptions(pc.options);
     const LpProblem reduced = presolver.presolve(lp);
+    INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
+    if (presolver.isInfeasible()) {
+        CHECK(!orig.feasible);
+        return;
+    }
     if (fired != nullptr) {
         const auto reductions = presolveReductions();
         fired->resize(reductions.size(), 0);
@@ -832,15 +845,10 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
             (*fired)[r] += presolver.stats().*reductions[r].count;
         }
     }
-    INFO("presolve case: " << pc.name << "\nmodel:\n" << describe(lp));
-    if (presolver.isInfeasible()) {
-        CHECK(!orig.feasible);
-        return;
-    }
     const auto& mapping = presolver.colMapping();
     INFO("reduced:\n" << describe(reduced));
 
-    const Enumeration red = enumerate(reduced);
+    const Enumeration red = enumerate(reduced, true);
     INFO("optimum " << orig.best << ", reduced optimum " << red.best);
     CHECK(red.feasible == orig.feasible);
     CHECK(!red.unbounded);
@@ -850,35 +858,41 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
 
     // Every point the reduced model admits postsolves to a feasible point of
     // the original with the same objective.
-    forEachFeasible(reduced, [&](const Slice& s) {
-        for (const auto& xr : slicePoints(s)) {
-            const auto full = presolver.postsolve(xr);
-            if (full.size() != static_cast<std::size_t>(lp.num_cols)) {
-                CHECK(false);
-                continue;
+    forEachFeasible(
+        reduced,
+        [&](const Slice& s) {
+            for (const auto& xr : slicePoints(s)) {
+                const auto full = presolver.postsolve(xr);
+                if (full.size() != static_cast<std::size_t>(lp.num_cols)) {
+                    CHECK(false);
+                    continue;
+                }
+                INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full)
+                                     << ", objective " << objective(reduced, xr) << " -> "
+                                     << objective(lp, full));
+                CHECK(pointFeasible(lp, full, kFeasTol));
+                CHECK(std::abs(objective(lp, full) - objective(reduced, xr)) <= kObjTol);
             }
-            INFO("reduced point" << describe(xr) << " -> postsolved" << describe(full)
-                                 << ", objective " << objective(reduced, xr) << " -> "
-                                 << objective(lp, full));
-            CHECK(pointFeasible(lp, full, kFeasTol));
-            CHECK(std::abs(objective(lp, full) - objective(reduced, xr)) <= kObjTol);
-        }
-    });
+        },
+        true);
 
     const bool primal = std::all_of(lp.obj.begin(), lp.obj.end(), [](Real c) { return c == 0.0; });
     if (!primal) {
         return;
     }
-    forEachFeasible(lp, [&](const Slice& s) {
-        for (const auto& x : slicePoints(s)) {
-            std::vector<Real> xr(reduced.num_cols);
-            for (Index jj = 0; jj < reduced.num_cols; ++jj) {
-                xr[jj] = x[mapping[jj]];
+    forEachFeasible(
+        lp,
+        [&](const Slice& s) {
+            for (const auto& x : slicePoints(s)) {
+                std::vector<Real> xr(reduced.num_cols);
+                for (Index jj = 0; jj < reduced.num_cols; ++jj) {
+                    xr[jj] = x[mapping[jj]];
+                }
+                INFO("original point" << describe(x));
+                CHECK(pointFeasible(reduced, xr, kFeasTol));
             }
-            INFO("original point" << describe(x));
-            CHECK(pointFeasible(reduced, xr, kFeasTol));
-        }
-    });
+        },
+        true);
 }
 
 // The presolve audit's models: the shared ones, plus models that reach the
@@ -894,6 +908,9 @@ std::vector<LpProblem> presolveAuditModels() {
     // x0 + x1 + 1e-10 x2 <= 0 at its minimum activity: an implied equation.
     models.push_back(makeModel(Sense::Maximize, {1, 2, 1}, {0, 0, 0}, {1, 2, 3}, {B, I, I},
                                {{1, 1, 1e-10}, {1, 0, 1}}, {-kInf, 1}, {0, 3}));
+    // -x0 - x1 + 1e-10 x2 >= 0 at its maximum activity, within 1e-8.
+    models.push_back(makeModel(Sense::Minimize, {-1, 1, -2}, {0, 0, 0}, {2, 1, 3}, {I, B, I},
+                               {{-1, -1, 1e-10}, {0, 1, 1}}, {0, 1}, {kInf, 4}));
     // 2x0 - x1 = 1 over continuous columns, both in a second row.
     models.push_back(makeModel(Sense::Minimize, {1, -1, 2}, {0, -kInf, 0}, {3, kInf, 2}, {C, C, I},
                                {{2, -1, 0}, {1, 1, 1}}, {1, -kInf}, {1, 4}));
@@ -1021,7 +1038,7 @@ TEST_CASE("Validity: the two-column enumeration agrees with a solve without pres
         spec.continuous_pair = true;
         spec.max_int = 3;
         const LpProblem lp = randomModel(rng, spec);
-        const Enumeration e = enumerate(lp);
+        const Enumeration e = enumerate(lp, true);
         if (e.unbounded) {
             ++unbounded;
             continue;
