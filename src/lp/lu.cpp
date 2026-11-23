@@ -834,6 +834,13 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         Real best_abs = 0.0;
 
         // First check singleton columns from count buckets (Markowitz = 0).
+        // The first admissible one is taken: eliminating a column singleton
+        // does no arithmetic (its column has no other entry, so no L eta), and
+        // the set of columns that singleton peeling reaches does not depend on
+        // the order, so the factor values come out the same in any order, only
+        // permuted. Scanning the whole bucket for the largest |a| instead made
+        // every step O(#singletons), O(dim^2) on a slack-heavy basis: 97% of
+        // the time on pds-100, ~17 s per factorization (#281).
         for (Index j = col_bucket_head[1]; j >= 0;
              j = col_bucket_next[static_cast<std::size_t>(j)]) {
             if (col_active[static_cast<std::size_t>(j)] == 0 || col_count[j] != 1) {
@@ -852,14 +859,10 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
             if (absval <= kZeroTol) {
                 continue;
             }
-            const long long m =
-                static_cast<long long>(row_count[e_row[static_cast<std::size_t>(eidx)]] - 1) *
-                static_cast<long long>(col_count[j] - 1);
-            if (m < best_markowitz || (m == best_markowitz && absval > best_abs)) {
-                best_markowitz = m;
-                best_entry = eidx;
-                best_abs = absval;
-            }
+            best_markowitz = 0;
+            best_entry = eidx;
+            best_abs = absval;
+            break;
         }
 
         // Check singleton rows from count buckets.
