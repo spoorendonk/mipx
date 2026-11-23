@@ -186,7 +186,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: simple LP", "[barrier][cpu-cholesky]") {
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -205,7 +205,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: bounds-only LP", "[barrier][cpu-cholesky]
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -219,7 +219,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: triangle LP", "[barrier][cpu-cholesky]") 
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -296,7 +296,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: equality rows and a dependent row converg
     opts.verbose = false;
     opts.crossover = false;
     opts.presolve = false;
-    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -338,7 +338,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: small Netlib LPs converge without crossov
     opts.verbose = false;
     opts.crossover = false;
     opts.presolve = presolve;
-    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -611,6 +611,22 @@ TEST_CASE("BarrierSolver: dual simplex fallback on max_iter=1", "[barrier][fallb
     CHECK(result.objective == 0.0);
     CHECK(solver.getPrimalValues().empty());
     CHECK_FALSE(solver.lastError().empty());
+}
+
+TEST_CASE("BarrierSolver CPU NE: factor above the memory cap ends with Error",
+          "[barrier][cpu-cholesky]") {
+    auto lp = buildSimpleLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.algorithm = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    opts.ne_max_bytes = 1;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Error);
+    CHECK(solver.lastError().find("above the cap") != std::string::npos);
 }
 
 TEST_CASE("BarrierSolver: reported objective matches reconstructed primal",

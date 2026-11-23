@@ -1,16 +1,24 @@
 // CPU Newton-step backends for the barrier solver:
-//   CpuCholeskySolver  — Normal Equations + sparse LL' (Mosek/Gurobi style)
-//   CpuAugmentedSolver — Augmented system + sparse LDL' (HiPO/Zanetti-Gondzio)
+//   CpuCholeskySolver       — Normal Equations + dense LL'
+//   CpuSparseCholeskySolver — Normal Equations + sparse supernodal LL' (MOSEK style)
+//   CpuAugmentedSolver      — Augmented system + sparse LDL' (HiPO/Zanetti-Gondzio)
 
+#include "mipx/sparse_cholesky.h"
 #include "newton_solver.h"
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <queue>
 #include <set>
+#include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -828,41 +836,127 @@ static Index findInColumn(const SymbolicFact& sym, Index k, Index j) {
     return -1;
 }
 
+// First unsigned number in a one-line file, or nullopt (missing, or "max").
+std::optional<unsigned long long> readNumberFile(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "r");
+    if (f == nullptr) {
+        return std::nullopt;
+    }
+    unsigned long long v = 0;
+    const bool ok = std::fscanf(f, "%llu", &v) == 1;
+    std::fclose(f);
+    return ok ? std::optional{v} : std::nullopt;
+}
+
+// Headroom left under this process's cgroup v2 memory limit, or nullopt
+// without one: in a container or systemd slice the cgroup's OOM killer, not
+// the machine's free memory, is what ends an oversized factor.
+std::optional<std::size_t> cgroupHeadroom() {
+    std::FILE* f = std::fopen("/proc/self/cgroup", "r");
+    if (f == nullptr) {
+        return std::nullopt;
+    }
+    char line[4096];
+    std::string path;
+    while (std::fgets(line, sizeof line, f) != nullptr) {
+        // cgroup v2: the single line "0::/path".
+        if (std::strncmp(line, "0::", 3) == 0) {
+            path = line + 3;
+            while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) {
+                path.pop_back();
+            }
+            break;
+        }
+    }
+    std::fclose(f);
+    if (path.empty()) {
+        return std::nullopt;
+    }
+    // The limit may sit on any ancestor (a slice above the process's scope):
+    // the least headroom on the way up to the root binds.
+    std::optional<std::size_t> least;
+    while (!path.empty() && path != "/") {
+        const std::string dir = "/sys/fs/cgroup" + path;
+        const auto max = readNumberFile(dir + "/memory.max");
+        const auto current = readNumberFile(dir + "/memory.current");
+        if (max && current) {
+            const auto h = static_cast<std::size_t>(*max > *current ? *max - *current : 0);
+            least = least ? std::min(*least, h) : h;
+        }
+        path.resize(path.rfind('/'));
+    }
+    return least;
+}
+
+// The cap on a normal-equations factor: BarrierOptions::ne_max_bytes, else
+// the memory available now: Linux MemAvailable (which counts reclaimable
+// page cache), or free physical pages, bounded by the cgroup's headroom. A
+// factor above it ends with a solver error rather than a failed allocation
+// or, under overcommit, the OOM killer (#280). 0 when the platform does not
+// say.
+std::size_t factorMemoryCap(const BarrierOptions& opts) {
+    if (opts.ne_max_bytes != 0) {
+        return opts.ne_max_bytes;
+    }
+    std::size_t cap = 0;
+    if (std::FILE* f = std::fopen("/proc/meminfo", "r")) {
+        char line[256];
+        unsigned long long kb = 0;
+        while (std::fgets(line, sizeof line, f) != nullptr) {
+            if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) {
+                cap = static_cast<std::size_t>(kb) * 1024;
+                break;
+            }
+        }
+        std::fclose(f);
+    }
+    if (cap == 0) {
+        const long pages = sysconf(_SC_AVPHYS_PAGES);
+        const long page_size = sysconf(_SC_PAGE_SIZE);
+        if (pages > 0 && page_size > 0) {
+            cap = static_cast<std::size_t>(pages) * static_cast<std::size_t>(page_size);
+        }
+    }
+    if (const auto headroom = cgroupHeadroom()) {
+        // At least 1 byte: 0 would read as "no cap".
+        const std::size_t h = std::max<std::size_t>(*headroom, 1);
+        cap = cap == 0 ? h : std::min(cap, h);
+    }
+    return cap;
+}
+
+std::string megabytes(std::size_t bytes) {
+    return std::to_string(bytes >> 20) + " MB";
+}
+
 }  // anonymous namespace
 
 // ============================================================================
-// CpuCholeskySolver: Normal Equations + dense LL'
+// Normal equations: M = A*Theta*A' + reg*I, Theta = Z S^{-1}
 // ============================================================================
 //
-// Forms M = A*Theta*A' + reg*I densely each iteration and factors it with a
-// dense Cholesky. The fill-reducing orderings selected by BarrierOptions::
-// ordering do not apply here: a dense factor has no sparsity to preserve.
-// Ordering is consumed only by the sparse augmented path (CpuAugmentedSolver);
-// the GPU path delegates ordering to cuDSS internally.
+// The Newton system shared by both normal-equations backends; they differ in
+// how M is formed and factored (factorM) and solved (solveM).
 
-class CpuCholeskySolver final : public NewtonSolver {
+class NormalEquationsSolver : public NewtonSolver {
 public:
     bool setup(const SparseMatrix& A, Index m, Index n, const BarrierOptions& opts) override {
         a_ = &A;
         m_ = m;
         n_ = n;
         ir_steps_ = opts.ir_steps;
-
-        theta_.resize(static_cast<size_t>(n), 0.0);
-        s_copy_.resize(static_cast<size_t>(n), 0.0);
-
-        return true;
+        theta_.assign(static_cast<size_t>(n), 0.0);
+        s_copy_.assign(static_cast<size_t>(n), 0.0);
+        return setupFactor(opts);
     }
 
     bool factorize(std::span<const Real> z, std::span<const Real> s, Real reg) override {
         reg_ = std::max(reg, 1e-12);
-
         for (Index j = 0; j < n_; ++j) {
             theta_[j] = z[j] / std::max(s[j], 1e-20);
             s_copy_[j] = s[j];
         }
-
-        return numericLL();
+        return factorM();
     }
 
     bool solveNewton(std::span<const Real> rp, std::span<const Real> rd, std::span<const Real> rc,
@@ -882,10 +976,8 @@ public:
             rhs[i] = rp[i] - ah[i];
         }
 
-        // Solve M*dy = rhs using dense Cholesky (no permutation needed).
         std::vector<Real> dy_vec(rhs.begin(), rhs.end());
-        denseForwardSolve(dy_vec);
-        denseBackwardSolve(dy_vec);
+        solveM(dy_vec);
 
         // Iterative refinement.
         for (Int ir = 0; ir < ir_steps_; ++ir) {
@@ -900,14 +992,11 @@ public:
                 m_dy[i] += reg_ * dy_vec[i];
             }
 
-            std::vector<Real> resid(static_cast<size_t>(m_));
+            std::vector<Real> corr(static_cast<size_t>(m_));
             for (Index i = 0; i < m_; ++i) {
-                resid[i] = rhs[i] - m_dy[i];
+                corr[i] = rhs[i] - m_dy[i];
             }
-
-            std::vector<Real> corr(resid.begin(), resid.end());
-            denseForwardSolve(corr);
-            denseBackwardSolve(corr);
+            solveM(corr);
 
             for (Index i = 0; i < m_; ++i) {
                 dy_vec[i] += corr[i];
@@ -933,15 +1022,57 @@ public:
         return true;
     }
 
+protected:
+    virtual bool setupFactor(const BarrierOptions& opts) = 0;
+    // Form M from theta_ and reg_ and factor it.
+    virtual bool factorM() = 0;
+    // Overwrite b with M^{-1} b.
+    virtual void solveM(std::span<Real> b) const = 0;
+
+    // A pivot that cancels to (near) zero relative to its diagonal marks a
+    // row linearly dependent on the earlier ones (or a row whose columns all
+    // sit at their bounds). Perturbing it to a tiny positive value makes dy
+    // blow up along that row, so it is set huge instead: the solve then leaves
+    // that component of dy at zero, which drops the dependent row from the
+    // step (the "Cholesky-infinity" rule of PCx and Wright's primal-dual
+    // book). M carries reg on its diagonal, so the test is net of reg.
+    static constexpr Real kDependentPivotTol = 1e-13;
+    static constexpr Real kInfinitePivot = 1e128;
+
+    const SparseMatrix* a_ = nullptr;
+    Index m_ = 0, n_ = 0;
+    Int ir_steps_ = 2;
+    Real reg_ = 1e-8;
+    std::vector<Real> theta_;
+    std::vector<Real> s_copy_;
+};
+
+// ============================================================================
+// CpuCholeskySolver: Normal Equations + dense LL'
+// ============================================================================
+//
+// Forms M densely each iteration and factors it with a dense Cholesky: m^2
+// memory and m^3 time per iteration however sparse A is. The fill-reducing
+// orderings selected by BarrierOptions::ordering do not apply here.
+
+class CpuCholeskySolver final : public NormalEquationsSolver {
 private:
-    // Dense NE matrix construction + dense LL' factorization.
-    // Reference implementation for Netlib-scale problems: for each IPM
-    // iteration, forms M = A*Theta*A' + reg*I densely and computes its
-    // Cholesky factor L stored densely (column-major, lower triangle).
-    // If a pivot is too small or negative after the Cholesky updates it is
-    // perturbed just enough to keep the factor well-conditioned; iterative
-    // refinement then corrects for the perturbation error.
-    bool numericLL() {
+    bool setupFactor(const BarrierOptions& opts) override {
+        const std::size_t bytes =
+            static_cast<std::size_t>(m_) * static_cast<std::size_t>(m_) * sizeof(Real);
+        const std::size_t cap = factorMemoryCap(opts);
+        if (cap != 0 && bytes > cap) {
+            error_ = "dense normal equations need " + megabytes(bytes) + ", above the cap of " +
+                     megabytes(cap) + "; the sparse normal-equations backend fits large LPs";
+            return false;
+        }
+        return true;
+    }
+
+    // Reference implementation for Netlib-scale problems: forms M densely
+    // and computes its Cholesky factor L stored densely (column-major, lower
+    // triangle).
+    bool factorM() override {
         const Index m = m_;
         ne_dense_.assign(static_cast<size_t>(m) * static_cast<size_t>(m), 0.0);
 
@@ -982,14 +1113,6 @@ private:
             }
             Real diag = ne_dense_[j + j * m] - sum;
 
-            // A pivot that cancels to (near) zero relative to its diagonal
-            // marks a row linearly dependent on the earlier ones (or a row
-            // whose columns all sit at their bounds). Perturbing it to a tiny
-            // positive value makes dy blow up along that row, so it is set
-            // huge instead: the solve then leaves that component of dy at
-            // zero, which drops the dependent row from the step (the
-            // "Cholesky-infinity" rule of PCx and Wright's primal-dual book).
-            // M carries reg on its diagonal, so the test is net of reg.
             if (diag - reg_ <= kDependentPivotTol * (diag_orig[j] - reg_) || diag < 1e-30) {
                 diag = kInfinitePivot;
             }
@@ -1014,20 +1137,16 @@ private:
         return true;
     }
 
-    // Dense forward solve: L * x = b (overwrite b).
-    void denseForwardSolve(std::span<Real> b) const {
+    void solveM(std::span<Real> b) const override {
         const Index m = m_;
+        // L * x = b
         for (Index j = 0; j < m; ++j) {
             b[j] /= ne_dense_[j + j * m];
             for (Index i = j + 1; i < m; ++i) {
                 b[i] -= ne_dense_[i + j * m] * b[j];
             }
         }
-    }
-
-    // Dense backward solve: L' * x = b (overwrite b).
-    void denseBackwardSolve(std::span<Real> b) const {
-        const Index m = m_;
+        // L' * x = b
         for (Index j = m - 1; j >= 0; --j) {
             for (Index i = j + 1; i < m; ++i) {
                 b[j] -= ne_dense_[i + j * m] * b[i];
@@ -1036,17 +1155,132 @@ private:
         }
     }
 
-    static constexpr Real kDependentPivotTol = 1e-13;
-    static constexpr Real kInfinitePivot = 1e128;
-
-    const SparseMatrix* a_ = nullptr;
-    Index m_ = 0, n_ = 0;
-    Int ir_steps_ = 2;
-    Real reg_ = 1e-8;
-
     std::vector<Real> ne_dense_;  // Dense NE matrix / Cholesky factor (col-major)
-    std::vector<Real> theta_;
-    std::vector<Real> s_copy_;
+};
+
+// ============================================================================
+// CpuSparseCholeskySolver: Normal Equations + sparse supernodal LL'
+// ============================================================================
+//
+// The pattern of M (lower triangle, by row of A) is found once in setup,
+// ordered with BarrierOptions::ordering and analyzed by SparseCholesky; each
+// iteration forms M's entries on that pattern and refactors (#290).
+
+class CpuSparseCholeskySolver final : public NormalEquationsSolver {
+private:
+    bool setupFactor(const BarrierOptions& opts) override {
+        const Index m = m_;
+        // Pattern of M, each pair once: column k of the pattern lists k and the
+        // rows i > k sharing a column of A with row k.
+        ne_ptr_.assign(static_cast<size_t>(m) + 1, 0);
+        ne_idx_.clear();
+        std::vector<Index> mark(static_cast<size_t>(m), -1);
+        for (Index k = 0; k < m; ++k) {
+            mark[k] = k;
+            ne_idx_.push_back(k);
+            const auto rk = a_->row(k);
+            for (Index q = 0; q < rk.size(); ++q) {
+                const auto cj = a_->col(rk.indices[q]);
+                for (Index p = 0; p < cj.size(); ++p) {
+                    const Index i = cj.indices[p];
+                    if (i > k && mark[i] != k) {
+                        mark[i] = k;
+                        ne_idx_.push_back(i);
+                    }
+                }
+            }
+            if (ne_idx_.size() > static_cast<std::size_t>(std::numeric_limits<Index>::max())) {
+                error_ = "normal-equations pattern has more than 2^31 entries";
+                return false;
+            }
+            ne_ptr_[k + 1] = static_cast<Index>(ne_idx_.size());
+        }
+
+        BarrierOrdering ordering = opts.ordering;
+        if (ordering == BarrierOrdering::Auto || ordering == BarrierOrdering::CuDSS) {
+            ordering = autoSelectOrdering(m, ne_ptr_[m]);
+        }
+        SparseCholesky::setBlasThreads(opts.threads);
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<Index> perm;
+        std::vector<Index> iperm;
+        if (ordering == BarrierOrdering::Nd) {
+            computeNd(m, ne_ptr_, ne_idx_, perm, iperm);
+        } else {
+            computeAmd(m, ne_ptr_, ne_idx_, perm, iperm);
+        }
+        const double order_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+        // The factor shares the cap with M's pattern and its values (an Index
+        // and a Real per entry, held for the solve); 1 byte left when they
+        // alone fill it, so analyze refuses rather than reading 0 as no cap.
+        std::size_t cap = factorMemoryCap(opts);
+        if (cap != 0) {
+            const std::size_t ne_bytes =
+                ne_idx_.size() * (sizeof(Index) + sizeof(Real)) +
+                static_cast<std::size_t>(m) * (sizeof(Index) + sizeof(Real));
+            cap = cap > ne_bytes ? cap - ne_bytes : 1;
+        }
+        const bool analyzed = chol_.analyze(m, ne_ptr_, ne_idx_, perm, cap);
+        // Printed also when the factor is refused: its size is the finding.
+        if (opts.verbose) {
+            const auto& st = chol_.stats();
+            std::printf(
+                "  NE Cholesky: m=%d nnz(M)=%zu nnz(L)=%zu supernodes=%d (widest %d) "
+                "factor=%s ordering=%s %.2fs analysis=%.2fs blas=%s\n",
+                m, st.nnz_input, st.nnz_l, st.num_supernodes, st.max_supernode_cols,
+                megabytes(chol_.factorBytes()).c_str(),
+                ordering == BarrierOrdering::Nd ? "ND" : "AMD", order_seconds, st.analyze_seconds,
+                SparseCholesky::blasAvailable() ? "yes" : "no");
+        }
+        if (!analyzed) {
+            error_ = chol_.error();
+            return false;
+        }
+        ne_val_.assign(ne_idx_.size(), 0.0);
+        work_.assign(static_cast<size_t>(m), 0.0);
+        return true;
+    }
+
+    bool factorM() override {
+        const Index m = m_;
+        // Column k of M: sum over the columns j of row k of theta_j a_kj a_j,
+        // gathered on the pattern's rows i >= k.
+        for (Index k = 0; k < m; ++k) {
+            const auto rk = a_->row(k);
+            for (Index q = 0; q < rk.size(); ++q) {
+                const Index j = rk.indices[q];
+                const Real t = theta_[j] * rk.values[q];
+                const auto cj = a_->col(j);
+                for (Index p = 0; p < cj.size(); ++p) {
+                    const Index i = cj.indices[p];
+                    if (i >= k) {
+                        work_[i] += t * cj.values[p];
+                    }
+                }
+            }
+            for (Index p = ne_ptr_[k]; p < ne_ptr_[k + 1]; ++p) {
+                const Index i = ne_idx_[p];
+                ne_val_[p] = work_[i];
+                work_[i] = 0.0;
+            }
+            ne_val_[ne_ptr_[k]] += reg_;  // the diagonal comes first
+        }
+        SparseCholesky::PivotRule rule;
+        rule.dependent_tol = kDependentPivotTol;
+        rule.diag_offset = reg_;
+        rule.infinite_pivot = kInfinitePivot;
+        return chol_.factorize(ne_val_, rule);
+    }
+
+    void solveM(std::span<Real> b) const override { chol_.solve(b); }
+
+    std::vector<Index> ne_ptr_;
+    std::vector<Index> ne_idx_;
+    std::vector<Real> ne_val_;
+    std::vector<Real> work_;
+    SparseCholesky chol_;
 };
 
 // ============================================================================
@@ -1300,6 +1534,10 @@ private:
 
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver() {
     return std::make_unique<CpuCholeskySolver>();
+}
+
+std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver() {
+    return std::make_unique<CpuSparseCholeskySolver>();
 }
 
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver() {

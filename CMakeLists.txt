@@ -48,6 +48,39 @@ option(MIPX_USE_BZIP2 "Enable bzip2 decompression for .mps.bz2 files" ${BZIP2_FO
 
 find_package(TBB QUIET)
 option(MIPX_USE_TBB "Enable TBB for parallel tree search" ${TBB_FOUND})
+
+# BLAS for the dense blocks of the barrier's supernodal Cholesky (#290),
+# OpenBLAS preferred, loaded at run time (src/CMakeLists.txt). Optional:
+# without it those blocks run on mipx's own loops.
+if(NOT DEFINED BLA_VENDOR)
+    set(BLA_VENDOR OpenBLAS)
+    find_package(BLAS QUIET)
+    unset(BLA_VENDOR)
+endif()
+if(NOT BLAS_FOUND)
+    find_package(BLAS QUIET)
+endif()
+option(MIPX_USE_BLAS "Use BLAS for the barrier's supernodal Cholesky" ${BLAS_FOUND})
+# The shared library to dlopen; empty without one. Its resolved file is the
+# fallback: the found path is often a -dev package's symlink, absent on a
+# host with the runtime package only, while the symlink itself follows a
+# library upgrade, so it is tried first.
+set(MIPX_BLAS_SHARED_LIBRARY "")
+set(MIPX_BLAS_SHARED_LIBRARY_REAL "")
+if(MIPX_USE_BLAS)
+    foreach(_lib IN LISTS BLAS_LIBRARIES)
+        if(_lib MATCHES "\\.(so|dylib)(\\.[0-9]+)*$" AND EXISTS "${_lib}")
+            set(MIPX_BLAS_SHARED_LIBRARY "${_lib}")
+            file(REAL_PATH "${_lib}" MIPX_BLAS_SHARED_LIBRARY_REAL)
+            break()
+        endif()
+    endforeach()
+    if(MIPX_BLAS_SHARED_LIBRARY)
+        message(STATUS "mipx: barrier BLAS loaded at run time from ${MIPX_BLAS_SHARED_LIBRARY}")
+    else()
+        message(STATUS "mipx: no shared BLAS library in BLAS_LIBRARIES; own loops")
+    endif()
+endif()
 set(_mipx_use_gpu_default ${CUDAToolkit_FOUND})
 if(DEFINED MIPX_USE_CUDA AND NOT DEFINED MIPX_USE_GPU)
     set(_mipx_use_gpu_default "${MIPX_USE_CUDA}")

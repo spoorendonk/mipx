@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <span>
+#include <string>
 
 namespace mipx {
 
@@ -29,10 +30,18 @@ public:
     virtual bool solveNewton(std::span<const Real> rp, std::span<const Real> rd,
                              std::span<const Real> rc, std::span<Real> dz, std::span<Real> dy,
                              std::span<Real> ds) = 0;
+
+    /// Why setup() or factorize() last failed, when the backend can say
+    /// (e.g. the factor does not fit in memory); empty otherwise.
+    [[nodiscard]] const std::string& lastError() const { return error_; }
+
+protected:
+    std::string error_;
 };
 
 // CPU backends (always available).
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
+std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver();
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
