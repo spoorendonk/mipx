@@ -55,7 +55,12 @@ struct BarrierOptions {
     // arrays of M itself against the same cap. 0: the memory available when
     // the backend is set up (MemAvailable, or the cgroup's headroom if lower).
     std::size_t ne_max_bytes = 0;
+    // A column of A with more than max(dense_col_fraction * m, 16) nonzeros
+    // is dense. The sparse normal-equations path leaves at most
+    // ne_max_dense_cols of them (the densest) out of its Cholesky factor and
+    // solves with them by a Schur complement (#314); 0 keeps them all in.
     Real dense_col_fraction = 0.1;
+    Int ne_max_dense_cols = 100;
     Int ir_steps = 2;
     Int ruiz_iterations = 10;
     bool verbose = true;

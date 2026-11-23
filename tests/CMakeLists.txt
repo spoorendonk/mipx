@@ -21,6 +21,7 @@ add_executable(mipx-tests
     test_parallel.cpp
     test_symmetry.cpp
     test_barrier.cpp
+    test_barrier_dense_cols.cpp
     test_sparse_cholesky.cpp
     test_amd_ordering.cpp
     test_pdlp.cpp
@@ -49,6 +50,12 @@ mipx_set_compiler_flags(mipx-tests)
 # them (#217); here one small file misses instead.
 set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
+)
+
+# The dense-column tests drive a barrier backend through its internal
+# interface (src/lp/newton_solver.h), so that file alone sees src/.
+set_property(SOURCE test_barrier_dense_cols.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+    ${PROJECT_SOURCE_DIR}/src
 )
 
 # A build that found a shared BLAS must load it at run time (#290).

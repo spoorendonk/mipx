@@ -846,13 +846,78 @@ private:
 // The pattern of M (lower triangle, by row of A) is found once in setup,
 // ordered with BarrierOptions::ordering and analyzed by SparseCholesky; each
 // iteration forms M's entries on that pattern and refactors (#290).
+//
+// Dense columns (#314; Andersen 1996, Andersen & Andersen 2000 sec. 4.2): a
+// column with k nonzeros puts a k x k dense block into M. The densest columns
+// A_d are left out of the factor, which is then of M_s = A_s Theta_s A_s' +
+// reg I, and M = M_s + A_d Theta_d A_d' is solved by the Woodbury identity.
+// M_s can be singular where M is not (a row only dense columns cover, or one
+// whose sparse part depends on other rows): such a pivot of M_s is not set
+// infinite, which would drop the row from M too, but shifted by the dense
+// columns' share D_i of M's diagonal, and the shift is taken back out
+// exactly by a column sqrt(added) e_i with sign -1 (the modified Schur
+// complement). With U = [A_d Theta_d^{1/2} | sqrt(added_i) e_i] and C =
+// diag(I, -I), M = M_s' + U C U' and
+//   M^{-1} b = M_s'^{-1} (b - U S^{-1} U' M_s'^{-1} b),  S = C + U' M_s'^{-1} U,
+// S factored densely by LU with partial pivoting (it is indefinite). Forming
+// S takes one solve with M_s' per column of U, one column at a time, so no
+// m x k block is stored.
 
 class CpuSparseCholeskySolver final : public NormalEquationsSolver {
+public:
+    [[nodiscard]] FactorStats factorStats() const override {
+        return {chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size())};
+    }
+
 private:
+    // A column of S whose LU pivot cancels to this, against C's unit scale,
+    // is dropped from the update (a row dependent in M as well as in M_s).
+    // A compensation column's pivot is about M's own pivot on that row over
+    // the shift, so a small one is legitimate: the bar is the dependent-pivot
+    // rule's.
+    static constexpr Real kSchurDependentTol = kDependentPivotTol;
+    // Bound on the order of S: (k + shifted)^2 reals and one solve per column
+    // each iteration.
+    static constexpr Index kMaxSchurOrder = 4096;
+    // A row whose dense share D_i is below this fraction of its diagonal in
+    // M gets no shift: the dense columns barely reach it, so a dependent
+    // pivot there keeps the infinite rule.
+    static constexpr Real kMinShiftFraction = 1e-8;
+    // On those rows a pivot of M_s that cancels to this fraction of its
+    // diagonal (net of reg) is shifted too: a near-dependent row (its pivot
+    // left at about reg) would otherwise make M_s' as ill-conditioned as
+    // reg is small, and the Woodbury solve would lose those digits.
+    static constexpr Real kShiftTol = 1e-6;
+
+    void findDenseColumns(const BarrierOptions& opts) {
+        dense_cols_.clear();
+        is_dense_.assign(static_cast<size_t>(n_), 0);
+        if (opts.ne_max_dense_cols <= 0) {
+            return;
+        }
+        const auto thresh = std::max<Index>(
+            16, static_cast<Index>(opts.dense_col_fraction * static_cast<Real>(m_)));
+        for (Index j = 0; j < n_; ++j) {
+            if (a_->col(j).size() > thresh) {
+                dense_cols_.push_back(j);
+            }
+        }
+        std::stable_sort(dense_cols_.begin(), dense_cols_.end(),
+                         [&](Index a, Index b) { return a_->col(a).size() > a_->col(b).size(); });
+        if (dense_cols_.size() > static_cast<size_t>(opts.ne_max_dense_cols)) {
+            dense_cols_.resize(static_cast<size_t>(opts.ne_max_dense_cols));
+        }
+        std::sort(dense_cols_.begin(), dense_cols_.end());
+        for (const Index j : dense_cols_) {
+            is_dense_[j] = 1;
+        }
+    }
+
     bool setupFactor(const BarrierOptions& opts) override {
         const Index m = m_;
-        // Pattern of M, each pair once: column k of the pattern lists k and the
-        // rows i > k sharing a column of A with row k.
+        findDenseColumns(opts);
+        // Pattern of M_s, each pair once: column k of the pattern lists k and
+        // the rows i > k sharing a sparse column of A with row k.
         ne_ptr_.assign(static_cast<size_t>(m) + 1, 0);
         ne_idx_.clear();
         std::vector<Index> mark(static_cast<size_t>(m), -1);
@@ -861,6 +926,9 @@ private:
             ne_idx_.push_back(k);
             const auto rk = a_->row(k);
             for (Index q = 0; q < rk.size(); ++q) {
+                if (is_dense_[rk.indices[q]] != 0) {
+                    continue;
+                }
                 const auto cj = a_->col(rk.indices[q]);
                 for (Index p = 0; p < cj.size(); ++p) {
                     const Index i = cj.indices[p];
@@ -908,10 +976,10 @@ private:
         if (opts.verbose) {
             const auto& st = chol_.stats();
             std::printf(
-                "  NE Cholesky: m=%d nnz(M)=%zu nnz(L)=%zu supernodes=%d (widest %d) "
-                "factor=%s ordering=%s %.2fs analysis=%.2fs blas=%s\n",
-                m, st.nnz_input, st.nnz_l, st.num_supernodes, st.max_supernode_cols,
-                megabytes(chol_.factorBytes()).c_str(),
+                "  NE Cholesky: m=%d dense_cols=%zu nnz(M)=%zu nnz(L)=%zu supernodes=%d "
+                "(widest %d) factor=%s ordering=%s %.2fs analysis=%.2fs blas=%s\n",
+                m, dense_cols_.size(), st.nnz_input, st.nnz_l, st.num_supernodes,
+                st.max_supernode_cols, megabytes(chol_.factorBytes()).c_str(),
                 ordering == BarrierOrdering::Nd ? "ND" : "AMD", order_seconds, st.analyze_seconds,
                 SparseCholesky::blasAvailable() ? "yes" : "no");
         }
@@ -921,17 +989,25 @@ private:
         }
         ne_val_.assign(ne_idx_.size(), 0.0);
         work_.assign(static_cast<size_t>(m), 0.0);
+        if (!dense_cols_.empty()) {
+            dense_share_.assign(static_cast<size_t>(m), 0.0);
+            shift_.assign(static_cast<size_t>(m), 0.0);
+            ucol_.assign(static_cast<size_t>(m), 0.0);
+        }
         return true;
     }
 
     bool factorM() override {
         const Index m = m_;
-        // Column k of M: sum over the columns j of row k of theta_j a_kj a_j,
-        // gathered on the pattern's rows i >= k.
+        // Column k of M_s: sum over the sparse columns j of row k of
+        // theta_j a_kj a_j, gathered on the pattern's rows i >= k.
         for (Index k = 0; k < m; ++k) {
             const auto rk = a_->row(k);
             for (Index q = 0; q < rk.size(); ++q) {
                 const Index j = rk.indices[q];
+                if (is_dense_[j] != 0) {
+                    continue;
+                }
                 const Real t = theta_[j] * rk.values[q];
                 const auto cj = a_->col(j);
                 for (Index p = 0; p < cj.size(); ++p) {
@@ -952,16 +1028,200 @@ private:
         rule.dependent_tol = kDependentPivotTol;
         rule.diag_offset = reg_;
         rule.infinite_pivot = kInfinitePivot;
-        return chol_.factorize(ne_val_, rule);
+        schur_order_ = 0;
+        if (dense_cols_.empty()) {
+            return chol_.factorize(ne_val_, rule);
+        }
+        std::fill(dense_share_.begin(), dense_share_.end(), 0.0);
+        for (const Index j : dense_cols_) {
+            const auto cj = a_->col(j);
+            for (Index p = 0; p < cj.size(); ++p) {
+                dense_share_[cj.indices[p]] += theta_[j] * cj.values[p] * cj.values[p];
+            }
+        }
+        for (Index i = 0; i < m; ++i) {
+            const Real d = dense_share_[i];
+            const Real full = ne_val_[ne_ptr_[i]] - reg_ + d;
+            shift_[i] = d > 0.0 && d >= kMinShiftFraction * full ? d : 0.0;
+        }
+        rule.dependent_shift = shift_;
+        rule.shift_tol = kShiftTol;
+        if (!chol_.factorize(ne_val_, rule)) {
+            return false;
+        }
+        return factorSchur();
     }
 
-    void solveM(std::span<Real> b) const override { chol_.solve(b); }
+    // Column q of U, into ucol_ (all zero on entry).
+    void scatterU(Index q) const {
+        const auto k = static_cast<Index>(dense_cols_.size());
+        if (q < k) {
+            const Index j = dense_cols_[q];
+            const Real s = std::sqrt(theta_[j]);
+            const auto cj = a_->col(j);
+            for (Index p = 0; p < cj.size(); ++p) {
+                ucol_[cj.indices[p]] = s * cj.values[p];
+            }
+        } else {
+            const auto& sp = chol_.shiftedPivots()[q - k];
+            ucol_[sp.row] = std::sqrt(sp.added);
+        }
+    }
+
+    // out = U' x.
+    void applyUt(std::span<const Real> x, std::span<Real> out) const {
+        const auto k = static_cast<Index>(dense_cols_.size());
+        for (Index q = 0; q < k; ++q) {
+            const Index j = dense_cols_[q];
+            const auto cj = a_->col(j);
+            Real s = 0.0;
+            for (Index p = 0; p < cj.size(); ++p) {
+                s += cj.values[p] * x[cj.indices[p]];
+            }
+            out[q] = std::sqrt(theta_[j]) * s;
+        }
+        const auto& shifted = chol_.shiftedPivots();
+        for (size_t r = 0; r < shifted.size(); ++r) {
+            out[k + static_cast<Index>(r)] = std::sqrt(shifted[r].added) * x[shifted[r].row];
+        }
+    }
+
+    // Form S = C + U' M_s'^{-1} U and factor it.
+    bool factorSchur() {
+        const auto k = static_cast<Index>(dense_cols_.size());
+        const auto t = k + static_cast<Index>(chol_.shiftedPivots().size());
+        if (t > kMaxSchurOrder) {
+            error_ = "dense-column Schur complement of order " + std::to_string(t) + " exceeds " +
+                     std::to_string(kMaxSchurOrder);
+            return false;
+        }
+        schur_order_ = t;
+        const auto tt = static_cast<size_t>(t);
+        schur_.assign(tt * tt, 0.0);  // column-major
+        schur_piv_.assign(tt, 0);
+        schur_rhs_.assign(tt, 0.0);
+        std::vector<Real> y(static_cast<size_t>(m_));
+        for (Index q = 0; q < t; ++q) {
+            scatterU(q);
+            std::copy(ucol_.begin(), ucol_.end(), y.begin());
+            std::fill(ucol_.begin(), ucol_.end(), 0.0);
+            chol_.solve(y);
+            applyUt(y, std::span<Real>(schur_).subspan(static_cast<size_t>(q) * tt, tt));
+            schur_[static_cast<size_t>(q) * tt + static_cast<size_t>(q)] += q < k ? 1.0 : -1.0;
+        }
+        // LU with partial pivoting, in place. A pivot that cancels marks a
+        // column of U dependent on the others through M_s'; it is set huge,
+        // which drops it from the update.
+        auto at = [&](Index r, Index c) -> Real& {
+            return schur_[static_cast<size_t>(c) * tt + static_cast<size_t>(r)];
+        };
+        for (Index c = 0; c < t; ++c) {
+            Index piv = c;
+            for (Index r = c + 1; r < t; ++r) {
+                if (std::abs(at(r, c)) > std::abs(at(piv, c))) {
+                    piv = r;
+                }
+            }
+            schur_piv_[c] = piv;
+            if (piv != c) {
+                for (Index cc = 0; cc < t; ++cc) {
+                    std::swap(at(c, cc), at(piv, cc));
+                }
+            }
+            if (!std::isfinite(at(c, c))) {
+                return false;
+            }
+            if (std::abs(at(c, c)) <= kSchurDependentTol) {
+                at(c, c) = kInfinitePivot;
+            }
+            const Real inv = 1.0 / at(c, c);
+            for (Index r = c + 1; r < t; ++r) {
+                at(r, c) *= inv;
+            }
+            for (Index cc = c + 1; cc < t; ++cc) {
+                const Real u = at(c, cc);
+                if (u == 0.0) {
+                    continue;
+                }
+                for (Index r = c + 1; r < t; ++r) {
+                    at(r, cc) -= at(r, c) * u;
+                }
+            }
+        }
+        return true;
+    }
+
+    // schur_rhs_ = S^{-1} schur_rhs_.
+    void solveSchur() const {
+        const auto t = schur_order_;
+        const auto tt = static_cast<size_t>(t);
+        auto at = [&](Index r, Index c) {
+            return schur_[static_cast<size_t>(c) * tt + static_cast<size_t>(r)];
+        };
+        auto& w = schur_rhs_;
+        // The swaps moved whole rows, L's included, so L is in the final row
+        // order: apply them all before the forward solve.
+        for (Index c = 0; c < t; ++c) {
+            std::swap(w[c], w[schur_piv_[c]]);
+        }
+        for (Index c = 0; c < t; ++c) {
+            for (Index r = c + 1; r < t; ++r) {
+                w[r] -= at(r, c) * w[c];
+            }
+        }
+        for (Index c = t - 1; c >= 0; --c) {
+            w[c] /= at(c, c);
+            for (Index r = 0; r < c; ++r) {
+                w[r] -= at(r, c) * w[c];
+            }
+        }
+    }
+
+    void solveM(std::span<Real> b) const override {
+        chol_.solve(b);
+        if (schur_order_ == 0) {
+            return;
+        }
+        applyUt(b, schur_rhs_);
+        solveSchur();
+        // ucol_ = U w, then b -= M_s'^{-1} U w.
+        const auto k = static_cast<Index>(dense_cols_.size());
+        for (Index q = 0; q < schur_order_; ++q) {
+            const Real w = schur_rhs_[q];
+            if (q < k) {
+                const Index j = dense_cols_[q];
+                const Real s = std::sqrt(theta_[j]) * w;
+                const auto cj = a_->col(j);
+                for (Index p = 0; p < cj.size(); ++p) {
+                    ucol_[cj.indices[p]] += s * cj.values[p];
+                }
+            } else {
+                const auto& sp = chol_.shiftedPivots()[q - k];
+                ucol_[sp.row] += std::sqrt(sp.added) * w;
+            }
+        }
+        chol_.solve(ucol_);
+        for (Index i = 0; i < m_; ++i) {
+            b[i] -= ucol_[i];
+        }
+        std::fill(ucol_.begin(), ucol_.end(), 0.0);
+    }
 
     std::vector<Index> ne_ptr_;
     std::vector<Index> ne_idx_;
     std::vector<Real> ne_val_;
     std::vector<Real> work_;
     SparseCholesky chol_;
+
+    std::vector<Index> dense_cols_;  // the columns left out of the factor, ascending
+    std::vector<char> is_dense_;
+    std::vector<Real> dense_share_;  // D_i = sum over dense j of theta_j a_ij^2
+    std::vector<Real> shift_;        // the dependent-pivot shift per row
+    Index schur_order_ = 0;          // k + shifted pivots; 0: no Schur step
+    std::vector<Real> schur_;        // LU of S, column-major
+    std::vector<Index> schur_piv_;
+    mutable std::vector<Real> schur_rhs_;
+    mutable std::vector<Real> ucol_;  // m-vector scratch, all zero between uses
 };
 
 // ============================================================================

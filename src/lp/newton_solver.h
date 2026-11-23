@@ -3,6 +3,7 @@
 #include "mipx/barrier.h"
 #include "mipx/sparse_matrix.h"
 
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <string>
@@ -34,6 +35,14 @@ public:
     /// Why setup() or factorize() last failed, when the backend can say
     /// (e.g. the factor does not fit in memory); empty otherwise.
     [[nodiscard]] const std::string& lastError() const { return error_; }
+
+    /// The factor's size once set up, where the backend counts it (the sparse
+    /// normal equations; zeros elsewhere), for tests and diagnostics.
+    struct FactorStats {
+        std::size_t nnz_l = 0;
+        Index dense_cols = 0;  // columns of A left out of the factor
+    };
+    [[nodiscard]] virtual FactorStats factorStats() const { return {}; }
 
 protected:
     std::string error_;

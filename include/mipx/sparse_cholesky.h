@@ -50,6 +50,23 @@ public:
         /// Regularization already on M's diagonal, taken out of the test.
         Real diag_offset = 0.0;
         Real infinite_pivot = 1e128;
+        /// Per row, original numbering; empty: none. A dependent pivot on a
+        /// row with dependent_shift > 0 becomes max(pivot, 0) + shift rather
+        /// than infinite_pivot, and is listed in shiftedPivots(): the caller
+        /// that compensates for it (a Schur complement) gets M's solve back.
+        std::span<const Real> dependent_shift;
+        /// On a row with dependent_shift > 0, a pivot counts as dependent at
+        /// this tolerance when it is above dependent_tol: the shift is taken
+        /// back out exactly, so a small pivot is shifted rather than left to
+        /// make the factor ill-conditioned (Andersen 1996).
+        Real shift_tol = 0.0;
+    };
+
+    /// A dependent pivot moved by PivotRule::dependent_shift: the factor is
+    /// that of M + added·e_row·e_rowᵀ.
+    struct ShiftedPivot {
+        Index row = 0;
+        Real added = 0.0;
     };
 
     /// Symbolic analysis. col_starts/row_indices give the pattern as above
@@ -83,6 +100,9 @@ public:
 
     [[nodiscard]] const Stats& stats() const { return stats_; }
     [[nodiscard]] Index numDependentPivots() const { return num_dependent_; }
+    /// The pivots of the last factorize() moved by dependent_shift; not
+    /// counted in numDependentPivots().
+    [[nodiscard]] const std::vector<ShiftedPivot>& shiftedPivots() const { return shifted_; }
     [[nodiscard]] const std::string& error() const { return error_; }
 
     /// Bytes the numeric factor and its index arrays take once analyzed.
@@ -120,6 +140,7 @@ private:
 
     Stats stats_{};
     Index num_dependent_ = 0;
+    std::vector<ShiftedPivot> shifted_;
     std::string error_;
 };
 
