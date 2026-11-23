@@ -88,7 +88,8 @@ public:
 
     /// Numeric factorization of the matrix whose entries are `values`, aligned
     /// with the analyzed pattern. Returns false when a pivot is not finite, or
-    /// when `deadline` passes (checked before each supernode; error() says so).
+    /// when `deadline` passes or its stop flag is raised (checked before each
+    /// panel of a supernode; error() says which).
     bool factorize(std::span<const Real> values, const PivotRule& rule,
                    const Deadline& deadline = {});
 

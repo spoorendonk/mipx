@@ -644,7 +644,8 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
             // Once per panel, so a large supernode is not one unbroken block
             // of work (#275).
             if (deadline.passed()) {
-                error_ = "time limit reached in the factorization";
+                error_ = deadline.stopped() ? "stopped in the factorization"
+                                            : "time limit reached in the factorization";
                 return false;
             }
             const Index k1 = std::min(nc, k0 + kPanel);

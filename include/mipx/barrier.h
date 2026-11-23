@@ -92,6 +92,9 @@ struct BarrierOptions {
     bool verbose = true;
     bool crossover = true;
     bool presolve = true;
+    // Raised by the caller to stop the solve, which then returns
+    // Status::IterLimit. The CPU IPM checks it every iteration and inside its
+    // factorizations, as it does max_solve_seconds.
     const std::atomic<bool>* stop_flag = nullptr;
 };
 

@@ -544,11 +544,16 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     std::vector<Real> dy_aff(static_cast<size_t>(m));
     std::vector<Real> ds_aff(static_cast<size_t>(n));
 
-    // The time limit (#275): the backend's factorize() fails once it passes.
+    // The time limit (#275) and the caller's stop flag: the backend's
+    // factorize() fails once either is reached. A stop ends as Failed, which
+    // solve() reads as a stop (IterLimit), a passed time as TimeLimit.
     const Deadline& deadline = solver.deadline();
+    auto interrupted = [&] {
+        return deadline.stopped() ? BarrierIpmOutcome::Failed : BarrierIpmOutcome::TimeLimit;
+    };
     if (!mehrotraStartingPoint(solver, b, c, u, upper_cols, reg, z, y, s, v, w)) {
         iters = 0;
-        return deadline.passed() ? BarrierIpmOutcome::TimeLimit : BarrierIpmOutcome::Failed;
+        return deadline.passed() ? interrupted() : BarrierIpmOutcome::Failed;
     }
     // After the starting point, which sizes v and w.
     GondzioCorrectors gondzio{upper_cols, z, s, v, w, dz, dy, ds, dv, dw};
@@ -670,7 +675,7 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         // step is still reported optimal.
         if (deadline.passed()) {
             iters = iter;
-            return BarrierIpmOutcome::TimeLimit;
+            return interrupted();
         }
 
         // Factorize.
@@ -684,7 +689,7 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             if (deadline.passed() || !solver.factorize(z_fac, s_fac, reg * 100.0)) {
                 if (deadline.passed()) {
                     iters = iter;
-                    return BarrierIpmOutcome::TimeLimit;
+                    return interrupted();
                 }
                 return stopShort(iter);
             }
@@ -1457,7 +1462,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         // A factor too large for memory ends the solve with an error status
         // rather than an exception out of solve() (#280).
         try {
-            solver->setDeadline(deadline_);
+            // The stop flag too, so a raised one ends a long factorization
+            // rather than waiting it out (the MIP root race joins this arm).
+            solver->setDeadline(deadline_.orStop(options_.stop_flag));
             if (!solver->setup(aeq_, m, n, options_)) {
                 if (last_error_.empty()) {
                     last_error_ = solver->lastError().empty() ? "Barrier backend setup failed."
@@ -1485,6 +1492,12 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             } else {
                 last_error_ = "Barrier solve failed.";
             }
+        }
+        // A failed or stopped run has no iterate that solve() reads, and one
+        // whose starting point failed (a stop inside its factorization) has
+        // none at all: z is empty, and unscaling it would read past its end.
+        if (!ok) {
+            return outcome;
         }
     }
 

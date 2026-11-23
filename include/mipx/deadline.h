@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 
 namespace mipx {
@@ -26,8 +27,23 @@ public:
         return d;
     }
 
+    /// This deadline, passed also once `*flag` is true: a caller's stop
+    /// request (the MIP root race's), which the long loops then end on too.
+    /// The flag must outlive the copy; nullptr adds none.
+    [[nodiscard]] Deadline orStop(const std::atomic<bool>* flag) const {
+        Deadline d = *this;
+        d.stop_ = flag;
+        return d;
+    }
+
+    /// Whether a time is set; a stop flag alone is not one.
     [[nodiscard]] bool isSet() const { return set_; }
-    [[nodiscard]] bool passed() const { return set_ && Clock::now() >= at_; }
+    /// The time has passed, or the stop flag is raised.
+    [[nodiscard]] bool passed() const { return (set_ && Clock::now() >= at_) || stopped(); }
+    /// The stop flag is raised, whatever the time.
+    [[nodiscard]] bool stopped() const {
+        return stop_ != nullptr && stop_->load(std::memory_order_relaxed);
+    }
     /// Seconds left, at least 0; -1 when none is set.
     [[nodiscard]] double remainingSeconds() const {
         if (!set_) {
@@ -40,6 +56,7 @@ public:
 private:
     bool set_ = false;
     Clock::time_point at_{};
+    const std::atomic<bool>* stop_ = nullptr;
 };
 
 }  // namespace mipx

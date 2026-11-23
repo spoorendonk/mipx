@@ -4,6 +4,7 @@
 #include "mipx/barrier.h"
 #include "mipx/sparse_cholesky.h"
 
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <memory>
@@ -105,6 +106,34 @@ TEST_CASE("Barrier backends stop factorizing once the deadline has passed",
     CHECK_FALSE(solver->factorize(ones, ones, 1e-8));
     solver->setDeadline(Deadline{});
     CHECK(solver->factorize(ones, ones, 1e-8));
+
+    // A raised stop flag, with no time set, stops it the same way.
+    std::atomic<bool> stop{true};
+    solver->setDeadline(Deadline{}.orStop(&stop));
+    CHECK_FALSE(solver->factorize(ones, ones, 1e-8));
+    stop.store(false);
+    CHECK(solver->factorize(ones, ones, 1e-8));
+}
+
+TEST_CASE("Barrier with a raised stop flag returns IterLimit, not TimeLimit",
+          "[barrier][time-limit]") {
+    // The flag is up before the starting point's factorization, which then
+    // fails inside the backend: that must still read as a stop.
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
+                               BarrierAlgorithm::CpuSparseCholesky);
+    INFO("algo " << static_cast<int>(algo));
+    const std::atomic<bool> stop{true};
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.algorithm = algo;
+    opts.stop_flag = &stop;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(halfKnapsackLp(200));
+    const auto result = solver.solve();
+    CHECK(result.status == Status::IterLimit);
+    CHECK(result.iterations == 0);
 }
 
 TEST_CASE("SparseCholesky stops at a passed deadline and says so", "[time-limit][sparse-ne]") {
@@ -122,4 +151,8 @@ TEST_CASE("SparseCholesky stops at a passed deadline and says so", "[time-limit]
     // A later factorization without one succeeds and clears the message.
     CHECK(chol.factorize(values, rule));
     CHECK(chol.error().empty());
+
+    const std::atomic<bool> stop{true};
+    CHECK_FALSE(chol.factorize(values, rule, Deadline{}.orStop(&stop)));
+    CHECK(chol.error().find("stopped") != std::string::npos);
 }
