@@ -1,4 +1,5 @@
 #include "common.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/heuristic_runtime.h"
 
 #include <algorithm>
@@ -160,6 +161,11 @@ bool HeuristicRuntime::isImprovement(Sense sense, Real candidate, Real incumbent
 }
 
 bool HeuristicRuntime::allowRootCall(double total_work_units) const {
+    // Out of time, in either mode: the LP heuristics' solves would stop at
+    // once, and the solve's result is TimeLimit whatever they find.
+    if (root_deadline_.passed()) {
+        return false;
+    }
     total_work_units = canonicalWorkUnits(total_work_units);
     if (config_.mode == HeuristicRuntimeMode::Opportunistic) {
         return true;
@@ -195,6 +201,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(const RootHeuristicConte
                                                         Real& incumbent,
                                                         std::vector<Real>& best_solution) {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    root_deadline_ = ctx.lp.getOptions().deadline;
     if (!emitted_root_header_ && callback_ != nullptr) {
         callback_->onHeader("root", config_.mode);
         emitted_root_header_ = true;

@@ -1749,4 +1749,31 @@ TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic", "[heuristi
         REQUIRE(!best_solution.empty());
         CHECK(isFeasible(problem, best_solution));
     }
+
+    SECTION("past the root LP's deadline no budgeted heuristic runs") {
+        // #355: the deadline the MIP solver arms on the root LP also ends
+        // the portfolio's budgeted calls, the LP heuristics and feasibility
+        // jump; only the cheap LP-free roundings still run.
+        auto opts = lp.getOptions();
+        opts.deadline = Deadline::after(0.0);
+        lp.setOptions(opts);
+        std::vector<Real> best_solution = {1.0, 0.0, 0.0};
+        Real incumbent = -6.0;
+
+        const auto out = runtime.runRootPortfolio(ctx, incumbent, best_solution);
+
+        CHECK(out.auxobj_calls == 0);
+        CHECK(out.zeroobj_calls == 0);
+        CHECK(out.feaspump_calls == 0);
+        CHECK(out.rens_calls == 0);
+        CHECK(out.rins_calls == 0);
+        CHECK(out.localbranching_calls == 0);
+        CHECK(out.feasjump_calls == 0);
+        CHECK(out.undercover_calls == 0);
+        CHECK(out.reducedcost_calls == 0);
+        CHECK(out.crossover_calls == 0);
+        CHECK(out.proximity_calls == 0);
+        CHECK(out.lp_iterations == 0);
+        CHECK(out.zirounding_calls >= 1);
+    }
 }

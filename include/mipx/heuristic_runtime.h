@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 #include "mipx/heuristics.h"
 #include "mipx/lp_problem.h"
 
@@ -252,6 +253,9 @@ private:
 
     HeuristicRuntimeConfig config_;
     HeuristicBudgetManager budget_;
+    // The root LP's deadline, taken when runRootPortfolio starts: past it no
+    // further budgeted root heuristic is called (#355).
+    Deadline root_deadline_;
     RestartStrategyEngine restart_engine_;
     HeuristicRuntimeStats stats_;
     HeuristicCallback* callback_ = nullptr;

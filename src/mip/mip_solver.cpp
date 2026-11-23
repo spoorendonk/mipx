@@ -821,9 +821,10 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
                                                std::span<const Real> lp_primals,
                                                std::span<const Real> reduced_costs,
                                                std::mt19937_64& rng, Real incumbent,
-                                               double& work_units) {
+                                               double& work_units, Deadline deadline) {
     // Scylla-style LP-light FPR: LP-fractionality ranking + fix/propagate/repair,
-    // with an in-repo mipx sub-MIP neighborhood polish step.
+    // with an in-repo mipx sub-MIP neighborhood polish step. The sub-MIP gets
+    // the smaller of its own budget and the time `deadline` leaves (#355).
     if (discrete_vars.empty() || lp_primals.empty()) {
         return std::nullopt;
     }
@@ -860,6 +861,10 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
             return std::nullopt;
         }
         if (submip_work_used >= kSubMipPolishWorkBudget) {
+            return std::nullopt;
+        }
+        const double time_left = deadline.remainingSeconds();
+        if (deadline.isSet() && time_left <= 0.0) {
             return std::nullopt;
         }
 
@@ -907,6 +912,9 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
         sub_solver.setPreRootLpFreeEnabled(false);
         sub_solver.setPreRootLpLightEnabled(false);
         sub_solver.setPreRootPortfolioEnabled(false);
+        if (deadline.isSet()) {
+            sub_solver.setTimeLimit(time_left);
+        }
         sub_solver.load(sub);
         const auto sub_result = sub_solver.solve();
         const double sub_work = std::max(0.0, sub_result.work_units);
@@ -4910,9 +4918,10 @@ MipResult MipSolver::solveMinimizationOnce() {
                         if (!run_lp_light_arms) {
                             break;
                         }
-                        out.candidate = runLpLightFpr(
-                            round_problem, discrete_vars, lp_light_primals, lp_light_reduced_costs,
-                            round_rng, incumbent_for_round, out.local_work);
+                        out.candidate =
+                            runLpLightFpr(round_problem, discrete_vars, lp_light_primals,
+                                          lp_light_reduced_costs, round_rng, incumbent_for_round,
+                                          out.local_work, Deadline::after(timeLeft()));
                         break;
                     }
                     case PreRootArm::LpLightDiving: {
@@ -5848,6 +5857,13 @@ MipResult MipSolver::solveMinimizationOnce() {
             ++root_int_inf;
         }
     }
+    // From here on, the root heuristics, the root's branching and the whole
+    // tree run on the time left (#351, #355); parallel workers arm their own
+    // solvers the same way. A heuristic LP stopped by it is no result: each
+    // heuristic takes a candidate only from an Optimal solve and puts back
+    // the root basis, and the portfolio's basis_dirty restore below needs no
+    // re-solve, so the tree never starts from a stopped LP.
+    setLpDeadline(lp, Deadline::after(timeLeft()));
     const RootHeuristicContext root_ctx{
         .problem = problem_,
         .lp = lp,
@@ -5975,10 +5991,6 @@ MipResult MipSolver::solveMinimizationOnce() {
     root_node.estimate = root_bound;
     root_node.basis = root_basis;
     root_node.basis_rows = lp.numRows();
-
-    // From here on, the root's branching and the whole tree run on the time
-    // left (#351); parallel workers arm their own solvers the same way.
-    setLpDeadline(lp, Deadline::after(timeLeft()));
 
     Index branch_var = -1;
     {
