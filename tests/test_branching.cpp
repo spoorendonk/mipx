@@ -365,6 +365,51 @@ TEST_CASE("Symmetry detection enforces canonical branching", "[branching][symmet
     CHECK(selection.variable == 0);
 }
 
+// #351: once the MIP's deadline has passed, the first strong-branching probe
+// stops on TimeLimit; the rule probes no more, learns no pseudocost from the
+// cut-short probe, and still picks a variable, by pseudocosts.
+TEST_CASE("ReliabilityBranching stops strong branching at a passed deadline",
+          "[branching][time_limit]") {
+    LpProblem lp;
+    lp.name = "deadline";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-1.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.row_names = {"sum"};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    auto opts = solver.getOptions();
+    opts.deadline = Deadline::after(0.0);
+    solver.setOptions(opts);
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    std::vector<Real> primal = {0.5, 0.5};
+    std::vector<Real> lb = lp.col_lower;
+    std::vector<Real> ub = lp.col_upper;
+    BranchingTelemetry telemetry;
+    const auto selection = branching.select(solver, lp, primal, lb, ub, -1.0, false, telemetry);
+
+    CHECK(telemetry.strong_branch_calls == 1);
+    CHECK(telemetry.strong_branch_probes == 1);
+    CHECK(telemetry.pseudocost_updates_strong == 0);
+    CHECK(branching.downReliability(0) == 0);
+    CHECK(branching.upReliability(0) == 0);
+    CHECK(selection.variable >= 0);
+    CHECK(selection.used_pseudocost);
+}
+
 TEST_CASE("pseudocostNodeEstimate matches the hand-computed sum", "[branching][search]") {
     LpProblem problem;
     problem.num_cols = 3;

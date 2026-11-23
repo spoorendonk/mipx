@@ -41,6 +41,14 @@ void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
     lp.setOptions(opts);
 }
 
+// Every later solve of `lp` stops by `deadline` (#351): the tree's node,
+// re-solve, branching and heuristic LPs share the MIP's time left.
+void setLpDeadline(DualSimplexSolver& lp, Deadline deadline) {
+    auto opts = lp.getOptions();
+    opts.deadline = deadline;
+    lp.setOptions(opts);
+}
+
 /// Get physical core count (linux only, falls back to hardware_concurrency).
 unsigned getPhysicalCores() {
 #ifdef __linux__
@@ -1828,12 +1836,13 @@ bool MipSolver::isAcceptableIncumbent(std::span<const Real> x) const {
 std::optional<HeuristicSolution> MipSolver::integralNodeIncumbent(std::span<const Real> x,
                                                                   Real node_obj,
                                                                   double& work_units) const {
-    return completeIncumbent(problem_, x, node_obj, work_units);
+    return completeIncumbent(problem_, x, node_obj, work_units, Deadline::after(timeLeft()));
 }
 
 std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& model,
                                                               std::span<const Real> x,
-                                                              Real node_obj, double& work_units) {
+                                                              Real node_obj, double& work_units,
+                                                              Deadline deadline) {
     const auto acceptable = [&model](std::span<const Real> point) {
         return pointHoldsModel(model, point);
     };
@@ -1858,6 +1867,7 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
     if (any_continuous) {
         DualSimplexSolver completion;
         completion.setVerbose(false);
+        setLpDeadline(completion, deadline);
         completion.setIterationLimit(std::max<Int>(1000, 2 * (model.num_rows + model.num_cols)));
         completion.load(fixed);
         const auto result = completion.solve();
@@ -2009,10 +2019,12 @@ bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real
 // A node LP that ends on Error, a limit, or Unbounded (the root LP was
 // bounded, so a node's cannot be) proves nothing about the node. A warm
 // start may have led it there, so it gets one cold start, which takes
-// another path, before the caller gives the node up (#283).
+// another path, before the caller gives the node up (#283). One the tree's
+// deadline stopped has no time left for that (#351).
 LpResult MipSolver::resolveNodeLpWithoutVerdict(DualSimplexSolver& lp, const LpResult& first,
                                                 Int& node_iters_out, double& node_work_out) {
-    if (first.status == Status::Optimal || first.status == Status::Infeasible) {
+    if (first.status == Status::Optimal || first.status == Status::Infeasible ||
+        first.status == Status::TimeLimit) {
         return first;
     }
     lp.clearBasis();
@@ -2028,9 +2040,13 @@ LpResult MipSolver::resolveNodeLpWithoutVerdict(DualSimplexSolver& lp, const LpR
     return cold;
 }
 
-void MipSolver::recordNodeDroppedWithoutVerdict(Real bound) {
+void MipSolver::recordNodeDroppedWithoutVerdict(Real bound, Status status) {
     std::lock_guard<std::mutex> lock(no_verdict_mutex_);
-    ++lp_stats_.nodes_dropped_no_verdict;
+    if (status == Status::TimeLimit) {
+        ++lp_stats_.nodes_dropped_time_limit;
+    } else {
+        ++lp_stats_.nodes_dropped_no_verdict;
+    }
     lp_stats_.dropped_node_bound = std::min(lp_stats_.dropped_node_bound, bound);
 }
 
@@ -2300,9 +2316,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     if (node_result.status != Status::Optimal) {
-        // No verdict even cold: the subtree may hold the optimum, so the
-        // search is not complete without it (#283).
-        recordNodeDroppedWithoutVerdict(node.lp_bound);
+        // No verdict even cold, or the deadline stopped it: the subtree may
+        // hold the optimum, so the search is not complete without it (#283).
+        recordNodeDroppedWithoutVerdict(node.lp_bound, node_result.status);
         return false;
     }
 
@@ -2579,7 +2595,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     // The node's LP optimum before the tightening still
                     // bounds its subtree (#283).
                     flushTreePresolveStats();
-                    recordNodeDroppedWithoutVerdict(prev_obj);
+                    recordNodeDroppedWithoutVerdict(prev_obj, refresh.status);
                     return false;
                 }
                 node_obj_out = refresh.objective;
@@ -3388,6 +3404,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             auto& worker_ctx = workers[static_cast<std::size_t>(t)];
             worker_ctx.lp.load(problem_);
             worker_ctx.lp.setVerbose(false);
+            setLpDeadline(worker_ctx.lp, Deadline::after(timeLeft()));
             worker_ctx.lp.setBasis(root_lp.getBasis());
             worker_ctx.current_lower = problem_.col_lower;
             worker_ctx.current_upper = problem_.col_upper;
@@ -3654,6 +3671,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         DualSimplexSolver local_lp;
         local_lp.load(problem_);
         local_lp.setVerbose(false);
+        setLpDeadline(local_lp, Deadline::after(timeLeft()));
         // Warm-start from root basis.
         local_lp.setBasis(root_lp.getBasis());
         std::vector<Real> current_lower = problem_.col_lower;
@@ -5940,6 +5958,10 @@ MipResult MipSolver::solveMinimizationOnce() {
     root_node.basis = root_basis;
     root_node.basis_rows = lp.numRows();
 
+    // From here on, the root's branching and the whole tree run on the time
+    // left (#351); parallel workers arm their own solvers the same way.
+    setLpDeadline(lp, Deadline::after(timeLeft()));
+
     Index branch_var = -1;
     {
         std::lock_guard<std::mutex> lock(branching_mutex_);
@@ -6004,14 +6026,19 @@ MipResult MipSolver::solveMinimizationOnce() {
     const Real dropped_bound = lp_stats_.dropped_node_bound;
     const bool dropped_open = dropped_bound < kInf && dropped_bound < incumbent - 1e-6;
     if (dropped_open && verbose_) {
-        log_.log("Search incomplete: %d node(s) dropped without an LP verdict, bound %.6g\n",
-                 lp_stats_.nodes_dropped_no_verdict, log_obj_sign_ * dropped_bound);
+        log_.log(
+            "Search incomplete: %d node(s) dropped without an LP verdict, %d at the time "
+            "limit, bound %.6g\n",
+            lp_stats_.nodes_dropped_no_verdict, lp_stats_.nodes_dropped_time_limit,
+            log_obj_sign_ * dropped_bound);
     }
     // An open queue means a limit stopped the tree, or its gap test, which
     // reads the queue alone: with nodes dropped, the gap may still be open
-    // and no limit reached, which is no limit's status.
-    const bool limit_hit = !queue.empty() && (!dropped_open || nodes_explored >= node_limit_ ||
-                                              result.time_seconds >= time_limit_);
+    // and no limit reached, which is no limit's status. A node the deadline
+    // stopped is the time limit's, even when it was the last (#351).
+    const bool limit_hit = (!queue.empty() && (!dropped_open || nodes_explored >= node_limit_ ||
+                                               result.time_seconds >= time_limit_)) ||
+                           (dropped_open && lp_stats_.nodes_dropped_time_limit > 0);
     const Status limit_status =
         nodes_explored >= node_limit_ ? Status::NodeLimit : Status::TimeLimit;
     if (incumbent < kInf) {

@@ -529,6 +529,33 @@ TEST_CASE("DualSimplex: max_solve_seconds enforces time limit", "[dual_simplex][
     CHECK(result.status == Status::TimeLimit);
 }
 
+// #351: the deadline is the solve's limit when it is the nearer one, and the
+// caller's max_solve_seconds survives the solve unchanged.
+TEST_CASE("DualSimplex: a passed deadline stops the solve, its own limit kept",
+          "[dual_simplex][time_limit]") {
+    auto lp = buildTrivialLP();
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts = solver.getOptions();
+    opts.max_solve_seconds = 12.5;
+    opts.deadline = Deadline::after(0.0);
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    CHECK(solver.solve().status == Status::TimeLimit);
+    CHECK(solver.getOptions().max_solve_seconds == 12.5);
+
+    // A far deadline, with no limit of the solver's own, lets it finish.
+    opts.max_solve_seconds = -1.0;
+    opts.deadline = Deadline::after(3600.0);
+    solver.setOptions(opts);
+    solver.clearBasis();
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+    CHECK(solver.getOptions().max_solve_seconds == -1.0);
+}
+
 TEST_CASE("DualSimplex: primal-feasible guardrails tolerate non-positive options",
           "[dual_simplex][options][guardrail]") {
     auto lp = buildTrivialLP();

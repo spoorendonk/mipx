@@ -660,6 +660,19 @@ void DualSimplexSolver::refactorize() {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
+    // The deadline is this solve's max_solve_seconds when it is the nearer
+    // limit (#351); every time check below then holds it. The caller's
+    // option is put back on every way out.
+    struct RestoreLimit {
+        double& slot;
+        double value;
+        ~RestoreLimit() { slot = value; }
+    } restore{options_.max_solve_seconds, options_.max_solve_seconds};
+    if (options_.deadline.isSet()) {
+        const double left = options_.deadline.remainingSeconds();
+        const double own = restore.value;
+        options_.max_solve_seconds = own < 0.0 ? left : std::min(own, left);
+    }
     const auto start = std::chrono::steady_clock::now();
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);

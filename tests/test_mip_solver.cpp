@@ -859,6 +859,33 @@ TEST_CASE("MipSolver: time limit stops a root LP that does not finish in time",
     checkSetCoverIncumbent(lp, result.solution);
 }
 
+// #351: the time limit holds through the tree. On this model the root
+// finishes well inside the limit and the tree's node and strong-branching
+// LPs run past it: before the tree's LPs got the time left, the solve
+// overran 8 s by 0.38 s here (32-core box, one thread), after by 0.01 s.
+// Wall-clock, so [benchmark] keeps it out of the default suite.
+TEST_CASE("MipSolver: time limit stops the tree's LPs", "[mip][benchmark][time_limit]") {
+    constexpr double kLimit = 8.0;
+    constexpr double kAllowedOverrun = 0.2;
+    const auto lp = buildSlowRootSetCover(400, 40000, 8);
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setTimeLimit(kLimit);
+    solver.load(lp);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto result = solver.solve();
+    const double wall =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    CHECK(result.status == Status::TimeLimit);
+    CHECK(result.nodes > 1);  // the limit fell in the tree, not the root
+    CHECK(std::isfinite(result.best_bound));
+    CHECK(wall <= kLimit + kAllowedOverrun);
+    CHECK(result.time_seconds <= kLimit + kAllowedOverrun);
+    checkSetCoverIncumbent(lp, result.solution);
+}
+
 // #336, deterministic: with no time at all, every root policy, the race
 // included, returns TimeLimit with no bound and no node beyond the root.
 TEST_CASE("MipSolver: a zero time limit stops in the root with no bound", "[mip][time_limit]") {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 #include "mipx/lp_problem.h"
 #include "mipx/lp_solver.h"
 #include "mipx/lu.h"
@@ -118,6 +119,11 @@ struct DualSimplexOptions {
 
     // Solve time limit for stand-alone LP usage. Negative means disabled.
     double max_solve_seconds = -1.0;
+    // A wall-clock point every solve stops by, whichever of it and
+    // max_solve_seconds comes first, with Status::TimeLimit (#351). Set once
+    // on a solver whose solves share one budget (a MIP tree's); none by
+    // default. Its stop flag, if any, is not read: stop_flag is.
+    Deadline deadline;
 
     // Cost perturbation against dual degeneracy (#278), after HiGHS's
     // HEkk::initialiseCost: each bounded structural's cost moves by

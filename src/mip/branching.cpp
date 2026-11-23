@@ -275,6 +275,12 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 telemetry.strong_branch_probe_work_units += down.work_units;
                 lp.setColBounds(c.var, orig_lb, orig_ub);
 
+                if (down.status == Status::TimeLimit) {
+                    // The MIP's deadline passed mid-probe (#351): no time is
+                    // left for more, and a cut-short probe teaches the
+                    // pseudocosts nothing. Choose among those probed.
+                    break;
+                }
                 if (down.status == Status::Infeasible) {
                     down_gain = kStrongInfeasibleGain;
                 } else if (down.status == Status::Optimal || down.status == Status::IterLimit) {
@@ -300,6 +306,9 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 telemetry.strong_branch_probe_work_units += up.work_units;
                 lp.setColBounds(c.var, orig_lb, orig_ub);
 
+                if (up.status == Status::TimeLimit) {
+                    break;  // as for the down probe; its sample stands
+                }
                 if (up.status == Status::Infeasible) {
                     up_gain = kStrongInfeasibleGain;
                 } else if (up.status == Status::Optimal || up.status == Status::IterLimit) {

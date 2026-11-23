@@ -79,13 +79,18 @@ struct MipLpStats {
     Int root_race_barrier_wins = 0;
     Int root_race_pdlp_wins = 0;
     /// Node LPs that ended without a verdict (neither Optimal nor
-    /// Infeasible: Error, a limit, or Unbounded) and were re-solved cold.
+    /// Infeasible: Error, an iteration limit, or Unbounded) and were
+    /// re-solved cold. One the MIP's time limit stopped is not (#351).
     Int node_lp_no_verdict = 0;
     /// Of those, the ones the cold re-solve gave a verdict.
     Int node_lp_no_verdict_recovered = 0;
     /// Nodes left unexplored because no re-solve gave a verdict (#283).
     Int nodes_dropped_no_verdict = 0;
-    /// The least bound among those nodes; +inf when none was dropped. The
+    /// Nodes left unexplored because the time limit stopped their LP
+    /// (#351): the tree stopped on the limit, whatever the queue holds.
+    Int nodes_dropped_time_limit = 0;
+    /// The least bound among the nodes of either count; +inf when none was
+    /// dropped. The
     /// search counts as complete only while this is not below the incumbent.
     Real dropped_node_bound = kInf;
 };
@@ -592,10 +597,12 @@ private:
     std::optional<HeuristicSolution> integralNodeIncumbent(std::span<const Real> x, Real node_obj,
                                                            double& work_units) const;
     /// integralNodeIncumbent() against `model`, the gate being
-    /// heuristic_detail::isFeasiblePoint on it.
+    /// heuristic_detail::isFeasiblePoint on it. The completion LP stops by
+    /// `deadline` (#351).
     static std::optional<HeuristicSolution> completeIncumbent(const LpProblem& model,
                                                               std::span<const Real> x,
-                                                              Real node_obj, double& work_units);
+                                                              Real node_obj, double& work_units,
+                                                              Deadline deadline = {});
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;
@@ -623,12 +630,14 @@ private:
                      Int strong_branch_budget_override = -1,
                      std::optional<TreePseudocostSample>* deferred_pseudocost = nullptr);
     /// Re-solve from a cold basis a node LP that ended without a verdict;
-    /// returns `first` unchanged when it has one (#283).
+    /// returns `first` unchanged when it has one (#283), or when the time
+    /// limit stopped it: no time is left to retry in (#351).
     LpResult resolveNodeLpWithoutVerdict(DualSimplexSolver& lp, const LpResult& first,
                                          Int& node_iters_out, double& node_work_out);
     /// Record a node left unexplored for want of an LP verdict, with a valid
-    /// lower bound for its subtree (#283).
-    void recordNodeDroppedWithoutVerdict(Real bound);
+    /// lower bound for its subtree (#283); `status` is the LP's, and
+    /// TimeLimit counts it as stopped by the limit (#351).
+    void recordNodeDroppedWithoutVerdict(Real bound, Status status);
     void ageConflictPool();
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
                                bool lp_infeasible);
