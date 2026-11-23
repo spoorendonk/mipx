@@ -987,6 +987,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             case BarrierAlgorithm::CpuAugmented:
                 solver = createCpuAugmentedSolver();
                 break;
+            case BarrierAlgorithm::CpuSparseCholesky:
+                solver = createCpuSparseCholeskySolver();
+                break;
             default:
                 solver = createCpuCholeskySolver();
                 break;
@@ -994,20 +997,30 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     }
 
     if (solver) {
-        if (!solver->setup(aeq_, m, n, options_)) {
-            if (last_error_.empty()) {
-                last_error_ = "Barrier backend setup failed.";
+        // A factor too large for memory ends the solve with an error status
+        // rather than an exception out of solve() (#280).
+        try {
+            if (!solver->setup(aeq_, m, n, options_)) {
+                if (last_error_.empty()) {
+                    last_error_ = solver->lastError().empty() ? "Barrier backend setup failed."
+                                                              : solver->lastError();
+                }
+                return BarrierIpmOutcome::Failed;
             }
+            outcome = runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s,
+                                     iters);
+        } catch (const std::bad_alloc&) {
+            last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
         }
-        outcome =
-            runMehrotraIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y, s, iters);
         ok = outcome != BarrierIpmOutcome::Failed;
         if (!ok && last_error_.empty() &&
             !(options_.stop_flag != nullptr &&
               options_.stop_flag->load(std::memory_order_relaxed))) {
             if (!gpu_fallback_error.empty()) {
                 last_error_ = gpu_fallback_error + " CPU fallback also failed.";
+            } else if (!solver->lastError().empty()) {
+                last_error_ = solver->lastError();
             } else {
                 last_error_ = "Barrier solve failed.";
             }

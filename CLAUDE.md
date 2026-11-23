@@ -327,6 +327,7 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 | `MIPX_SIMD_ISA` | native | SIMD codegen: `off`, `avx2`, `native` |
 | `MIPX_STRICT_WARNINGS` | ON | `-Werror` |
 | `MIPX_USE_CCACHE` | ON | Use `ccache`/`sccache` as compiler launcher when installed |
+| `MIPX_USE_BLAS` | auto-detect (OFF in the wheel) | BLAS-3 for the barrier's sparse NE Cholesky blocks, loaded at run time (#290) |
 
 `CMAKE_CUDA_ARCHITECTURES` is cached at first configure, so a `build/` made
 before #192 keeps nvcc's default (75), whose code the driver cannot JIT for an
@@ -345,9 +346,11 @@ compile command, so it only hits there with `base_dir` set in the user's
 ccache config to a directory above both checkouts (e.g. `$HOME`). That
 rewrites absolute path *arguments* but not `-D` values: an absolute path in a
 target-wide definition makes every file of the target miss direct mode, and
-the files that expand it miss outright. Keep such paths in
+the files that expand it miss outright. Keep checkout paths in
 `tests/test_paths.cpp`, the one file that carries them (#217: 96% → 99.5%
-hits, second-worktree build ~19s → ~11s).
+hits, second-worktree build ~19s → ~11s). A system path, the same in every
+checkout, is harmless as a per-source definition: `sparse_cholesky.cpp`
+carries the BLAS library's (#290).
 
 The `clean` block deliberately keeps `build/_deps`, so a build in place in
 this checkout rebuilds everything of ours but does not re-clone Catch2 and
@@ -426,4 +429,13 @@ Regression gates and benchmark scripts for Netlib LP, MIPLIB MIP, Mittelman, and
   `mipx-presolve-bench-highs`, the HiGHS side of the presolve-only bench
   (#287). The mipx library, CLI and tests never link it, and the gates build
   without it.
+  BLAS and LAPACK are allowed as dense kernels, not solvers (Simon,
+  2026-11-23): `MIPX_USE_BLAS` (on when CMake finds a BLAS, OpenBLAS
+  preferred) runs the supernode blocks of the barrier's sparse Cholesky
+  (#290) on BLAS-3, with mipx's own loops as the fallback when no BLAS is
+  found. BLAS threads follow `BarrierOptions::threads` (the CLI's
+  `--threads`), so one-thread panels stay one-thread. The library is
+  `dlopen`ed on first use, never linked: OpenBLAS reserves its thread pool
+  when it loads, which failed every mipx binary under `ulimit -v`, barrier or
+  not. Keep it that way.
 - CUDA code lives alongside CPU code in the same directories (`.cu` files).

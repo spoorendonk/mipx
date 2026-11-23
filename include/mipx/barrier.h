@@ -6,6 +6,7 @@
 #include "mipx/lp_solver.h"
 
 #include <atomic>
+#include <cstddef>
 #include <span>
 #include <string>
 #include <vector>
@@ -14,10 +15,11 @@ namespace mipx {
 
 enum class BarrierAlgorithm {
     Auto,
-    CpuCholesky,
+    CpuCholesky,  // normal equations, dense LL'
     CpuAugmented,
     GpuCholesky,
     GpuAugmented,
+    CpuSparseCholesky,  // normal equations, sparse supernodal LL' (#290); opt-in
 };
 
 enum class BarrierOrdering {
@@ -41,10 +43,18 @@ struct BarrierOptions {
     Real regularization = 1e-8;
     Real step_fraction = 0.995;
     BarrierAlgorithm algorithm = BarrierAlgorithm::Auto;
-    // Fill-reducing ordering for the sparse augmented (LDL') CPU path only.
-    // The dense normal-equations path has no sparsity to preserve, and the GPU
-    // path delegates ordering to cuDSS, so this is ignored by both.
+    // Fill-reducing ordering for the sparse CPU paths (augmented LDL' and
+    // sparse normal equations). The dense normal-equations path has no
+    // sparsity to preserve, and the GPU path delegates ordering to cuDSS, so
+    // this is ignored by both.
     BarrierOrdering ordering = BarrierOrdering::Auto;
+    // Threads of the BLAS behind the sparse normal-equations factorization.
+    Int threads = 1;
+    // Cap in bytes on a CPU normal-equations factor (dense or sparse); one
+    // above it ends the solve with Status::Error. The sparse path counts the
+    // arrays of M itself against the same cap. 0: the memory available when
+    // the backend is set up (MemAvailable, or the cgroup's headroom if lower).
+    std::size_t ne_max_bytes = 0;
     Real dense_col_fraction = 0.1;
     Int ir_steps = 2;
     Int ruiz_iterations = 10;

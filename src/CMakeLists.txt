@@ -9,6 +9,7 @@ add_library(mipx STATIC
     lp/barrier.cpp
     lp/barrier_cpu.cpp
     lp/barrier_presolve.cpp
+    lp/sparse_cholesky.cpp
     lp/pdlp.cpp
     io/mps_reader.cpp
     io/mps_writer.cpp
@@ -79,6 +80,18 @@ endif()
 if(MIPX_USE_TBB)
     target_link_libraries(mipx PUBLIC TBB::tbb)
     target_compile_definitions(mipx PUBLIC MIPX_HAS_TBB)
+endif()
+
+# BLAS is not linked: sparse_cholesky.cpp dlopens the shared library found
+# here on first use (OpenBLAS reserves its thread pool at load time, which
+# would otherwise fail every mipx binary under an address-space limit). The
+# path is a system library's, the same in every checkout, so it does not
+# defeat ccache across worktrees.
+if(MIPX_BLAS_SHARED_LIBRARY)
+    set_property(SOURCE lp/sparse_cholesky.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        "MIPX_BLAS_LIBRARY=\"${MIPX_BLAS_SHARED_LIBRARY}\""
+        "MIPX_BLAS_LIBRARY_REAL=\"${MIPX_BLAS_SHARED_LIBRARY_REAL}\"")
+    target_link_libraries(mipx PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 if(MIPX_CUDA_BACKEND_ENABLED)

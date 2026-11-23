@@ -21,6 +21,7 @@ add_executable(mipx-tests
     test_parallel.cpp
     test_symmetry.cpp
     test_barrier.cpp
+    test_sparse_cholesky.cpp
     test_pdlp.cpp
     test_exact_refinement.cpp
     test_conflict_graph.cpp
@@ -48,6 +49,12 @@ mipx_set_compiler_flags(mipx-tests)
 set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
+
+# A build that found a shared BLAS must load it at run time (#290).
+if(MIPX_BLAS_SHARED_LIBRARY)
+    set_property(SOURCE test_sparse_cholesky.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        MIPX_TEST_EXPECT_BLAS)
+endif()
 
 # The CLI tests in test_cli.cpp spawn the real binary; they compile to nothing
 # when there is no binary to spawn (MIPX_BUILD_CLI=OFF).
