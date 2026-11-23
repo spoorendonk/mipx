@@ -313,7 +313,7 @@ TEST_CASE("BarrierSolver CPU Cholesky: equality rows and a dependent row converg
     }
 }
 
-TEST_CASE("BarrierSolver CPU Cholesky: small Netlib LPs converge without crossover",
+TEST_CASE("BarrierSolver CPU: small Netlib LPs converge without crossover",
           "[barrier][cpu-cholesky][netlib]") {
     // Issue #204: the CPU normal-equations IPM solved none of these. Crossover
     // is off, so a cold dual-simplex fallback cannot stand in for the IPM.
@@ -386,6 +386,7 @@ TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]"
     BarrierOptions opts;
     opts.verbose = false;
     opts.algorithm = BarrierAlgorithm::CpuAugmented;
+    opts.crossover = false;  // the IPM itself, not a crossover rescue
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
@@ -409,13 +410,16 @@ TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
+    opts.crossover = false;  // the IPM itself, not a crossover rescue
     opts.presolve = presolve;
     opts.algorithm = algo;
     solver.setOptions(opts);
     solver.load(lp);
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    CHECK(std::abs(result.objective - 2.03902e6) <= 1e-6 * 2.03902e6);
+    // mipx dual simplex, and HiGHS when mcf recorded it: 2039020.
+    constexpr Real kOptimum = 2039020.0;
+    CHECK(std::abs(result.objective - kOptimum) <= 1e-6 * kOptimum);
 }
 
 // ============================================================================
