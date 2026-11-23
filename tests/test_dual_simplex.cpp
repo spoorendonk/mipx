@@ -1429,15 +1429,25 @@ TEST_CASE("DualSimplex: row_price_actual_work charges the kernel's own work",
 }
 
 // #379: an abandoned sparse walk is charged the rows it reached and the dense
-// scan that resumes after it, so on the same pivots the fallback assembly costs
-// the dense one less only the rows the walk skipped (zero in BTRAN): at most m
-// a fallback. Losing the walk's or the resumed scan's share breaks the bound.
+// scan that resumes after it. On the same pivots a fallback assembly is then
+// charged less than the dense scan's by only the rows below its break row that
+// BTRAN left at zero, at most m - 1. Every row of this LP has n >= m - 1
+// nonzeros, so a lost walk share (at least n + 2 a fallback: the break row and
+// its slack) exceeds the bound, and so does a lost resume share on any
+// fallback that breaks before the last row.
 TEST_CASE("DualSimplex: row_price_actual_work charges a fill-in fallback's walk and resume",
           "[dual_simplex][row_price]") {
     const Index m = 40;
-    const auto lp = buildDenseLP(m, 30);
+    const auto lp = buildDenseLP(m, m);
 
-    auto solve = [&](bool force_dense, DualSimplexSolver::RowPriceStats& stats) {
+    struct Run {
+        LpResult result;
+        std::vector<BasisStatus> basis;
+        DualSimplexSolver::RowPriceStats stats;
+        DualSimplexSolver::DseFallbackStats dse;
+        uint64_t ticks = 0;
+    };
+    auto solve = [&](bool force_dense) {
         DualSimplexSolver solver;
         solver.setVerbose(false);
         DualSimplexOptions opts;
@@ -1445,22 +1455,33 @@ TEST_CASE("DualSimplex: row_price_actual_work charges a fill-in fallback's walk 
         opts.force_dense_pivot_row = force_dense;
         solver.setOptions(opts);
         solver.load(lp);
-        const auto result = solver.solve();
-        REQUIRE(result.status == Status::Optimal);
-        stats = solver.getRowPriceStats();
-        return std::pair{result.iterations, solver.workUnits().ticks()};
+        Run run{solver.solve(),
+                {},
+                solver.getRowPriceStats(),
+                solver.getDseFallbackStats(),
+                solver.workUnits().ticks()};
+        run.basis = solver.getBasis();
+        return run;
     };
-    DualSimplexSolver::RowPriceStats adaptive_stats;
-    DualSimplexSolver::RowPriceStats dense_stats;
-    const auto [adaptive_iters, adaptive_ticks] = solve(false, adaptive_stats);
-    const auto [dense_iters, dense_ticks] = solve(true, dense_stats);
+    const Run adaptive = solve(false);
+    const Run dense = solve(true);
 
-    REQUIRE(adaptive_stats.fill_in_fallbacks > 0);
-    REQUIRE(adaptive_stats.sparse_assemblies == 0);
-    REQUIRE(adaptive_iters == dense_iters);
-    REQUIRE(adaptive_ticks <= dense_ticks);
-    CHECK(dense_ticks - adaptive_ticks <=
-          static_cast<uint64_t>(adaptive_stats.fill_in_fallbacks) * static_cast<uint64_t>(m));
+    REQUIRE(adaptive.result.status == Status::Optimal);
+    REQUIRE(dense.result.status == Status::Optimal);
+    REQUIRE(adaptive.stats.fill_in_fallbacks > 0);
+    REQUIRE(adaptive.stats.sparse_assemblies == 0);
+    // The bound compares charges on the same pivot path. The charges differ
+    // and feed the DSE cost check, so check what the path shows, not only its
+    // length.
+    REQUIRE(adaptive.result.iterations == dense.result.iterations);
+    REQUIRE(adaptive.basis == dense.basis);
+    REQUIRE(adaptive.dse.cost == dense.dse.cost);
+    REQUIRE(adaptive.dse.degenerate == dense.dse.degenerate);
+    CHECK_THAT(adaptive.result.objective, WithinAbs(dense.result.objective, 1e-9));
+
+    REQUIRE(adaptive.ticks <= dense.ticks);
+    CHECK(dense.ticks - adaptive.ticks <=
+          static_cast<uint64_t>(adaptive.stats.fill_in_fallbacks) * static_cast<uint64_t>(m - 1));
 }
 
 TEST_CASE("DualSimplex: row_price_actual_work defaults to off", "[dual_simplex][options]") {
