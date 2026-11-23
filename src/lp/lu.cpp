@@ -385,6 +385,12 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     ft_dense_offset_.clear();
     ft_dense_value_.clear();
     ft_dense_nnz_ = 0;
+    ft_row_head_.assign(static_cast<std::size_t>(dim_), -1);
+    ft_row_next_.clear();
+    ft_entry_eta_.clear();
+    ft_last_pivot_.assign(static_cast<std::size_t>(dim_), -1);
+    ft_prev_pivot_.clear();
+    ft_pivot_head_.clear();
     update_touched_.clear();
     // Reset update workspace so the first update after a refactorization
     // cannot read stale values when using sparse touch clearing.
@@ -1535,11 +1541,22 @@ void SparseLU::applyFTTransposeSparse(std::span<Real> x, std::vector<Index>& pat
     newMarkEpoch();
     const uint32_t id = sparse_epoch_id_;
     uint32_t* mark = sparse_epoch_.data();
+    // Each eta reads its own entries and writes only its pivot position, so
+    // the pattern grows by at most one position per eta. On a sparse input
+    // the etas go by their row-wise copy, which reads only the rows of
+    // positions that are nonzero; on a dense one, or a small basis, by their
+    // columns, which read every entry once.
+    const bool by_row =
+        solve_kernel_ == SolveKernel::AlwaysHyperSparse ||
+        (solve_kernel_ == SolveKernel::Auto && dim_ >= kHyperSparseMinDim &&
+         static_cast<Real>(pattern.size()) <= kHyperSparseMaxDensity * static_cast<Real>(dim_));
+    if (by_row) {
+        applyFTTransposeByRow(x, pattern, mark, id);
+        return;
+    }
     for (Index i : pattern) {
         mark[i] = id;
     }
-    // Each eta reads its own entries and writes only its pivot position, so
-    // the pattern grows by at most one position per eta.
     work_.count(static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_ +
                 static_cast<uint64_t>(num_updates_));
     applyFTTranspose(x);
@@ -1550,6 +1567,72 @@ void SparseLU::applyFTTransposeSparse(std::span<Real> x, std::vector<Index>& pat
             pattern.push_back(pos);
         }
     }
+}
+
+void SparseLU::applyFTTransposeByRow(std::span<Real> x, std::vector<Index>& pattern, uint32_t* mark,
+                                     uint32_t id) const {
+    // Going through the etas from the newest u down, eta u sets
+    //     x[p_u] = (x[p_u] - sum_i d_u[i] * x[i]) / d_u[p_u],
+    // reading x as the newer etas left it. Instead of a dot product per eta,
+    // each value x takes is scattered, by the row-wise copy, into the
+    // accumulators of the etas that read it: a position's value from the
+    // input is read by the etas newer than the newest one pivoting there
+    // (ft_last_pivot_), and the value eta u writes by the etas between u and
+    // the previous one pivoting at p_u (ft_prev_pivot_). Each row list runs
+    // newest first, so a range is a prefix walk from its head. Only rows of
+    // nonzero values are walked; an eta stored dense takes its dot product.
+    ft_acc_.assign(static_cast<std::size_t>(num_updates_), 0.0);
+    Real* acc = ft_acc_.data();
+    const Index* next = ft_row_next_.data();
+    const Index* entry_eta = ft_entry_eta_.data();
+    const Real* value = ft_value_.data();
+    uint64_t touched = 2 * static_cast<uint64_t>(num_updates_) + pattern.size();
+    for (Index i : pattern) {
+        // A repeated input position scatters once.
+        if (mark[i] == id) {
+            continue;
+        }
+        mark[i] = id;
+        const Real xi = x[i];
+        if (xi == 0.0) {
+            continue;
+        }
+        const Index stop = ft_last_pivot_[static_cast<std::size_t>(i)];
+        for (Index k = ft_row_head_[static_cast<std::size_t>(i)]; k >= 0 && entry_eta[k] > stop;
+             k = next[k]) {
+            acc[entry_eta[k]] += value[k] * xi;
+            ++touched;
+        }
+    }
+    for (Index u = num_updates_ - 1; u >= 0; --u) {
+        const Index pos = ft_pivot_pos_[u];
+        Real sum = acc[u];
+        if (ft_is_dense_[u] != 0) {
+            // x holds every position's current value, so the dot reads them.
+            sum = denseDot(ft_dense_value_.data() + ft_dense_offset_[u], x);
+            touched += static_cast<uint64_t>(dim_);
+        }
+        const Real old = x[pos];
+        if (old == 0.0 && sum == 0.0) {
+            continue;
+        }
+        const Real xp = (old - sum) * ft_pivot_inv_[u];
+        x[pos] = xp;
+        if (xp == 0.0) {
+            continue;
+        }
+        if (mark[pos] != id) {
+            mark[pos] = id;
+            pattern.push_back(pos);
+        }
+        const Index stop = ft_prev_pivot_[static_cast<std::size_t>(u)];
+        for (Index k = ft_pivot_head_[static_cast<std::size_t>(u)]; k >= 0 && entry_eta[k] > stop;
+             k = next[k]) {
+            acc[entry_eta[k]] += value[k] * xp;
+            ++touched;
+        }
+    }
+    work_.count(touched);
 }
 
 void SparseLU::solveLDense(std::span<Real> work) const {
@@ -2326,6 +2409,15 @@ void SparseLU::updateFromFtranColumn(Index pivot_pos, std::span<const Real> tran
         dim_ >= kFtDenseMinDim &&
         update_nnz >= static_cast<Index>(kFtDenseThreshold * static_cast<Real>(dim_));
 
+    // Row-wise bookkeeping (see ft_row_head_). The eta holds no entry at its
+    // own pivot position, so the pivot's row head is the same before and
+    // after its entries are added.
+    const Index eta = num_updates_;
+    const auto pivot_sz = static_cast<std::size_t>(pivot_pos);
+    ft_prev_pivot_.push_back(ft_last_pivot_[pivot_sz]);
+    ft_pivot_head_.push_back(ft_row_head_[pivot_sz]);
+    ft_last_pivot_[pivot_sz] = eta;
+
     if (use_dense_store) {
         Index dense_off = static_cast<Index>(ft_dense_value_.size());
         ft_dense_offset_.push_back(dense_off);
@@ -2352,6 +2444,10 @@ void SparseLU::updateFromFtranColumn(Index pivot_pos, std::span<const Real> tran
             }
             const Real v = transformed_col[i];
             if (std::abs(v) > drop_tol) {
+                const auto i_sz = static_cast<std::size_t>(i);
+                ft_row_next_.push_back(ft_row_head_[i_sz]);
+                ft_row_head_[i_sz] = static_cast<Index>(ft_index_.size());
+                ft_entry_eta_.push_back(eta);
                 ft_index_.push_back(i);
                 ft_value_.push_back(v);
                 max_u_entry_ = std::max(max_u_entry_, std::abs(v));

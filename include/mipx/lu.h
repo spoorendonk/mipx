@@ -58,13 +58,13 @@ public:
     /// exactly zero elsewhere. No value is dropped, however small: the result
     /// is the dense solve's up to round-off. The L and U stages each run
     /// hyper-sparse or dense on their predicted result density; the update
-    /// etas go by pattern forward (an eta stored dense costs a rescan of the
-    /// dimension) and densely in btranSparse, so those parts are not yet
-    /// O(pattern).
+    /// etas go by pattern (an eta stored dense costs the dimension).
     void ftranSparse(std::span<Real> rhs, std::vector<Index>& pattern) const;
 
     /// Solve B^T*y = rhs in-place by pattern, as ftranSparse: `pattern` lists
-    /// basis positions on entry and rows on return.
+    /// basis positions on entry and rows on return. The update etas go by
+    /// their row-wise copy, so they cost the entries in the rows the result
+    /// reaches rather than all eta nonzeros.
     void btranSparse(std::span<Real> rhs, std::vector<Index>& pattern) const;
 
     /// Forrest-Tomlin rank-1 update: replace basis column at position `pivot_pos`
@@ -166,6 +166,10 @@ private:
     /// extended by the positions the etas make nonzero.
     void applyFTSparse(std::span<Real> x, std::vector<Index>& pattern) const;
     void applyFTTransposeSparse(std::span<Real> x, std::vector<Index>& pattern) const;
+    /// applyFTTransposeSparse's hyper-sparse kernel, by the etas' row-wise copy.
+    /// `mark`/`id` mark the positions of `pattern`.
+    void applyFTTransposeByRow(std::span<Real> x, std::vector<Index>& pattern, uint32_t* mark,
+                               uint32_t id) const;
 
     /// Dense L and L^T solves in elimination order (supernodal when panels exist).
     void solveLDense(std::span<Real> x) const;
@@ -320,6 +324,22 @@ private:
     std::vector<Index> ft_dense_offset_;
     std::vector<Real> ft_dense_value_;
     uint64_t ft_dense_nnz_ = 0;
+    // The sparse etas' entries again, by position, for BTRAN by pattern.
+    // ft_row_head_[i] is the newest entry k (index into ft_index_) at
+    // position i, ft_row_next_[k] the next older one there (-1 ends both),
+    // and ft_entry_eta_[k] the eta holding entry k.
+    std::vector<Index> ft_row_head_;
+    std::vector<Index> ft_row_next_;
+    std::vector<Index> ft_entry_eta_;
+    // ft_last_pivot_[i] is the newest eta pivoting at position i (-1: none).
+    // For eta u, ft_prev_pivot_[u] is the previous eta pivoting at the same
+    // position (-1: none), and ft_pivot_head_[u] was ft_row_head_ at that
+    // position when u was added: the newest entry there of an eta before u.
+    std::vector<Index> ft_last_pivot_;
+    std::vector<Index> ft_prev_pivot_;
+    std::vector<Index> ft_pivot_head_;
+    // Per-eta dot products accumulated by applyFTTransposeByRow.
+    mutable std::vector<Real> ft_acc_;
 
     Index num_updates_ = 0;
 
