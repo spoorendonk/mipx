@@ -15,8 +15,8 @@ namespace mipx {
 /// CSR (toSparseMatrix).
 ///
 /// An entry is a position, not a nonzero: a value may be exactly 0 and stays
-/// an entry until erased, as a coefficient override of 0 does today, so the
-/// move onto this structure keeps every row's pattern (#338 review).
+/// an entry until erased, as the input's explicit zeros and a coefficient
+/// changed to 0 do, so every row keeps the input's pattern (#338 review).
 ///
 /// Entries live in an append-only pool with 32-bit ids, never reused or
 /// reclaimed: the pool holds the input's nonzeros plus every insert of a new
@@ -34,7 +34,8 @@ namespace mipx {
 class PresolveMatrix {
 public:
     PresolveMatrix() = default;
-    /// Every stored entry of `matrix`, explicit zeros included.
+    /// Every stored entry of `matrix`, explicit zeros included. Each row's
+    /// columns must be sorted and unique (asserted), or find() misses them.
     explicit PresolveMatrix(const SparseMatrix& matrix);
 
     [[nodiscard]] Index numRows() const { return static_cast<Index>(row_size_.size()); }
@@ -76,8 +77,10 @@ public:
 
     /// The live entries of one row or column in order, as Terms: `for (const
     /// auto [col, a] : m.row(i))`. Reads the pool through the matrix at each
-    /// step, so an insert into another row or column may move it; the same
-    /// rule as the forEach walks holds for the line being walked.
+    /// step, so changing a value, erasing an entry, or inserting into another
+    /// row or column is fine while walking; only inserting a new entry into,
+    /// or clearing, the line being walked invalidates it (its id list may
+    /// grow, compact or empty).
     class Line {
     public:
         class Iterator {
