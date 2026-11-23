@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -1010,14 +1011,19 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
     return true;
 }
 
-// An Optimal whose point misses in the model's units (primalHoldsUnscaled())
-// is re-solved on the unscaled model from its basis, the way HiGHS cleans up
-// an optimum that holds only scaled: in the model's units kPrimalTol is what
-// the rows and bounds are held to, and the basis is the scaled optimum's, so
-// the clean-up starts close. It runs within what is left of the iteration and
-// time limits; with none left the verdict is withdrawn to that limit, as an
-// unchecked warm verdict is (#249). Its own verdict is returned unchecked, as
-// a cold one is. The scaled model is put back exactly as it was afterwards,
+// An Optimal the model's units refute is re-solved on the unscaled model from
+// its basis, the way HiGHS cleans up an optimum that holds only scaled: in the
+// model's units kPrimalTol and kDualTol are what the rows, bounds and
+// multipliers are held to, and the basis is the scaled optimum's, so the
+// clean-up starts close. Refuted means a point that misses
+// (primalHoldsUnscaled(), #307) or, on a point that holds, multipliers of the
+// wrong sign or a duality gap (optimumHoldsUnscaled(), #306): the scaled dual
+// tolerance is kDualTol cs_j on column j in the model's units. It runs within
+// what is left of the iteration and time limits; with none left the verdict
+// is withdrawn to that limit, as an unchecked warm verdict is (#249). Its own
+// verdict is returned unchecked, as a cold one is, with one exception: when
+// the scaled point held and the clean-up's Optimal misses, the scaled optimum
+// is put back. The scaled model is put back exactly as it was afterwards,
 // and the values, the basis and the factors with it, so later solves keep the
 // scaling. A clean-up that stops on a limit keeps its own point, unlike
 // solve()'s cold fallback, which puts the warm point back: there the cold run
@@ -1030,7 +1036,11 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // verdict the model's units refute.
 LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
                                             std::chrono::steady_clock::time_point start) {
-    if (res.status != Status::Optimal || !scaled_ || !has_basis_ || primalHoldsUnscaled()) {
+    if (res.status != Status::Optimal || !scaled_ || !has_basis_) {
+        return res;
+    }
+    const bool primal_held = primalHoldsUnscaled();
+    if (primal_held && optimumHoldsUnscaled()) {
         return res;
     }
     if (res.iterations >= iter_limit_) {
@@ -1057,6 +1067,18 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     // A DSE-to-Devex fallback tripped on the unscaled model says nothing of
     // the scaled one, which later warm solves (every B&B node) run on.
     const bool dse_fell_back = dse_fell_back_;
+    // A scaled optimum refuted only by its multipliers holds its rows and
+    // bounds; keep its point to put back if the clean-up's does not (#306).
+    struct Point {
+        std::vector<Real> primal, dual, reduced_cost;
+        std::vector<BasisStatus> var_status;
+        std::vector<Index> basis, nonbasic, basis_pos, nonbasic_pos;
+    };
+    std::optional<Point> scaled_point;
+    if (primal_held) {
+        scaled_point = Point{primal_, dual_,     reduced_cost_, var_status_,
+                             basis_,  nonbasic_, basis_pos_,    nonbasic_pos_};
+    }
     unapplyScaling();
     convertValues(true);
     row_scale_.assign(static_cast<std::size_t>(num_rows_), 1.0);
@@ -1081,6 +1103,23 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     buildBasisMatrixSource();
+    if (scaled_point && clean.status == Status::Optimal && !primalHoldsUnscaled()) {
+        // The unscaled factors of an ill-conditioned basis can read its point
+        // worse than the scaled ones did (cuts seed 45269): a dual refutation
+        // is not traded for a row miss. The scaled optimum stands, unchecked.
+        primal_ = std::move(scaled_point->primal);
+        dual_ = std::move(scaled_point->dual);
+        reduced_cost_ = std::move(scaled_point->reduced_cost);
+        var_status_ = std::move(scaled_point->var_status);
+        basis_ = std::move(scaled_point->basis);
+        nonbasic_ = std::move(scaled_point->nonbasic);
+        basis_pos_ = std::move(scaled_point->basis_pos);
+        nonbasic_pos_ = std::move(scaled_point->nonbasic_pos);
+        dual_ray_.clear();
+        primal_ray_.clear();
+        has_basis_ = true;
+        clean.objective = getObjective();
+    }
     if (has_basis_) {
         // Nonbasic values back exactly on the scaled bounds, and the factors
         // of the scaled basis for getTableauRow and the next warm solve.
