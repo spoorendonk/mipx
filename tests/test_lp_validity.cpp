@@ -1769,7 +1769,7 @@ TEST_CASE("Regression #305: a cold Farkas ray that fails in the model's units is
     // Audit cuts seed 63, scaled degenerate max, round 0. The cold Infeasible's
     // ray failed the contract in the model's units; the unscaled clean-up
     // re-solves from its basis and returns a ray that certifies.
-    requireCertifiedInfeasible(literalLp(
+    const LpProblem lp = literalLp(
         Sense::Maximize, 1.5,
         {-2531.25, 875, -19.53125, 0.026718749999999999, 0.0049687500000000001},
         {-kInf, -0.0015, -kInf, -kInf, -kInf}, {kInf, 0.00087500000000000002, kInf, -225, kInf},
@@ -1799,7 +1799,30 @@ TEST_CASE("Regression #305: a cold Farkas ray that fails in the model's units is
          {7, 3, -23.75},
          {7, 4, -3.75},
          {8, 0, -0.0047499999999999999},
-         {8, 4, 3750}}));
+         {8, 4, 3750}});
+    requireCertifiedInfeasible(lp);
+
+    // With a budget that ends inside the clean-up, its limit is no verdict
+    // and its point no bound: Error, not IterLimit. A budget that ends in
+    // the scaled solve is that solve's IterLimit; the scaled solve reaches a
+    // verdict only with iterations left, so the clean-up always gets some,
+    // and only a budget cut inside it gives Error.
+    DualSimplexSolver first;
+    const LpResult full = solveLiteral(first, lp);
+    REQUIRE(full.status == Status::Infeasible);
+    int errors = 0;
+    for (Int limit = 1; limit < full.iterations; ++limit) {
+        DualSimplexSolver cut_short;
+        cut_short.setVerbose(false);
+        cut_short.setIterationLimit(limit);
+        cut_short.load(lp);
+        const LpResult res = cut_short.solve();
+        INFO("iteration limit " << limit);
+        CHECK((res.status == Status::IterLimit || res.status == Status::Error));
+        CHECK(cut_short.getDualRay().empty());
+        errors += res.status == Status::Error ? 1 : 0;
+    }
+    CHECK(errors > 0);
 }
 
 TEST_CASE("Regression #305: a cold Infeasible on a feasible model is withdrawn to Error",

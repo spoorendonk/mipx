@@ -672,8 +672,10 @@ LpResult DualSimplexSolver::solve() {
     // coefficients of 0.0026 and 2.75e8, its pivot skipped as round-off). A
     // wrong Infeasible prunes a node and teaches a conflict, so the verdict is
     // withdrawn to Error, which B&B retries cold and then drops with its
-    // bound kept (#318).
-    if (res.status == Status::Infeasible && !checked && !dualRayMeetsContract()) {
+    // bound kept (#318). Not only an unchecked verdict: a checked Optimal
+    // whose point misses a column bound is cleaned up, and that re-solve's
+    // Infeasible is unchecked; a checked Infeasible passes again unchanged.
+    if (res.status == Status::Infeasible && !dualRayMeetsContract()) {
         return withdrawVerdict(res, Status::Error);
     }
     return res;
