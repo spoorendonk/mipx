@@ -12,6 +12,7 @@
 #include "mipx/lp_problem.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -107,7 +108,8 @@ inline bool parseCommon(int argc, char** argv, int& i, CommonOptions& opt,
 /// and HiGHS would run its MIP presolve, which logs no rules, on a model with
 /// integers. Semi columns, SOS and indicator constraints are refused, as
 /// mipx's presolve refuses them and HiGHS's API would drop the last two.
-inline LpProblem readOrExit(const CommonOptions& opt) {
+/// `relaxed`, when given, says whether the model had integer columns.
+inline LpProblem readOrExit(const CommonOptions& opt, bool* relaxed = nullptr) {
     LpProblem lp;
     try {
         lp = readModel(opt.path, opt.format);
@@ -119,6 +121,9 @@ inline LpProblem readOrExit(const CommonOptions& opt) {
         std::fprintf(stderr, "Error: %s has semi columns, SOS or indicator constraints\n",
                      opt.path.c_str());
         std::exit(kExitUsage);
+    }
+    if (relaxed != nullptr) {
+        *relaxed = lp.hasIntegers();
     }
     for (auto& t : lp.col_type) {
         t = VarType::Continuous;

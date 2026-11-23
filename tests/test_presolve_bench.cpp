@@ -177,7 +177,7 @@ TEST_CASE("Presolve bench: the reference comes from --solu", "[presolve][bench]"
     CHECK(fail.real("rel_err") > 1e-6);
 }
 
-TEST_CASE("Presolve bench: a postsolved point that misses a row fails the check",
+TEST_CASE("Presolve bench: the check's verdict follows the violation it reports",
           "[presolve][bench]") {
     // Issue #257's LP: its presolved answer, postsolved, has missed its one
     // row by 5e-5. Whatever presolve does with it, the verdict must follow
@@ -254,6 +254,12 @@ TEST_CASE("Presolve bench: a missing or malformed file is a usage error", "[pres
 
     const auto solu_alone = runBench(dataFile("presolve_bench.lp") + " --solu x.solu");
     CHECK(solu_alone.exit_code == 2);
+
+    // tiny.mps has a binary column: its .solu value is no LP optimum.
+    const auto mip_solu =
+        runBench(dataFile("tiny.mps") + " --check-postsolve --solu " + dataFile("tiny.solu"));
+    CHECK(mip_solu.exit_code == 2);
+    CHECK(mip_solu.row.empty());
 }
 
 #endif

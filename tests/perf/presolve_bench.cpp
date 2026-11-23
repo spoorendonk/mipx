@@ -274,7 +274,13 @@ int main(int argc, char** argv) {
     const Options opt = parse(argc, argv);
     const std::string instance =
         opt.common.name.empty() ? pb::instanceName(opt.common.path) : opt.common.name;
-    const LpProblem lp = pb::readOrExit(opt.common);
+    bool relaxed = false;
+    const LpProblem lp = pb::readOrExit(opt.common, &relaxed);
+    if (relaxed && !opt.solu.empty()) {
+        // A .solu value of a model with integers is its MIP optimum, not the
+        // optimum of the relaxation this checks.
+        pb::usageError(kUsage, "--solu with a model that has integer columns");
+    }
 
     std::vector<double> times;
     Presolver presolver;

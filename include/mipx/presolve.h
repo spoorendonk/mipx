@@ -135,7 +135,8 @@ struct PresolveStats {
     Real time_seconds = 0.0;
     /// Wall time in each reduction, summed over the rounds, so a slow
     /// presolve can be traced to the pass that takes it (#287). What
-    /// time_seconds holds beyond their sum is the loop's own bookkeeping.
+    /// time_seconds holds beyond their sum is the setup and the loop's own
+    /// bookkeeping.
     Real fixed_var_seconds = 0.0;
     Real singleton_row_seconds = 0.0;
     Real singleton_col_seconds = 0.0;
