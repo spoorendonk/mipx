@@ -19,8 +19,8 @@ instance's file or `.solu` reference is missing. Better than listed is reported,
 not failed. A run in which nothing was gated (an empty or missing list) fails
 too. MIPs run with `--gap-tol 1e-9`, so Optimal means proven and the objective
 can be held to 1e-6. A MIP stopped by a limit is `dnf` whatever its incumbent:
-the CLI prints `Objective: 0` when it has none, so the incumbent cannot be
-checked (noted on #223).
+the CLI prints `Objective: none` when it has none (#224), and checking a
+limited incumbent is follow-up work on #223.
 
 ```bash
 ./tests/data/download_netlib.sh && ./tests/data/download_miplib.sh --small
@@ -32,7 +32,9 @@ ctest --test-dir build -L instance-gate --output-on-failure   # both, via ctest
 Each run prints one line per instance and a per-backend count of the four
 classes. Without downloaded instances the script prints `SKIPPED` and exits 77,
 which ctest shows as a skip. Options: `--backends dual,pdlp`, `--time-limit S`
-(defaults: 10s per LP, 60s per MIP), `--binary PATH`.
+(defaults: 10s per LP, 60s per MIP), `--binary PATH`. A row's own
+`time_limit` wins over `--time-limit`: to try such an instance at a longer
+limit, pass `--expected-file` with a copy of the list without it.
 
 Regenerating the lists:
 
@@ -53,10 +55,12 @@ bnl2, which it once reported Optimal up to 7.7% from the optimum (#205): `dnf`
 is expected there, and the gate fails if they disagree again. The MIP list covers flugpl, gen, gt2
 and p0201. gt2 is `dnf`: the tree search has not finished it since #278
 changed the LP vertices it lands on (#341, #350). Its 10 s per-row limit
-keeps the gate from spending 60 s on a known stop. The row still fails on a
-wrong Optimal or Infeasible claim, but a crash, error or hang on gt2 is `dnf`
-too and passes, and it reports `BETTER` once gt2 solves again; then set the
-row to `match_1e-6` and drop its limit by hand (`--write-expected` keeps it).
+keeps the gate from spending 60 s on a known stop. The row fails only if gt2
+claims Optimal, Infeasible or Unbounded wrongly within 10 s; a crash, error,
+hang or a wrong incumbent at the limit is `dnf` and passes. It reports
+`BETTER` once gt2 solves within 10 s (0.3 s before #278; #350 asks for well
+inside 10 s); then set the row to `match_1e-6` and drop its limit by hand
+(`--write-expected` keeps it).
 A gate with no instance files exits 77 and names the listed instances it did
 not run; ctest shows only `Skipped` for it unless run with `-V`. Widening the
 lists to the full sets is a benchmark-scale run, tracked in #223. The gate

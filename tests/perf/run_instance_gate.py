@@ -361,7 +361,8 @@ def main(argv: list[str]) -> int:
     listed = read_expected(suite.expected)
     if not find_instances(suite.data_dir):
         # Name what was not gated, so a skip cannot read as a pass (#341).
-        names = sorted({row.instance for row in listed})
+        backends = selected_backends(args, suite)
+        names = sorted({row.instance for row in listed if row.backend in backends})
         print(
             f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}, "
             f"not run: {', '.join(names) or 'none listed'}. "

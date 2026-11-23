@@ -191,6 +191,12 @@ def test_gate_skip_names_the_listed_instances_it_did_not_run(
     assert code == gate.SKIP_EXIT
     assert "not run: good, slow." in capsys.readouterr().err
 
+    (tmp_path / "lp").mkdir()
+    _, lp_list = setup_suite(tmp_path / "lp", "good,dual,match_1e-6\nslow,pdlp,dnf\n")
+    argv = ["lp", "--data-dir", str(empty), "--binary", "/nonexistent", "--backends", "dual"]
+    assert gate.main([*argv, "--expected-file", str(lp_list)]) == gate.SKIP_EXIT
+    assert "not run: good." in capsys.readouterr().err
+
 
 def test_write_expected_regenerates_and_keeps_other_rows(tmp_path: Path) -> None:
     data, expected = setup_suite(tmp_path, "instance,backend,expected,time_limit\n", header=False)
