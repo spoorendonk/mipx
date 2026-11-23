@@ -258,6 +258,8 @@ constexpr Rule kRules[] = {
     {"coeff_tightening", &PresolveStats::coeff_tightening_changes,
      &PresolveStats::coeff_tightening_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
+    {"implied_bounds_relaxed", &PresolveStats::implied_bounds_relaxed,
+     &PresolveStats::implied_bounds_relaxed_seconds},
 };
 
 void addOptional(pb::Row& row, const std::string& column, const std::optional<Real>& v) {

@@ -156,6 +156,7 @@ struct PresolveStats {
     Real empty_col_seconds = 0.0;
     Real coeff_tightening_seconds = 0.0;
     Real probing_seconds = 0.0;
+    Real implied_bounds_relaxed_seconds = 0.0;
 };
 
 struct PresolveOptions {

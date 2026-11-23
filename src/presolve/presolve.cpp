@@ -2634,7 +2634,9 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
     if (!infeasible_ && std::none_of(lp.col_type.begin(), lp.col_type.end(),
                                      [](VarType t) { return t != VarType::Continuous; })) {
-        stats_.implied_bounds_relaxed = relaxImpliedBounds(lp, problem, col_removed, row_removed);
+        stats_.implied_bounds_relaxed = timed(stats_.implied_bounds_relaxed_seconds, [&] {
+            return relaxImpliedBounds(lp, problem, col_removed, row_removed);
+        });
     }
 
     stats_.time_seconds =
@@ -2651,7 +2653,8 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 //
 // A tightened bound that a remaining row implies, given the other columns'
 // current bounds, cuts nothing off the reduced LP, so putting the original
-// bound back leaves its feasible set, and so postsolve, as they were. Each
+// bound back leaves its feasible set, and so postsolve, as they were (up to
+// the check's 1e-9 relative tolerance, far inside the solvers'). Each
 // column is put back against the bounds as they stand after the earlier
 // ones, never against bounds this pass has already loosened: two columns
 // whose tightened bounds each follow from the other's would otherwise both
@@ -2669,6 +2672,11 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
         Index max_inf = 0;
     };
     std::vector<Activity> act(lp.num_rows);
+    // A finite bound this large (an MPS file's 1e30 for "none") counts as
+    // infinite: as a finite term it would swamp the row's other terms, and
+    // the rounding could imply a bound the row does not. Counting it as
+    // infinite only keeps more bounds.
+    constexpr Real kHugeBound = 1e20;
     // Adds (sign +1) or removes (sign -1) the term a*x of a row's activities
     // for x in [lb, ub].
     auto addTerm = [](Activity& r, Real a, Real lb, Real ub, int sign) {
@@ -2677,12 +2685,12 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
         }
         const Real at_min = a > 0.0 ? lb : ub;
         const Real at_max = a > 0.0 ? ub : lb;
-        if (std::isinf(at_min)) {
+        if (std::abs(at_min) >= kHugeBound) {
             r.min_inf += sign;
         } else {
             r.min_finite += sign * a * at_min;
         }
-        if (std::isinf(at_max)) {
+        if (std::abs(at_max) >= kHugeBound) {
             r.max_inf += sign;
         } else {
             r.max_finite += sign * a * at_max;
@@ -2723,7 +2731,7 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
             const bool use_upper_side = upper == (a > 0.0);
             const Real side = use_upper_side ? lp.row_upper[i] : lp.row_lower[i];
             const Index rest_inf = use_upper_side ? rest.min_inf : rest.max_inf;
-            if (std::isinf(side) || rest_inf > 0) {
+            if (std::abs(side) >= kHugeBound || rest_inf > 0) {
                 continue;
             }
             const Real rest_finite = use_upper_side ? rest.min_finite : rest.max_finite;

@@ -885,6 +885,44 @@ TEST_CASE("Presolve: an LP's implied bounds are put back, a MIP's kept", "[preso
     }
 }
 
+// max x + y s.t. x <= 4, x - y <= 0, y - x <= 0, x, y >= 0. The singleton row
+// gives x <= 4 and activity tightening y <= 4; each follows from the other
+// through a row, so only one may be put back, or x = y grows without bound.
+// Parallel rows stay off so the two rows are not merged into x = y.
+TEST_CASE("Presolve: bounds that imply each other are not both put back", "[presolve]") {
+    LpProblem lp;
+    lp.name = "mutual_ub";
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.col_names = {"x", "y"};
+    lp.num_rows = 3;
+    lp.row_lower = {-kInf, -kInf, -kInf};
+    lp.row_upper = {4.0, 0.0, 0.0};
+    lp.row_names = {"cap", "xy", "yx"};
+    std::vector<Triplet> trips = {
+        {0, 0, 1.0}, {1, 0, 1.0}, {1, 1, -1.0}, {2, 0, -1.0}, {2, 1, 1.0}};
+    lp.matrix = SparseMatrix(3, 2, std::move(trips));
+
+    PresolveOptions options;
+    options.enable_parallel_rows = false;
+    Presolver presolver;
+    presolver.setOptions(options);
+    const auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().implied_bounds_relaxed >= 1);
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(reduced);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(8.0, 1e-9));
+}
+
 TEST_CASE("Presolve: dual fixing", "[presolve]") {
     auto lp = buildDualFixingProblem();
 
