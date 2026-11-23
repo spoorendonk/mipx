@@ -90,10 +90,24 @@ struct PostsolveParallelCol {
     Real removed_upper;
 };
 
+/// An implied-free continuous column singleton was substituted out of its
+/// row (#324): x_col = (rhs - sum a_k x_k) / coeff over the row's other
+/// columns as they were then, rhs the row's equation side or the side the
+/// column's cost pushes it to. The row and the column were removed; the
+/// row's terms are kept for postsolve (and for a dual postsolve, #323).
+struct PostsolveFreeColSubstitution {
+    Index orig_col;
+    Index orig_row;
+    Real coeff;
+    Real rhs;
+    std::vector<Index> row_cols;
+    std::vector<Real> row_coeffs;
+};
+
 using PostsolveOp =
     std::variant<PostsolveFixVariable, PostsolveSingletonRow, PostsolveSingletonCol,
                  PostsolveForcingRow, PostsolveDominatedRow, PostsolveCoeffTightening,
-                 PostsolveDoubletonEquality, PostsolveParallelCol>;
+                 PostsolveDoubletonEquality, PostsolveParallelCol, PostsolveFreeColSubstitution>;
 
 // ---- PostsolveStack ---------------------------------------------------------
 
@@ -138,6 +152,8 @@ struct PresolveStats {
     Index parallel_row_changes = 0;
     /// Parallel continuous columns fixed (dominated) or merged (#308).
     Index parallel_col_changes = 0;
+    /// Implied-free column singletons substituted out with their row (#324).
+    Index free_col_substitution_changes = 0;
     Index doubleton_eq_changes = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
@@ -168,6 +184,7 @@ struct PresolveStats {
     Real duplicate_row_seconds = 0.0;
     Real parallel_row_seconds = 0.0;
     Real parallel_col_seconds = 0.0;
+    Real free_col_substitution_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -186,6 +203,9 @@ struct PresolveOptions {
     /// Fix dominated and merge equal-cost parallel continuous columns (#308).
     /// Off by default until benchmarked, like every new reduction.
     bool enable_parallel_cols = false;
+    /// Substitute implied-free continuous column singletons out of their row,
+    /// removing both (#324). Off by default until benchmarked.
+    bool enable_free_col_substitution = false;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.
@@ -300,6 +320,13 @@ private:
                              const std::vector<Index>& dirty_cols,
                              std::vector<uint8_t>& next_dirty_rows,
                              std::vector<uint8_t>& next_dirty_cols);
+    Index substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& col_removed,
+                                      std::vector<bool>& row_removed,
+                                      std::vector<Index>& row_active_nnz,
+                                      std::vector<Index>& col_active_nnz,
+                                      const std::vector<Index>& dirty_cols,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols);
     Index aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& col_removed,
                                        std::vector<bool>& row_removed,
                                        std::vector<Index>& row_active_nnz,

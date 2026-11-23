@@ -1093,10 +1093,12 @@ PresolveOptions withParallelCols() {
     return options;
 }
 
-/// Presolves `lp` with parallel columns on, solves what is left and returns
-/// the postsolved point; the small models here often reduce to empty.
-std::vector<Real> presolveSolvePostsolve(const LpProblem& lp, Presolver& presolver) {
-    presolver.setOptions(withParallelCols());
+/// Presolves `lp` (with parallel columns on by default), solves what is left
+/// and returns the postsolved point; the small models here often reduce to
+/// empty.
+std::vector<Real> presolveSolvePostsolve(const LpProblem& lp, Presolver& presolver,
+                                         const PresolveOptions& options = withParallelCols()) {
+    presolver.setOptions(options);
     const LpProblem reduced = presolver.presolve(lp);
     REQUIRE_FALSE(presolver.isInfeasible());
     std::vector<Real> x;
@@ -1293,6 +1295,127 @@ TEST_CASE("Presolve: parallel columns are left alone when off or integer", "[pre
         presolver.setOptions(withParallelCols());
         presolver.presolve(lp);
         CHECK(presolver.stats().parallel_col_changes == 0);
+    }
+}
+
+namespace {
+
+/// x0 a column singleton of r0 = row0 . x in [l0, u0]; x1, x2 integer in
+/// [0, 2], also in r1: x1 - x2 <= 1.
+LpProblem freeColModel(Sense sense, std::vector<Real> obj, const std::vector<Real>& row0,
+                       Real x0_lower, Real x0_upper, VarType x0_type, Real l0, Real u0) {
+    LpProblem lp;
+    lp.name = "free_col";
+    lp.sense = sense;
+    lp.num_cols = 3;
+    lp.obj = std::move(obj);
+    lp.col_lower = {x0_lower, 0.0, 0.0};
+    lp.col_upper = {x0_upper, 2.0, 2.0};
+    lp.col_type = {x0_type, VarType::Integer, VarType::Integer};
+    lp.col_names = {"x0", "x1", "x2"};
+    lp.num_rows = 2;
+    lp.row_lower = {l0, -kInf};
+    lp.row_upper = {u0, 1.0};
+    lp.row_names = {"r0", "r1"};
+    std::vector<Triplet> trips = {
+        {0, 0, row0[0]}, {0, 1, row0[1]}, {0, 2, row0[2]}, {1, 1, 1.0}, {1, 2, -1.0}};
+    lp.matrix = SparseMatrix(2, 3, std::move(trips));
+    return lp;
+}
+
+PresolveOptions withFreeColSubstitution() {
+    PresolveOptions options;
+    options.enable_free_col_substitution = true;
+    return options;
+}
+
+Real directOptimum(const LpProblem& lp) {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    return result.objective;
+}
+
+/// Substitutes x0 out, then checks the postsolved point (feasibility in
+/// presolveSolvePostsolve) and its objective against the direct optimum.
+void checkSubstituted(const LpProblem& lp) {
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, withFreeColSubstitution());
+    CHECK(presolver.stats().free_col_substitution_changes >= 1);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+}
+
+Index substitutions(const LpProblem& lp, const PresolveOptions& options) {
+    Presolver presolver;
+    presolver.setOptions(options);
+    presolver.presolve(lp);
+    return presolver.stats().free_col_substitution_changes;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: an implied-free singleton is substituted out of an equation", "[presolve]") {
+    // x0 = 4 - x1 - x2 lies in [0, 4] for every x1, x2, so x0 >= 0 never binds.
+    const LpProblem lp = freeColModel(Sense::Minimize, {2, -1, 1}, {1, 1, 1}, 0.0, kInf,
+                                      VarType::Continuous, 4.0, 4.0);
+    checkSubstituted(lp);
+    CHECK_THAT(directOptimum(lp), WithinAbs(0.0, 1e-9));
+}
+
+TEST_CASE("Presolve: an implied-free singleton's cost picks its inequality's side", "[presolve]") {
+    // 1 <= a x0 + x1 + x2 <= 5 keeps x0 within [-5, 5] of [-100, 100]; the
+    // row goes to the side x0's cost pushes it to, for each sense and sign.
+    for (const Sense sense : {Sense::Minimize, Sense::Maximize}) {
+        for (const Real a : {1.0, -1.0}) {
+            for (const Real c0 : {1.0, -1.0}) {
+                CAPTURE(sense == Sense::Minimize, a, c0);
+                checkSubstituted(freeColModel(sense, {c0, 1, -1}, {a, 1, 1}, -100.0, 100.0,
+                                              VarType::Continuous, 1.0, 5.0));
+            }
+        }
+    }
+}
+
+TEST_CASE("Presolve: a free singleton is kept when its cost pushes to an open side", "[presolve]") {
+    // x0 + x1 + x2 >= 1 with x0 free: minimizing x0 takes the row to its
+    // lower side, minimizing -x0 to its missing upper one.
+    checkSubstituted(freeColModel(Sense::Minimize, {1, 1, -1}, {1, 1, 1}, -kInf, kInf,
+                                  VarType::Continuous, 1.0, kInf));
+    CHECK(substitutions(freeColModel(Sense::Minimize, {-1, 1, -1}, {1, 1, 1}, -kInf, kInf,
+                                     VarType::Continuous, 1.0, kInf),
+                        withFreeColSubstitution()) == 0);
+}
+
+TEST_CASE("Presolve: a zero-cost implied-free singleton is substituted out", "[presolve]") {
+    // 0 <= x0 + x1 - x2 <= 3 keeps x0 in [-2, 5] of [-5, 5].
+    checkSubstituted(freeColModel(Sense::Maximize, {0, 1, -1}, {1, 1, -1}, -5.0, 5.0,
+                                  VarType::Continuous, 0.0, 3.0));
+}
+
+TEST_CASE("Presolve: free column substitution leaves what it cannot take", "[presolve]") {
+    const auto eq = [](VarType type, Real x0_upper, Real a0) {
+        return freeColModel(Sense::Minimize, {2, -1, 1}, {a0, 1, 1}, 0.0, x0_upper, type, 4.0, 4.0);
+    };
+    SECTION("option off") {
+        CHECK(substitutions(eq(VarType::Continuous, kInf, 1.0), PresolveOptions{}) == 0);
+    }
+    SECTION("integer column") {
+        CHECK(substitutions(eq(VarType::Integer, kInf, 1.0), withFreeColSubstitution()) == 0);
+    }
+    SECTION("a bound the row does not imply") {
+        // x0 = 4 - x1 - x2 reaches 4 > 3.
+        const LpProblem lp = eq(VarType::Continuous, 3.0, 1.0);
+        CHECK(substitutions(lp, withFreeColSubstitution()) == 0);
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver, withFreeColSubstitution());
+        CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+    }
+    SECTION("a pivot small against the row") {
+        // x0 = (4 - x1 - x2) / 1e-3 lies in [0, 4000], implied by [0, 1e5].
+        CHECK(substitutions(eq(VarType::Continuous, 1e5, 1e-3), withFreeColSubstitution()) == 0);
     }
 }
 

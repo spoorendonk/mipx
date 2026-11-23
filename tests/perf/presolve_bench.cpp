@@ -48,12 +48,14 @@ namespace {
 const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
-    "       [--parallel-cols]\n";
+    "       [--parallel-cols] [--free-col-substitution]\n";
 
 struct Options {
     pb::CommonOptions common;
     bool check = false;
     bool parallel_cols = false;  ///< PresolveOptions::enable_parallel_cols (#308), off by default.
+    /// PresolveOptions::enable_free_col_substitution (#324), off by default.
+    bool free_col_substitution = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -76,6 +78,8 @@ Options parse(int argc, char** argv) {
             opt.check = true;
         } else if (arg == "--parallel-cols") {
             opt.parallel_cols = true;
+        } else if (arg == "--free-col-substitution") {
+            opt.free_col_substitution = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -248,6 +252,8 @@ constexpr Rule kRules[] = {
     {"fixed_var", &PresolveStats::fixed_var_changes, &PresolveStats::fixed_var_seconds},
     {"singleton_row", &PresolveStats::singleton_row_changes, &PresolveStats::singleton_row_seconds},
     {"singleton_col", &PresolveStats::singleton_col_changes, &PresolveStats::singleton_col_seconds},
+    {"free_col_substitution", &PresolveStats::free_col_substitution_changes,
+     &PresolveStats::free_col_substitution_seconds},
     {"doubleton_eq", &PresolveStats::doubleton_eq_changes, &PresolveStats::doubleton_eq_seconds},
     {"forcing_row", &PresolveStats::forcing_row_changes, &PresolveStats::forcing_row_seconds},
     {"dominated_row", &PresolveStats::dominated_row_changes, &PresolveStats::dominated_row_seconds},
@@ -297,6 +303,7 @@ int main(int argc, char** argv) {
         presolver = Presolver();
         PresolveOptions popts = presolver.options();
         popts.enable_parallel_cols = opt.parallel_cols;
+        popts.enable_free_col_substitution = opt.free_col_substitution;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.

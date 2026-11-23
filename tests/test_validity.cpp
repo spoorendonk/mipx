@@ -805,9 +805,13 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions parallel_cols = o;
     parallel_cols.enable_parallel_cols = true;
     cases.push_back({"parallel columns (opt-in)", parallel_cols, false});
+    PresolveOptions free_cols = o;
+    free_cols.enable_free_col_substitution = true;
+    cases.push_back({"free column substitution (opt-in)", free_cols});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
+    all.enable_free_col_substitution = true;
     cases.push_back({"all opt-in but parallel columns", all});
     all.enable_parallel_cols = true;
     cases.push_back({"all opt-in", all, false});
@@ -839,6 +843,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_parallel_rows; }},
         {"parallel columns", &PresolveStats::parallel_col_changes,
          [](const PresolveOptions& o) { return o.enable_parallel_cols; }},
+        {"free column substitution", &PresolveStats::free_col_substitution_changes,
+         [](const PresolveOptions& o) { return o.enable_free_col_substitution; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
@@ -938,7 +944,8 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
 // forcing rows on, a row forcing rows declines, which one with a column it
 // cannot pin (a coefficient at or below presolve's 1e-8) is. Putting back an
 // LP's implied bounds (#279) needs a model with no integer column, and
-// parallel columns (#308) a continuous pair with scaled coefficients.
+// parallel columns (#308) a continuous pair with scaled coefficients, and
+// free column substitution (#324) a continuous singleton its row bounds.
 std::vector<LpProblem> presolveAuditModels() {
     constexpr auto I = VarType::Integer;
     constexpr auto B = VarType::Binary;
@@ -988,6 +995,15 @@ std::vector<LpProblem> presolveAuditModels() {
         spec.max_int = t % 2 == 0 ? 0 : 3;
         models.push_back(randomModel(par_rng, spec));
     }
+    // Implied-free continuous column singletons (#324): x0 in an equation
+    // that keeps it in [0, 4]; x0 free with cost in a >= row; zero-cost x0
+    // in [-5, 5] in a ranged row that keeps it in [-2, 5].
+    models.push_back(makeModel(Sense::Minimize, {2, -1, 1}, {0, 0, 0}, {kInf, 2, 2}, {C, I, I},
+                               {{1, 1, 1}, {0, 1, -1}}, {4, -kInf}, {4, 1}));
+    models.push_back(makeModel(Sense::Minimize, {1, 1, -1}, {-kInf, 0, 0}, {kInf, 3, 2}, {C, I, I},
+                               {{1, 1, 1}, {0, 1, 1}}, {1, -kInf}, {kInf, 3}));
+    models.push_back(makeModel(Sense::Maximize, {0, 1, -1}, {-5, 0, 0}, {5, 2, 2}, {C, I, I},
+                               {{1, 1, -1}, {0, 1, 1}}, {0, -kInf}, {3, 3}));
     return models;
 }
 
