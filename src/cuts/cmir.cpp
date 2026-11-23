@@ -150,7 +150,8 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp, const LpProblem& probl
     (void)lp;  // LP solver not needed for row-based CMIR.
     Int accepted = 0;
 
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf)
             continue;
         const Real rhs = problem.row_upper[i];
@@ -225,6 +226,10 @@ Int SeparatorManager::separateCmir(DualSimplexSolver& lp, const LpProblem& probl
                 continue;
             if (!std::isfinite(problem.col_upper[j]))
                 continue;
+            // Each flip re-derives the whole row, so a long row is quadratic:
+            // check the deadline per flip too (#336).
+            if (pastDeadline())
+                break;
             greedy_comp[k] = !greedy_comp[k];
             auto res = applyCmir(row_indices, row_values, rhs, problem, primals, greedy_comp);
             if (res.valid && res.violation > best_violation) {
@@ -279,7 +284,8 @@ Int SeparatorManager::separateStrongCg(DualSimplexSolver& lp, const LpProblem& p
 
     const std::vector<Real> multipliers = {0.5, 1.0, 2.0, 3.0, 0.25, 0.75, 1.5};
 
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf)
             continue;
         const Real rhs = problem.row_upper[i];

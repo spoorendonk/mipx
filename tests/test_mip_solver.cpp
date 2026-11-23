@@ -2,11 +2,14 @@
 #include "mipx/mip_solver.h"
 #include "test_paths.hpp"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <random>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -763,6 +766,83 @@ TEST_CASE("MipSolver: node limit", "[mip]") {
 
     // With node limit 1, we process root but can't explore children.
     CHECK((result.status == Status::NodeLimit || result.status == Status::Optimal));
+}
+
+// A seeded random set cover, sized so its root LP is slow: every
+// column covers `per_col` distinct rows, at an integer cost in [1, 100].
+static LpProblem buildSlowRootSetCover(Index rows, Index cols, Index per_col) {
+    LpProblem lp;
+    lp.name = "slow_root_set_cover";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = cols;
+    lp.num_rows = rows;
+    std::mt19937 rng(336);
+    std::uniform_int_distribution<Index> row_dist(0, rows - 1);
+    std::uniform_int_distribution<Index> cost_dist(1, 100);
+    std::vector<Triplet> trips;
+    trips.reserve(static_cast<std::size_t>(cols) * static_cast<std::size_t>(per_col));
+    std::vector<Index> picked;
+    for (Index j = 0; j < cols; ++j) {
+        lp.obj.push_back(static_cast<Real>(cost_dist(rng)));
+        picked.clear();
+        while (static_cast<Index>(picked.size()) < per_col) {
+            const Index i = row_dist(rng);
+            if (std::ranges::find(picked, i) == picked.end()) {
+                picked.push_back(i);
+                trips.push_back({i, j, 1.0});
+            }
+        }
+    }
+    lp.col_lower.assign(static_cast<std::size_t>(cols), 0.0);
+    lp.col_upper.assign(static_cast<std::size_t>(cols), 1.0);
+    lp.col_type.assign(static_cast<std::size_t>(cols), VarType::Binary);
+    lp.row_lower.assign(static_cast<std::size_t>(rows), 1.0);
+    lp.row_upper.assign(static_cast<std::size_t>(rows), kInf);
+    lp.matrix = SparseMatrix(rows, cols, std::move(trips));
+    return lp;
+}
+
+// #336: the time limit holds through the root stage. The root LP of this
+// model does not finish in 0.2 s, so a 0.2 s limit stops it there,
+// and the solve returns TimeLimit within the stated overrun. Wall-clock, so
+// [benchmark] keeps it out of the default suite (solver-regression label).
+TEST_CASE("MipSolver: time limit stops a root LP that does not finish in time",
+          "[mip][benchmark][time_limit]") {
+    const auto lp = buildSlowRootSetCover(400, 40000, 8);
+    constexpr double kLimit = 0.2;
+    constexpr double kAllowedOverrun = 0.5;
+
+    // Not BarrierRoot, nor the race, which joins its barrier arm: the barrier
+    // reads its stop flag once per IPM iteration, and on this model one
+    // factorization takes minutes. Stopping inside it is #275.
+    const auto policy = GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot);
+    CAPTURE(static_cast<int>(policy));
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setRootLpPolicy(policy);
+    solver.setTimeLimit(kLimit);
+    solver.load(lp);
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto result = solver.solve();
+    const double wall =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    CHECK(result.status == Status::TimeLimit);
+    CHECK(result.nodes <= 1);
+    CHECK(wall <= kLimit + kAllowedOverrun);
+    CHECK(result.time_seconds <= kLimit + kAllowedOverrun);
+    // An incumbent, when one was found, is feasible for the model.
+    if (!result.solution.empty()) {
+        for (Index i = 0; i < lp.num_rows; ++i) {
+            Real activity = 0.0;
+            const auto row = lp.matrix.row(i);
+            for (Index p = 0; p < row.size(); ++p) {
+                activity += row.values[p] * result.solution[row.indices[p]];
+            }
+            CHECK(activity >= 1.0 - 1e-6);
+        }
+    }
 }
 
 TEST_CASE("MipSolver: a node dropped without an LP verdict leaves the search unproven",

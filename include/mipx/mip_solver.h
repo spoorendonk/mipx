@@ -694,6 +694,11 @@ private:
     // Parameters.
     Int node_limit_ = 1000000;
     double time_limit_ = 3600.0;
+    // Start of the current solveMinimizationOnce(): with time_limit_, the one
+    // deadline every stage of the solve runs against (#336).
+    std::chrono::steady_clock::time_point solve_start_ = std::chrono::steady_clock::now();
+    // Seconds left before the deadline, at least 0.
+    [[nodiscard]] double timeLeft() const;
     Real gap_tol_ = 1e-4;
     bool verbose_ = true;
     bool presolve_ = true;

@@ -54,7 +54,8 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem, std::span<co
 
     Int accepted = 0;
 
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf)
             continue;
         const Real rhs = problem.row_upper[i];

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -33,6 +34,50 @@
 namespace mipx {
 
 namespace {
+
+// Gives the next solve of `lp` `seconds` at most; negative means no limit.
+void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
+    auto opts = lp.getOptions();
+    opts.max_solve_seconds = seconds;
+    lp.setOptions(opts);
+}
+
+// Sets `flag` once `time_left` reaches 0, for a backend that takes a stop
+// flag and no time limit (the barrier, #275), and for the root race's stop
+// flag (#336). Stops and joins on destruction.
+class DeadlineWatcher {
+public:
+    DeadlineWatcher(std::atomic<bool>& flag, std::function<double()> time_left)
+        : thread_([this, &flag, time_left = std::move(time_left)] {
+              std::unique_lock lock(mutex_);
+              while (!done_) {
+                  const double left = time_left();
+                  if (left <= 0.0) {
+                      flag.store(true, std::memory_order_relaxed);
+                      return;
+                  }
+                  // Re-read the clock at least every second: a limit of
+                  // hours never becomes one far-off time_point.
+                  cv_.wait_for(lock, std::chrono::duration<double>(std::min(left, 1.0)));
+              }
+          }) {}
+    DeadlineWatcher(const DeadlineWatcher&) = delete;
+    DeadlineWatcher& operator=(const DeadlineWatcher&) = delete;
+    ~DeadlineWatcher() {
+        {
+            std::lock_guard lock(mutex_);
+            done_ = true;
+        }
+        cv_.notify_one();
+        thread_.join();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread thread_;  // Last: it starts once the members it uses exist.
+};
 
 /// Get physical core count (linux only, falls back to hardware_concurrency).
 unsigned getPhysicalCores() {
@@ -1402,6 +1447,12 @@ void MipSolver::buildCliqueTable() {
     }
 }
 
+double MipSolver::timeLeft() const {
+    const double spent =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
+    return std::max(0.0, time_limit_ - spent);
+}
+
 bool MipSolver::runRootProbing() {
     probing_stats_ = {};
     probing_stats_.enabled = true;
@@ -1409,7 +1460,7 @@ bool MipSolver::runRootProbing() {
     ProbingConfig config;
     config.max_rounds = probing_max_rounds_;
     config.max_probes_per_round = probing_max_probes_per_round_;
-    config.time_limit = probing_time_limit_;
+    config.time_limit = std::min(probing_time_limit_, timeLeft());
     config.detect_equivalences = true;
     // Domination detection is O(n^2) and its output is not yet consumed by
     // branching/presolve, so leave it off by default.
@@ -4086,6 +4137,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     exact_refinement_stats_.rational_verification_enabled = exact_refinement_rational_check_;
 
     auto start_time = std::chrono::steady_clock::now();
+    solve_start_ = start_time;
     auto elapsed = [&]() -> double {
         auto now = std::chrono::steady_clock::now();
         return std::chrono::duration<double>(now - start_time).count();
@@ -4234,7 +4286,13 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     // Presolve.
     Presolver presolver;
-    presolver.setOptions(presolve_options_);
+    {
+        // Presolve probing runs against the solve's deadline too (#336).
+        auto presolve_options = presolve_options_;
+        presolve_options.probing_time_limit =
+            std::min(presolve_options.probing_time_limit, timeLeft());
+        presolver.setOptions(presolve_options);
+    }
     LpProblem working_problem;
     bool did_presolve = false;
     double symmetry_pre_work = 0.0;
@@ -4918,7 +4976,7 @@ MipResult MipSolver::solveMinimizationOnce() {
                     if (next_round_value >= pre_root_lp_free_max_rounds_) {
                         break;
                     }
-                    if (stage_work.ticks() >= budget_ticks) {
+                    if (stage_work.ticks() >= budget_ticks || timeLeft() <= 0.0) {
                         break;
                     }
 
@@ -4963,7 +5021,8 @@ MipResult MipSolver::solveMinimizationOnce() {
                         (0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(thread_id + 1)));
                     while (!should_stop.load(std::memory_order_relaxed)) {
                         if (stage_work.units() >=
-                            portfolio.currentBudget(pre_root_lp_free_work_budget_)) {
+                                portfolio.currentBudget(pre_root_lp_free_work_budget_) ||
+                            timeLeft() <= 0.0) {
                             break;
                         }
                         const Int round = next_round.fetch_add(1, std::memory_order_relaxed);
@@ -5172,6 +5231,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             solver.setVerbose(false);
             auto opts = solver.getOptions();
             opts.stop_flag = stop_flag;
+            opts.max_solve_seconds = timeLeft();
             solver.setOptions(opts);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
@@ -5182,6 +5242,14 @@ MipResult MipSolver::solveMinimizationOnce() {
             opts.verbose = false;
             opts.algorithm = barrier_algorithm_;
             opts.ordering = barrier_ordering_;
+            // No time option (#275): outside the race, a watcher stops it at
+            // the deadline; in the race, the race's flag carries the deadline.
+            std::atomic<bool> deadline_flag{false};
+            std::optional<DeadlineWatcher> watcher;
+            if (stop_flag == nullptr) {
+                watcher.emplace(deadline_flag, [this] { return timeLeft(); });
+                stop_flag = &deadline_flag;
+            }
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);
@@ -5198,6 +5266,7 @@ MipResult MipSolver::solveMinimizationOnce() {
                             barrier_algorithm_ == BarrierAlgorithm::GpuCholesky ||
                             barrier_algorithm_ == BarrierAlgorithm::GpuAugmented);
             opts.stop_flag = stop_flag;
+            opts.max_solve_seconds = timeLeft();
             solver.setOptions(opts);
             solver.load(problem_);
             out.lp_result = solver.solve();
@@ -5256,6 +5325,8 @@ MipResult MipSolver::solveMinimizationOnce() {
             race_results.push_back(runRootBackend(RootBackend::Pdlp, nullptr));
         } else {
             std::atomic<bool> race_stop{false};
+            // The deadline stops every arm (#336).
+            const DeadlineWatcher race_deadline(race_stop, [this] { return timeLeft(); });
             std::mutex race_mutex;
             auto run_and_store = [&](RootBackend backend) {
                 auto result = runRootBackend(backend, &race_stop);
@@ -5383,6 +5454,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     } else {
         lp.setVerbose(verbose_);
+        setLpTimeLimit(lp, timeLeft());
         root_result = lp.solve();
         root_primals = lp.getPrimalValues();
         root_basis = lp.getBasis();
@@ -5424,6 +5496,35 @@ MipResult MipSolver::solveMinimizationOnce() {
         return result;
     }
 
+    // The deadline stopped a root LP (#336): the incumbent so far, and the
+    // bound proved so far (-inf when no root LP finished).
+    auto rootTimeLimitResult = [&](Real bound) {
+        if (verbose_) {
+            log_.log("Time limit reached in the root LP.\n");
+        }
+        MipResult result;
+        result.status = Status::TimeLimit;
+        result.nodes = 1;
+        result.lp_iterations = total_lp_iters;
+        result.work_units = canonicalReportedWork(total_work);
+        result.time_seconds = elapsed();
+        result.best_bound = bound;
+        if (incumbent < kInf) {
+            result.objective = incumbent;
+            result.solution = std::move(best_solution);
+            if (bound > -kInf) {
+                result.best_bound = std::min(bound, incumbent);
+                result.gap = computeGap(incumbent, result.best_bound);
+            }
+        }
+        applyPostsolve(result);
+        restoreProblem();
+        return result;
+    };
+    if (root_result.status != Status::Optimal && timeLeft() <= 0.0) {
+        return rootTimeLimitResult(-kInf);
+    }
+
     if (root_result.status != Status::Optimal) {
         if (verbose_) {
             log_.log("Root LP failed: status %d\n", static_cast<int>(root_result.status));
@@ -5454,9 +5555,14 @@ MipResult MipSolver::solveMinimizationOnce() {
             static_cast<Index>(root_basis.size()) == lp.numCols() + lp.numRows()) {
             lp.setBasis(root_basis);
         }
+        setLpTimeLimit(lp, timeLeft());
         auto sync = lp.solve();
         total_lp_iters += sync.iterations;
         total_work += sync.work_units;
+        if (sync.status != Status::Optimal && sync.status != Status::Infeasible &&
+            sync.status != Status::Unbounded && timeLeft() <= 0.0) {
+            return rootTimeLimitResult(root_bound);
+        }
         if (sync.status == Status::Infeasible) {
             if (verbose_) {
                 log_.log("Root sync LP infeasible after non-dual root solve.\n");
@@ -5500,6 +5606,10 @@ MipResult MipSolver::solveMinimizationOnce() {
         root_primals = lp.getPrimalValues();
         root_basis = lp.getBasis();
     }
+
+    // The cut loop, the back-outs and the tree reuse this solver: each solve
+    // that runs against the deadline sets its own limit.
+    setLpTimeLimit(lp, -1.0);
 
     // Run cutting planes at root (suppress LP iteration logs — we log per round).
     LpProblem root_certificate_problem;
@@ -5580,6 +5690,9 @@ MipResult MipSolver::solveMinimizationOnce() {
 
         if (trigger_refinement) {
             for (Int round = 0; round < exact_refinement_max_rounds_; ++round) {
+                if (timeLeft() <= 0.0) {
+                    break;
+                }
                 ++exact_refinement_stats_.rounds;
 
                 iterativePrimalRepair(certificate_problem, refined_primals,
@@ -5595,7 +5708,9 @@ MipResult MipSolver::solveMinimizationOnce() {
                     break;
                 }
 
+                setLpTimeLimit(lp, timeLeft());
                 auto refine_result = lp.solve();
+                setLpTimeLimit(lp, -1.0);
                 ++exact_refinement_stats_.resolve_calls;
                 exact_refinement_stats_.resolve_iterations += refine_result.iterations;
                 exact_refinement_stats_.resolve_work_units += refine_result.work_units;
@@ -5733,8 +5848,11 @@ MipResult MipSolver::solveMinimizationOnce() {
         .total_work_units = total_work,
         .solution_pool = &solution_pool,
     };
+    // Past the deadline the portfolio is skipped (#336); the tree's first
+    // check then returns TimeLimit.
     const auto root_heur_outcome =
-        root_runtime.runRootPortfolio(root_ctx, incumbent, best_solution);
+        timeLeft() > 0.0 ? root_runtime.runRootPortfolio(root_ctx, incumbent, best_solution)
+                         : RootHeuristicOutcome{};
     total_lp_iters += root_heur_outcome.lp_iterations;
     total_work += root_heur_outcome.work_units;
     if (verbose_) {
@@ -6124,6 +6242,14 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     CutPool pool;
     SeparatorManager separators;
     separators.setStrengthenCuts(cut_strengthening_);
+    // One separator call can outlast a short limit (rail507's cmir takes
+    // seconds), so separation stops at the deadline too (#336). A limit
+    // past ~30 years is left unset rather than overflow the clock.
+    if (const double left = timeLeft(); left < 1e9) {
+        separators.setDeadline(std::chrono::steady_clock::now() +
+                               std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                   std::chrono::duration<double>(left)));
+    }
     if (vb_store_.numVUBs() > 0 || vb_store_.numVLBs() > 0) {
         separators.setVariableBoundStore(&vb_store_);
     }
@@ -6201,6 +6327,13 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         if (!policy.run) {
             break;
         }
+        // The deadline ends the loop before a round's separation (#336).
+        if (timeLeft() <= 0.0) {
+            if (verbose_) {
+                log_.log("  cut-round %d: time limit reached, cut loop stopped\n", round + 1);
+            }
+            break;
+        }
 
         // A family runs this round only when both the adaptive policy and the
         // user configuration allow it. Every CutFamily value must appear here:
@@ -6260,6 +6393,14 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         }
 
         if (new_cuts == 0) {
+            break;
+        }
+        // Past the deadline the round's cuts are not added: the re-solve
+        // would get no time and be backed out (#336).
+        if (timeLeft() <= 0.0) {
+            if (verbose_) {
+                log_.log("  cut-round %d: time limit reached after separation\n", round + 1);
+            }
             break;
         }
 
@@ -6346,7 +6487,12 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         const auto pre_round_basis = lp.getBasis();
         lp.addRows(starts, col_indices, values, lower, upper);
 
+        // A re-solve the deadline stops is backed out below like any other
+        // that ends without an optimum. The back-out's own re-solve warm
+        // starts from an optimal basis and runs without a limit.
+        setLpTimeLimit(lp, timeLeft());
         auto result = lp.solve();
+        setLpTimeLimit(lp, -1.0);
         total_lp_iters += result.iterations;
         total_work += result.work_units;
         cut_node_work += result.work_units;

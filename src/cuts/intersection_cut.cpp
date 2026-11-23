@@ -112,7 +112,7 @@ Int SeparatorManager::separateIntersectionCut(DualSimplexSolver& lp, const LpPro
     };
 
     Int accepted = 0;
-    for (Index ci = 0; ci < max_try && accepted < max_cuts_per_family_; ++ci) {
+    for (Index ci = 0; ci < max_try && accepted < max_cuts_per_family_ && !pastDeadline(); ++ci) {
         const Candidate& cand = candidates[ci];
         ++stats.attempted;
 
@@ -193,7 +193,7 @@ Int SeparatorManager::separateMultiRow(DualSimplexSolver& lp, const LpProblem& p
     };
 
     Int accepted = 0;
-    for (Index c1 = 0; c1 < max_cands && accepted < max_cuts_per_family_; ++c1) {
+    for (Index c1 = 0; c1 < max_cands && accepted < max_cuts_per_family_ && !pastDeadline(); ++c1) {
         for (Index c2 = c1 + 1; c2 < max_cands && accepted < max_cuts_per_family_; ++c2) {
             ++stats.attempted;
 

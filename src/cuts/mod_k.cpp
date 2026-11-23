@@ -16,7 +16,8 @@ Int SeparatorManager::separateModK(const LpProblem& problem, std::span<const Rea
     Int accepted = 0;
     const std::vector<Int> k_values = {2, 3, 4, 5};
 
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf) {
             continue;
         }

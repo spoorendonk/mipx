@@ -149,7 +149,7 @@ Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
     Int total_added = 0;
 
     auto runFamily = [&](CutFamily family, auto&& fn) {
-        if (!isEnabled(family)) {
+        if (!isEnabled(family) || pastDeadline()) {
             return;
         }
         auto t0 = std::chrono::steady_clock::now();
@@ -238,7 +238,8 @@ Int SeparatorManager::separateGomory(DualSimplexSolver& lp, const LpProblem& pro
 Int SeparatorManager::separateMir(const LpProblem& problem, std::span<const Real> primals,
                                   CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }
@@ -301,7 +302,8 @@ Int SeparatorManager::separateCover(const LpProblem& problem, std::span<const Re
     };
 
     Int accepted = 0;
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }
@@ -393,7 +395,8 @@ Int SeparatorManager::separateCover(const LpProblem& problem, std::span<const Re
 Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<const Real> primals,
                                            CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }
@@ -419,6 +422,10 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
             const Real ax = row.values[px];
             if (ax <= 1e-9 || problem.col_type[x] == VarType::Binary) {
                 continue;
+            }
+            // The scan over y makes a long row quadratic: check per x too.
+            if (pastDeadline()) {
+                break;
             }
 
             for (Index py = 0; py < row.size() && accepted < max_cuts_per_family_; ++py) {
@@ -461,7 +468,8 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
 
     // Generate implied-bound cuts from probing-derived VUBs/VLBs.
     if (vb_store_ != nullptr) {
-        for (Index j = 0; j < problem.num_cols && accepted < max_cuts_per_family_; ++j) {
+        for (Index j = 0;
+             j < problem.num_cols && accepted < max_cuts_per_family_ && !pastDeadline(); ++j) {
             if (problem.col_type[j] == VarType::Binary) {
                 continue;
             }
@@ -534,7 +542,8 @@ Int SeparatorManager::separateClique(const LpProblem& problem, std::span<const R
     Int accepted = 0;
     std::unordered_set<std::uint64_t> seen_pairs;
 
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }
@@ -635,7 +644,8 @@ Int SeparatorManager::separateCliqueTableCover(const LpProblem& problem,
 Int SeparatorManager::separateZeroHalf(const LpProblem& problem, std::span<const Real> primals,
                                        CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }
@@ -703,7 +713,8 @@ Int SeparatorManager::separateMixing(const LpProblem& problem, std::span<const R
                                      CutPool& pool, CutFamilyStats& stats) {
     Int accepted = 0;
     constexpr Real kScale = 1.0 / 3.0;
-    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_; ++i) {
+    for (Index i = 0; i < problem.num_rows && accepted < max_cuts_per_family_ && !pastDeadline();
+         ++i) {
         if (problem.row_upper[i] >= kInf || problem.row_lower[i] > -kInf) {
             continue;
         }

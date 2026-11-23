@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <span>
 #include <utility>
 #include <vector>
@@ -91,10 +92,20 @@ public:
         local_rows_ = std::move(rows);
     }
 
+    /// Separation stops at @p deadline: no family starts after it, and the
+    /// row and candidate loops stop between rows (#336). A round cut short
+    /// keeps the cuts it pooled. The default, time_point::max(), never stops.
+    void setDeadline(std::chrono::steady_clock::time_point deadline) { deadline_ = deadline; }
+
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
                  CutPool& pool, CutSeparationStats& stats);
 
 private:
+    [[nodiscard]] bool pastDeadline() const {
+        return deadline_ != std::chrono::steady_clock::time_point::max() &&
+               std::chrono::steady_clock::now() >= deadline_;
+    }
+
     Int separateGomory(DualSimplexSolver& lp, const LpProblem& problem,
                        std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats);
     Int separateMir(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
@@ -160,6 +171,7 @@ private:
     const VariableBoundStore* vb_store_ = nullptr;
     const CliqueTable* clique_table_ = nullptr;
     bool strengthen_cuts_ = false;
+    std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
     const LpProblem* problem_ = nullptr;  // set by separate() for maybeStrengthen
 };
 
