@@ -90,6 +90,21 @@ def test_parse_outcome_uses_the_summary_status_line() -> None:
     assert gate.parse_outcome("segfault").status == "crash"
 
 
+@pytest.mark.parametrize(
+    ("backend", "ne"), [("barrier-dense", "dense"), ("barrier-sparse", "sparse")]
+)
+def test_barrier_backends_run_the_cpu_barrier_on_one_ne_backend(backend: str, ne: str) -> None:
+    args = gate.solver_args(backend, 10.0)
+    assert args[args.index("--barrier-ne") + 1] == ne
+    assert "--barrier" in args
+    assert "--no-gpu" in args
+    assert f"--{backend}" not in args
+
+
+def test_barrier_suite_covers_both_ne_backends() -> None:
+    assert set(gate.SUITES["barrier"].backends) == set(gate.BARRIER_NE)
+
+
 def test_read_solu_keeps_only_usable_references(tmp_path: Path) -> None:
     solu = tmp_path / "x.solu"
     solu.write_text("=opt= a 1.5\n=inf= b\n=best= c 3\n=unkn= d\n=unbd= e\n")
