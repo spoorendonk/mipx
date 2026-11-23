@@ -57,8 +57,10 @@ LpResult solveWithLimit(BarrierAlgorithm algo, Real seconds) {
 }  // namespace
 
 TEST_CASE("Barrier with a zero time limit returns TimeLimit", "[barrier][time-limit]") {
-    // A limit already passed stops the starting point's factorization from
-    // inside the backend, on every CPU backend.
+    // A limit already passed ends the solve before its first iteration, on
+    // every CPU backend. Which check stops it (the backend's factorization or
+    // the loop's own) is not observable here; the factorize() test below
+    // covers the backends' checks.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     INFO("algo " << static_cast<int>(algo));

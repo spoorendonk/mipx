@@ -84,7 +84,10 @@ struct BarrierOptions {
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its
     // factorizations, and solve() then returns Status::TimeLimit; crossover
-    // gets what is left. The GPU loop does not check it yet.
+    // gets what is left. The clock starts in solve(): load()'s presolve is
+    // outside it. The GPU loop checks it at the start of each iteration (a
+    // watcher raises its stop flag), so one long GPU factorization can still
+    // overrun it.
     Real max_solve_seconds = -1.0;
     bool verbose = true;
     bool crossover = true;
