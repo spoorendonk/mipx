@@ -909,6 +909,10 @@ TEST_CASE("MipSolver: time limit stops the root heuristics", "[mip][benchmark][t
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     CHECK(result.status == Status::TimeLimit);
+    // The root LP finished (a bound) and no tree ran: the limit fell in the
+    // root stage after the LP, where the portfolio runs.
+    CHECK(result.nodes <= 1);
+    CHECK(std::isfinite(result.best_bound));
     CHECK(wall <= kLimit + kAllowedOverrun);
     CHECK(result.time_seconds <= kLimit + kAllowedOverrun);
     checkSetCoverIncumbent(lp, result.solution);

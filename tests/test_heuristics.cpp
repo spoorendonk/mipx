@@ -1757,15 +1757,24 @@ TEST_CASE("HeuristicRuntime: root portfolio invokes every heuristic", "[heuristi
         auto opts = lp.getOptions();
         opts.deadline = Deadline::after(0.0);
         lp.setOptions(opts);
+
+        // Without an incumbent: the heuristics that look for a first one.
+        Real no_incumbent = kInf;
+        std::vector<Real> no_solution;
+        const auto first = runtime.runRootPortfolio(ctx, no_incumbent, no_solution);
+        CHECK(first.auxobj_calls == 0);
+        CHECK(first.zeroobj_calls == 0);
+        CHECK(first.feaspump_calls == 0);
+        CHECK(first.rens_calls == 0);
+        CHECK(first.feasjump_calls == 0);
+        CHECK(first.lp_iterations == 0);
+
+        // With one: the heuristics that improve it.
         std::vector<Real> best_solution = {1.0, 0.0, 0.0};
         Real incumbent = -6.0;
 
         const auto out = runtime.runRootPortfolio(ctx, incumbent, best_solution);
 
-        CHECK(out.auxobj_calls == 0);
-        CHECK(out.zeroobj_calls == 0);
-        CHECK(out.feaspump_calls == 0);
-        CHECK(out.rens_calls == 0);
         CHECK(out.rins_calls == 0);
         CHECK(out.localbranching_calls == 0);
         CHECK(out.feasjump_calls == 0);
