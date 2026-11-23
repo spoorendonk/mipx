@@ -885,6 +885,41 @@ TEST_CASE("Presolve: an LP's implied bounds are put back, a MIP's kept", "[preso
     }
 }
 
+// min 2x + y s.t. x >= 2.5, x + y >= 3, 0 <= x <= x_ub, 0 <= y <= 0.50005.
+// The second row implies only x >= 2.49995, so x >= 2.5 from the singleton
+// row must stay; with x_ub large, taking x's term out of the row's running
+// maximum rounds y's 0.50005 to 0.5 and made it look implied.
+TEST_CASE("Presolve: a large bound's rounding does not put back a needed bound", "[presolve]") {
+    for (const Real x_ub : {1e12, 1e14}) {
+        INFO("x_ub " << x_ub);
+        LpProblem lp;
+        lp.name = "rounding_lb";
+        lp.sense = Sense::Minimize;
+        lp.num_cols = 2;
+        lp.obj = {2.0, 1.0};
+        lp.col_lower = {0.0, 0.0};
+        lp.col_upper = {x_ub, 0.50005};
+        lp.col_type = {VarType::Continuous, VarType::Continuous};
+        lp.col_names = {"x", "y"};
+        lp.num_rows = 2;
+        lp.row_lower = {2.5, 3.0};
+        lp.row_upper = {kInf, kInf};
+        lp.row_names = {"r1", "r2"};
+        std::vector<Triplet> trips = {{0, 0, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}};
+        lp.matrix = SparseMatrix(2, 2, std::move(trips));
+
+        Presolver presolver;
+        const auto reduced = presolver.presolve(lp);
+        REQUIRE_FALSE(presolver.isInfeasible());
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        solver.load(reduced);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(5.5, 1e-9));
+    }
+}
+
 // max x + y s.t. x <= 4, x - y <= 0, y - x <= 0, x, y >= 0. The singleton row
 // gives x <= 4 and activity tightening y <= 4; each follows from the other
 // through a row, so only one may be put back, or x = y grows without bound.

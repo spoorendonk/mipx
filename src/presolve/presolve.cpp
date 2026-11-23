@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -2712,8 +2713,50 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
 
     // Whether a remaining row bounds column j by `bound` or tighter from
     // above (upper) or below, the column's own term taken out.
+    //
+    // The running activities only pick the rows worth a look: taking a large
+    // term out of a sum rounds away the small ones beside it (x <= 1e12 in a
+    // row leaves its other terms good to about 1e-4), so a bound they say is
+    // implied may not be. rowImplies decides, from a fresh scan of the row
+    // without column j, with the scan's rounding error counted against it.
+    constexpr Real kEps = std::numeric_limits<Real>::epsilon();
+    auto rowImplies = [&](Index i, Index j, Real a, bool use_upper_side, bool upper, Real bound,
+                          Real tol) {
+        const Real side = use_upper_side ? lp.row_upper[i] : lp.row_lower[i];
+        Real rest = 0.0;
+        Real magnitude = std::abs(side);
+        Index terms = 0;
+        auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const Index jj = rv.indices[k];
+            if (jj == j || col_removed[jj]) {
+                continue;
+            }
+            const Real aa = effectiveCoeff(coeff_overrides_, i, jj, rv.values[k]);
+            if (aa == 0.0) {
+                continue;
+            }
+            // The end of column jj that gives the row's minimum activity
+            // (upper side) or maximum (lower side).
+            const Real b = (aa > 0.0) == use_upper_side ? lp.col_lower[jj] : lp.col_upper[jj];
+            if (std::abs(b) >= kHugeBound) {
+                return false;
+            }
+            rest += aa * b;
+            magnitude += std::abs(aa * b);
+            ++terms;
+        }
+        const Real value = (side - rest) / a;
+        const Real err = (static_cast<Real>(terms) + 2.0) * kEps * magnitude / std::abs(a) +
+                         2.0 * kEps * std::abs(value);
+        return upper ? value + err <= bound + tol : value - err >= bound - tol;
+    };
+
     auto implied = [&](Index j, bool upper, Real bound) {
         const Real tol = 1e-9 * std::max<Real>(1.0, std::abs(bound));
+        // Room for the running activities' rounding, so the filter seldom
+        // passes over a row that does imply the bound.
+        const Real filter_tol = 1e-6 * std::max<Real>(1.0, std::abs(bound));
         auto cv = lp.matrix.col(j);
         for (Index k = 0; k < cv.size(); ++k) {
             const Index i = cv.indices[k];
@@ -2736,7 +2779,9 @@ Index Presolver::relaxImpliedBounds(LpProblem& lp, const LpProblem& original,
             }
             const Real rest_finite = use_upper_side ? rest.min_finite : rest.max_finite;
             const Real value = (side - rest_finite) / a;
-            if (upper ? value <= bound + tol : value >= bound - tol) {
+            const Real slack = filter_tol + 1e-6 * std::abs(rest_finite / a);
+            if ((upper ? value <= bound + slack : value >= bound - slack) &&
+                rowImplies(i, j, a, use_upper_side, upper, bound, tol)) {
                 return true;
             }
         }
