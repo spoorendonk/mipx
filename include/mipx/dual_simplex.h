@@ -363,8 +363,8 @@ private:
     // gets a cold re-solve. `checked` says the verdict returned passed
     // verdictHolds(), so the clean-up need not run it again.
     LpResult solveWithColdFallback(std::chrono::steady_clock::time_point start, bool& checked);
-    // An Optimal the model's units refute gets a re-solve of the unscaled
-    // model from its basis (#307, #306).
+    // An Optimal or Infeasible the model's units refute gets a re-solve of the
+    // unscaled model from its basis (#307, #306, #305).
     LpResult cleanUpUnscaled(LpResult res, std::chrono::steady_clock::time_point start,
                              bool checked);
     bool dualRayMeetsContract() const;

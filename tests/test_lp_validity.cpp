@@ -1754,6 +1754,192 @@ TEST_CASE("Regression #306: a clean-up that misses a row keeps the scaled optimu
          {5, 6, 1625}}));
 }
 
+// An Infeasible whose ray fails the contract after the unscaled clean-up is
+// withdrawn to Error, with no ray left to read (#318).
+void requireErrorWithoutRay(const LpProblem& lp) {
+    DualSimplexSolver solver;
+    const LpResult res = solveLiteral(solver, lp);
+    INFO(describe(lp));
+    REQUIRE(res.status == Status::Error);
+    CHECK(solver.getDualRay().empty());
+}
+
+TEST_CASE("Regression #305: a cold Farkas ray that fails in the model's units is cleaned up",
+          "[lp_validity]") {
+    // Audit cuts seed 63, scaled degenerate max, round 0. The cold Infeasible's
+    // ray failed the contract in the model's units; the unscaled clean-up
+    // re-solves from its basis and returns a ray that certifies.
+    requireCertifiedInfeasible(literalLp(
+        Sense::Maximize, 1.5,
+        {-2531.25, 875, -19.53125, 0.026718749999999999, 0.0049687500000000001},
+        {-kInf, -0.0015, -kInf, -kInf, -kInf}, {kInf, 0.00087500000000000002, kInf, -225, kInf},
+        {-kInf, 0.515625, -74.6875, 165, -kInf, 0.0017875, -kInf, -3875, 7276265.8105204403},
+        {9375, 0.515625, -74.6875, kInf, kInf, kInf, 35.625, kInf, kInf},
+        {{0, 0, -1750000},
+         {0, 3, -18.75},
+         {0, 4, 2.75},
+         {1, 4, 0.00027500000000000002},
+         {2, 1, -6250},
+         {2, 2, -200},
+         {2, 4, -0.0074999999999999997},
+         {3, 1, -16250},
+         {3, 2, 225},
+         {3, 3, -0.27500000000000002},
+         {4, 0, 36250000},
+         {4, 1, 1250000},
+         {4, 3, -12.5},
+         {5, 0, -0.025000000000000001},
+         {5, 2, 0.0035000000000000001},
+         {5, 3, -2.5000000000000002e-06},
+         {6, 0, 25000},
+         {6, 1, -23750},
+         {7, 0, 2250000},
+         {7, 1, -1750000},
+         {7, 2, -13750},
+         {7, 3, -23.75},
+         {7, 4, -3.75},
+         {8, 0, -0.0047499999999999999},
+         {8, 4, 3750}}));
+}
+
+TEST_CASE("Regression #305: a cold Infeasible on a feasible model is withdrawn to Error",
+          "[lp_validity]") {
+    // Audit cuts seed 44, scaled max, round 0. The model is feasible (HiGHS:
+    // Optimal); it needs the free x2 near 2.3e7 against coefficients of
+    // 0.0026 and 2.75e8, and the cold solve skipped that pivot as round-off.
+    // Its ray leaves d2 = -0.0026 on x2, which has no bound, in the scaled
+    // and the unscaled solve alike.
+    requireErrorWithoutRay(literalLp(
+        Sense::Maximize, -5.625, {-0.0, -0.12, -82500}, {-625, -612.5, -kInf}, {150, -112.5, kInf},
+        {-181.25, -0.10312500000000001, -kInf, -kInf, 2357403.6549608898},
+        {-56.25, kInf, -253.75, 114062.5, kInf},
+        {{0, 0, 0.5},
+         {1, 2, 1750.0000000000002},
+         {2, 0, 0.47500000000000003},
+         {2, 1, 0.23750000000000002},
+         {2, 2, -487500},
+         {3, 1, -400},
+         {3, 2, -275000000},
+         {4, 1, -3750},
+         {4, 2, 0.0026250000000000002}}));
+}
+
+TEST_CASE("Regression #305: a Farkas ray lost to round-off is withdrawn to Error",
+          "[lp_validity]") {
+    // Audit cuts seed 4293, scaled min, round 1. The model is infeasible
+    // (HiGHS agrees), but the ray leaves d4 = -8.75e-5 on x4, which has no
+    // upper bound, after the clean-up too: no certificate, so no verdict.
+    requireErrorWithoutRay(
+        literalLp(Sense::Minimize, 3.875,
+                  {0.0026046875000000002, -9.046875, -0.0061875000000000003, -3187.5, 86406.25,
+                   -1.0625, 4187.5},
+                  {-13750, 1.75, 625, -0.0032499999999999999, 5.0000000000000002e-05, -kInf, -kInf},
+                  {kInf, 1.75, 4875, -0.0032499999999999999, kInf, kInf, -0.00062500000000000001},
+                  {-151875, -kInf, -939.0625, -kInf, -kInf},
+                  {-151875, -0.234375, -939.0625, 34406.269001280452, -5307395.7057410125},
+                  {{0, 0, 4.625},
+                   {0, 1, -2500},
+                   {0, 4, 400000000},
+                   {0, 5, 12500},
+                   {0, 6, 43750000},
+                   {1, 0, -3.7500000000000003e-05},
+                   {1, 1, 0.26250000000000001},
+                   {1, 3, 325},
+                   {1, 5, 0.087500000000000008},
+                   {2, 0, 0.035000000000000003},
+                   {2, 2, -0.35000000000000003},
+                   {2, 3, 175000},
+                   {2, 4, 125000},
+                   {2, 5, -37.5},
+                   {2, 6, -137500},
+                   {3, 0, -4.875},
+                   {3, 1, -17500},
+                   {3, 2, -0.32500000000000001},
+                   {3, 4, -0.10000000000000001},
+                   {4, 0, 362.5},
+                   {4, 2, -0.0046249999999999998},
+                   {4, 4, -8.7499999999999999e-05},
+                   {4, 6, -4.625}}));
+}
+
+TEST_CASE("Regression #305: a Farkas ray on the round-off threshold is no proof", "[lp_validity]") {
+    // Audit cuts seed 59370, scaled degenerate min, round 0 (HiGHS:
+    // Unbounded, so feasible). The ray is R5 alone, which leaves d5 = 0.0005
+    // on the free x5 against terms of 5000: exactly kPivotTol of them, which
+    // a double check rounds onto the threshold and passed.
+    requireErrorWithoutRay(literalLp(Sense::Minimize, 5.125,
+                                     {-0.084687499999999999, 0.0028437499999999999, 35,
+                                      0.0079843750000000002, 0.00056875000000000003, -898.4375},
+                                     {62.5, -kInf, -kInf, -2000, 3750, -kInf},
+                                     {125, -500, kInf, kInf, kInf, kInf},
+                                     {-kInf, 80625, -36875, -kInf, -kInf, 10241014.322327748},
+                                     {0.12625, 80625, kInf, kInf, 12.03125, kInf},
+                                     {{0, 2, -0.050000000000000003},
+                                      {0, 3, -4.8750000000000006e-05},
+                                      {0, 4, 2.7500000000000004e-06},
+                                      {0, 5, 4.125},
+                                      {1, 0, -250},
+                                      {1, 1, -32.5},
+                                      {1, 2, -350000},
+                                      {1, 3, -42.5},
+                                      {1, 5, 3000000},
+                                      {2, 0, -387.5},
+                                      {2, 4, 2.625},
+                                      {2, 5, -1000000},
+                                      {3, 2, -62500},
+                                      {3, 3, -37.5},
+                                      {3, 4, 1.5},
+                                      {3, 5, -375000},
+                                      {4, 0, 0.36249999999999999},
+                                      {4, 3, 0.021250000000000002},
+                                      {5, 1, 625},
+                                      {5, 3, -5000},
+                                      {5, 5, -0.00050000000000000001}}));
+    // Audit cuts seed 2367, scaled degenerate max, round 0. The ray is R7
+    // alone, whose 0.00025 on the free x2 is kPivotTol of its 2500 on x0; read
+    // back through the scales, that tie fell under the threshold.
+    requireErrorWithoutRay(literalLp(
+        Sense::Maximize, -7.25,
+        {0.0014375, -292.1875, 74843.75, 0.059375000000000004, 500, -0.0050000000000000001},
+        {12500, -kInf, -kInf, -kInf, -0.0036250000000000002, -2500},
+        {22500, 0.037499999999999999, kInf, -20, -0.0036250000000000002, -2500},
+        {-46093.75, -0.008984375000000001, 1171.875, 83593.75, -kInf, -kInf, 127656.25, -kInf},
+        {-46093.75, -0.0069843750000000001, 1171.875, kInf, kInf, kInf, 141406.25,
+         29360547.152363472},
+        {{0, 0, -4.75},
+         {0, 2, -287500000},
+         {0, 3, -125},
+         {1, 0, 5.0000000000000004e-08},
+         {1, 4, 2.375},
+         {2, 1, 387500},
+         {2, 2, 16250000},
+         {2, 3, 325},
+         {2, 5, 2.5},
+         {3, 0, -4.125},
+         {3, 1, 2500000},
+         {3, 2, -137500000},
+         {3, 5, -25},
+         {4, 0, -4.5000000000000006e-08},
+         {4, 2, -4.75},
+         {4, 4, 0.050000000000000003},
+         {4, 5, 4.8749999999999999e-07},
+         {5, 0, 0.0035000000000000001},
+         {5, 1, -1125},
+         {5, 2, 312500},
+         {5, 4, -46250},
+         {6, 0, 5},
+         {6, 1, -5000000},
+         {6, 2, 262500000},
+         {6, 3, 125},
+         {6, 4, -45000000},
+         {6, 5, -46.25},
+         {7, 0, 2500},
+         {7, 2, 0.00025000000000000001},
+         {7, 3, -0.018749999999999999},
+         {7, 4, -0.0013749999999999999},
+         {7, 5, -5}}));
+}
+
 TEST_CASE("Regression #278: cost perturbation leaves a certified optimum on a dual-degenerate LP",
           "[lp_validity]") {
     // A capacitated transportation LP whose costs take three values, so most

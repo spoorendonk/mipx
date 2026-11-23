@@ -663,7 +663,20 @@ LpResult DualSimplexSolver::solve() {
     const auto start = std::chrono::steady_clock::now();
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);
-    return cleanUpUnscaled(res, start, checked);
+    res = cleanUpUnscaled(res, start, checked);
+    // An Infeasible whose ray fails the getDualRay() contract in the model's
+    // units is no proof: that check is the certificate, not stricter than it,
+    // so #249's reason to leave a cold verdict unchecked does not apply. Of the
+    // cuts audit's cold rays the clean-up cannot repair, a third came from
+    // feasible models (cuts seed 44: a free column needed at 2.3e7 against
+    // coefficients of 0.0026 and 2.75e8, its pivot skipped as round-off). A
+    // wrong Infeasible prunes a node and teaches a conflict, so the verdict is
+    // withdrawn to Error, which B&B retries cold and then drops with its
+    // bound kept (#318).
+    if (res.status == Status::Infeasible && !checked && !dualRayMeetsContract()) {
+        return withdrawVerdict(res, Status::Error);
+    }
+    return res;
 }
 
 LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::time_point start,
@@ -683,7 +696,8 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     // verdict is returned as a first cold solve's is, not withdrawn: the check
     // is stricter than the certificate and rejects many correct cold verdicts
     // (#249's measurements, #282). solve()'s unscaled clean-up still re-solves
-    // a scaled cold Optimal the model's units refute (#307, #306).
+    // a scaled cold Optimal or Infeasible the model's units refute (#307,
+    // #306, #305).
     if (!warm) {
         return res;
     }
@@ -786,17 +800,28 @@ bool DualSimplexSolver::dualRayMeetsContract() const {
     if (std::all_of(dual_ray_.begin(), dual_ray_.end(), [](Real v) { return v == 0.0; })) {
         return false;
     }
-    std::vector<Real> d(static_cast<std::size_t>(num_cols_), 0.0);
-    Real size = 0.0;
-    Real beta = 0.0;
-    Real mag = 0.0;
+    // In long double, as a certificate is checked, and a hair (kTie, relative)
+    // stricter than kPivotTol: the ratio test drops an entry at kPivotTol of
+    // the row's terms, so a d_j can sit on this threshold exactly. In double
+    // the product kPivotTol * size rounds up onto it and passes a d_j the
+    // model's units fail (cuts seed 59370: d5 = 0.0005 against terms of 5000,
+    // on a model HiGHS finds feasible), and the scaled entries read back
+    // through scales of 1/max carry round-off that can take a tie below the
+    // threshold (cuts seed 2367: 0.00025 against 2500 in one row). A ray in
+    // that band is no proof either way; it gets the clean-up, then Error.
+    using Wide = long double;
+    constexpr Wide kTie = 1e-12L;
+    std::vector<Wide> d(static_cast<std::size_t>(num_cols_), 0.0L);
+    Wide size = 0.0L;
+    Wide beta = 0.0L;
+    Wide mag = 0.0L;
     for (Index i = 0; i < num_rows_; ++i) {
-        const Real yi = dual_ray_[static_cast<std::size_t>(i)];
-        if (yi == 0.0) {
+        const Wide yi = dual_ray_[static_cast<std::size_t>(i)];
+        if (yi == 0.0L) {
             continue;
         }
-        const Real rs = scaled_ ? row_scale_[i] : 1.0;
-        const Real side = yi > 0.0 ? row_upper_[i] : row_lower_[i];
+        const Wide rs = scaled_ ? row_scale_[i] : 1.0;
+        const Real side = yi > 0.0L ? row_upper_[i] : row_lower_[i];
         if (!std::isfinite(side)) {
             return false;
         }
@@ -805,27 +830,27 @@ bool DualSimplexSolver::dualRayMeetsContract() const {
         const auto rv = matrix_.row(i);
         for (Index k = 0; k < rv.size(); ++k) {
             const Index j = rv.indices[k];
-            const Real t = yi * rv.values[k] / (rs * (scaled_ ? col_scale_[j] : 1.0));
+            const Wide t = yi * rv.values[k] / (rs * (scaled_ ? col_scale_[j] : 1.0));
             d[static_cast<std::size_t>(j)] += t;
             size = std::max(size, std::abs(t));
         }
     }
-    Real alpha = 0.0;
+    Wide alpha = 0.0L;
     for (Index j = 0; j < num_cols_; ++j) {
-        const Real dj = d[static_cast<std::size_t>(j)];
-        if (dj == 0.0) {
+        const Wide dj = d[static_cast<std::size_t>(j)];
+        if (dj == 0.0L) {
             continue;
         }
-        const Real bound = dj > 0.0 ? col_lower_[j] : col_upper_[j];
+        const Real bound = dj > 0.0L ? col_lower_[j] : col_upper_[j];
         if (std::isfinite(bound)) {
-            const Real t = dj * bound * (scaled_ ? col_scale_[j] : 1.0);
+            const Wide t = dj * bound * (scaled_ ? col_scale_[j] : 1.0);
             alpha += t;
             mag = std::max(mag, std::abs(t));
-        } else if (std::abs(dj) > kPivotTol * size) {
+        } else if (std::abs(dj) > kPivotTol * (1.0L - kTie) * size) {
             return false;
         }
     }
-    return alpha - beta > -kUnscaledRelTol * std::max(1.0, mag);
+    return alpha - beta > -kUnscaledRelTol * std::max(1.0L, mag);
 }
 
 // The optimum read back in the model's units: rows within a relative
@@ -1048,23 +1073,39 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // limit; Error), Unbounded included: the refutation may be the check's
 // strictness, not the optimum's (#282), and the ray is unchecked.
 //
-// `checked` means solve()'s fallback already ran optimumHoldsUnscaled() on
-// this verdict and it passed, so only the point is checked here.
+// An Infeasible whose ray fails the getDualRay() contract in the model's
+// units (dualRayMeetsContract()) is cleaned up the same way (#305): on scaled
+// cut models the scaled pivots skip entries the scaling makes look like
+// round-off, and the unscaled re-solve from the same basis repairs most such
+// rays. It has no point to put back, and solve() withdraws a ray that still
+// fails to Error (#318).
+//
+// `checked` means solve()'s fallback already ran verdictHolds() on this
+// verdict and it passed, so only an Optimal's point is checked here.
 //
 // On default, with no option to turn it off (#313): it fires only on a
 // verdict the model's units refute.
 LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
                                             std::chrono::steady_clock::time_point start,
                                             bool checked) {
-    if (res.status != Status::Optimal || !scaled_ || !has_basis_) {
+    if (!scaled_ || !has_basis_) {
         return res;
     }
-    const bool primal_held = primalHoldsUnscaled();
-    if (primal_held && (checked || optimumHoldsUnscaled())) {
+    bool primal_held = false;
+    if (res.status == Status::Optimal) {
+        primal_held = primalHoldsUnscaled();
+        if (primal_held && (checked || optimumHoldsUnscaled())) {
+            return res;
+        }
+    } else if (res.status != Status::Infeasible || checked || dualRayMeetsContract()) {
         return res;
     }
+    // With no budget left, a point that held stands, and so does an
+    // Infeasible: solve() withdraws its failing ray to Error, not to a limit,
+    // whose objective strong branching would read as a bound (#318).
+    const bool keep = primal_held || res.status == Status::Infeasible;
     if (res.iterations >= iter_limit_) {
-        return primal_held ? res : withdrawVerdict(res, Status::IterLimit);
+        return keep ? res : withdrawVerdict(res, Status::IterLimit);
     }
     const Int iter_limit = iter_limit_;
     const double time_limit = options_.max_solve_seconds;
@@ -1072,7 +1113,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         const double spent =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         if (spent >= time_limit) {
-            return primal_held ? res : withdrawVerdict(res, Status::TimeLimit);
+            return keep ? res : withdrawVerdict(res, Status::TimeLimit);
         }
         options_.max_solve_seconds = time_limit - spent;
     }
