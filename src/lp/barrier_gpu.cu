@@ -1778,7 +1778,8 @@ struct GpuBarrierImpl {
             double dinf = ctx.h_scalars[2] * inv_c;
             double pobj = obj_offset + ctx.h_scalars[3];
             double dobj = obj_offset + ctx.h_scalars[4];
-            double gap = std::abs(mu) / (1.0 + std::abs(pobj));
+            // Relative duality gap z's, not mu = z's / n (#253).
+            double gap = std::abs(ctx.h_scalars[0]) / (1.0 + std::abs(pobj));
 
             // Update backend tag when switching.
             backend_tag = (active_backend == Backend::NE)

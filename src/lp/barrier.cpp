@@ -617,7 +617,10 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         Real mu = zs_sum / std::max<Index>(n_compl, 1);
         Real pinf = std::max(infNorm(rp), ru_norm) * inv_b;
         Real dinf = infNorm(rd) * inv_c;
-        Real gap = std::abs(mu) / (1.0 + std::abs(obj_offset + dot(c, z)));
+        // Relative duality gap: z's (bound pairs included) is the gap of a
+        // feasible pair, not mu = z's / n, which would stop n times early
+        // (#253).
+        Real gap = std::abs(zs_sum) / (1.0 + std::abs(obj_offset + dot(c, z)));
 
         if (opts.verbose) {
             std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e  mu=% .2e\n", iter,
