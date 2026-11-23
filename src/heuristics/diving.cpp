@@ -53,6 +53,12 @@ std::optional<HeuristicSolution> DivingHeuristic::dive(const LpProblem& problem,
         lp.setIterationLimit(200);  // Limit iterations per dive.
         auto result = lp.solve();
 
+        if (result.status == Status::TimeLimit) {
+            // Out of time (the deadline on lp, #337): a stopped LP says
+            // nothing about this fixing, and every further step would stop
+            // at once too, so end the dive rather than backtrack.
+            break;
+        }
         if (result.status != Status::Optimal) {
             ++consecutive_infeasible;
             // Undo the fixing.

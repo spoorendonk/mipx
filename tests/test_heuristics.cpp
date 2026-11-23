@@ -365,6 +365,35 @@ TEST_CASE("FractionalDiving: LP state restored after dive", "[heuristics]") {
     CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
+TEST_CASE("FractionalDiving: a TimeLimit LP ends the dive with no solution", "[heuristics]") {
+    // #354: once the deadline on the LP has passed, every dive step stops
+    // with TimeLimit. That is no result: the dive ends, finds nothing, and
+    // leaves the LP's bounds as they were.
+    auto problem = buildKnapsack();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    const Real obj_before = lr.objective;
+    const auto primals = lp.getPrimalValues();
+
+    auto opts = lp.getOptions();
+    const auto saved = opts;
+    opts.deadline = Deadline::after(0.0);
+    lp.setOptions(opts);
+
+    FractionalDiving diving;
+    diving.setMaxDives(50);
+    diving.setBacktrackLimit(1000);
+    CHECK(!diving.run(problem, lp, primals, kInf).has_value());
+
+    lp.setOptions(saved);
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
+}
+
 TEST_CASE("Diving: respects backtrack limit", "[heuristics]") {
     // Build a problem where diving will hit infeasibility.
     auto problem = buildHardRoundingMip();
@@ -493,6 +522,39 @@ TEST_CASE("RensHeuristic: finds feasible on easy MIP", "[heuristics]") {
 
     REQUIRE(result.has_value());
     CHECK(isFeasible(problem, result->values));
+}
+
+TEST_CASE("RensHeuristic: a TimeLimit subproblem LP yields no solution", "[heuristics]") {
+    // #354: the same setup as above finds a solution; with the deadline on
+    // the LP passed, the subproblem solve stops with TimeLimit, and RENS
+    // reads no candidate from it and restores the LP.
+    auto problem = buildEasyRoundingMip();
+
+    DualSimplexSolver lp;
+    lp.load(problem);
+    auto lr = lp.solve();
+    REQUIRE(lr.status == Status::Optimal);
+    const Real obj_before = lr.objective;
+    const auto primals = lp.getPrimalValues();
+
+    auto opts = lp.getOptions();
+    const auto saved = opts;
+    opts.deadline = Deadline::after(0.0);
+    lp.setOptions(opts);
+
+    RensHeuristic rens;
+    rens.setSubproblemIterLimit(100);
+    rens.setFixTol(1.0);
+    rens.setMinFixedVars(1);
+    rens.setMinFixedRate(0.0);
+    CHECK(!rens.run(problem, lp, primals, kInf).has_value());
+    CHECK(rens.lastExecutedSolve());
+    CHECK(!rens.lastFoundSolution());
+
+    lp.setOptions(saved);
+    auto lr2 = lp.solve();
+    REQUIRE(lr2.status == Status::Optimal);
+    CHECK_THAT(lr2.objective, WithinAbs(obj_before, 1e-6));
 }
 
 TEST_CASE("RensHeuristic: skips when too few variables can be fixed", "[heuristics]") {
