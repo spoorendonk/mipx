@@ -1487,7 +1487,19 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // Warm-start: primals are already in internal (scaled) coordinates.
     // No re-scaling needed — we keep primals in internal coords at all times.
 
+    // Columns the primal path's ray guard priced out (#241, #319) stay out of
+    // pricing until the basis changes: guard_priced[k] == basis_epoch. Their
+    // reduced costs are kept as priced, not zeroed, so the reported ones stay
+    // c - A^T y of the reported duals.
+    Int basis_epoch = 0;
+    std::vector<Int> guard_priced(static_cast<std::size_t>(numVars()), -1);
+    bool guard_fired_since_duals = false;
+    const auto guardPriced = [&](Index k) {
+        return guard_priced[static_cast<std::size_t>(k)] == basis_epoch;
+    };
+
     auto recoverFromSingularBasis = [&]() -> bool {
+        ++basis_epoch;
         setupCrashBasis();
         try {
             refactorize();
@@ -2594,7 +2606,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                                               (st == BasisStatus::AtLower && rc < -kDualTol) ||
                                               (st == BasisStatus::AtUpper && rc > kDualTol) ||
                                               (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                                          if (!dual_inf) {
+                                          if (!dual_inf || guardPriced(k)) {
                                               continue;
                                           }
                                           const Real score = primalEnteringScore(k, rc);
@@ -2631,7 +2643,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     bool dual_inf = (st == BasisStatus::AtLower && rc < -kDualTol) ||
                                     (st == BasisStatus::AtUpper && rc > kDualTol) ||
                                     (st == BasisStatus::Free && std::abs(rc) > kDualTol);
-                    if (!dual_inf) {
+                    if (!dual_inf || guardPriced(k)) {
                         continue;
                     }
                     const Real score = primalEnteringScore(k, rc);
@@ -2719,6 +2731,16 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                         }
                     }
                     // Re-enter main loop to check final optimality.
+                    rebuildInfeasibleSet();
+                    continue;
+                }
+                // A guard-priced column's incremental price is no longer
+                // checked against y: price once more from fresh duals, so the
+                // reported reduced costs are c - A^T y (#319). The guard's
+                // columns stay skipped, so this cannot loop.
+                if (guard_fired_since_duals) {
+                    guard_fired_since_duals = false;
+                    computeDuals();
                     rebuildInfeasibleSet();
                     continue;
                 }
@@ -2922,7 +2944,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 // ray whose gain is at that level is no proof (#241: gains of
                 // 1e-7 against terms of 2e9 on bounded LPs). Refresh updated
                 // factors and price again, and on fresh ones take the column
-                // as priced out.
+                // as priced out: skipped by pricing until the basis changes,
+                // its reduced cost kept. Zeroing it (as before #319) reported
+                // a d_j that c - A^T y contradicts. On an ill-conditioned basis
+                // that d_j can be real in the model's units and still below
+                // what the basis resolves, about |c_B|^T |B^-1 a_q| eps (cuts
+                // seed 2609: d2 = -1.4e-6 exactly, against ray terms of 3e10,
+                // on an LP that sits on the Optimal/Unbounded edge).
                 Real ray_gain = varCost(entering_p);
                 Real ray_mag = std::abs(ray_gain);
                 for (Index i = 0; i < num_rows_; ++i) {
@@ -2945,7 +2973,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                         computeDuals();
                         initDseWeights();
                     } else {
-                        reduced_cost_[entering_p] = 0.0;
+                        guard_priced[static_cast<std::size_t>(entering_p)] = basis_epoch;
+                        guard_fired_since_duals = true;
                     }
                     rebuildInfeasibleSet();
                     ++iterations_;
@@ -3098,6 +3127,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
 
             // Swap basis.
+            ++basis_epoch;
             basis_[leaving_row_p] = entering_p;
             basis_pos_[entering_p] = leaving_row_p;
             repair_rejected_row = -1;
@@ -3863,6 +3893,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // ---- Swap basis ----
         // Entering goes into basis at leaving_row position.
         // Leaving goes nonbasic.
+        ++basis_epoch;
         basis_[leaving_row] = entering_var;
         basis_pos_[entering_var] = leaving_row;
         basis_pos_[leaving_var] = -1;
