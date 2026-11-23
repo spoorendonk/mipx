@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 
 #include <cstddef>
 #include <span>
@@ -86,8 +87,10 @@ public:
                  std::span<const Index> perm, std::size_t max_bytes = 0);
 
     /// Numeric factorization of the matrix whose entries are `values`, aligned
-    /// with the analyzed pattern. Returns false when a pivot is not finite.
-    bool factorize(std::span<const Real> values, const PivotRule& rule);
+    /// with the analyzed pattern. Returns false when a pivot is not finite, or
+    /// when `deadline` passes (checked before each supernode; error() says so).
+    bool factorize(std::span<const Real> values, const PivotRule& rule,
+                   const Deadline& deadline = {});
 
     /// Solve M·x = b in place (original numbering).
     void solve(std::span<Real> b) const;

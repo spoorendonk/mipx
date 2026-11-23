@@ -540,9 +540,11 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     std::vector<Real> dy_aff(static_cast<size_t>(m));
     std::vector<Real> ds_aff(static_cast<size_t>(n));
 
+    // The time limit (#275): the backend's factorize() fails once it passes.
+    const Deadline& deadline = solver.deadline();
     if (!mehrotraStartingPoint(solver, b, c, u, upper_cols, reg, z, y, s, v, w)) {
         iters = 0;
-        return BarrierIpmOutcome::Failed;
+        return deadline.passed() ? BarrierIpmOutcome::TimeLimit : BarrierIpmOutcome::Failed;
     }
     // After the starting point, which sizes v and w.
     GondzioCorrectors gondzio{upper_cols, z, s, v, w, dz, dy, ds, dv, dw};
@@ -592,6 +594,10 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         if (opts.stop_flag != nullptr && opts.stop_flag->load(std::memory_order_relaxed)) {
             iters = iter;
             return BarrierIpmOutcome::Failed;
+        }
+        if (deadline.passed()) {
+            iters = iter;
+            return BarrierIpmOutcome::TimeLimit;
         }
 
         // Residuals.
@@ -667,8 +673,12 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         const std::span<const Real> z_fac = bounded ? ub_step.z_eff : z;
         const std::span<const Real> s_fac = bounded ? ub_step.s_eff : s;
         if (!solver.factorize(z_fac, s_fac, reg)) {
-            // Retry with boosted regularization.
-            if (!solver.factorize(z_fac, s_fac, reg * 100.0)) {
+            // Retry with boosted regularization, unless out of time.
+            if (deadline.passed() || !solver.factorize(z_fac, s_fac, reg * 100.0)) {
+                if (deadline.passed()) {
+                    iters = iter;
+                    return BarrierIpmOutcome::TimeLimit;
+                }
                 return stopShort(iter);
             }
         }
@@ -1416,6 +1426,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         // A factor too large for memory ends the solve with an error status
         // rather than an exception out of solve() (#280).
         try {
+            solver->setDeadline(deadline_);
             if (!solver->setup(aeq_, m, n, options_)) {
                 if (last_error_.empty()) {
                     last_error_ = solver->lastError().empty() ? "Barrier backend setup failed."
@@ -1428,6 +1439,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
+        }
+        if (outcome == BarrierIpmOutcome::TimeLimit) {
+            return outcome;  // no iterate to unscale or hand on
         }
         ok = outcome != BarrierIpmOutcome::Failed;
         if (!ok && last_error_.empty() &&
@@ -1639,6 +1653,7 @@ bool BarrierSolver::runCrossover() {
     DualSimplexOptions ds_opts;
     ds_opts.stop_flag = options_.stop_flag;
     ds_opts.enable_scaling = true;
+    ds_opts.max_solve_seconds = deadline_.remainingSeconds();  // -1: none (#275)
     ds.setOptions(ds_opts);
 
     auto result = ds.solve();
@@ -1650,6 +1665,10 @@ bool BarrierSolver::runCrossover() {
         basis_orig_ = ds.getBasis();
         objective_ = result.objective;
         return true;
+    }
+    if (result.status == Status::TimeLimit || deadline_.passed()) {
+        crossover_status_ = Status::TimeLimit;
+        return false;  // no time left for a cold run
     }
 
     // Crossover failed — fall back to cold dual simplex.
@@ -1670,6 +1689,7 @@ bool BarrierSolver::runCrossover() {
     ds_cold.setIterationLimit(3 * dim_sum);
     DualSimplexOptions cold_opts;
     cold_opts.stop_flag = options_.stop_flag;
+    cold_opts.max_solve_seconds = deadline_.remainingSeconds();
     ds_cold.setOptions(cold_opts);
 
     auto cold_result = ds_cold.solve();
@@ -1697,6 +1717,7 @@ bool BarrierSolver::runCrossover() {
 LpResult BarrierSolver::solve() {
     last_error_.clear();
     gondzio_corrections_ = 0;
+    deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
         status_ = Status::Error;
         last_error_ = "Barrier solver has no loaded problem.";
@@ -1715,6 +1736,24 @@ LpResult BarrierSolver::solve() {
     Int iters = 0;
 
     const BarrierIpmOutcome outcome = solveStandardForm(z, y, s, iters);
+
+    auto timeLimit = [&](Int iterations) {
+        dual_eq_.clear();
+        reduced_costs_std_.clear();
+        primal_orig_.clear();
+        basis_orig_.clear();
+        status_ = Status::TimeLimit;
+        objective_ = 0.0;
+        iterations_ = iterations;
+        last_error_.clear();
+        if (options_.verbose) {
+            std::printf("Barrier: time limit of %g s reached.\n", options_.max_solve_seconds);
+        }
+        return LpResult{status_, objective_, iterations_, 0.0};
+    };
+    if (outcome == BarrierIpmOutcome::TimeLimit) {
+        return timeLimit(iters);
+    }
 
     if (outcome == BarrierIpmOutcome::Failed) {
         if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
@@ -1774,6 +1813,9 @@ LpResult BarrierSolver::solve() {
                 // Simplex on the same LP contradicts the barrier's optimum,
                 // so neither verdict is reported.
                 return fail("Barrier optimum contradicted by crossover's simplex.");
+            }
+            if (needs_crossover && crossover_status_ == Status::TimeLimit) {
+                return timeLimit(iters + crossover_iters_);
             }
             if (needs_crossover) {
                 return fail(near_optimal

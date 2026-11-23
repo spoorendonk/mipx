@@ -727,6 +727,7 @@ int main(int argc, char* argv[]) {
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
                     bopts.gondzio_correctors = barrier_gondzio;
                     bopts.threads = std::max(1, num_threads);
+                    bopts.max_solve_seconds = seconds;  // #275
                     solver.setOptions(bopts);
                     solver.load(model);
                     run.result = solver.solve();

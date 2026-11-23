@@ -164,6 +164,18 @@ TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]
     CHECK(run.mentions("Objective: none"));
 }
 
+TEST_CASE("CLI: --time-limit reaches the barrier", "[cli][barrier]") {
+    // Issue #275: the barrier ran past --time-limit. A limit of 0 has passed
+    // before the first factorization, so the status is deterministic. No
+    // presolve: it would solve this model before the barrier ran.
+    const auto run = runSolver("'" + testDataDir() +
+                               "/lp_format.lp' --barrier --no-gpu --no-presolve --time-limit 0");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Time limit"));
+    CHECK(run.mentions("Objective: none"));
+}
+
 TEST_CASE("CLI: an LP whose postsolved point misses a row is solved again", "[cli]") {
     // Issue #257: the LP path postsolved and printed Optimal unchecked. The
     // model's postsolve rebuilds x2 through a 1e6 coefficient from an x1 off

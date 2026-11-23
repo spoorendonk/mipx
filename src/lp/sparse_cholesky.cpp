@@ -607,7 +607,8 @@ std::size_t SparseCholesky::factorBytes() const {
            static_cast<std::size_t>(n_) * (3 * sizeof(Index) + 2 * sizeof(Real));
 }
 
-bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& rule) {
+bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& rule,
+                               const Deadline& deadline) {
     std::fill(values_.begin(), values_.end(), 0.0);
     for (std::size_t p = 0; p < entry_pos_.size(); ++p) {
         values_[entry_pos_[p]] += values[p];
@@ -639,6 +640,12 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
         // applies), a triangular solve for the panel's rows below, and a
         // rank-k update of the columns right of the panel.
         for (Index k0 = 0; k0 < nc; k0 += kPanel) {
+            // Once per panel, so a large supernode is not one unbroken block
+            // of work (#275).
+            if (deadline.passed()) {
+                error_ = "time limit reached in the factorization";
+                return false;
+            }
             const Index k1 = std::min(nc, k0 + kPanel);
             for (Index k = k0; k < k1; ++k) {
                 Real* colk = at(0, k);

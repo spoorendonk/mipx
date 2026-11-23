@@ -2,6 +2,7 @@
 
 #include "mipx/barrier_presolve.h"
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 #include "mipx/lp_problem.h"
 #include "mipx/lp_solver.h"
 
@@ -31,10 +32,12 @@ enum class BarrierOrdering {
 
 // How an interior-point run ended. NearOptimal is a run that stopped short of
 // primal_dual_tol but whose best iterate is close enough to start crossover.
+// TimeLimit is a run stopped by BarrierOptions::max_solve_seconds.
 enum class BarrierIpmOutcome {
     Optimal,
     NearOptimal,
     Failed,
+    TimeLimit,
 };
 
 struct BarrierOptions {
@@ -78,6 +81,11 @@ struct BarrierOptions {
     // Opt-in, CPU backends only: above 0 the GPU path is skipped, an explicit
     // GPU backend included (reported when verbose).
     Int gondzio_correctors = 0;
+    // Wall-clock limit on solve() in seconds, crossover included; below 0:
+    // none (#275). The CPU IPM checks it every iteration and inside its
+    // factorizations, and solve() then returns Status::TimeLimit; crossover
+    // gets what is left. The GPU loop does not check it yet.
+    Real max_solve_seconds = -1.0;
     bool verbose = true;
     bool crossover = true;
     bool presolve = true;
@@ -181,6 +189,7 @@ private:
         Status::Error;  // Infeasible/Unbounded if either crossover run proved it
     bool used_gpu_ = false;
     Int gondzio_corrections_ = 0;
+    Deadline deadline_;  // of the current solve(), from max_solve_seconds
     std::string last_error_;
 };
 

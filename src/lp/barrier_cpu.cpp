@@ -814,6 +814,10 @@ private:
         std::vector<Real> ne_col(static_cast<size_t>(m_), 0.0);
 
         for (Index j = 0; j < m; ++j) {
+            // Forming M is m products with A, O(m nnz(A)).
+            if (deadline_.passed()) {
+                return false;
+            }
             auto rj = a_->row(j);
             for (Index k = 0; k < rj.size(); ++k) {
                 tmp[rj.indices[k]] = theta_[rj.indices[k]] * rj.values[k];
@@ -837,6 +841,11 @@ private:
             diag_orig[j] = ne_dense_[j + j * m];
         }
         for (Index j = 0; j < m; ++j) {
+            // Once per column: the factor is O(m^3), minutes at large m
+            // (#275).
+            if (deadline_.passed()) {
+                return false;
+            }
             // Diagonal: L[j,j] = sqrt(M[j,j] - sum_{k<j} L[j,k]^2)
             Real sum = 0.0;
             for (Index k = 0; k < j; ++k) {
@@ -1141,7 +1150,7 @@ private:
         schur_order_ = 0;
         schur_dropped_ = 0;
         if (dense_cols_.empty()) {
-            return chol_.factorize(ne_val_, rule);
+            return chol_.factorize(ne_val_, rule, deadline_);
         }
         std::fill(dense_share_.begin(), dense_share_.end(), 0.0);
         for (const Index j : dense_cols_) {
@@ -1162,7 +1171,7 @@ private:
         rule.dependent_shift = shift_;
         rule.shift_reference = shift_;  // M's diagonal, net of reg
         rule.shift_tol = kShiftTol;
-        if (!chol_.factorize(ne_val_, rule)) {
+        if (!chol_.factorize(ne_val_, rule, deadline_)) {
             return false;
         }
         const auto t = static_cast<Index>(dense_cols_.size() + chol_.shiftedPivots().size());
@@ -1491,6 +1500,10 @@ private:
         std::vector<Real> w(static_cast<size_t>(dim_), 0.0);
 
         for (Index j = 0; j < dim_; ++j) {
+            // Once per column: fill-in can make this minutes long (#275).
+            if (deadline_.passed()) {
+                return false;
+            }
             // Scatter augmented matrix column j into w.
             scatterAugColumn(j, w);
 

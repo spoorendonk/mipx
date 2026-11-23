@@ -26,6 +26,7 @@ add_executable(mipx-tests
     test_barrier_implicit_bounds.cpp
     test_barrier_gondzio.cpp
     test_barrier_gap.cpp
+    test_barrier_time_limit.cpp
     test_sparse_cholesky.cpp
     test_amd_ordering.cpp
     test_pdlp.cpp

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/barrier.h"
+#include "mipx/deadline.h"
 #include "mipx/sparse_matrix.h"
 
 #include <cstddef>
@@ -36,6 +37,12 @@ public:
     /// (e.g. the factor does not fit in memory); empty otherwise.
     [[nodiscard]] const std::string& lastError() const { return error_; }
 
+    /// The solve's time limit (#275). A CPU backend checks it inside its
+    /// factorization, so one long factorize() cannot overrun it by minutes,
+    /// and returns false once it has passed.
+    void setDeadline(const Deadline& deadline) { deadline_ = deadline; }
+    [[nodiscard]] const Deadline& deadline() const { return deadline_; }
+
     /// The factor's size once set up, where the backend counts it (the sizes:
     /// sparse normal equations; the flop estimates: both normal-equations
     /// backends; zeros elsewhere), for tests, diagnostics and #293's K.
@@ -54,6 +61,7 @@ public:
 
 protected:
     std::string error_;
+    Deadline deadline_;
 };
 
 // CPU backends (always available).
