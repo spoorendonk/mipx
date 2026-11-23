@@ -1825,6 +1825,7 @@ LpResult BarrierSolver::solve() {
         dual_eq_.clear();
         reduced_costs_std_.clear();
         primal_orig_.clear();
+        basis_orig_.clear();
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
