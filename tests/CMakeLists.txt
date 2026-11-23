@@ -185,4 +185,19 @@ if(TARGET mipx-solve AND Python3_Interpreter_FOUND)
             SKIP_RETURN_CODE 77
         )
     endforeach()
+
+    # CPU barrier gate (#296): every Netlib LP on both normal-equations
+    # backends, against tests/perf/instance_gate/barrier_expected.csv. Minutes,
+    # not seconds, so it has a label of its own and stays out of instance-gate:
+    #
+    #   ctest --test-dir build -L barrier-gate --output-on-failure
+    add_test(NAME "barrier-gate: netlib"
+        COMMAND Python3::Interpreter
+            "${PROJECT_SOURCE_DIR}/tests/perf/run_instance_gate.py" barrier
+            --binary "$<TARGET_FILE:mipx-solve>"
+    )
+    set_tests_properties("barrier-gate: netlib" PROPERTIES
+        LABELS "solver-regression;barrier-gate"
+        SKIP_RETURN_CODE 77
+    )
 endif()

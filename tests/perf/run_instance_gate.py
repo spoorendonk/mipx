@@ -31,6 +31,7 @@ incumbent is possible; doing so is follow-up work on #223.
 
     run_instance_gate.py lp  [--backends dual,barrier,pdlp]   # Netlib, per LP backend
     run_instance_gate.py mip                                   # curated MIPLIB subset
+    run_instance_gate.py barrier [--backends barrier-dense,barrier-sparse]  # CPU barrier, Netlib
 
 By default only the instances in the expected list run. `--all` runs every
 instance in the data directory that has a reference, and `--write-expected`
@@ -131,7 +132,20 @@ SUITES: dict[str, Suite] = {
         ("mip",),
         "tests/data/download_miplib.sh --small",
     ),
+    # The CPU barrier over every Netlib LP, per normal-equations backend (#296).
+    "barrier": Suite(
+        REPO / "tests" / "data" / "netlib",
+        "netlib.solu",
+        GATE_DIR / "barrier_expected.csv",
+        10.0,
+        ("barrier-dense", "barrier-sparse"),
+        "tests/data/download_netlib.sh",
+    ),
 }
+
+# The CPU barrier backends: --barrier on one normal-equations backend (#290),
+# GPU off so the gate measures the CPU path on every host.
+BARRIER_NE = {"barrier-dense": "dense", "barrier-sparse": "sparse"}
 
 
 def read_expected(path: Path) -> list[Expectation]:
@@ -204,6 +218,8 @@ def solver_args(backend: str, time_limit: float) -> list[str]:
         # held to 1e-6: at the default 1e-4 a legitimate gap-limit stop can sit
         # anywhere within 1e-4 of the optimum.
         args += ["--gap-tol", "1e-9"]
+    elif backend in BARRIER_NE:
+        args += ["--barrier", "--barrier-ne", BARRIER_NE[backend], "--no-gpu"]
     else:
         args.append(f"--{backend}")
     return args
@@ -286,17 +302,21 @@ def build_plan(args: argparse.Namespace, suite: Suite, listed: list[Expectation]
 
 def print_summary(results: dict[tuple[str, str], str], backends: list[str]) -> None:
     print("\nSummary (per backend):")
-    print(f"  {'backend':<8} " + " ".join(f"{c:>10}" for c in CLASSES))
+    print(f"  {'backend':<14} " + " ".join(f"{c:>10}" for c in CLASSES))
     for backend in backends:
         counts = Counter(cls for (_, b), cls in results.items() if b == backend)
-        print(f"  {backend:<8} " + " ".join(f"{counts.get(c, 0):>10}" for c in CLASSES))
+        print(f"  {backend:<14} " + " ".join(f"{counts.get(c, 0):>10}" for c in CLASSES))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("suite", choices=sorted(SUITES))
     p.add_argument("--binary", default=str(REPO / "build" / "mipx-solve"))
-    p.add_argument("--backends", default="", help="Comma-separated subset (lp: dual,barrier,pdlp).")
+    p.add_argument(
+        "--backends",
+        default="",
+        help="Comma-separated subset (lp: dual,barrier,pdlp; barrier: barrier-{dense,sparse}).",
+    )
     p.add_argument("--time-limit", type=float, default=0.0, help="Per-instance limit (s).")
     p.add_argument("--data-dir", default="", help="Instance directory (default: the suite's).")
     p.add_argument("--expected-file", default="", help="Expected list (default: the suite's).")
@@ -319,7 +339,7 @@ def execute(args: argparse.Namespace, suite: Suite, plan: Plan) -> dict[tuple[st
         results[(name, backend)] = cls
         tag = verdict(plan.expected.get((name, backend)), cls)
         obj = "" if outcome.objective is None else f" obj={outcome.objective:.10g}"
-        print(f"  {name:<12} {backend:<8} {cls:<11} [{tag}] status={outcome.status}{obj}")
+        print(f"  {name:<12} {backend:<14} {cls:<11} [{tag}] status={outcome.status}{obj}")
     return results
 
 
