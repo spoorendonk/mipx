@@ -60,6 +60,13 @@ public:
         /// exactly, so a small but nonzero pivot is shifted too rather than
         /// left to make the factor ill-conditioned (Andersen 1996).
         Real shift_tol = 0.0;
+        /// Per row, original numbering, net of diag_offset; empty: the
+        /// original diagonal. On a row with dependent_shift > 0, shift_tol is
+        /// measured against this rather than the pivot's own diagonal: with
+        /// columns left out of M, a row they carry almost alone has a small
+        /// diagonal here but a large one in the full matrix, and its pivot
+        /// must be shifted for the compensated solve to stay accurate.
+        std::span<const Real> shift_reference;
     };
 
     /// A dependent pivot moved by PivotRule::dependent_shift: the factor is

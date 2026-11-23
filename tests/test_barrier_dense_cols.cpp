@@ -172,6 +172,36 @@ TEST_CASE("Sparse NE dense columns: a small dense share still keeps the row",
     CHECK(relDiff(got.dz, want.dz) < 1e-5);
 }
 
+TEST_CASE("Sparse NE dense columns: rows the dense columns carry almost alone are shifted",
+          "[barrier][sparse-ne][dense-cols]") {
+    // Theta of the dense columns 1e8 of the sparse ones: every row's sparse
+    // share is about 1e-8 of its diagonal in M. Measured against M_s's own
+    // diagonal those pivots look healthy, but M_s^{-1} is then 1e8 larger
+    // than M^{-1} along them and S loses its digits (Netlib brandy, #315).
+    // Measured against M's diagonal, every row is shifted and compensated.
+    Index n = 0;
+    const SparseMatrix A = buildPlantedMatrix(&n);
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ir_steps = 0;
+
+    auto ref = createCpuCholeskySolver();
+    REQUIRE(ref->setup(A, kRows, n, opts));
+    const Step want = newtonStep(*ref, n, 0.0, 1e8);
+
+    auto sparse = createCpuSparseCholeskySolver();
+    REQUIRE(sparse->setup(A, kRows, n, opts));
+    const Step got = newtonStep(*sparse, n, 0.0, 1e8);
+    CHECK(sparse->factorStats().schur_order == kDense + kRows);
+    CHECK(sparse->factorStats().schur_dropped == 0);
+    // M's condition is about 1e8 here, and dz carries dy times Theta = 1e8 on
+    // the dense columns: about 3e-6 off the dense reference. Measured against
+    // M_s's own diagonal, only the last row and row kDup are shifted and dz is
+    // off by 45.
+    CHECK(relDiff(got.dy, want.dy) < 1e-5);
+    CHECK(relDiff(got.dz, want.dz) < 1e-4);
+}
+
 TEST_CASE("Sparse NE dense columns: a row dependent in M too is dropped as the full factor does",
           "[barrier][sparse-ne][dense-cols]") {
     // Rows kDup - 1 and kDup are equal in A: both factors drop one of them.
@@ -304,6 +334,35 @@ TEST_CASE("Sparse NE dense columns: past the cap, a full factor that does not fi
     // And the next factorization stays on that path.
     const Step again = newtonStep(*sparse, n, 1.5);
     CHECK(relDiff(again.dy, want.dy) < 1e-8);
+}
+
+TEST_CASE("SparseCholesky: shift_tol is measured against shift_reference when given",
+          "[sparse-cholesky][dense-cols]") {
+    // M = I: both pivots are healthy against their own diagonal. Against a
+    // reference diagonal of 1e9 on row 1 (columns left out of M carry it),
+    // row 1's pivot is 1e-9 of it, under shift_tol, so it is shifted.
+    const std::vector<Index> ptr = {0, 1, 2};
+    const std::vector<Index> idx = {0, 1};
+    const std::vector<Real> val = {1.0, 1.0};
+    const std::vector<Index> perm = {0, 1};
+    const std::vector<Real> shift = {1.0, 1e9};
+    const bool with_reference = GENERATE(false, true);
+    SparseCholesky chol;
+    REQUIRE(chol.analyze(2, ptr, idx, perm));
+    SparseCholesky::PivotRule rule;
+    rule.dependent_shift = shift;
+    rule.shift_tol = 1e-6;
+    if (with_reference) {
+        rule.shift_reference = shift;
+    }
+    REQUIRE(chol.factorize(val, rule));
+    if (with_reference) {
+        REQUIRE(chol.shiftedPivots().size() == 1);
+        CHECK(chol.shiftedPivots()[0].row == 1);
+        CHECK(chol.shiftedPivots()[0].added == 1e9);
+    } else {
+        CHECK(chol.shiftedPivots().empty());
+    }
 }
 
 TEST_CASE("SparseCholesky: a shifted dependent pivot factors M + added e e'",

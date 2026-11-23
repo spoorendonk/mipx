@@ -647,9 +647,14 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
                 const Real shift = rule.dependent_shift.empty()
                                        ? 0.0
                                        : rule.dependent_shift[static_cast<size_t>(row)];
-                const Real tol =
-                    shift > 0.0 ? std::max(rule.dependent_tol, rule.shift_tol) : rule.dependent_tol;
-                if (d - rule.diag_offset <= tol * (d0 - rule.diag_offset) || d < 1e-30) {
+                Real bar = rule.dependent_tol * (d0 - rule.diag_offset);
+                if (shift > 0.0) {
+                    const Real ref = rule.shift_reference.empty()
+                                         ? d0 - rule.diag_offset
+                                         : rule.shift_reference[static_cast<size_t>(row)];
+                    bar = std::max(bar, rule.shift_tol * ref);
+                }
+                if (d - rule.diag_offset <= bar || d < 1e-30) {
                     if (shift > 0.0 && std::max(d, 0.0) + shift >= 1e-30) {
                         // Replacing the pivot d by p is adding p - d to
                         // M's diagonal at this row before elimination.

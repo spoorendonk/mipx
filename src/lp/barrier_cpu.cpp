@@ -882,10 +882,13 @@ public:
     }
 
 private:
-    // With dense columns out, a pivot of M_s that cancels to this fraction of
-    // its diagonal (net of reg) is shifted too: a near-dependent row (its pivot
-    // left at about reg) would otherwise make M_s' as ill-conditioned as
-    // reg is small, and the Woodbury solve would lose those digits.
+    // With dense columns out, a pivot of M_s at or below this fraction of the
+    // row's diagonal in M (net of reg) is shifted too: a near-dependent row
+    // (its pivot left at about reg) would otherwise make M_s' as
+    // ill-conditioned as reg is small, and the Woodbury solve would lose those
+    // digits. The bar is on M's diagonal, not M_s's: on a row the dense
+    // columns carry almost alone, M_s's pivot is tiny next to M's and makes
+    // S lose its digits just the same (Netlib brandy, #315).
     static constexpr Real kShiftTol = 1e-6;
 
     void findDenseColumns(const BarrierOptions& opts) {
@@ -1097,6 +1100,7 @@ private:
             shift_[i] = std::max(full_diag_[i], 0.0);
         }
         rule.dependent_shift = shift_;
+        rule.shift_reference = shift_;  // M's diagonal, net of reg
         rule.shift_tol = kShiftTol;
         if (!chol_.factorize(ne_val_, rule)) {
             return false;
