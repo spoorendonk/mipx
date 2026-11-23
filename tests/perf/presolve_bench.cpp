@@ -387,6 +387,7 @@ int main(int argc, char** argv) {
     row.addInt("implied_row_dual_bounds", st.implied_row_dual_bounds);
     row.addReal("dual_bounds_seconds", st.dual_bounds_seconds);
     row.addInt("weakly_dominated_col", st.weakly_dominated_col_changes);
+    row.addInt("forcing_col", st.forcing_col_changes);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }

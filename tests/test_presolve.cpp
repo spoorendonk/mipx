@@ -3630,14 +3630,19 @@ TEST_CASE("Presolve: dominated columns from implied row-dual bounds", "[presolve
         // min 0: x + g >= 1, x + 2g >= -5, x <= 10 with no lower bound,
         // g >= 0 with no upper. g's dual constraint y0 + 2y1 <= 0 puts y0
         // and y1 at 0, so d_x = -y0 - y1 is 0: weakly dominated downward,
-        // but at an infinite bound, so upward instead.
+        // but at an infinite bound, so upward instead. g itself, at zero
+        // cost and only helping both rows as it rises, is a forcing column
+        // going up: it goes with both rows, so two weak changes, one of them
+        // forcing.
         const LpProblem lp =
             rowsModel({0.0, 0.0}, {-kInf, 0.0}, {10.0, kInf},
                       {{1.0, kInf, {{0, 1.0}, {1, 1.0}}}, {-5.0, kInf, {{0, 1.0}, {1, 2.0}}}});
         Presolver presolver;
         presolver.setMaxRounds(1);
         const auto full = checkDominated(lp, presolver);
-        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 2);
+        CHECK(presolver.stats().forcing_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 1));
         CHECK_FALSE(keepsColumn(presolver, 0));
         CHECK_THAT(full[0], WithinAbs(10.0, 1e-12));
     }
@@ -3689,6 +3694,86 @@ TEST_CASE("Presolve: dominated columns from implied row-dual bounds", "[presolve
         CHECK(presolver.stats().weakly_dominated_col_changes == 1);
         CHECK_FALSE(keepsColumn(presolver, 0));
         CHECK(keepsColumn(presolver, 1));
+    }
+    SECTION("a forcing column going up is removed with its rows") {
+        // min x1 + x2: x0 + x1 >= 1, -x0 + x2 <= 1, x0 free at zero cost,
+        // x1 and x2 in [0, 3]. y0 >= 0 and y1 <= 0 from the sides put
+        // d_0 = -y0 + y1 <= 0, so x0, unbounded above, is a forcing column:
+        // x0 and both rows go, and postsolve raises x0 until both hold.
+        const LpProblem lp =
+            rowsModel({0.0, 1.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, 3.0, 3.0},
+                      {{1.0, kInf, {{0, 1.0}, {1, 1.0}}}, {-kInf, 1.0, {{0, -1.0}, {2, 1.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(lp, presolver);
+        CHECK(presolver.stats().forcing_col_changes == 1);
+        CHECK(presolver.stats().weakly_dominated_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        // x1 = x2 = 0 at the optimum, so x0 = 1 puts row 0 at its side.
+        CHECK_THAT(full[0], WithinAbs(1.0, 1e-12));
+    }
+    SECTION("a forcing column going down is removed with its rows") {
+        // min x1 + x2: x0 - x1 <= 2, -x0 - x2 >= -4: the same downward.
+        const LpProblem lp =
+            rowsModel({0.0, 1.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, 3.0, 3.0},
+                      {{-kInf, 2.0, {{0, 1.0}, {1, -1.0}}}, {-4.0, kInf, {{0, -1.0}, {2, -1.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(lp, presolver);
+        CHECK(presolver.stats().forcing_col_changes == 1);
+        CHECK_FALSE(keepsColumn(presolver, 0));
+        CHECK_THAT(full[0], WithinAbs(2.0, 1e-12));
+    }
+    SECTION("a column with a cost is no forcing column") {
+        // The upward model with cost 1 on x0: d_0 <= 1 by the sides, so x0
+        // keeps its rows.
+        const LpProblem lp =
+            rowsModel({1.0, 1.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, 3.0, 3.0},
+                      {{1.0, kInf, {{0, 1.0}, {1, 1.0}}}, {-kInf, 1.0, {{0, -1.0}, {2, 1.0}}}});
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        checkDominated(lp, presolver);
+        CHECK(presolver.stats().forcing_col_changes == 0);
+    }
+    SECTION("a cost within tol is forcing only within tol over the dynamism") {
+        // The upward model with cost 5e-8 on x0: d_0 <= 5e-8, weakly
+        // dominated upward (tol 1e-7). With coefficients 1 and -1 the
+        // dynamism is 1 and x0 is forcing; with 10 in row 0 it is 10, the
+        // test's tolerance 1e-8, and x0 keeps its rows.
+        auto model = [](Real a) {
+            return rowsModel(
+                {5e-8, 1.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, 3.0, 3.0},
+                {{1.0, kInf, {{0, a}, {1, 1.0}}}, {-kInf, 1.0, {{0, -1.0}, {2, 1.0}}}});
+        };
+        Presolver flat;
+        flat.setMaxRounds(1);
+        checkDominated(model(1.0), flat);
+        CHECK(flat.stats().forcing_col_changes == 1);
+        Presolver steep;
+        steep.setMaxRounds(1);
+        checkDominated(model(10.0), steep);
+        CHECK(steep.stats().forcing_col_changes == 0);
+        CHECK(keepsColumn(steep, 0));
+    }
+    SECTION("a dual bound implied by another column does not make a forcing column") {
+        // max x2: x0 - x1 = 1, -x0 + x2 <= 1, -x1 + x2 <= 1, x0 free and
+        // x1 >= 0 at zero cost, x2 in [0, 3]. x1's dual constraint
+        // y0 >= -y2 >= 0 implies d_0 = -y0 + y1 <= 0, weakly dominated
+        // upward; but row 0 is an equation, its dual free by its sides, so
+        // x0 is no forcing column: its postsolve meets one side of a row
+        // only. (Read from the implied sums, x0 and then x1 would be
+        // removed as forcing columns; postsolve happens to land on the
+        // equation here, so only the count catches it.)
+        LpProblem lp = rowsModel({0.0, 0.0, 1.0}, {-kInf, 0.0, 0.0}, {kInf, kInf, 3.0},
+                                 {{1.0, 1.0, {{0, 1.0}, {1, -1.0}}},
+                                  {-kInf, 1.0, {{0, -1.0}, {2, 1.0}}},
+                                  {-kInf, 1.0, {{1, -1.0}, {2, 1.0}}}});
+        lp.sense = Sense::Maximize;
+        Presolver presolver;
+        presolver.setMaxRounds(1);
+        const auto full = checkDominated(lp, presolver);
+        CHECK(presolver.stats().forcing_col_changes == 0);
+        CHECK_THAT(full[2], WithinAbs(3.0, 1e-9));
     }
     SECTION("a column the bounds do not settle is left alone") {
         // f in [0, 20], neither bound strictly implied: f's dual constraint

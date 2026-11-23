@@ -124,11 +124,32 @@ struct PostsolveZeroCostSingleton {
     std::vector<Real> row_coeffs;
 };
 
+/// A forcing column (#383, HiGHS's forcingColumn): a continuous column with
+/// an infinite bound whose reduced cost is 0 in every dual, removed with all
+/// its rows. Each row is one-sided in the direction the column can go
+/// without limit, so the column can always be moved to satisfy it.
+/// Postsolve starts the column at its other bound and moves it to the
+/// nearest value that holds every row, (rhs - the row's other terms) /
+/// coeff: up when its upper bound is infinite, down when its lower is.
+struct PostsolveForcingCol {
+    struct Row {
+        Index orig_row;
+        Real coeff;               ///< The column's coefficient in the row.
+        Real rhs;                 ///< The side the column moves the row toward.
+        std::vector<Index> cols;  ///< The row's other columns, then.
+        std::vector<Real> coeffs;
+    };
+    Index orig_col;
+    Real other_bound;
+    bool at_infinite_upper;
+    std::vector<Row> rows;
+};
+
 using PostsolveOp =
     std::variant<PostsolveFixVariable, PostsolveSingletonRow, PostsolveSingletonCol,
                  PostsolveForcingRow, PostsolveDominatedRow, PostsolveCoeffTightening,
                  PostsolveDoubletonEquality, PostsolveParallelCol, PostsolveFreeColSubstitution,
-                 PostsolveZeroCostSingleton>;
+                 PostsolveZeroCostSingleton, PostsolveForcingCol>;
 
 // ---- PostsolveStack ---------------------------------------------------------
 
@@ -240,6 +261,9 @@ struct PresolveStats {
     Index dominated_col_changes = 0;
     /// Of dominated_col_changes, the weakly dominated ones.
     Index weakly_dominated_col_changes = 0;
+    /// Of weakly_dominated_col_changes, the forcing columns, removed with
+    /// their rows rather than fixed (#383).
+    Index forcing_col_changes = 0;
     Real dominated_col_seconds = 0.0;
 };
 

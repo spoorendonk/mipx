@@ -896,6 +896,8 @@ std::vector<PresolveReduction> presolveReductions() {
         // Runs on LPs only, as the put-back below.
         {"dominated columns", &PresolveStats::dominated_col_changes,
          [](const PresolveOptions& o) { return o.enable_dominated_columns; }},
+        {"forcing columns", &PresolveStats::forcing_col_changes,
+         [](const PresolveOptions& o) { return o.enable_dominated_columns; }},
         {"empty columns", &PresolveStats::empty_col_changes, always},
         {"coefficient tightening", &PresolveStats::coeff_tightening_changes,
          [](const PresolveOptions& o) { return o.enable_coefficient_tightening; }},
@@ -1077,6 +1079,12 @@ std::vector<LpProblem> presolveAuditModels() {
                                {{1, 1, 0}, {1, 0, -1}}, {1, -kInf}, {6, 2}));
     models.push_back(makeModel(Sense::Maximize, {1, -1, -1}, {0, 0, 0}, {3, 3, 3}, {C, I, C},
                                {{1, 1, 0}, {1, 0, 1}}, {2, 1}, {6, kInf}));
+    // Forcing columns (#383), LPs: a free zero-cost x0 that going up meets
+    // both its rows, then one that going down does.
+    models.push_back(makeModel(Sense::Minimize, {0, 1}, {-kInf, 0}, {kInf, 3}, {C, C},
+                               {{1, 1}, {-1, 1}}, {1, -kInf}, {kInf, 1}));
+    models.push_back(makeModel(Sense::Minimize, {0, 1}, {-kInf, 0}, {kInf, 3}, {C, C},
+                               {{1, -1}, {-1, -1}}, {-kInf, -4}, {2, kInf}));
     return models;
 }
 

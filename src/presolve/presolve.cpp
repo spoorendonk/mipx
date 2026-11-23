@@ -284,6 +284,32 @@ Real zeroCostSingletonValue(const PostsolveZeroCostSingleton& op, const std::vec
     return x_lo;  // Inside (l, u): the row at its lower side over a x.
 }
 
+// x_col for a forcing column (#383), as HiGHS's ForcingColumn::undo: from
+// the other bound, the nearest value in the column's free direction that
+// puts every removed row at or past its side, R the row's other terms as
+// postsolved. The row the value comes from is then at its side.
+Real forcingColValue(const PostsolveForcingCol& op, const std::vector<Real>& full) {
+    bool limited = std::abs(op.other_bound) < kHugeBound;
+    Real x = op.other_bound;
+    for (const auto& row : op.rows) {
+        if (std::abs(row.rhs) >= kHugeBound) {
+            continue;  // No limit from an infinite side.
+        }
+        CompensatedSum rest;
+        for (std::size_t k = 0; k < row.cols.size(); ++k) {
+            rest.add(row.coeffs[k] * full[row.cols[k]]);
+        }
+        const Real from_row = -rest.without(row.rhs) / row.coeff;
+        x = !limited               ? from_row
+            : op.at_infinite_upper ? std::max(x, from_row)
+                                   : std::min(x, from_row);
+        limited = true;
+    }
+    // No finite limit and no finite other bound: every value holds the rows.
+    // A limit is kept whatever its size, as a tiny coefficient may need it.
+    return limited ? x : 0.0;
+}
+
 }  // namespace
 
 // =============================================================================
@@ -420,6 +446,8 @@ std::vector<Real> PostsolveStack::postsolve(const std::vector<Real>& presolved_s
                     full[op.orig_col] = -rest.without(op.rhs) / op.coeff;
                 } else if constexpr (std::is_same_v<T, PostsolveZeroCostSingleton>) {
                     full[op.orig_col] = zeroCostSingletonValue(op, full);
+                } else if constexpr (std::is_same_v<T, PostsolveForcingCol>) {
+                    full[op.orig_col] = forcingColValue(op, full);
                 }
             },
             *it);
@@ -2755,9 +2783,21 @@ Index Presolver::dualFixing(LpProblem& lp, std::vector<bool>& col_removed,
 // The column bounds are the presolved model's, including those activity
 // bound tightening wrote in from the rows. So a column that was half-free
 // can be weakly fixed at an implied bound where HiGHS, which keeps implied
-// bounds apart, sees an infinite one and tries a forcing column (#377).
-// Both are valid (the tightened LP has the same optima), but the counts
-// differ from HiGHS's.
+// bounds apart, sees an infinite one and tries a forcing column. Both are
+// valid (the tightened LP has the same optima), but the counts differ from
+// HiGHS's.
+//
+// A forcing column (#383) is weakly dominated toward an infinite bound
+// with d_j = 0 by the row sides alone: every row of x_j is one-sided, and
+// x_j moving toward that bound meets each side. x_j and its rows go, and
+// postsolve moves x_j just far enough. The LP left is the original's
+// projection, with the same optima, so the bounds read for later columns
+// still hold and none of them waits for it. One exception within tol: a
+// cost on the dual-infeasible side (c_j < 0 going up) sources row-dual
+// bounds that cross the sides, and a later column in those rows can read
+// them, though the rows are gone (HiGHS re-sums on row removal). The LP is
+// then unbounded in exact arithmetic, as the comment on removeForcing
+// below says.
 Index Presolver::removeDominatedColumns(LpProblem& lp, std::vector<bool>& col_removed,
                                         std::vector<bool>& row_removed,
                                         std::vector<Index>& row_active_nnz,
@@ -2796,6 +2836,63 @@ Index Presolver::removeDominatedColumns(LpProblem& lp, std::vector<bool>& col_re
         return false;
     };
 
+    // HiGHS's forcing-column test: x_j's bound in `direction` is infinite,
+    // so dual feasibility bounds d_j on the other side by 0, and by the
+    // row sides alone (the ...Orig sums) d_j is bounded by 0 on this side
+    // too, within tol over the column's dynamism.
+    auto isForcing = [&](Index j, Real cost, Real direction) {
+        Real min_abs = kInf;
+        Real max_abs = 0.0;
+        for (const auto [row, a] : work_->col(j)) {
+            if (!row_removed[row] && a != 0.0) {
+                min_abs = std::min(min_abs, std::abs(a));
+                max_abs = std::max(max_abs, std::abs(a));
+            }
+        }
+        const Real dynamism = max_abs / min_abs;
+        const Real bound =
+            direction > 0.0 ? -bounds.sumUpperOrig(j, -cost) : -bounds.sumLowerOrig(j, -cost);
+        return std::abs(bound) <= std::max(tol / dynamism, std::numeric_limits<Real>::epsilon());
+    };
+    // Removes x_j with every row it is in. Each row records the side that
+    // x_j meets by moving toward its infinite bound (the upper where
+    // direction * a > 0, direction > 0 for an infinite lower bound), and its
+    // other terms, for postsolve. The rows' other sides are infinite, or
+    // the row duals would be free and the ...Orig sums infinite. x_j's cost
+    // is within the test's tolerance of 0, and is dropped, as in HiGHS:
+    // c_j x_j is not carried into the offset, so the postsolved objective
+    // may differ from the reduced one by it, and an LP unbounded only
+    // through such a cost presolves to a bounded one.
+    auto removeForcing = [&](Index j, Real direction) {
+        PostsolveForcingCol op{
+            j, direction > 0.0 ? lp.col_upper[j] : lp.col_lower[j], direction < 0.0, {}};
+        for (const auto [row, a] : work_->col(j)) {
+            if (row_removed[row] || a == 0.0) {
+                continue;
+            }
+            PostsolveForcingCol::Row r{
+                row, a, direction * a > 0.0 ? lp.row_upper[row] : lp.row_lower[row], {}, {}};
+            for (const auto [col, b] : work_->row(row)) {
+                if (col != j && !col_removed[col] && b != 0.0) {
+                    r.cols.push_back(col);
+                    r.coeffs.push_back(b);
+                }
+            }
+            op.rows.push_back(std::move(r));
+        }
+        removeActiveColumn(*work_, j, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        for (const auto& r : op.rows) {
+            removeActiveRow(*work_, r.orig_row, col_removed, row_removed, row_active_nnz,
+                            col_active_nnz, next_dirty_rows, next_dirty_cols);
+        }
+        ++stats_.vars_removed;
+        stats_.rows_removed += static_cast<Index>(op.rows.size());
+        ++stats_.weakly_dominated_col_changes;
+        ++stats_.forcing_col_changes;
+        postsolve_stack_.push(std::move(op));
+    };
+
     for (Index j = 0; j < lp.num_cols; ++j) {
         if (col_removed[j] || col_active_nnz[j] == 0 || lp.col_lower[j] == lp.col_upper[j]) {
             continue;
@@ -2812,22 +2909,40 @@ Index Presolver::removeDominatedColumns(LpProblem& lp, std::vector<bool>& col_re
         const bool upper_finite = upper < kHugeBound;
 
         // HiGHS's order: strong downward, strong upward, weak downward, weak
-        // upward; the first that applies with a finite bound fixes x_j.
+        // upward; the first that applies with a finite bound fixes x_j. A
+        // weak one at an infinite bound may make x_j a forcing column.
         Real value = 0.0;
         bool fix = false;
         bool weak = false;
+        Real forcing = 0.0;  // The forcing column's direction, 0 for none.
         if (dual_lower > tol) {
             fix = lower_finite;
             value = lower;
         } else if (dual_upper < -tol) {
             fix = upper_finite;
             value = upper;
-        } else if (dual_lower >= -tol && lower_finite) {
-            fix = weak = true;
-            value = lower;
-        } else if (dual_upper <= tol && upper_finite) {
-            fix = weak = true;
-            value = upper;
+        } else {
+            if (dual_lower >= -tol) {
+                if (lower_finite) {
+                    fix = weak = true;
+                    value = lower;
+                } else if (isForcing(j, cost, 1.0)) {
+                    forcing = 1.0;
+                }
+            }
+            if (!fix && forcing == 0.0 && dual_upper <= tol) {
+                if (upper_finite) {
+                    fix = weak = true;
+                    value = upper;
+                } else if (isForcing(j, cost, -1.0)) {
+                    forcing = -1.0;
+                }
+            }
+        }
+        if (forcing != 0.0) {
+            removeForcing(j, forcing);
+            ++changes;
+            continue;
         }
         if (!fix) {
             continue;
