@@ -292,7 +292,8 @@ listed instances it did not run (#341).
 
 The CPU barrier gate (#330) runs every Netlib LP through both barrier
 normal-equations backends and takes about six minutes on one thread (dense
-~5 min, sparse ~45 s), so `-L solver-regression` now runs it too. Its second
+~5 min, sparse ~70 s, of which ~26 s is pilot87, nearly all crossover), so
+`-L solver-regression` now runs it too. Its second
 test (#331) runs the first 15 column-generation masters the same way in
 ~1.5 s, once `tests/perf/generate_cg_masters.py` has made them (see
 `tests/perf/README.md`). To run both on their own:

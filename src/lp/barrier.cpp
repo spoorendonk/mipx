@@ -585,8 +585,10 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         return BarrierIpmOutcome::NearOptimal;
     };
 
-    // Stall detection: track previous gap.
-    Real prev_gap = 1e30;
+    // Stall detection: the smallest of each measure so far.
+    Real low_gap = 1e30;
+    Real low_pinf = 1e30;
+    Real low_dinf = 1e30;
     Int stall_count = 0;
     constexpr Int max_stall = 10;
     Index schur_order_shown = -1;
@@ -660,8 +662,25 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
             }
         }
 
-        // Stall detection.
-        if (gap >= prev_gap * 0.999) {
+        // Stall detection: an iteration stalls when none of the three
+        // measures gets 0.1% below its smallest value so far. The relative
+        // gap alone is not progress: early on |pobj| can fall faster than
+        // z's, so the gap rises while mu and pinf fall a thousandfold
+        // (pilot87, #369). Against the smallest value, not the previous
+        // one, a measure that bounces does not reset the count. A measure
+        // already within tolerance does not count: at rounding level it
+        // wobbles by more than 0.1%.
+        const Real tol = opts.primal_dual_tol;
+        auto improved = [tol](Real now, Real& low) {
+            const bool better = low > tol && now < low * 0.999;
+            low = std::min(low, now);
+            return better;
+        };
+        // Each measure is updated, so no short-circuit.
+        const bool gap_better = improved(gap, low_gap);
+        const bool pinf_better = improved(pinf, low_pinf);
+        const bool dinf_better = improved(dinf, low_dinf);
+        if (!(gap_better || pinf_better || dinf_better)) {
             ++stall_count;
             if (stall_count >= max_stall) {
                 return stopShort(iter);
@@ -669,7 +688,6 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         } else {
             stall_count = 0;
         }
-        prev_gap = gap;
 
         // After the stopping test, so an iterate that converged on the last
         // step is still reported optimal.
