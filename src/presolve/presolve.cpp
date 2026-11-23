@@ -905,9 +905,10 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
     // scale the row's rounding up into x_j and the transferred costs.
     constexpr Real kPivotRatio = 1e-2;
     // How far x_j's implied range may reach past a bound and still count as
-    // within it. Absolute: postsolve does not clamp, so this is how far x_j
-    // may come out beyond its bound, and the reduced model gains that
-    // sliver of the row (relative to a bound of 1000 it was 1e-5).
+    // within it. Absolute: postsolve does not clamp, so this is this pass's
+    // share of how far x_j may come out beyond its bound, and the reduced
+    // model gains that sliver of the row (relative to a bound of 1000 it was
+    // 1e-5). The other columns' own errors still reach x_j, times a_k / a.
     constexpr Real kFreeTol = 1e-9;
     Index changes = 0;
 

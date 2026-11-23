@@ -1445,6 +1445,15 @@ TEST_CASE("Presolve: free column substitution leaves what it cannot take", "[pre
         const auto full = presolveSolvePostsolve(lp, presolver, withFreeColSubstitution());
         CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
     }
+    SECTION("a bound the row does not imply, negative coefficient") {
+        // -x0 + x1 + x2 = 4 puts x0 = x1 + x2 - 4 in [-4, 0], past -3; with
+        // the a < 0 ends swapped it would read [0, -4] and pass.
+        const LpProblem lp = freeColModel(Sense::Minimize, {2, -1, 1}, {-1, 1, 1}, -3.0, 5.0,
+                                          VarType::Continuous, 4.0, 4.0);
+        CHECK(substitutions(lp, withFreeColSubstitution()) == 0);
+        checkSubstituted(freeColModel(Sense::Minimize, {2, -1, 1}, {-1, 1, 1}, -4.0, 5.0,
+                                      VarType::Continuous, 4.0, 4.0));
+    }
     SECTION("a row with crossed sides") {
         // 5 <= x0 + x1 <= 1 is infeasible; held at 5 and dropped it was not.
         const LpProblem lp = pairRowModel({1, 0}, {-10, 0}, {10, 1}, 5.0, 1.0);
