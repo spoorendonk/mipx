@@ -95,15 +95,28 @@ public:
     /// Separation stops at @p deadline: no family starts after it, and the
     /// row and candidate loops stop between rows (#336). A round cut short
     /// keeps the cuts it pooled. The default, time_point::max(), never stops.
-    void setDeadline(std::chrono::steady_clock::time_point deadline) { deadline_ = deadline; }
+    void setDeadline(std::chrono::steady_clock::time_point deadline) {
+        deadline_ = deadline;
+        deadline_polls_ = 0;
+        past_deadline_ = false;
+    }
 
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
                  CutPool& pool, CutSeparationStats& stats);
 
 private:
+    /// Reads the clock on the first call and every 16th after it: the row loops call it per row,
+    /// and most rows are skipped by a filter that costs less than a clock
+    /// read. The quadratic loops call it per inner step, so a long row still
+    /// reaches the clock quickly. Once past, it stays past.
     [[nodiscard]] bool pastDeadline() const {
-        return deadline_ != std::chrono::steady_clock::time_point::max() &&
-               std::chrono::steady_clock::now() >= deadline_;
+        if (deadline_ == std::chrono::steady_clock::time_point::max()) {
+            return false;
+        }
+        if (!past_deadline_ && (deadline_polls_++ & 15U) == 0) {
+            past_deadline_ = std::chrono::steady_clock::now() >= deadline_;
+        }
+        return past_deadline_;
     }
 
     Int separateGomory(DualSimplexSolver& lp, const LpProblem& problem,
@@ -172,6 +185,10 @@ private:
     const CliqueTable* clique_table_ = nullptr;
     bool strengthen_cuts_ = false;
     std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
+    // pastDeadline()'s poll counter and latch. A manager is used from one
+    // thread at a time.
+    mutable unsigned deadline_polls_ = 0;
+    mutable bool past_deadline_ = false;
     const LpProblem* problem_ = nullptr;  // set by separate() for maybeStrengthen
 };
 

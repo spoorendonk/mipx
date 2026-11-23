@@ -974,6 +974,38 @@ TEST_CASE("SeparatorManager: cover family generates tagged cuts", "[cuts][famili
     }
 }
 
+// #336: a deadline in the past stops separation before any family starts;
+// the same manager with a far deadline finds cuts on this model. The first
+// deadline poll reads the clock, so this does not depend on timing.
+TEST_CASE("SeparatorManager: a past deadline separates no cuts", "[cuts][time_limit]") {
+    auto problem = buildBinaryConflictMip();
+    DualSimplexSolver lp;
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+
+    SeparatorManager manager;
+    CutFamilyConfig config;
+    config.gomory = false;
+    config.cover = true;
+    config.clique = true;
+    manager.setConfig(config);
+    manager.setMaxCutsPerFamily(10);
+    const auto now = std::chrono::steady_clock::now();
+
+    CutPool far_pool;
+    CutSeparationStats far_stats;
+    manager.setDeadline(now + std::chrono::hours(1));
+    REQUIRE(manager.separate(lp, problem, lp.getPrimalValues(), far_pool, far_stats) >= 1);
+
+    CutPool past_pool;
+    CutSeparationStats past_stats;
+    manager.setDeadline(now - std::chrono::seconds(1));
+    CHECK(manager.separate(lp, problem, lp.getPrimalValues(), past_pool, past_stats) == 0);
+    CHECK(past_pool.size() == 0);
+    CHECK(past_stats.at(CutFamily::Cover).attempted == 0);
+    CHECK(past_stats.at(CutFamily::Clique).attempted == 0);
+}
+
 TEST_CASE("SeparatorManager: clique family generates conflict cuts", "[cuts][families]") {
     auto problem = buildBinaryConflictMip();
     DualSimplexSolver lp;

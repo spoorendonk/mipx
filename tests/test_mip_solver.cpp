@@ -808,15 +808,22 @@ static LpProblem buildSlowRootSetCover(Index rows, Index cols, Index per_col) {
 // [benchmark] keeps it out of the default suite (solver-regression label).
 TEST_CASE("MipSolver: time limit stops a root LP that does not finish in time",
           "[mip][benchmark][time_limit]") {
-    const auto lp = buildSlowRootSetCover(400, 40000, 8);
     constexpr double kLimit = 0.2;
     constexpr double kAllowedOverrun = 0.5;
 
-    // Not BarrierRoot, nor the race, which joins its barrier arm: the barrier
-    // reads its stop flag once per IPM iteration, and on this model one
-    // factorization takes minutes. Stopping inside it is #275.
-    const auto policy = GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot);
+    // Not the race yet: one CPU factorization of its barrier arm takes
+    // minutes on the large model, and the race's stop flag is not read inside
+    // it until fix/275-stop-flag lands (#346). The barrier alone stops in its
+    // factorization on its own max_solve_seconds (#275), but the steps before
+    // the first IPM iteration have no check: on the large model (~40400
+    // standard-form rows) the dense Cholesky fills an m x m matrix of ~13 GB
+    // and the sparse one's ordering takes ~7 s. Its model is 10x narrower,
+    // where the time goes into the factorization.
+    const auto policy =
+        GENERATE(RootLpPolicy::DualDefault, RootLpPolicy::PdlpRoot, RootLpPolicy::BarrierRoot);
     CAPTURE(static_cast<int>(policy));
+    const auto lp =
+        buildSlowRootSetCover(400, policy == RootLpPolicy::BarrierRoot ? 4000 : 40000, 8);
     MipSolver solver;
     solver.setVerbose(false);
     solver.setNumThreads(1);

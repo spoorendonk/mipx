@@ -42,9 +42,9 @@ void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
     lp.setOptions(opts);
 }
 
-// Sets `flag` once `time_left` reaches 0, for a backend that takes a stop
-// flag and no time limit (the barrier, #275), and for the root race's stop
-// flag (#336). Stops and joins on destruction.
+// Sets `flag` once `time_left` reaches 0: the root race's stop flag (#336),
+// which also ends a race arm whose own time limit is not checked where it
+// spends its time. Stops and joins on destruction.
 class DeadlineWatcher {
 public:
     DeadlineWatcher(std::atomic<bool>& flag, std::function<double()> time_left)
@@ -821,11 +821,14 @@ struct LpLightGuide {
     double work_units = 0.0;
 };
 
-std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem) {
+// `seconds` bounds the solve (the MIP deadline's time left, #336); negative
+// means no limit.
+std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem, double seconds) {
 #ifdef MIPX_HAS_LP_LIGHT
     DualSimplexSolver lp;
     lp.load(problem);
     lp.setVerbose(false);
+    setLpTimeLimit(lp, seconds);
     const auto result = lp.solve();
     if (result.status != Status::Optimal) {
         return std::nullopt;
@@ -838,6 +841,7 @@ std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem) {
     return guide;
 #else
     (void)problem;
+    (void)seconds;
     return std::nullopt;
 #endif
 }
@@ -4483,6 +4487,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         DualSimplexSolver lp;
         lp.load(problem_);
         lp.setVerbose(verbose_);
+        setLpTimeLimit(lp, timeLeft());
         auto lr = lp.solve();
 
         MipResult result;
@@ -4490,6 +4495,12 @@ MipResult MipSolver::solveMinimizationOnce() {
         result.objective = lr.objective;
         result.best_bound = lr.objective;
         result.gap = 0.0;
+        if (lr.status == Status::TimeLimit) {
+            // Stopped by the deadline (#336): no point and no bound.
+            result.objective = kInf;
+            result.best_bound = -kInf;
+            result.gap = kInf;
+        }
         result.nodes = 0;
         result.lp_iterations = lr.iterations;
         result.work_units = canonicalReportedWork(lr.work_units + symmetry_pre_work);
@@ -4555,7 +4566,7 @@ MipResult MipSolver::solveMinimizationOnce() {
 
         std::optional<LpLightGuide> lp_light_guide;
         if (pre_root_stats_.lp_light_available) {
-            lp_light_guide = solveLpLightGuide(problem_);
+            lp_light_guide = solveLpLightGuide(problem_, timeLeft());
             if (lp_light_guide.has_value()) {
                 pre_root_stats_.lp_light_lp_solves = 1;
                 pre_root_stats_.lp_light_lp_iterations = lp_light_guide->iterations;
@@ -5242,17 +5253,13 @@ MipResult MipSolver::solveMinimizationOnce() {
             opts.verbose = false;
             opts.algorithm = barrier_algorithm_;
             opts.ordering = barrier_ordering_;
-            // No time option (#275): outside the race, a watcher stops it at
-            // the deadline; in the race, the race's flag carries the deadline.
-            std::atomic<bool> deadline_flag{false};
-            std::optional<DeadlineWatcher> watcher;
-            if (stop_flag == nullptr) {
-                watcher.emplace(deadline_flag, [this] { return timeLeft(); });
-                stop_flag = &deadline_flag;
-            }
             opts.stop_flag = stop_flag;
             solver.setOptions(opts);
             solver.load(problem_);
+            // The barrier's clock starts in solve() (#275), so the limit is
+            // read after load()'s presolve, which it does not cover.
+            opts.max_solve_seconds = timeLeft();
+            solver.setOptions(opts);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
             out.basis = solver.getBasis();
@@ -5496,9 +5503,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         return result;
     }
 
-    // The deadline stopped a root LP (#336): the incumbent so far, and the
-    // bound proved so far (-inf when no root LP finished).
-    auto rootTimeLimitResult = [&](Real bound) {
+    // The deadline stopped a root LP (#336): the incumbent so far, and no
+    // bound, since no dual simplex root solve finished.
+    auto rootTimeLimitResult = [&]() {
         if (verbose_) {
             log_.log("Time limit reached in the root LP.\n");
         }
@@ -5508,21 +5515,17 @@ MipResult MipSolver::solveMinimizationOnce() {
         result.lp_iterations = total_lp_iters;
         result.work_units = canonicalReportedWork(total_work);
         result.time_seconds = elapsed();
-        result.best_bound = bound;
+        result.best_bound = -kInf;
         if (incumbent < kInf) {
             result.objective = incumbent;
             result.solution = std::move(best_solution);
-            if (bound > -kInf) {
-                result.best_bound = std::min(bound, incumbent);
-                result.gap = computeGap(incumbent, result.best_bound);
-            }
         }
         applyPostsolve(result);
         restoreProblem();
         return result;
     };
     if (root_result.status != Status::Optimal && timeLeft() <= 0.0) {
-        return rootTimeLimitResult(-kInf);
+        return rootTimeLimitResult();
     }
 
     if (root_result.status != Status::Optimal) {
@@ -5561,7 +5564,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         total_work += sync.work_units;
         if (sync.status != Status::Optimal && sync.status != Status::Infeasible &&
             sync.status != Status::Unbounded && timeLeft() <= 0.0) {
-            return rootTimeLimitResult(root_bound);
+            // root_bound came from barrier or PDLP, whose "optimal" holds to
+            // a relative tolerance only, so it is no proven bound.
+            return rootTimeLimitResult();
         }
         if (sync.status == Status::Infeasible) {
             if (verbose_) {
@@ -6488,8 +6493,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         lp.addRows(starts, col_indices, values, lower, upper);
 
         // A re-solve the deadline stops is backed out below like any other
-        // that ends without an optimum. The back-out's own re-solve warm
-        // starts from an optimal basis and runs without a limit.
+        // that ends without an optimum. The back-out's own re-solve runs
+        // without a limit on purpose: it restores the previous LP's optimal
+        // basis (zero iterations unless the warm check falls back cold), and
+        // the caller reads the root point from it, which must be optimal
+        // (#240). Correctness over the limit, in that rare cold case.
         setLpTimeLimit(lp, timeLeft());
         auto result = lp.solve();
         setLpTimeLimit(lp, -1.0);
