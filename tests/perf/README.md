@@ -73,19 +73,20 @@ The gate's own tests: `uv run --with pytest pytest tests/perf/test_run_instance_
 The `barrier` suite runs the CPU barrier over every Netlib LP in
 `tests/data/netlib`, once per normal-equations backend (#290):
 `barrier-dense` (`--barrier --barrier-ne dense --no-gpu`) and `barrier-sparse`
-(`--barrier-ne sparse`), one thread each, classified as above against
-`instance_gate/barrier_expected.csv`, with `--time-limit 10` per instance
-(the barrier honours it since #275; a time-limit stop reads as `dnf`). Its
-backend setup is not yet on the clock (#347), which on Netlib's sizes is
-small against the limit. It takes minutes,
-so it has its own ctest label and stays out of `instance-gate` and the
-commit and push gates. It is a tier-0 run: no lock, under `wcp build`.
+(`--barrier --barrier-ne sparse --no-gpu`), one thread each, classified as
+above against `instance_gate/barrier_expected.csv`, with `--time-limit 10`
+per instance (the barrier honours it since #275; a time-limit stop reads as
+`dnf`). Its backend setup is not yet on the clock (#347): the dense normal
+equations are allocated before the first check, about 2.2 GB on stocfor3
+(m ≈ 16.7k), so the dense backend needs that much memory free. It takes
+minutes, so it has its own ctest label and stays out of `instance-gate` and
+the commit and push gates.
 
 ```bash
 python3 tests/perf/run_instance_gate.py barrier                          # both backends
 python3 tests/perf/run_instance_gate.py barrier --backends barrier-sparse
 python3 tests/perf/run_instance_gate.py barrier --all --write-expected   # regenerate the list
-wcp build -- ctest --test-dir build -L barrier-gate --output-on-failure
+ctest --test-dir build -L barrier-gate --output-on-failure
 ```
 
 # Performance Regression Gate

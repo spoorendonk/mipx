@@ -290,6 +290,14 @@ See `tests/perf/README.md` for running it directly and regenerating the lists.
 Without instance files it reports `Skipped`, not a pass; `-V` shows which
 listed instances it did not run (#341).
 
+The CPU barrier gate (#330) runs every Netlib LP through both barrier
+normal-equations backends and takes about six minutes on one thread (dense
+~5 min, sparse ~45 s), so `-L solver-regression` now runs it too. To run it on its own:
+
+```bash
+ctest --test-dir build -L barrier-gate --output-on-failure
+```
+
 Don't add new wall-clock assertions to the default suite. Timing work belongs
 in a benchmark bed with recorded baselines, not in pass/fail unit tests — see
 #213 for folding this label into the MIPLIB benchmark suite.
