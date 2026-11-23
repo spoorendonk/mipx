@@ -853,34 +853,37 @@ private:
 // reg I, and M = M_s + A_d Theta_d A_d' is solved by the Woodbury identity.
 // M_s can be singular where M is not (a row only dense columns cover, or one
 // whose sparse part depends on other rows): such a pivot of M_s is not set
-// infinite, which would drop the row from M too, but shifted by the dense
-// columns' share D_i of M's diagonal, and the shift is taken back out
-// exactly by a column sqrt(added) e_i with sign -1 (the modified Schur
-// complement). With U = [A_d Theta_d^{1/2} | sqrt(added_i) e_i] and C =
+// infinite, which would drop the row from M too, but shifted by the row's
+// diagonal in M, and the shift is taken back out exactly by a column
+// sqrt(added) e_i with sign -1 (the modified Schur complement). With
+// U = [A_d Theta_d^{1/2} | sqrt(added_i) e_i] and C =
 // diag(I, -I), M = M_s' + U C U' and
 //   M^{-1} b = M_s'^{-1} (b - U S^{-1} U' M_s'^{-1} b),  S = C + U' M_s'^{-1} U,
 // S factored densely, symmetric and without pivoting, dense columns first.
 // Its dense block I + U_d' M_s'^{-1} U_d is SPD with pivots >= 1; once that
 // is eliminated, the compensation block is -(I + E' M^{-1} E)^{-1} (E the
 // sqrt(added_i) e_i, by Woodbury on M + E E'), negative definite, and its
-// pivot on row i is about -M_i / (M_i + added_i), M_i M's own pivot there. So
-// a row dependent in M as well shows up as a compensation pivot near 0 and is
-// dropped by the dependent-pivot rule's own bar, on M_i. Forming S takes one
-// solve with M_s' per column of U, one column at a time, so no m x k block is
-// stored. If S would be larger than max_schur_order (many shifted pivots),
-// the dense columns go back into the factor, as without this handling.
+// pivot on row i is -mu_i / (mu_i + added_i), mu_i row i's pivot in M (plus
+// the later shifts) with i eliminated last. So a row dependent in M as well
+// shows up as a compensation pivot near 0 and is dropped by the
+// dependent-pivot rule's own bar, on mu_i. Forming S takes one solve with
+// M_s' per column of U, one column at a time, so no m x k block is stored.
+// If S would be larger than max_schur_order (many shifted pivots), the dense
+// columns go back into the factor, as without this handling; if that factor
+// does not fit, they stay out and S may grow to twice the cap.
 
 class CpuSparseCholeskySolver final : public NormalEquationsSolver {
 public:
     explicit CpuSparseCholeskySolver(Index max_schur_order) : max_schur_order_(max_schur_order) {}
 
     [[nodiscard]] FactorStats factorStats() const override {
-        return {chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size()), schur_order_};
+        return {chol_.stats().nnz_l, static_cast<Index>(dense_cols_.size()), schur_order_,
+                schur_dropped_};
     }
 
 private:
-    // On rows the dense columns reach, a pivot of M_s that cancels to this
-    // diagonal (net of reg) is shifted too: a near-dependent row (its pivot
+    // With dense columns out, a pivot of M_s that cancels to this fraction of
+    // its diagonal (net of reg) is shifted too: a near-dependent row (its pivot
     // left at about reg) would otherwise make M_s' as ill-conditioned as
     // reg is small, and the Woodbury solve would lose those digits.
     static constexpr Real kShiftTol = 1e-6;
@@ -918,6 +921,7 @@ private:
     // Pattern of M_s (without the columns in dense_cols_), ordered and
     // analyzed.
     bool analyzePattern() {
+        analyzed_ = false;
         const BarrierOptions& opts = opts_;
         const Index m = m_;
         // Pattern of M_s, each pair once: column k of the pattern lists k and
@@ -999,26 +1003,49 @@ private:
             full_diag_.assign(static_cast<size_t>(m), 0.0);
             ucol_.assign(static_cast<size_t>(m), 0.0);
         }
+        analyzed_ = true;
         return true;
     }
 
     // S would be too large: put the dense columns back into the factor for
-    // the rest of the solve.
+    // the rest of the solve. If that factor does not fit, keep them out and
+    // let S grow past the cap instead.
     bool keepDenseColumnsIn() {
+        std::vector<Index> saved;
+        saved.swap(dense_cols_);
+        std::fill(is_dense_.begin(), is_dense_.end(), 0);
+        schur_order_ = 0;
         if (opts_.verbose) {
             std::printf(
                 "  NE Cholesky: dense-column Schur complement of order > %d, %zu dense "
                 "columns back into the factor\n",
-                max_schur_order_, dense_cols_.size());
+                max_schur_order_, saved.size());
         }
-        dense_cols_.clear();
-        std::fill(is_dense_.begin(), is_dense_.end(), 0);
-        schur_order_ = 0;
-        return analyzePattern();
+        if (analyzePattern()) {
+            return true;
+        }
+        if (opts_.verbose) {
+            std::printf("  NE Cholesky: that factor does not fit (%s); dense columns kept out\n",
+                        error_.c_str());
+        }
+        dense_cols_ = std::move(saved);
+        for (const Index j : dense_cols_) {
+            is_dense_[j] = 1;
+        }
+        schur_uncapped_ = true;
+        if (!analyzePattern()) {
+            return false;
+        }
+        error_.clear();
+        return true;
     }
 
     bool factorM() override {
         const Index m = m_;
+        if (!analyzed_) {
+            return false;  // a failed re-analysis left the arrays out of step
+        }
+        error_.clear();
         // Column k of M_s: sum over the sparse columns j of row k of
         // theta_j a_kj a_j, gathered on the pattern's rows i >= k.
         for (Index k = 0; k < m; ++k) {
@@ -1049,6 +1076,7 @@ private:
         rule.diag_offset = reg_;
         rule.infinite_pivot = kInfinitePivot;
         schur_order_ = 0;
+        schur_dropped_ = 0;
         if (dense_cols_.empty()) {
             return chol_.factorize(ne_val_, rule);
         }
@@ -1059,21 +1087,28 @@ private:
                 dense_share_[cj.indices[p]] += theta_[j] * cj.values[p] * cj.values[p];
             }
         }
-        // A row whose dense share is under the dependent-pivot bar of its
-        // diagonal in M gets no shift: M's own pivot there is under it too,
-        // so the infinite rule is what the full factor would apply.
+        // Every dependent pivot of M_s is shifted by its row's diagonal in M
+        // (net of reg), not only on rows the dense columns reach: a row whose
+        // sparse part repeats a reached row's is dependent in M_s alone too.
+        // The compensation pivot then tells whether M drops it. Only a row
+        // empty in A keeps the infinite rule here.
         for (Index i = 0; i < m; ++i) {
-            const Real d = dense_share_[i];
-            full_diag_[i] = ne_val_[ne_ptr_[i]] - reg_ + d;
-            shift_[i] = d > 0.0 && d > kDependentPivotTol * full_diag_[i] ? d : 0.0;
+            full_diag_[i] = ne_val_[ne_ptr_[i]] - reg_ + dense_share_[i];
+            shift_[i] = std::max(full_diag_[i], 0.0);
         }
         rule.dependent_shift = shift_;
         rule.shift_tol = kShiftTol;
         if (!chol_.factorize(ne_val_, rule)) {
             return false;
         }
-        if (static_cast<Index>(dense_cols_.size() + chol_.shiftedPivots().size()) >
-            max_schur_order_) {
+        const auto t = static_cast<Index>(dense_cols_.size() + chol_.shiftedPivots().size());
+        if (schur_uncapped_ && t > 2 * max_schur_order_) {
+            // Past twice the cap S is too large to form (t^2 reals, t^3 work).
+            error_ = "dense-column Schur complement of order " + std::to_string(t) +
+                     " and a full factor that does not fit";
+            return false;
+        }
+        if (!schur_uncapped_ && t > max_schur_order_) {
             if (!keepDenseColumnsIn()) {
                 return false;
             }
@@ -1135,27 +1170,31 @@ private:
             schur_[static_cast<size_t>(q) * tt + static_cast<size_t>(q)] += q < k ? 1.0 : -1.0;
         }
         // Elimination in place without pivoting (see the class comment for
-        // the pivots' signs). A dense pivot is >= 1 in exact arithmetic, so
-        // a smaller one is rounding and is raised back to 1. A compensation
-        // pivot -M_i / (M_i + added) at or above the bar where M_i, net of
-        // reg, is dependent by kDependentPivotTol of M's diagonal is set
-        // huge, which drops row i from the step as the full factor would.
+        // the pivots' signs). A dense pivot is >= 1 in exact arithmetic; one
+        // under 1/2 means S lost all its digits to rounding, and the factor
+        // fails (the caller retries with more reg). A compensation pivot
+        // -mu / (mu + added) at or above the bar where mu, net of reg, is
+        // dependent by kDependentPivotTol of M's diagonal drops row i as the
+        // full factor's infinite pivot does: an infinite shift there is C's
+        // entry -1 made infinite, so C^{-1}'s entry 0 and S's diagonal one
+        // larger, which changes this pivot alone, by +1.
         auto at = [&](Index r, Index c) -> Real& {
             return schur_[static_cast<size_t>(c) * tt + static_cast<size_t>(r)];
         };
+        schur_dropped_ = 0;
         for (Index c = 0; c < t; ++c) {
             Real& p = at(c, c);
-            if (!std::isfinite(p)) {
+            if (!std::isfinite(p) || (c < k && p < 0.5)) {
+                error_ = "dense-column Schur complement lost its accuracy";
                 return false;
             }
-            if (c < k) {
-                p = std::max(p, 1.0);
-            } else {
+            if (c >= k) {
                 const auto& sp = shifted[static_cast<size_t>(c - k)];
                 const Real dep =
                     kDependentPivotTol * full_diag_[static_cast<size_t>(sp.row)] + reg_;
                 if (p >= -dep / (dep + sp.added)) {
-                    p = -kInfinitePivot;
+                    p += 1.0;
+                    ++schur_dropped_;
                 }
             }
             const Real inv = 1.0 / p;
@@ -1239,8 +1278,11 @@ private:
     std::vector<Real> full_diag_;    // M's diagonal net of reg, per row
     BarrierOptions opts_;
     Index max_schur_order_;
-    Index schur_order_ = 0;    // k + shifted pivots; 0: no Schur step
-    std::vector<Real> schur_;  // LU of S (unit L), column-major
+    bool schur_uncapped_ = false;  // the full factor did not fit: S may pass the cap
+    bool analyzed_ = false;        // pattern, ne_val_ and chol_ agree
+    Index schur_order_ = 0;        // k + shifted pivots; 0: no Schur step
+    Index schur_dropped_ = 0;      // compensation pivots dropped (rows dependent in M)
+    std::vector<Real> schur_;      // LU of S (unit L), column-major
     mutable std::vector<Real> schur_rhs_;
     mutable std::vector<Real> ucol_;  // m-vector scratch, all zero between uses
 };

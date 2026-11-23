@@ -40,8 +40,9 @@ public:
     /// normal equations; zeros elsewhere), for tests and diagnostics.
     struct FactorStats {
         std::size_t nnz_l = 0;
-        Index dense_cols = 0;   // columns of A left out of the factor
-        Index schur_order = 0;  // dense columns + shifted pivots, last factorize
+        Index dense_cols = 0;     // columns of A left out of the factor
+        Index schur_order = 0;    // dense columns + shifted pivots, last factorize
+        Index schur_dropped = 0;  // of those, rows dropped as dependent in M
     };
     [[nodiscard]] virtual FactorStats factorStats() const { return {}; }
 
@@ -53,7 +54,8 @@ protected:
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
 // max_schur_order bounds the dense-column Schur complement (#314): order^2
 // reals and one solve per column each iteration. Past it, the dense columns
-// go back into the factor. Smaller only in tests.
+// go back into the factor, or, if that factor does not fit, S may grow to
+// twice the cap before the factorization fails. Smaller only in tests.
 std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver(Index max_schur_order = 4096);
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
