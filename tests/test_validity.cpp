@@ -487,6 +487,10 @@ struct ModelSpec {
     // the one above, and the first row an equality over that pair only: a
     // doubleton equation (#258). Only the presolve audit enumerates these.
     bool continuous_pair = false;
+    // With continuous_pair, the pair's second column is a scaled copy of the
+    // first in every row, half the time at the same cost ratio: parallel
+    // columns (#308).
+    bool parallel_pair = false;
 };
 
 /// A random model; `anchor_out`, when given, receives the point its rows
@@ -563,6 +567,16 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
                 break;
         }
     }
+    // Draws only for parallel_pair, so the other specs' models stay as they were.
+    const bool parallel = spec.parallel_pair && pair >= 0;
+    Real pair_scale = 0.0;
+    if (parallel) {
+        const std::vector<Real> pair_scales = {2, -1, 0.5, -3};
+        pair_scale = pair_scales[uniform(0, static_cast<int>(pair_scales.size()) - 1)];
+        if (chance(0.5)) {
+            lp.obj[pair + 1] = pair_scale * lp.obj[pair];
+        }
+    }
     Index sym_src = -1;
     if (spec.symmetric) {
         sym_src = uniform(0, n_int - 1);
@@ -602,6 +616,14 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
         }
         if (row.empty()) {
             row.push_back({uniform(0, lp.num_cols - 1), 1.0});
+        }
+        if (parallel) {
+            std::erase_if(row, [&](const auto& t) { return t.first == pair + 1; });
+            for (const auto& [j, a] : std::vector(row)) {
+                if (j == pair) {
+                    row.push_back({pair + 1, pair_scale * a});
+                }
+            }
         }
         if (sym_src >= 0) {
             // The copy gets the source's coefficient in every row.
@@ -756,6 +778,12 @@ std::vector<LpProblem> auditModels(int seed, int count, bool allow_continuous) {
 struct PresolveCase {
     const char* name;
     PresolveOptions options;
+    // Whether each feasible point of a model without an objective projects
+    // onto one of the reduced model. Parallel columns do not keep that
+    // (#308): a merge replaces two columns by their sum, and with no
+    // objective every dominated column is fixed. Only the optimum and the
+    // postsolve of each reduced point are checked for them.
+    bool projects = true;
 };
 
 std::vector<PresolveCase> presolveCases() {
@@ -774,10 +802,15 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions probing = o;
     probing.enable_probing = true;
     cases.push_back({"probing (opt-in)", probing});
+    PresolveOptions parallel_cols = o;
+    parallel_cols.enable_parallel_cols = true;
+    cases.push_back({"parallel columns (opt-in)", parallel_cols, false});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
-    cases.push_back({"all opt-in", all});
+    cases.push_back({"all opt-in but parallel columns", all});
+    all.enable_parallel_cols = true;
+    cases.push_back({"all opt-in", all, false});
     return cases;
 }
 
@@ -804,6 +837,8 @@ std::vector<PresolveReduction> presolveReductions() {
         {"duplicate rows", &PresolveStats::duplicate_row_changes, always},
         {"parallel rows", &PresolveStats::parallel_row_changes,
          [](const PresolveOptions& o) { return o.enable_parallel_rows; }},
+        {"parallel columns", &PresolveStats::parallel_col_changes,
+         [](const PresolveOptions& o) { return o.enable_parallel_cols; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
@@ -879,7 +914,7 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
         true);
 
     const bool primal = std::all_of(lp.obj.begin(), lp.obj.end(), [](Real c) { return c == 0.0; });
-    if (!primal) {
+    if (!primal || !pc.projects) {
         return;
     }
     forEachFeasible(
@@ -902,7 +937,8 @@ void auditPresolve(const LpProblem& lp, const PresolveCase& pc,
 // equality over two continuous columns; implied equations, in a case with
 // forcing rows on, a row forcing rows declines, which one with a column it
 // cannot pin (a coefficient at or below presolve's 1e-8) is. Putting back an
-// LP's implied bounds (#279) needs a model with no integer column.
+// LP's implied bounds (#279) needs a model with no integer column, and
+// parallel columns (#308) a continuous pair with scaled coefficients.
 std::vector<LpProblem> presolveAuditModels() {
     constexpr auto I = VarType::Integer;
     constexpr auto B = VarType::Binary;
@@ -935,6 +971,22 @@ std::vector<LpProblem> presolveAuditModels() {
         spec.min_int = 0;
         spec.max_int = 0;
         models.push_back(randomModel(lp_rng, spec));
+    }
+    // Parallel continuous columns (#308): x1 = 2 x0's column, x0 free above,
+    // so x1 is dominated at its lower bound; then both bounded at the same
+    // cost ratio, which merges them.
+    models.push_back(makeModel(Sense::Minimize, {1, 3, -1}, {0, 0, 0}, {kInf, 5, 2}, {C, C, I},
+                               {{1, 2, 1}, {1, 2, -1}}, {-kInf, -2}, {4, kInf}));
+    models.push_back(makeModel(Sense::Maximize, {-1, 2, 1}, {0, -1, 0}, {2, 1, 2}, {C, C, I},
+                               {{1, -2, 1}, {1, -2, -1}}, {-kInf, -2}, {3, kInf}));
+    std::mt19937 par_rng(308);
+    for (int t = 0; t < 80; ++t) {
+        ModelSpec spec;
+        spec.continuous_pair = true;
+        spec.parallel_pair = true;
+        spec.min_int = t % 2 == 0 ? 0 : 1;
+        spec.max_int = t % 2 == 0 ? 0 : 3;
+        models.push_back(randomModel(par_rng, spec));
     }
     return models;
 }

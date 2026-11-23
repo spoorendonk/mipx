@@ -47,11 +47,13 @@ namespace {
 
 const std::string kUsage =
     "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
-    "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n";
+    "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
+    "       [--parallel-cols]\n";
 
 struct Options {
     pb::CommonOptions common;
     bool check = false;
+    bool parallel_cols = false;  ///< PresolveOptions::enable_parallel_cols (#308), off by default.
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -72,6 +74,8 @@ Options parse(int argc, char** argv) {
         };
         if (arg == "--check-postsolve") {
             opt.check = true;
+        } else if (arg == "--parallel-cols") {
+            opt.parallel_cols = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -249,6 +253,7 @@ constexpr Rule kRules[] = {
     {"dominated_row", &PresolveStats::dominated_row_changes, &PresolveStats::dominated_row_seconds},
     {"duplicate_row", &PresolveStats::duplicate_row_changes, &PresolveStats::duplicate_row_seconds},
     {"parallel_row", &PresolveStats::parallel_row_changes, &PresolveStats::parallel_row_seconds},
+    {"parallel_col", &PresolveStats::parallel_col_changes, &PresolveStats::parallel_col_seconds},
     {"implied_equation", &PresolveStats::implied_equation_changes,
      &PresolveStats::implied_equation_seconds},
     {"activity_bound_tightening", &PresolveStats::activity_bound_tightening_changes,
@@ -290,6 +295,9 @@ int main(int argc, char** argv) {
     std::string error;
     for (int rep = 0; rep < opt.common.repeats && error.empty(); ++rep) {
         presolver = Presolver();
+        PresolveOptions popts = presolver.options();
+        popts.enable_parallel_cols = opt.parallel_cols;
+        presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
             LpProblem out;

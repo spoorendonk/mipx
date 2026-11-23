@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -366,6 +367,29 @@ std::vector<Real> PostsolveStack::postsolve(const std::vector<Real>& presolved_s
                         x_elim = std::min(x_elim, op.eliminated_upper);
                     }
                     full[op.eliminated_col] = x_elim;
+                } else if constexpr (std::is_same_v<T, PostsolveParallelCol>) {
+                    // y = x_kept + scale * x_removed: pick x_removed within
+                    // its bounds that leaves x_kept within its own.
+                    const Real y = full[op.kept_col];
+                    const Real s = op.scale;
+                    Real lo = op.removed_lower;
+                    Real hi = op.removed_upper;
+                    // x_kept = y - s * x_removed in [kept_lower, kept_upper].
+                    const Real from_upper = (y - op.kept_upper) / s;
+                    const Real from_lower = (y - op.kept_lower) / s;
+                    if (s > 0.0) {
+                        lo = std::max(lo, from_upper);
+                        hi = std::min(hi, from_lower);
+                    } else {
+                        lo = std::max(lo, from_lower);
+                        hi = std::min(hi, from_upper);
+                    }
+                    // A finite end, so the point is a vertex where it can be;
+                    // rounding may cross lo and hi by a hair, lo then wins.
+                    Real x = std::isfinite(lo) ? lo : (std::isfinite(hi) ? hi : 0.0);
+                    x = std::max(std::min(x, op.removed_upper), op.removed_lower);
+                    full[op.removed_col] = x;
+                    full[op.kept_col] = y - s * x;
                 }
             },
             *it);
@@ -1995,6 +2019,293 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
     return changes;
 }
 
+namespace {
+
+/// Hash of a column's active rows and of its coefficients divided by the
+/// first active one, so parallel columns share a bucket and columns that
+/// only share a support (all of a single row's, say) mostly do not. The
+/// quotients are hashed to their top 30 mantissa bits: a pair whose
+/// rounding straddles a step is missed, never merged wrongly, as every
+/// pair is checked again.
+/// `first_out` receives the first active coefficient.
+uint64_t colPatternHash(const LpProblem& lp, Index col, const std::vector<bool>& row_removed,
+                        const std::unordered_map<uint64_t, Real>& coeff_overrides,
+                        Real& first_out) {
+    auto cv = lp.matrix.col(col);
+    uint64_t h = 1469598103934665603ULL;
+    Index active = 0;
+    first_out = 0.0;
+    for (Index k = 0; k < cv.size(); ++k) {
+        const Index row = cv.indices[k];
+        if (row_removed[row]) {
+            continue;
+        }
+        const Real a = effectiveCoeff(coeff_overrides, row, col, cv.values[k]);
+        if (active == 0) {
+            first_out = a;
+        }
+        h = mixHash(h, static_cast<uint64_t>(row));
+        if (first_out != 0.0) {
+            // Sign, exponent and the top 30 of the 52 mantissa bits.
+            constexpr uint64_t kKeep = ~((uint64_t{1} << 22) - 1);
+            h = mixHash(h, std::bit_cast<uint64_t>(a / first_out) & kKeep);
+        }
+        ++active;
+    }
+    return mixHash(h, static_cast<uint64_t>(active));
+}
+
+/// Whether A_c2 = scale * A_c1 over the active rows, to a relative 1e-12: a
+/// shift between the two columns then moves no row activity by more than
+/// rounding.
+bool colsHaveScaledPattern(const LpProblem& lp, Index c1, Index c2,
+                           const std::vector<bool>& row_removed,
+                           const std::unordered_map<uint64_t, Real>& coeff_overrides,
+                           Real& scale_out) {
+    constexpr Real kRelTol = 1e-12;
+    auto a = lp.matrix.col(c1);
+    auto b = lp.matrix.col(c2);
+    Index p = 0;
+    Index q = 0;
+    bool have_scale = false;
+    Real scale = 0.0;
+    while (true) {
+        while (p < a.size() && row_removed[a.indices[p]]) {
+            ++p;
+        }
+        while (q < b.size() && row_removed[b.indices[q]]) {
+            ++q;
+        }
+        const bool done_a = p >= a.size();
+        const bool done_b = q >= b.size();
+        if (done_a || done_b) {
+            if (done_a && done_b && have_scale) {
+                scale_out = scale;
+                return true;
+            }
+            return false;
+        }
+        const Index row = a.indices[p];
+        if (row != b.indices[q]) {
+            return false;
+        }
+        const Real va = effectiveCoeff(coeff_overrides, row, c1, a.values[p]);
+        const Real vb = effectiveCoeff(coeff_overrides, row, c2, b.values[q]);
+        if (va == 0.0 || vb == 0.0) {
+            return false;
+        }
+        if (!have_scale) {
+            scale = vb / va;
+            if (!std::isfinite(scale) || scale == 0.0) {
+                return false;
+            }
+            have_scale = true;
+        } else if (std::abs(scale * va - vb) >
+                   kRelTol * std::max(std::abs(scale * va), std::abs(vb))) {
+            return false;
+        }
+        ++p;
+        ++q;
+    }
+}
+
+}  // namespace
+
+Index Presolver::removeParallelCols(LpProblem& lp, std::vector<bool>& col_removed,
+                                    const std::vector<bool>& row_removed,
+                                    std::vector<Index>& row_active_nnz,
+                                    std::vector<Index>& col_active_nnz,
+                                    const std::vector<Index>& dirty_cols,
+                                    std::vector<uint8_t>& next_dirty_rows,
+                                    std::vector<uint8_t>& next_dirty_cols) {
+    // Parallel columns j share a pattern u: A_j = a_j * u, with a_j the first
+    // active coefficient. In terms of z_j = a_j * x_j each adds z_j to the
+    // same activity u * sum(z) at a cost of r_j = c_j / a_j per unit
+    // (minimisation), so moving d units of z from `rem` to `keep` keeps every
+    // row and changes the cost by d * (r_keep - r_rem). Hence:
+    //  - when some column's z is unbounded above, the cheapest such one
+    //    (least r) can take over any column of r at least its own: that
+    //    column's z goes to its lower end, a fixing; the mirror holds for z
+    //    unbounded below, the dearest one, and the upper end;
+    //  - columns of equal r merge into y = x_keep + s * x_rem
+    //    (s = a_rem / a_keep), whose bounds are the sum of theirs.
+    // One absorber per direction and a sort for the merges keep a bucket
+    // linear (plus the sort) in its size. HiGHS's parallel-columns rule
+    // (detectParallelRowsAndCols) does both reductions. Continuous columns
+    // only: an integer one could neither absorb a fractional move nor be
+    // split back.
+    Index changes = 0;
+    const Real sense = lp.sense == Sense::Maximize ? -1.0 : 1.0;
+    // A finite bound this large (an MPS file's 1e30 for "none") is not fixed
+    // at: shifting the rows by it would swamp their other terms.
+    constexpr Real kHugeBound = 1e20;
+    // Every candidate is hashed, but a bucket is looked at only when one of
+    // its columns is dirty: a clean column's partner may be dirty, e.g. a
+    // bound of the dirty one turned finite since the pair was last seen.
+    std::vector<uint8_t> dirty(static_cast<size_t>(lp.num_cols), 0);
+    for (Index j : dirty_cols) {
+        dirty[j] = 1;
+    }
+    struct Member {
+        uint64_t hash;
+        Index col;
+        Real a;  ///< First active coefficient.
+        Real r;  ///< Cost per unit of a * x.
+    };
+    bool any_dirty = false;
+    // Sorted by hash into buckets: cheaper than a map of vectors when most
+    // buckets hold one column.
+    std::vector<Member> all;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        if (col_removed[j] || col_active_nnz[j] == 0 || lp.col_type[j] != VarType::Continuous ||
+            lp.col_lower[j] > lp.col_upper[j]) {
+            continue;
+        }
+        Real a = 0.0;
+        const uint64_t h = colPatternHash(lp, j, row_removed, coeff_overrides_, a);
+        if (a == 0.0) {
+            continue;
+        }
+        if (dirty[j] != 0) {
+            ++stats_.cols_examined;
+            any_dirty = true;
+        }
+        all.push_back({h, j, a, sense * lp.obj[j] / a});
+    }
+    if (!any_dirty) {
+        return 0;
+    }
+    std::sort(all.begin(), all.end(), [](const Member& p, const Member& q) {
+        return p.hash != q.hash ? p.hash < q.hash : p.col < q.col;
+    });
+
+    auto fixAt = [&](Index col, Real value) {
+        removeActiveColumn(lp, col, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                           next_dirty_rows, next_dirty_cols);
+        lp.obj_offset += lp.obj[col] * value;
+        postsolve_stack_.push(PostsolveFixVariable{col, value});
+        auto cv = lp.matrix.col(col);
+        for (Index k = 0; k < cv.size(); ++k) {
+            const Index row = cv.indices[k];
+            if (!row_removed[row]) {
+                shiftRowSides(lp, row,
+                              effectiveCoeff(coeff_overrides_, row, col, cv.values[k]) * value);
+            }
+        }
+        ++changes;
+        ++stats_.vars_removed;
+    };
+    // c_rem - s * c_keep for A_rem = s * A_keep, the cost of moving x_rem up
+    // by one with x_keep making up for it, and the tolerance it is read to.
+    // False when the two are not parallel after all (a hash collision).
+    auto pairDiff = [&](Index keep, Index rem, Real& s, Real& diff, Real& tol) -> bool {
+        if (!colsHaveScaledPattern(lp, keep, rem, row_removed, coeff_overrides_, s)) {
+            return false;
+        }
+        const Real c_keep = sense * lp.obj[keep];
+        const Real c_rem = sense * lp.obj[rem];
+        diff = c_rem - s * c_keep;
+        tol = 1e-12 * std::max({1.0, std::abs(c_rem), std::abs(s * c_keep)});
+        return true;
+    };
+    // The x bound at which a * x is at its low (high) end.
+    auto zLowBound = [&](const Member& m) {
+        return m.a > 0.0 ? lp.col_lower[m.col] : lp.col_upper[m.col];
+    };
+    auto zHighBound = [&](const Member& m) {
+        return m.a > 0.0 ? lp.col_upper[m.col] : lp.col_lower[m.col];
+    };
+    auto fixable = [](Real v) { return std::isfinite(v) && std::abs(v) < kHugeBound; };
+
+    for (size_t begin = 0, end = 0; begin < all.size(); begin = end) {
+        end = begin + 1;
+        while (end < all.size() && all[end].hash == all[begin].hash) {
+            ++end;
+        }
+        const std::span<const Member> members(all.data() + begin, end - begin);
+        if (members.size() < 2 ||
+            std::none_of(members.begin(), members.end(),
+                         [&](const Member& m) { return dirty[m.col] != 0; })) {
+            continue;
+        }
+        // z unbounded above: the least r takes over every column of r at
+        // least its own, which goes to its low end. `up` is false for the
+        // mirror: z unbounded below, the greatest r, the high end.
+        for (const bool up : {true, false}) {
+            const Member* absorber = nullptr;
+            for (const auto& m : members) {
+                // a * x unbounded in this pass's direction: x in the same
+                // one for a > 0, in the other for a < 0.
+                const bool x_up = (m.a > 0.0) == up;
+                const bool unbounded =
+                    x_up ? std::isinf(lp.col_upper[m.col]) && lp.col_upper[m.col] > 0.0
+                         : std::isinf(lp.col_lower[m.col]) && lp.col_lower[m.col] < 0.0;
+                if (!col_removed[m.col] && unbounded &&
+                    (absorber == nullptr || (up ? m.r < absorber->r : m.r > absorber->r))) {
+                    absorber = &m;
+                }
+            }
+            if (absorber == nullptr) {
+                continue;
+            }
+            for (const auto& m : members) {
+                const Real end = up ? zLowBound(m) : zHighBound(m);
+                Real s = 0.0;
+                Real diff = 0.0;
+                Real tol = 0.0;
+                if (m.col == absorber->col || col_removed[m.col] || !fixable(end) ||
+                    !pairDiff(absorber->col, m.col, s, diff, tol)) {
+                    continue;
+                }
+                // r_m - r_absorber = diff / a_m: at least zero to go low,
+                // at most zero to go high.
+                const bool cheaper_to_move = (m.a > 0.0) == up ? diff >= -tol : diff <= tol;
+                if (cheaper_to_move) {
+                    fixAt(m.col, end);
+                }
+            }
+        }
+        // Equal r: merge into the first of each run, in order of r.
+        std::vector<Member> left;
+        for (const auto& m : members) {
+            if (!col_removed[m.col]) {
+                left.push_back(m);
+            }
+        }
+        std::sort(left.begin(), left.end(), [](const Member& p, const Member& q) {
+            return p.r != q.r ? p.r < q.r : p.col < q.col;
+        });
+        size_t head = 0;
+        for (size_t i = 1; i < left.size(); ++i) {
+            const Index keep = left[head].col;
+            const Index rem = left[i].col;
+            Real s = 0.0;
+            Real diff = 0.0;
+            Real tol = 0.0;
+            if (!pairDiff(keep, rem, s, diff, tol)) {
+                continue;
+            }
+            if (std::abs(diff) > tol) {
+                head = i;
+                continue;
+            }
+            const Real kl = lp.col_lower[keep];
+            const Real ku = lp.col_upper[keep];
+            const Real rl = lp.col_lower[rem];
+            const Real ru = lp.col_upper[rem];
+            postsolve_stack_.push(PostsolveParallelCol{keep, rem, s, kl, ku, rl, ru});
+            lp.col_lower[keep] = s > 0.0 ? kl + s * rl : kl + s * ru;
+            lp.col_upper[keep] = s > 0.0 ? ku + s * ru : ku + s * rl;
+            removeActiveColumn(lp, rem, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                               next_dirty_rows, next_dirty_cols);
+            next_dirty_cols[keep] = 1;
+            ++changes;
+            ++stats_.vars_removed;
+        }
+    }
+    return changes;
+}
+
 // =============================================================================
 // Presolver — root probing
 // =============================================================================
@@ -2511,6 +2822,16 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                           next_dirty_cols);
             });
             stats_.parallel_row_changes += ch;
+            total_changes += ch;
+        }
+
+        if (options_.enable_parallel_cols) {
+            ch = timed(stats_.parallel_col_seconds, [&] {
+                return removeParallelCols(lp, col_removed, row_removed, row_active_nnz,
+                                          col_active_nnz, dirty_col_list, next_dirty_rows,
+                                          next_dirty_cols);
+            });
+            stats_.parallel_col_changes += ch;
             total_changes += ch;
         }
 

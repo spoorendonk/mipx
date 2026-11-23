@@ -1061,6 +1061,192 @@ TEST_CASE("Presolve: positive-scale parallel row removal", "[presolve]") {
     CHECK(reduced.num_rows == 1);
 }
 
+namespace {
+
+/// x1's column is a1 * x0's over two rows, x2 a third column that locks:
+///   x0 + a1 x1 + x2 <= 4,  x0 + a1 x1 - x2 >= -2,  x2 in [0, 1].
+LpProblem parallelColumnsModel(Real c0, Real c1, Real c2, Real x0_upper, Real x1_upper,
+                               VarType type, Real a1 = 2.0) {
+    LpProblem lp;
+    lp.name = "parallel_cols";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 3;
+    lp.obj = {c0, c1, c2};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {x0_upper, x1_upper, 1.0};
+    lp.col_type = {type, type, VarType::Continuous};
+    lp.col_names = {"x0", "x1", "x2"};
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -2.0};
+    lp.row_upper = {4.0, kInf};
+    lp.row_names = {"r0", "r1"};
+    std::vector<Triplet> trips = {{0, 0, 1.0}, {0, 1, a1}, {0, 2, 1.0},
+                                  {1, 0, 1.0}, {1, 1, a1}, {1, 2, -1.0}};
+    lp.matrix = SparseMatrix(2, 3, std::move(trips));
+    return lp;
+}
+
+PresolveOptions withParallelCols() {
+    PresolveOptions options;
+    options.enable_parallel_cols = true;
+    return options;
+}
+
+/// Presolves `lp` with parallel columns on, solves what is left and returns
+/// the postsolved point; the small models here often reduce to empty.
+std::vector<Real> presolveSolvePostsolve(const LpProblem& lp, Presolver& presolver) {
+    presolver.setOptions(withParallelCols());
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    std::vector<Real> x;
+    if (reduced.num_cols > 0) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.load(reduced);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        x = result.solution;
+    }
+    auto full = presolver.postsolve(x);
+    REQUIRE(full.size() == static_cast<std::size_t>(lp.num_cols));
+    // Feasible for both rows and every column bound.
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        CHECK(full[j] >= lp.col_lower[j] - 1e-9);
+        CHECK(full[j] <= lp.col_upper[j] + 1e-9);
+    }
+    std::vector<Real> act(static_cast<std::size_t>(lp.num_rows), 0.0);
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const auto cv = lp.matrix.col(j);
+        for (Index k = 0; k < cv.size(); ++k) {
+            act[cv.indices[k]] += cv.values[k] * full[j];
+        }
+    }
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        CHECK(act[i] >= lp.row_lower[i] - 1e-9);
+        CHECK(act[i] <= lp.row_upper[i] + 1e-9);
+    }
+    return full;
+}
+
+Real objectiveAt(const LpProblem& lp, const std::vector<Real>& x) {
+    Real obj = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        obj += lp.obj[j] * x[j];
+    }
+    return obj;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: a dominated parallel column is fixed at its bound", "[presolve]") {
+    // c1 = 3 > 2 * c0: moving x1 down by t and x0 up by 2t keeps both rows and
+    // saves t, and x0 has no upper bound, so x1 = 0 at some optimum. The
+    // optimum is x = (0, 0, 1) at -1.
+    const LpProblem lp = parallelColumnsModel(1.0, 3.0, -1.0, kInf, 5.0, VarType::Continuous);
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver);
+    CHECK(presolver.stats().parallel_col_changes == 1);
+    CHECK_THAT(full[1], WithinAbs(0.0, 1e-12));
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(-1.0, 1e-9));
+}
+
+TEST_CASE("Presolve: a dominated parallel column is fixed at its upper bound", "[presolve]") {
+    SECTION("positive scale, x0 unbounded below") {
+        // c1 = 1 < 2 * c0: moving x1 up by t and x0 down by 2t saves t, so
+        // x1 = 5. z = x0 + 2 x1 sits at its least, -2 + x2: -7 for any x2.
+        LpProblem lp = parallelColumnsModel(1.0, 1.0, -1.0, kInf, 5.0, VarType::Continuous);
+        lp.col_lower[0] = -kInf;
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver);
+        CHECK(presolver.stats().parallel_col_changes == 1);
+        CHECK_THAT(full[1], WithinAbs(5.0, 1e-12));
+        CHECK_THAT(objectiveAt(lp, full), WithinAbs(-7.0, 1e-9));
+    }
+    SECTION("negative scale, x0 unbounded above") {
+        // A_1 = -2 A_0 and c1 = 1 < -2 * c0 = 2: moving x1 up by t and x0 up
+        // by 2t saves t, so x1 = 5. The cost is -z - x1 - x2 with
+        // z = x0 - 2 x1 at its most, 4 - x2: -9 for any x2.
+        const LpProblem lp =
+            parallelColumnsModel(-1.0, 1.0, -1.0, kInf, 5.0, VarType::Continuous, -2.0);
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver);
+        CHECK(presolver.stats().parallel_col_changes == 1);
+        CHECK_THAT(full[1], WithinAbs(5.0, 1e-12));
+        CHECK_THAT(objectiveAt(lp, full), WithinAbs(-9.0, 1e-9));
+    }
+}
+
+TEST_CASE("Presolve: a dominated column at a huge bound is merged, not fixed", "[presolve]") {
+    // As the dominated case, but x1's lower bound is an MPS file's -1e30:
+    // shifting the rows by it would swamp them, so the pair is not fixed.
+    LpProblem lp = parallelColumnsModel(1.0, 2.0, -1.0, kInf, 5.0, VarType::Continuous);
+    lp.col_lower[1] = -1e30;
+    Presolver presolver;
+    presolver.setOptions(withParallelCols());
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().parallel_col_changes == 1);
+    for (Index i = 0; i < reduced.num_rows; ++i) {
+        CHECK((std::isinf(reduced.row_upper[i]) || std::abs(reduced.row_upper[i]) < 1e20));
+        CHECK((std::isinf(reduced.row_lower[i]) || std::abs(reduced.row_lower[i]) < 1e20));
+    }
+}
+
+TEST_CASE("Presolve: equal-cost parallel columns merge and keep the optimum", "[presolve]") {
+    // c1 = 2 * c0 and both bounded: y = x0 + 2 x1 in [0, 3 + 2]. The optimum
+    // has y = 4, x2 = 0, at -4.
+    const LpProblem lp = parallelColumnsModel(-1.0, -2.0, -0.5, 3.0, 1.0, VarType::Continuous);
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver);
+    CHECK(presolver.stats().parallel_col_changes == 1);
+    CHECK_THAT(full[0] + 2.0 * full[1], WithinAbs(4.0, 1e-9));
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(-4.0, 1e-9));
+}
+
+TEST_CASE("Presolve: a merged column splits back within both columns' bounds", "[presolve]") {
+    // y = x0 + s x1 with x0 in [0, 3] and x1 in [0, 1]: x1 takes the low end of
+    // what leaves x0 in its bounds, and x0 the rest.
+    PostsolveStack stack;
+    SECTION("positive scale") {
+        // y = 4, s = 2: x1 in [0.5, 2] within [0, 1], so x1 = 0.5 and x0 = 3.
+        stack.push(PostsolveParallelCol{0, 1, 2.0, 0.0, 3.0, 0.0, 1.0});
+        const auto full = stack.postsolve({4.0}, {0}, 2);
+        CHECK_THAT(full[0], WithinAbs(3.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(0.5, 1e-12));
+    }
+    SECTION("negative scale") {
+        // y = -1, s = -2: x0 = -1 + 2 x1 in [0, 3] gives x1 in [0.5, 2], so 0.5.
+        stack.push(PostsolveParallelCol{0, 1, -2.0, 0.0, 3.0, 0.0, 1.0});
+        const auto full = stack.postsolve({-1.0}, {0}, 2);
+        CHECK_THAT(full[0], WithinAbs(0.0, 1e-12));
+        CHECK_THAT(full[1], WithinAbs(0.5, 1e-12));
+    }
+    SECTION("unbounded kept column") {
+        // x0 free, x1 in [-1, 1]: x1 sits at its lower bound.
+        stack.push(PostsolveParallelCol{0, 1, 2.0, -kInf, kInf, -1.0, 1.0});
+        const auto full = stack.postsolve({5.0}, {0}, 2);
+        CHECK_THAT(full[1], WithinAbs(-1.0, 1e-12));
+        CHECK_THAT(full[0], WithinAbs(7.0, 1e-12));
+    }
+}
+
+TEST_CASE("Presolve: parallel columns are left alone when off or integer", "[presolve]") {
+    SECTION("option off") {
+        const LpProblem lp = parallelColumnsModel(-1.0, -2.0, -0.5, 3.0, 1.0, VarType::Continuous);
+        Presolver presolver;
+        presolver.presolve(lp);
+        CHECK(presolver.stats().parallel_col_changes == 0);
+    }
+    SECTION("integer pair") {
+        const LpProblem lp = parallelColumnsModel(-1.0, -2.0, -0.5, 3.0, 1.0, VarType::Integer);
+        Presolver presolver;
+        presolver.setOptions(withParallelCols());
+        presolver.presolve(lp);
+        CHECK(presolver.stats().parallel_col_changes == 0);
+    }
+}
+
 TEST_CASE("Presolve: a negative coefficient is not tightened while x >= 1 binds", "[presolve]") {
     // Row: -3x + y <= 4, x integer in [0,2], y in [0,10]
     // With x >= 1 the row still binds (-3 + 10 > 4), so there is no slack d.
