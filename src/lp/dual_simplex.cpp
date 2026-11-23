@@ -1311,6 +1311,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // left out. The perturbation comes off once the perturbed LP is optimal.
     std::vector<Real> cost_perturb;
     bool has_cost_perturb = false;
+    // The costs as this solve found them. Shifts and the perturbation come
+    // off by subtraction mid-solve, which leaves a few ulps behind; at exit,
+    // with all of them off, the costs are put back exactly from this copy so
+    // the drift does not build up over warm re-solves.
+    const std::vector<Real> obj_at_entry(obj_.begin(), obj_.begin() + num_cols_);
+    bool costs_moved = false;
     auto clearCostPerturbation = [&]() {
         if (!has_cost_perturb) {
             return;
@@ -1328,6 +1334,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         cost_perturb[static_cast<std::size_t>(j)] += shift;
         obj_[j] += shift;
+        costs_moved = true;
     };
     // HiGHS's HEkkDual::correctDual, run after a rebuild in the dual phase:
     // a nonbasic whose reduced cost is wrong by Td or more flips to its other
@@ -1433,6 +1440,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 obj_[j] += delta;
             }
             has_cost_perturb = true;
+            costs_moved = true;
             computeDuals();
         }
     }
@@ -1485,6 +1493,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         has_cost_shift = any_shift;
         if (has_cost_shift) {
+            costs_moved = true;
             computeDuals();
         }
     };
@@ -1672,9 +1681,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // numerically zero on fresh factors, or -1; cleared by the next basis
     // change.
     Index repair_rejected_row = -1;
-    // The iteration at which the dual ratio test last restored dual
-    // feasibility before pivoting, so it does so at most once per pivot.
-    Int last_dual_repair_iteration = -1;
+    // Passes of the main loop, and the pass on which the dual ratio test last
+    // restored dual feasibility before pivoting. The pass right after a
+    // repair does not repair again, so round-off cannot loop it; any pass
+    // in between (a rejected pivot's refactor, the shifts coming off)
+    // re-arms it, since those recompute the duals.
+    std::int64_t loop_pass = 0;
+    std::int64_t dual_repair_pass = -2;
     Int stall_restart_count = 0;
     Int best_pinf_count = std::numeric_limits<Int>::max();
     Int iters_since_pinf_improve = 0;
@@ -1900,6 +1913,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
     // Main dual simplex loop.
     while (iterations_ < iter_limit_) {
+        ++loop_pass;
         // Track work at iteration start for DSE cost/benefit analysis.
         double iter_work_start = work_.units();
         double iter_lu_work_start = lu_.workUnits().units();
@@ -3184,13 +3198,14 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // row then steps zero onto a tiny pivot and shifts its cost by the
         // whole error, and the iterates blow up. Restore the invariant first,
         // as HiGHS's correctDual does at each rebuild, and choose again.
-        // Once per pivot: should round-off leave a candidate wrong after the
-        // repair, the ratio test below copes rather than repairing forever.
-        if (last_dual_repair_iteration != iterations_ &&
+        // Not twice in a row: should round-off leave a candidate wrong right
+        // after a repair, the ratio test below copes rather than repairing
+        // forever.
+        if (dual_repair_pass != loop_pass - 1 &&
             std::ranges::any_of(bfrt_cands, [td = kDualTol](const BfrtCand& c) {
                 return c.tight < -td && std::isfinite(c.tight);
             })) {
-            last_dual_repair_iteration = iterations_;
+            dual_repair_pass = loop_pass;
             bool shifted = false;
             const bool flipped = correctDualInfeasibilities(&shifted);
             if (flipped || shifted) {
@@ -3732,14 +3747,16 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     }
 
     clearBoundPerturbation();
-    if (has_cost_perturb || has_cost_shift) {
+    const bool stopped_shifted = has_cost_perturb || has_cost_shift;
+    clearCostShifts();
+    clearCostPerturbation();
+    if (costs_moved) {
+        std::copy(obj_at_entry.begin(), obj_at_entry.end(), obj_.begin());
+    }
+    if (stopped_shifted && status_ != Status::Error) {
         // Stopped before the shifts or the perturbation came off (a limit,
         // an infeasibility proof): report duals for the true costs.
-        clearCostShifts();
-        clearCostPerturbation();
-        if (status_ != Status::Error) {
-            computeDuals();
-        }
+        computeDuals();
     }
 
     // Preserve warm-start basis only when solve did not end in internal error.
