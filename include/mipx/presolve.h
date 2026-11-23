@@ -129,7 +129,26 @@ struct PresolveStats {
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
     Index cols_examined = 0;
+    /// The reduction loop's wall time; building the reduced problem after it
+    /// is not included.
     Real time_seconds = 0.0;
+    /// Wall time in each reduction, summed over the rounds, so a slow
+    /// presolve can be traced to the pass that takes it (#287). What
+    /// time_seconds holds beyond their sum is the loop's own bookkeeping.
+    Real fixed_var_seconds = 0.0;
+    Real singleton_row_seconds = 0.0;
+    Real singleton_col_seconds = 0.0;
+    Real doubleton_eq_seconds = 0.0;
+    Real forcing_row_seconds = 0.0;
+    Real dominated_row_seconds = 0.0;
+    Real duplicate_row_seconds = 0.0;
+    Real parallel_row_seconds = 0.0;
+    Real implied_equation_seconds = 0.0;
+    Real activity_bound_tightening_seconds = 0.0;
+    Real dual_fixing_seconds = 0.0;
+    Real empty_col_seconds = 0.0;
+    Real coeff_tightening_seconds = 0.0;
+    Real probing_seconds = 0.0;
 };
 
 struct PresolveOptions {

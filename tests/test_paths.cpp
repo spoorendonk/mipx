@@ -12,4 +12,10 @@ std::string solveBinary() {
 }
 #endif
 
+#ifdef MIPX_HAS_PRESOLVE_BENCH_BINARY
+std::string presolveBenchBinary() {
+    return MIPX_PRESOLVE_BENCH_BINARY;
+}
+#endif
+
 }  // namespace mipx::test

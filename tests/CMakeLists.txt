@@ -30,6 +30,7 @@ add_executable(mipx-tests
     test_validity.cpp
     test_lp_validity.cpp
     test_cli.cpp
+    test_presolve_bench.cpp
     test_paths.cpp
 )
 
@@ -56,6 +57,15 @@ if(TARGET mipx-solve)
         MIPX_SOLVE_BINARY="$<TARGET_FILE:mipx-solve>"
     )
     add_dependencies(mipx-tests mipx-solve)
+endif()
+
+# The presolve-only bench tool's tests (test_presolve_bench.cpp) spawn it too.
+if(TARGET mipx-presolve-bench)
+    target_compile_definitions(mipx-tests PRIVATE MIPX_HAS_PRESOLVE_BENCH_BINARY)
+    set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        MIPX_PRESOLVE_BENCH_BINARY="$<TARGET_FILE:mipx-presolve-bench>"
+    )
+    add_dependencies(mipx-tests mipx-presolve-bench)
 endif()
 
 # LP sequence replay (#267): column generation's masters on the public
@@ -91,6 +101,14 @@ if(TARGET mipx-lpseq-replay-highs)
                 --arm simplex-warm --arm primal-warm --arm simplex-cold --arm ipx-cold --arm hipo-cold
                 --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_${seq}_highs.csv")
     endforeach()
+endif()
+# HiGHS's presolve alone (#287), on the LP the mipx tool's tests use.
+if(TARGET mipx-presolve-bench-highs)
+    add_test(NAME "Presolve bench (HiGHS): presolve_bench.lp"
+        COMMAND mipx-presolve-bench-highs "${PROJECT_SOURCE_DIR}/tests/data/presolve_bench.lp"
+            --repeats 2)
+    set_tests_properties("Presolve bench (HiGHS): presolve_bench.lp" PROPERTIES
+        PASS_REGULAR_EXPRESSION "\npresolve_bench,highs,reduced,")
 endif()
 
 # Fast correctness suite -- the default, and what the git hooks run.

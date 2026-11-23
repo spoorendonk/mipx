@@ -154,6 +154,11 @@ if(MIPX_BUILD_CLI)
     add_executable(mipx-lpseq-replay tests/perf/lpseq_replay.cpp)
     target_link_libraries(mipx-lpseq-replay PRIVATE mipx)
     mipx_set_compiler_flags(mipx-lpseq-replay)
+
+    # Presolve alone, without the solve, per reduction (#287).
+    add_executable(mipx-presolve-bench tests/perf/presolve_bench.cpp)
+    target_link_libraries(mipx-presolve-bench PRIVATE mipx)
+    mipx_set_compiler_flags(mipx-presolve-bench)
 endif()
 
 # --- Bench-only HiGHS comparator (#268) ---
@@ -164,7 +169,9 @@ endif()
 # solver dependencies": bench targets only). HiGHS is the v1.16.0 release
 # archive, pinned by hash, built static with HiPO (needs a BLAS, e.g.
 # libopenblas-dev).
-option(MIPX_BENCH_HIGHS "Build mipx-lpseq-replay-highs, fetching HiGHS v1.16.0 (bench only)" OFF)
+option(MIPX_BENCH_HIGHS
+       "Build mipx-lpseq-replay-highs and mipx-presolve-bench-highs, fetching HiGHS v1.16.0 (bench only)"
+       OFF)
 if(MIPX_BENCH_HIGHS)
     function(mipx_fetch_highs)
         # HiGHS's own build options, scoped to this function.
@@ -192,6 +199,13 @@ if(MIPX_BENCH_HIGHS)
     target_link_libraries(mipx-lpseq-replay-highs PRIVATE highs::highs)
     # mipx's warnings and sanitizers on this file and the shared parser.
     mipx_set_compiler_flags(mipx-lpseq-replay-highs)
+
+    # HiGHS's presolve alone, beside mipx-presolve-bench (#287). It reads the
+    # model with mipx's reader, so it links mipx as well; HiGHS stays out of
+    # the mipx library.
+    add_executable(mipx-presolve-bench-highs tests/perf/presolve_bench_highs.cpp)
+    target_link_libraries(mipx-presolve-bench-highs PRIVATE mipx highs::highs)
+    mipx_set_compiler_flags(mipx-presolve-bench-highs)
 endif()
 
 # --- Python extension ---

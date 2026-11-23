@@ -2415,6 +2415,14 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     std::vector<uint8_t> dirty_rows(lp.num_rows, 1);
     std::vector<uint8_t> dirty_cols(lp.num_cols, 1);
 
+    // Run one reduction, adding its wall time to `seconds`.
+    const auto timed = [](Real& seconds, auto&& reduce) {
+        const auto start = std::chrono::steady_clock::now();
+        const Index changes = reduce();
+        seconds += std::chrono::duration<Real>(std::chrono::steady_clock::now() - start).count();
+        return changes;
+    };
+
     // Iterative reduction loop.
     for (Index round = 0; round < max_rounds_ && !infeasible_; ++round) {
         Index total_changes = 0;
@@ -2439,79 +2447,107 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         std::vector<uint8_t> next_dirty_rows(lp.num_rows, 0);
         std::vector<uint8_t> next_dirty_cols(lp.num_cols, 0);
 
-        Index ch =
-            removeFixedVariables(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                 dirty_col_list, next_dirty_rows, next_dirty_cols);
+        Index ch = timed(stats_.fixed_var_seconds, [&] {
+            return removeFixedVariables(lp, col_removed, row_removed, row_active_nnz,
+                                        col_active_nnz, dirty_col_list, next_dirty_rows,
+                                        next_dirty_cols);
+        });
         stats_.fixed_var_changes += ch;
         total_changes += ch;
 
-        ch = removeSingletonRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                 dirty_row_list, next_dirty_rows, next_dirty_cols);
+        ch = timed(stats_.singleton_row_seconds, [&] {
+            return removeSingletonRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                       dirty_row_list, next_dirty_rows, next_dirty_cols);
+        });
         stats_.singleton_row_changes += ch;
         total_changes += ch;
 
-        ch = removeSingletonCols(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                 dirty_col_list, next_dirty_rows, next_dirty_cols);
+        ch = timed(stats_.singleton_col_seconds, [&] {
+            return removeSingletonCols(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                       dirty_col_list, next_dirty_rows, next_dirty_cols);
+        });
         stats_.singleton_col_changes += ch;
         total_changes += ch;
 
         if (options_.enable_doubleton_aggregation) {
-            ch = aggregateDoubletonEqualities(lp, col_removed, row_removed, row_active_nnz,
-                                              col_active_nnz, dirty_row_list, next_dirty_rows,
-                                              next_dirty_cols);
+            ch = timed(stats_.doubleton_eq_seconds, [&] {
+                return aggregateDoubletonEqualities(lp, col_removed, row_removed, row_active_nnz,
+                                                    col_active_nnz, dirty_row_list, next_dirty_rows,
+                                                    next_dirty_cols);
+            });
             stats_.doubleton_eq_changes += ch;
             total_changes += ch;
         }
 
         if (options_.enable_forcing_rows) {
-            ch = removeForcingRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                   dirty_row_list, next_dirty_rows, next_dirty_cols);
+            ch = timed(stats_.forcing_row_seconds, [&] {
+                return removeForcingRows(lp, col_removed, row_removed, row_active_nnz,
+                                         col_active_nnz, dirty_row_list, next_dirty_rows,
+                                         next_dirty_cols);
+            });
             stats_.forcing_row_changes += ch;
             total_changes += ch;
         }
 
-        ch = removeDominatedRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                 dirty_row_list, next_dirty_rows, next_dirty_cols);
+        ch = timed(stats_.dominated_row_seconds, [&] {
+            return removeDominatedRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                       dirty_row_list, next_dirty_rows, next_dirty_cols);
+        });
         stats_.dominated_row_changes += ch;
         total_changes += ch;
 
-        ch = removeDuplicateRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                 dirty_row_list, next_dirty_rows, next_dirty_cols);
+        ch = timed(stats_.duplicate_row_seconds, [&] {
+            return removeDuplicateRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                       dirty_row_list, next_dirty_rows, next_dirty_cols);
+        });
         stats_.duplicate_row_changes += ch;
         total_changes += ch;
 
         if (options_.enable_parallel_rows) {
-            ch = removeParallelRows(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                    dirty_row_list, next_dirty_rows, next_dirty_cols);
+            ch = timed(stats_.parallel_row_seconds, [&] {
+                return removeParallelRows(lp, col_removed, row_removed, row_active_nnz,
+                                          col_active_nnz, dirty_row_list, next_dirty_rows,
+                                          next_dirty_cols);
+            });
             stats_.parallel_row_changes += ch;
             total_changes += ch;
         }
 
-        ch = detectImpliedEquations(lp, col_removed, row_removed, dirty_row_list, next_dirty_rows,
-                                    next_dirty_cols);
+        ch = timed(stats_.implied_equation_seconds, [&] {
+            return detectImpliedEquations(lp, col_removed, row_removed, dirty_row_list,
+                                          next_dirty_rows, next_dirty_cols);
+        });
         stats_.implied_equation_changes += ch;
         total_changes += ch;
 
-        ch = activityBoundTightening(lp, col_removed, row_removed, dirty_row_list, next_dirty_rows,
-                                     next_dirty_cols);
+        ch = timed(stats_.activity_bound_tightening_seconds, [&] {
+            return activityBoundTightening(lp, col_removed, row_removed, dirty_row_list,
+                                           next_dirty_rows, next_dirty_cols);
+        });
         stats_.activity_bound_tightening_changes += ch;
         total_changes += ch;
 
         if (options_.enable_dual_fixing) {
-            ch = dualFixing(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                            dirty_col_list, next_dirty_rows, next_dirty_cols);
+            ch = timed(stats_.dual_fixing_seconds, [&] {
+                return dualFixing(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                  dirty_col_list, next_dirty_rows, next_dirty_cols);
+            });
             stats_.dual_fixing_changes += ch;
             total_changes += ch;
         }
 
-        ch = removeEmptyColumns(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
-                                dirty_col_list, next_dirty_rows, next_dirty_cols);
+        ch = timed(stats_.empty_col_seconds, [&] {
+            return removeEmptyColumns(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                                      dirty_col_list, next_dirty_rows, next_dirty_cols);
+        });
         stats_.empty_col_changes += ch;
         total_changes += ch;
 
         if (options_.enable_coefficient_tightening) {
-            ch = tightenCoefficients(lp, col_removed, row_removed, dirty_row_list, next_dirty_rows,
-                                     next_dirty_cols);
+            ch = timed(stats_.coeff_tightening_seconds, [&] {
+                return tightenCoefficients(lp, col_removed, row_removed, dirty_row_list,
+                                           next_dirty_rows, next_dirty_cols);
+            });
             stats_.coeff_tightening_changes += ch;
             total_changes += ch;
         }
@@ -2521,7 +2557,9 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         // fixing it finds re-triggers the loop.
         if (options_.enable_probing && !probing_done_ && total_changes == 0) {
             probing_done_ = true;
-            ch = probingPass(lp, col_removed, row_removed, next_dirty_rows, next_dirty_cols);
+            ch = timed(stats_.probing_seconds, [&] {
+                return probingPass(lp, col_removed, row_removed, next_dirty_rows, next_dirty_cols);
+            });
             stats_.probing_changes += ch;
             total_changes += ch;
             if (infeasible_) {
