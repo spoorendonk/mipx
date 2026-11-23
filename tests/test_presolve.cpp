@@ -1216,8 +1216,9 @@ TEST_CASE("Presolve: a huge finite bound does not swallow a row's activity", "[p
     // missing bound written as a huge finite one. Summed in, 1e30 swallowed
     // y's 0.50005, and taking it back out implied x >= 3, so presolve gave 6
     // (#300). The optimum is 5.5 at x = 2.5, y = 0.5. Negated, x's huge bound
-    // is a lower one under a -1 coefficient.
-    const Real huge = GENERATE(1e20, 1e30);
+    // is a lower one under a -1 coefficient. 1e17 is finite to presolve, but
+    // 1e17 + 0.50005 rounds to 1e17 in a plain sum all the same.
+    const Real huge = GENERATE(1e17, 1e20, 1e30);
     const Real s = GENERATE(1.0, -1.0);
     LpProblem lp;
     lp.name = "huge_bound";

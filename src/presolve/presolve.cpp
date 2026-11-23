@@ -25,6 +25,30 @@ namespace {
 // term, and taking it back out leaves 0 where the rest of the row was (#300).
 constexpr Real kHugeBound = 1e20;
 
+/// A sum kept as hi + lo with the rounding error of every addition in lo
+/// (Knuth's TwoSum), as HiGHS keeps activities (HighsCDouble). A term much
+/// larger than the rest, e.g. 1e17 next to 0.5, can then be taken back out
+/// and leave the rest, where a plain sum leaves 0 (#300).
+struct CompensatedSum {
+    Real hi = 0.0;
+    Real lo = 0.0;
+
+    void add(Real x) {
+        const Real s = hi + x;
+        const Real bb = s - hi;
+        lo += (hi - (s - bb)) + (x - bb);
+        hi = s;
+    }
+    /// The sum less x, rounded once.
+    [[nodiscard]] Real without(Real x) const {
+        const Real s = hi - x;
+        const Real bb = s - hi;
+        const Real err = (hi - (s - bb)) + (-x - bb);
+        return s + (err + lo);
+    }
+    [[nodiscard]] Real value() const { return hi + lo; }
+};
+
 inline void markRowsTouchingCol(const LpProblem& lp, Index col,
                                 const std::vector<bool>& row_removed,
                                 std::vector<uint8_t>& dirty_rows) {
@@ -1586,8 +1610,10 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
         ++stats_.rows_examined;
 
         auto rv = lp.matrix.row(i);
-        Real act_min = 0.0;
-        Real act_max = 0.0;
+        // Compensated, so a term much larger than the rest of the row (a
+        // bound of 1e17, say) is taken back out exactly below.
+        CompensatedSum act_min;
+        CompensatedSum act_max;
         Index inf_min_count = 0;
         Index inf_max_count = 0;
         Index inf_min_col = -1;
@@ -1609,6 +1635,9 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
                 continue;
             }
             Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
+            if (a == 0.0) {
+                continue;  // 0 * 1e30 would otherwise count as infinite.
+            }
 
             Real contrib_min = contrib(a, j, true);
             Real contrib_max = contrib(a, j, false);
@@ -1617,13 +1646,13 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
                 ++inf_min_count;
                 inf_min_col = j;
             } else {
-                act_min += contrib_min;
+                act_min.add(contrib_min);
             }
             if (std::isinf(contrib_max)) {
                 ++inf_max_count;
                 inf_max_col = j;
             } else {
-                act_max += contrib_max;
+                act_max.add(contrib_max);
             }
         }
 
@@ -1633,6 +1662,9 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
                 continue;
             }
             Real a = effectiveCoeff(coeff_overrides_, i, j, rv.values[k]);
+            if (a == 0.0) {
+                continue;
+            }
 
             bool res_min_finite = false;
             bool res_max_finite = false;
@@ -1641,18 +1673,18 @@ Index Presolver::activityBoundTightening(LpProblem& lp, std::vector<bool>& col_r
 
             if (inf_min_count == 0) {
                 res_min_finite = true;
-                res_min = act_min - contrib(a, j, true);
+                res_min = act_min.without(contrib(a, j, true));
             } else if (inf_min_count == 1 && inf_min_col == j) {
                 res_min_finite = true;
-                res_min = act_min;
+                res_min = act_min.value();
             }
 
             if (inf_max_count == 0) {
                 res_max_finite = true;
-                res_max = act_max - contrib(a, j, false);
+                res_max = act_max.without(contrib(a, j, false));
             } else if (inf_max_count == 1 && inf_max_col == j) {
                 res_max_finite = true;
-                res_max = act_max;
+                res_max = act_max.value();
             }
 
             // Huge sides count as infinite too, and a huge derived bound is
