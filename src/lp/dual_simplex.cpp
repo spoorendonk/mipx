@@ -1054,6 +1054,9 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     std::vector<Real> obj = obj_;
     std::vector<Real> row_scale = row_scale_;
     std::vector<Real> col_scale = col_scale_;
+    // A DSE-to-Devex fallback tripped on the unscaled model says nothing of
+    // the scaled one, which later warm solves (every B&B node) run on.
+    const bool dse_fell_back = dse_fell_back_;
     unapplyScaling();
     convertValues(true);
     row_scale_.assign(static_cast<std::size_t>(num_rows_), 1.0);
@@ -1074,6 +1077,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     row_scale_ = std::move(row_scale);
     col_scale_ = std::move(col_scale);
     scaled_ = true;
+    dse_fell_back_ = dse_fell_back;
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     buildBasisMatrixSource();
