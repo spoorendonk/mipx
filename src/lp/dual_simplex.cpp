@@ -674,6 +674,9 @@ LpResult DualSimplexSolver::solve() {
         options_.max_solve_seconds = own < 0.0 ? left : std::min(own, left);
     }
     const auto start = std::chrono::steady_clock::now();
+    // The row-price counters cover the whole call, cold retry and unscaled
+    // clean-up included; each pass restarts only the density history.
+    row_price_stats_ = RowPriceStats{};
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);
     res = cleanUpUnscaled(res, start, checked);
@@ -1318,8 +1321,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // Adaptive Harris (#159) numerical-incident tracking.
     bfrt_high_flip_iters_ = 0;
     adaptive_harris_stats_ = AdaptiveHarrisStats{};
-    // Hyper-sparse row-price (#131) path tracking and density history.
-    row_price_stats_ = RowPriceStats{};
+    // Hyper-sparse row-price (#131) density history; solve() resets the
+    // path counters once per call.
+    row_price_stats_.ema_alpha_density = 0.0;
 
     // Snapshot work at start of solve to compute delta.
     double work_at_start = work_.units();

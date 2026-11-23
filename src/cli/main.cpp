@@ -62,7 +62,7 @@ void printUsage(FILE* out) {
                  "[--dual-primal-devex|--dual-no-primal-devex] "
                  "[--dual-bfrt|--dual-no-bfrt] "
                  "[--dual-lu-update-limit N] "
-                 "[--dual-lu-ft-drop-tol T] "
+                 "[--dual-lu-ft-drop-tol T] [--dual-dense-row-price] "
                  "[--search-stable|--search-default|--search-aggressive] "
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
                  "[--pdlp-opt-norm l2|linf] "
@@ -162,6 +162,9 @@ int main(int argc, char* argv[]) {
     int dual_bfrt_override = -1;
     mipx::Int dual_lu_update_limit = std::numeric_limits<mipx::Int>::min();
     mipx::Real dual_lu_ft_drop_tolerance = std::numeric_limits<mipx::Real>::quiet_NaN();
+    // Forces the dense pivot-row assembly (DualSimplexOptions::force_dense_pivot_row),
+    // so the hyper-sparse row price can be benchmarked against it (#178).
+    bool dual_dense_row_price = false;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -363,6 +366,8 @@ int main(int argc, char* argv[]) {
             dual_lu_update_limit = static_cast<mipx::Int>(std::atoll(argv[++i]));
         } else if (arg == "--dual-lu-ft-drop-tol" && i + 1 < argc) {
             dual_lu_ft_drop_tolerance = std::atof(argv[++i]);
+        } else if (arg == "--dual-dense-row-price") {
+            dual_dense_row_price = true;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
             search_profile_explicit = true;
@@ -711,6 +716,8 @@ int main(int argc, char* argv[]) {
                 std::vector<mipx::Real> primals;
                 bool used_gpu = false;
                 std::string error;
+                // Set by the dual simplex only: which pivot-row kernel ran.
+                std::optional<mipx::DualSimplexSolver::RowPriceStats> row_price;
             };
             // One solve of `model` on the chosen backend; a negative limit is none.
             auto solveLp = [&](const mipx::LpProblem& model, double seconds) {
@@ -773,6 +780,7 @@ int main(int argc, char* argv[]) {
                 if (!std::isnan(dual_lu_ft_drop_tolerance)) {
                     dopts.lu_ft_drop_tolerance = dual_lu_ft_drop_tolerance;
                 }
+                dopts.force_dense_pivot_row = dual_dense_row_price;
                 if (seconds >= 0.0) {
                     dopts.max_solve_seconds = seconds;
                 }
@@ -780,6 +788,7 @@ int main(int argc, char* argv[]) {
                 solver.load(model);
                 run.result = solver.solve();
                 run.primals = solver.getPrimalValues();
+                run.row_price = solver.getRowPriceStats();
                 return run;
             };
 
@@ -820,6 +829,7 @@ int main(int argc, char* argv[]) {
                         loaded_miss, reduced_miss);
                     const mipx::Int iterations = run.result.iterations;
                     const double work_units = run.result.work_units;
+                    const auto row_price = run.row_price;
                     const double time_left =
                         time_limit >= 0.0 ? time_limit - secondsSince(t0) : -1.0;
                     if (time_limit >= 0.0 && time_left <= 0.0) {
@@ -828,6 +838,11 @@ int main(int argc, char* argv[]) {
                         run = solveLp(lp, time_left);
                         run.result.iterations += iterations;
                         run.result.work_units += work_units;
+                        if (run.row_price && row_price) {
+                            run.row_price->sparse_assemblies += row_price->sparse_assemblies;
+                            run.row_price->dense_assemblies += row_price->dense_assemblies;
+                            run.row_price->fill_in_fallbacks += row_price->fill_in_fallbacks;
+                        }
                         obj = run.result.objective;
                     }
                 }
@@ -840,6 +855,17 @@ int main(int argc, char* argv[]) {
             }
             if (lp_mode == LpMode::Pdlp && (verbose || print_backend)) {
                 log.log("PDLP backend: %s\n", run.used_gpu ? "GPU" : "CPU");
+            }
+            if (run.row_price && verbose) {
+                // Which pivot-row kernel ran, over every solve above, so a
+                // --dual-dense-row-price benchmark can confirm it got the
+                // dense one (#178). Fill-in fallbacks are among the dense.
+                const auto& rps = *run.row_price;
+                std::fflush(stdout);  // the solver's printf log comes first
+                log.log("Row price: %d sparse, %d dense (%d after a fill-in fallback)\n",
+                        static_cast<int>(rps.sparse_assemblies),
+                        static_cast<int>(rps.dense_assemblies),
+                        static_cast<int>(rps.fill_in_fallbacks));
             }
 
             std::fflush(stdout);  // flush LP solver's printf output before Logger write()

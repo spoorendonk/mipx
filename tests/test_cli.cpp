@@ -259,7 +259,7 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
           "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
           "--presolve-probing-probes", "--presolve-probing-time", "--clique-table",
           "--no-clique-table", "--plunge-depth", "--no-plunge", "--plunge-bound-quotient",
-          "--dual-primal-devex", "--dual-no-primal-devex"}) {
+          "--dual-primal-devex", "--dual-no-primal-devex", "--dual-dense-row-price"}) {
         INFO(flag);
         CHECK(run.mentions(flag));
     }
@@ -324,14 +324,35 @@ TEST_CASE("CLI: --plunge-depth reaches the tree search", "[cli]") {
     }
 }
 
-TEST_CASE("CLI: --dual-primal-devex is accepted and solves the LP", "[cli]") {
-    for (const char* flag : {"--dual-primal-devex", "--dual-no-primal-devex"}) {
+TEST_CASE("CLI: the dual simplex flags are accepted and solve the LP", "[cli]") {
+    for (const char* flag :
+         {"--dual-primal-devex", "--dual-no-primal-devex", "--dual-dense-row-price"}) {
         INFO(flag);
         const auto run =
             runSolver("'" + testDataDir() + "/lp_format.lp' --dual --quiet " + std::string(flag));
         CHECK(run.exit_code == 0);
         CHECK(run.mentions("Objective: 3.0000000000e+00"));
     }
+}
+
+TEST_CASE("CLI: --dual-dense-row-price reaches the dual simplex", "[cli]") {
+    // Presolve would empty this model, leaving no pivots to count.
+    const std::string base = "'" + testDataDir() + "/grid2_master_0001.mps' --dual --no-presolve ";
+    const auto adaptive = runSolver(base);
+    const auto dense = runSolver(base + "--dual-dense-row-price");
+
+    for (const auto* run : {&adaptive, &dense}) {
+        CHECK(run->exit_code == 0);
+        CHECK(run->mentions("Objective: 2.0390200000e+06"));
+    }
+    // The default takes the hyper-sparse row price on every pivot of this
+    // model; the flag turns it off. Counts are left unpinned, so a change to
+    // the pivot sequence does not fail a test about kernel choice.
+    CHECK(adaptive.mentions("Row price: "));
+    CHECK(adaptive.mentions(", 0 dense (0 after"));
+    CHECK_FALSE(adaptive.mentions("Row price: 0 sparse"));
+    CHECK(dense.mentions("Row price: 0 sparse, "));
+    CHECK_FALSE(dense.mentions(", 0 dense ("));
 }
 
 #endif  // MIPX_HAS_SOLVE_BINARY && !_WIN32

@@ -321,7 +321,8 @@ public:
     }
 
     /// Diagnostics for the hyper-sparse pivot-row ("row price") kernel (#131),
-    /// accumulated over the most recent solve(). Exposed for observability and
+    /// accumulated over the most recent solve(), all of its internal passes
+    /// (cold retry, unscaled clean-up) included. Exposed for observability and
     /// testing, so the path actually taken can be asserted.
     struct RowPriceStats {
         Int sparse_assemblies = 0;     // assemblies completed by the sparse kernel
