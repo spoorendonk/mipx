@@ -40,14 +40,22 @@ struct CommonOptions {
     ModelFormat format = ModelFormat::Auto;
     int repeats = 1;
     std::string csv;  ///< Append the row here as well, with a header if new.
+    // (Only rows of one tool and one set of options share a file; see emit.)
 };
 
 /// The instance name of `path`: its file name less the model suffixes.
 inline std::string instanceName(const std::string& path) {
     std::string name = path.substr(path.find_last_of('/') + 1);
-    // In this order: a compression suffix first, and ".emps" before ".mps".
+    // Case-insensitive, as the reader's suffixes are. In this order: a
+    // compression suffix first, and ".emps" before ".mps".
     for (const std::string_view suffix : {".gz", ".bz2", ".emps", ".mps", ".lp"}) {
-        if (name.size() > suffix.size() && name.ends_with(suffix)) {
+        if (name.size() <= suffix.size()) {
+            continue;
+        }
+        const std::string_view tail = std::string_view(name).substr(name.size() - suffix.size());
+        if (std::equal(tail.begin(), tail.end(), suffix.begin(), [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == b;
+            })) {
             name.resize(name.size() - suffix.size());
         }
     }
@@ -93,14 +101,29 @@ inline bool parseCommon(int argc, char** argv, int& i, CommonOptions& opt,
     return true;
 }
 
-/// Read the model, or exit with kExitUsage naming why not.
+/// Read the model as the LP both presolves take, or exit with kExitUsage
+/// naming why not. Integer columns become continuous (the LP relaxation, as
+/// mipx-solve --relax-integrality reads it): the bench measures LP presolve,
+/// and HiGHS would run its MIP presolve, which logs no rules, on a model with
+/// integers. Semi columns, SOS and indicator constraints are refused, as
+/// mipx's presolve refuses them and HiGHS's API would drop the last two.
 inline LpProblem readOrExit(const CommonOptions& opt) {
+    LpProblem lp;
     try {
-        return readModel(opt.path, opt.format);
+        lp = readModel(opt.path, opt.format);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Error: %s\n", e.what());
         std::exit(kExitUsage);
     }
+    if (hasAdvancedModelFeatures(lp)) {
+        std::fprintf(stderr, "Error: %s has semi columns, SOS or indicator constraints\n",
+                     opt.path.c_str());
+        std::exit(kExitUsage);
+    }
+    for (auto& t : lp.col_type) {
+        t = VarType::Continuous;
+    }
+    return lp;
 }
 
 /// Wall seconds of one call of `f`.
@@ -146,8 +169,20 @@ public:
         addSizes(suffix, lp.num_rows, lp.num_cols, lp.matrix.numNonzeros());
     }
 
+    [[nodiscard]] std::size_t size() const { return values_.size(); }
+
+    /// Empty every value from column `k` on, keeping the columns: a row for a
+    /// run that has no values there still fits the header.
+    void blankFrom(std::size_t k) {
+        for (; k < values_.size(); ++k) {
+            values_[k].clear();
+        }
+    }
+
     /// Header and row on stdout; appended to `csv` too when set, with the
-    /// header only when the file is new or empty.
+    /// header when the file is new or empty. A file whose header differs (a
+    /// run of the other tool, or with other options) is refused, exit
+    /// kExitUsage, so no row lands under the wrong columns.
     void emit(const std::string& csv) const {
         const std::string header = join(columns_);
         const std::string row = join(values_);
@@ -158,7 +193,15 @@ public:
         bool fresh = true;
         {
             std::ifstream in(csv);
-            fresh = !in || in.peek() == std::ifstream::traits_type::eof();
+            std::string first;
+            if (in && std::getline(in, first)) {
+                fresh = false;
+                if (first != header) {
+                    std::fprintf(stderr, "Error: %s has other columns than this run's\n",
+                                 csv.c_str());
+                    std::exit(kExitUsage);
+                }
+            }
         }
         std::ofstream out(csv, std::ios::app);
         if (!out) {

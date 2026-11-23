@@ -129,8 +129,9 @@ struct PresolveStats {
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
     Index cols_examined = 0;
-    /// The reduction loop's wall time; building the reduced problem after it
-    /// is not included.
+    /// Wall time of presolve's setup (copying the problem, rounding integer
+    /// bounds, counting row and column lengths) and its reduction loop;
+    /// building the reduced problem after it is not included.
     Real time_seconds = 0.0;
     /// Wall time in each reduction, summed over the rounds, so a slow
     /// presolve can be traced to the pass that takes it (#287). What

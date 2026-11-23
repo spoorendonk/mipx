@@ -3,17 +3,21 @@
 // (MIPX_BENCH_HIGHS, OFF by default); the mipx library never links HiGHS.
 //
 // The model is read with mipx's reader and passed to HiGHS through its API,
-// so both presolves see the same LP; HiGHS's read limits are widened as in
-// mipx-lpseq-replay-highs, and an entry HiGHS would still drop is refused.
-// Highs::presolve() runs --repeats times, each on a fresh Highs, one thread,
-// rule logging off; `seconds` is the fastest call, `seconds_median` the
-// median. One more, untimed run with presolve_rule_logging on gives the rows
-// and columns each of HiGHS's rules removed (<rule>_rows, <rule>_cols; HiGHS
-// logs them for LPs only).
+// so both presolves see the same LP (integer columns relaxed; readOrExit);
+// HiGHS's read limits are widened as in mipx-lpseq-replay-highs, and an entry
+// HiGHS would still drop is refused. First an untimed run with
+// presolve_rule_logging on gives the rows and columns each of HiGHS's rules
+// removed (<rule>_rows, <rule>_cols); it also takes HiGHS's one-time setup
+// (its thread pool), which would otherwise land in the first timed call.
+// Then Highs::presolve() runs --repeats times, each on a fresh Highs, one
+// thread, rule logging off; `seconds` is the fastest call, `seconds_median`
+// the median. The timed call includes HiGHS copying the reduced LP out
+// (mipx's includes building its reduced LP), not passing the model in.
 //
 // Status: HiGHS's presolve status (reduced, reduced_to_empty, not_reduced,
-// infeasible, unbounded_or_infeasible, timeout, error). Exit 0, 1 when
-// HiGHS's presolve errs, 2 on a usage or read error.
+// infeasible, unbounded_or_infeasible, timeout, error); sizes after are -1
+// unless it is one of the first three. Exit 0, 1 when HiGHS's presolve errs,
+// 2 on a usage or read error.
 
 #include "presolve_bench_common.h"
 
@@ -60,13 +64,7 @@ HighsLp toHighs(const LpProblem& lp) {
     h.col_upper_ = lp.col_upper;
     h.row_lower_ = lp.row_lower;
     h.row_upper_ = lp.row_upper;
-    if (lp.hasIntegers()) {
-        h.integrality_.resize(lp.num_cols);
-        for (Index j = 0; j < lp.num_cols; ++j) {
-            h.integrality_[j] = lp.col_type[j] == VarType::Continuous ? HighsVarType::kContinuous
-                                                                      : HighsVarType::kInteger;
-        }
-    }
+    // No integrality: readOrExit relaxed it, so HiGHS runs its LP presolve.
     h.a_matrix_.format_ = MatrixFormat::kRowwise;
     h.a_matrix_.num_col_ = lp.num_cols;
     h.a_matrix_.num_row_ = lp.num_rows;
@@ -182,6 +180,10 @@ int main(int argc, char** argv) {
     const LpProblem lp = pb::readOrExit(opt);
     const HighsLp hlp = toHighs(lp);
 
+    // Untimed and first (see the header).
+    const auto logged = loaded(hlp, true);
+    logged->presolve();
+
     std::vector<double> times;
     std::unique_ptr<Highs> last;
     for (int rep = 0; rep < opt.repeats; ++rep) {
@@ -207,8 +209,6 @@ int main(int argc, char** argv) {
         row.addSizes("after", -1, -1, -1);
     }
 
-    const auto logged = loaded(hlp, true);
-    logged->presolve();
     const HighsPresolveLog& log = logged->getPresolveLog();
     for (const auto& [rule, name] : kRules) {
         const bool have = static_cast<std::size_t>(rule) < log.rule.size();

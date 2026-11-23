@@ -3,24 +3,28 @@
 // reduction did, as one CSV row (presolve_bench_common.h has the leading
 // columns); mipx-presolve-bench-highs writes the same for HiGHS's presolve.
 //
-// Presolve runs with the options mipx-solve's LP path uses (PresolveOptions'
+// The model is read as an LP (integer columns relaxed; readOrExit). Presolve
+// runs with the options mipx-solve's LP path uses (PresolveOptions'
 // defaults), --repeats times on a fresh Presolver; `seconds` is the fastest
 // call and `seconds_median` the median, reading excluded. The per-reduction
 // columns, <rule>_changes and <rule>_seconds, are PresolveStats' counters and
-// times of the last call; `loop_seconds` is its reduction loop, the rest of
-// `seconds` building the reduced LP.
+// times of the last call; `loop_seconds` is its time_seconds (its setup and
+// reduction loop), the rest of that call's time building the reduced LP.
 //
 // --check-postsolve solves the reduced LP with dual simplex, postsolves the
 // point, and checks it against the model as read: every bound and row to
 // 1e-6 (pointHoldsModel) and its objective within --rel-tol (1e-6, relative to
 // max(1, |reference|)) of the reference: the instance's =opt= line in --solu
-// FILE, else a dual simplex solve of the model as read. A presolve verdict of
-// infeasible, or a reduced LP that is not optimal, must match that solve's
-// status. A solve that hits --time-limit is reported as "limit", not a fail.
+// FILE (an LP optimum), else a dual simplex solve of the model as read. A
+// presolve verdict of infeasible, or a reduced LP that is not optimal, must
+// match that solve's status. A solve that hits --time-limit is reported as
+// "limit"; a solver error on either side is a fail.
 //
-// Status: reduced, reduced_to_empty, not_reduced, infeasible, or error (the
-// presolver threw). Exit 0, 1 when the check fails or presolve threw, 2 on a
-// usage or read error.
+// Status: reduced, reduced_to_empty, not_reduced (sizes unchanged, though
+// bounds may have been tightened; HiGHS's not_reduced means no reduction at
+// all), infeasible (sizes after -1, as HiGHS's), or error (the presolver
+// threw; every column after the common ones empty). Exit 0, 1 when the check
+// fails or presolve threw, 2 on a usage or read error.
 
 #include "mipx/dual_simplex.h"
 #include "mipx/presolve.h"
@@ -184,10 +188,13 @@ Check checkPostsolve(const Options& opt, const std::string& instance, const LpPr
         }
         return *original;
     };
-    // A verdict without a point to postsolve must match the original's.
+    // A verdict without a point to postsolve must match the original's. A
+    // solver error on either side proves nothing, so it fails.
     const auto sameVerdict = [&](Status reduced_status) {
         const Status s = solveOriginal().status;
-        if (isLimit(s) || isLimit(reduced_status)) {
+        if (s == Status::Error || reduced_status == Status::Error) {
+            c.verdict = "fail";
+        } else if (isLimit(s) || isLimit(reduced_status)) {
             c.verdict = "limit";
         } else {
             c.verdict = s == reduced_status ? "pass" : "fail";
@@ -276,23 +283,21 @@ int main(int argc, char** argv) {
     for (int rep = 0; rep < opt.common.repeats && error.empty(); ++rep) {
         presolver = Presolver();
         try {
-            times.push_back(pb::secondsOf([&] { reduced = presolver.presolve(lp); }));
+            // Into a fresh LP, so freeing the last repeat's is not timed.
+            LpProblem out;
+            times.push_back(pb::secondsOf([&] { out = presolver.presolve(lp); }));
+            reduced = std::move(out);
         } catch (const std::exception& e) {
             error = e.what();
         }
     }
 
-    pb::Row row;
+    std::string status = "reduced";
     if (!error.empty()) {
         std::fprintf(stderr, "Error: presolve threw: %s\n", error.c_str());
-        pb::addCommon(row, instance, "mipx", "error", {std::numeric_limits<double>::quiet_NaN()},
-                      lp);
-        row.emit(opt.common.csv);
-        return pb::kExitCheckFailed;
-    }
-
-    std::string status = "reduced";
-    if (presolver.isInfeasible()) {
+        status = "error";
+        times = {std::numeric_limits<double>::quiet_NaN()};
+    } else if (presolver.isInfeasible()) {
         status = "infeasible";
     } else if (reduced.num_rows == 0 && reduced.num_cols == 0) {
         status = "reduced_to_empty";
@@ -301,9 +306,16 @@ int main(int argc, char** argv) {
         status = "not_reduced";
     }
 
-    const PresolveStats& st = presolver.stats();
+    pb::Row row;
     pb::addCommon(row, instance, "mipx", status, times, lp);
-    row.addSizes("after", reduced);
+    const std::size_t common_columns = row.size();
+    if (status == "infeasible") {
+        // Half reduced: its sizes are no reduction to compare.
+        row.addSizes("after", -1, -1, -1);
+    } else {
+        row.addSizes("after", reduced);
+    }
+    const PresolveStats& st = presolver.stats();
     row.addReal("loop_seconds", st.time_seconds);
     row.addInt("rounds", st.rounds);
     row.addInt("vars_removed", st.vars_removed);
@@ -318,7 +330,8 @@ int main(int argc, char** argv) {
 
     int exit_code = pb::kExitOk;
     if (opt.check) {
-        const Check c = checkPostsolve(opt, instance, lp, presolver, reduced);
+        const Check c =
+            error.empty() ? checkPostsolve(opt, instance, lp, presolver, reduced) : Check{};
         row.add("check", c.verdict);
         row.add("reduced_status", c.reduced_status);
         row.add("original_status", c.original_status);
@@ -329,6 +342,11 @@ int main(int argc, char** argv) {
         if (c.verdict == "fail") {
             exit_code = pb::kExitCheckFailed;
         }
+    }
+    if (!error.empty()) {
+        // The same columns as any other run's, so it joins one CSV file.
+        row.blankFrom(common_columns);
+        exit_code = pb::kExitCheckFailed;
     }
     row.emit(opt.common.csv);
     return exit_code;

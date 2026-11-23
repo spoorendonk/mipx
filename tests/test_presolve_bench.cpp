@@ -118,7 +118,6 @@ TEST_CASE("Presolve bench: reports sizes and the reductions that fire", "[presol
     CHECK(run.count("repeats") == 3);
     CHECK(run.real("seconds") > 0.0);
     CHECK(run.real("seconds") <= run.real("seconds_median"));
-    CHECK(run.real("loop_seconds") <= run.real("seconds"));
 
     CHECK(run.count("rows_before") == 8);
     CHECK(run.count("cols_before") == 9);
@@ -216,6 +215,29 @@ TEST_CASE("Presolve bench: --csv appends rows under one header", "[presolve][ben
     CHECK(lines[0].starts_with("instance,solver,status,"));
     CHECK(lines[1].starts_with("presolve_bench,mipx,reduced,"));
     CHECK(lines[2].starts_with("presolve_bench,mipx,reduced,"));
+
+    // A run with other columns (the check's) is refused, not appended.
+    const auto other =
+        runBench(dataFile("presolve_bench.lp") + " --check-postsolve --csv " + csv.quoted());
+    CHECK(other.exit_code == 2);
+    std::ifstream again(csv.path);
+    std::size_t count = 0;
+    for (std::string line; std::getline(again, line);) {
+        ++count;
+    }
+    CHECK(count == 3);
+}
+
+TEST_CASE("Presolve bench: the instance name drops model suffixes in any case",
+          "[presolve][bench]") {
+    std::ifstream in(testDataDir() + "/presolve_bench.lp");
+    std::stringstream lp;
+    lp << in.rdbuf();
+    const TempFile upper("Upper_Case.LP", lp.str());
+    const auto run = runBench(upper.quoted());
+    INFO(run.output);
+    REQUIRE(run.exit_code == 0);
+    CHECK(run.row.at("instance").ends_with("Upper_Case"));
 }
 
 TEST_CASE("Presolve bench: a missing or malformed file is a usage error", "[presolve][bench]") {
