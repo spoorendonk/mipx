@@ -662,7 +662,7 @@ TEST_CASE("DualSimplex: no-presolve #278 Netlib LPs solve within time limit",
     // pilot87 needed the cost perturbation and the dual-feasibility repair
     // before each dual pivot (about 6 s and 9 s on one thread); cycle, whose
     // cold basis is primal feasible, needed bound perturbation to reach the
-    // degenerate primal phase (#298, under 1 s).
+    // degenerate primal phase (#298, about 2 s).
     struct NetlibCase {
         const char* name;
         Real expected_obj;
@@ -692,6 +692,65 @@ TEST_CASE("DualSimplex: no-presolve #278 Netlib LPs solve within time limit",
         Real denom = std::max(1.0, std::abs(tc.expected_obj));
         Real rel_err = std::abs(result.objective - tc.expected_obj) / denom;
         CHECK(rel_err < 1e-6);
+    }
+}
+
+TEST_CASE("Regression #298: an optimum reached under bound perturbation is a vertex",
+          "[dual_simplex][regression]") {
+    // min -(1..6)·x  s.t.  x_{j+1} - x_j <= 0 (j < 5),  sum x <= 3,  x >= 0.
+    // The cold slack basis is primal feasible, its reduced costs cannot be
+    // fixed by bound flips (no upper bounds), and the chain rows sit at
+    // their zero sides, so the primal phase starts degenerate. With the
+    // stall threshold at one pivot the perturbation comes on at once, and
+    // pivots park leaving slacks on the shrunken bounds. The optimum,
+    // x_j = 0.5 for all j at -10.5, has every row tight: each nonbasic slack
+    // must be back on its true bound, so the rows hold with equality. It
+    // used to keep a slack at ub - eps, a feasible point that is no vertex.
+    constexpr Index n = 6;
+    LpProblem lp;
+    lp.name = "chain";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj = {-1.0, -2.0, -3.0, -4.0, -5.0, -6.0};
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, kInf);
+    lp.col_type.assign(n, VarType::Continuous);
+    lp.num_rows = n;
+    lp.row_lower.assign(n, -kInf);
+    lp.row_upper.assign(n, 0.0);
+    lp.row_upper[n - 1] = 3.0;
+    std::vector<Real> values;
+    std::vector<Index> col_indices;
+    std::vector<Index> row_starts = {0};
+    for (Index j = 0; j + 1 < n; ++j) {
+        values.insert(values.end(), {-1.0, 1.0});
+        col_indices.insert(col_indices.end(), {j, j + 1});
+        row_starts.push_back(static_cast<Index>(values.size()));
+    }
+    for (Index j = 0; j < n; ++j) {
+        values.push_back(1.0);
+        col_indices.push_back(j);
+    }
+    row_starts.push_back(static_cast<Index>(values.size()));
+    lp.matrix = SparseMatrix(n, n, values, col_indices, row_starts);
+
+    DualSimplexSolver solver;
+    DualSimplexOptions opts = solver.getOptions();
+    opts.enable_bound_perturbation = true;
+    opts.bound_perturbation_stall_pivots = 1;
+    opts.bound_perturbation_magnitude = 1e-3;
+    solver.setOptions(opts);
+    solver.setVerbose(false);
+    solver.load(lp);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-10.5, 1e-12));
+    const auto x = solver.getPrimalValues();
+    REQUIRE(x.size() == static_cast<std::size_t>(n));
+    for (Index j = 0; j < n; ++j) {
+        INFO("column " << j);
+        CHECK_THAT(x[j], WithinAbs(0.5, 1e-12));
     }
 }
 

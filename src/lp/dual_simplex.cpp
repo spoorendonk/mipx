@@ -1813,6 +1813,19 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         primal_feasible_dual_stall_pivots = 0;
     };
 
+    // The degenerate streak at the last activation or escalation, so each
+    // escalation waits another bound_perturbation_stall_pivots.
+    Int bound_perturb_streak_mark = 0;
+
+    // While perturbed, pivots park nonbasic variables on the shrunken bounds
+    // (lb + eps, ub - eps), and they stay there after the perturbation comes
+    // off mid-solve: moving them back at once would undo the progress the
+    // perturbation bought. snapNonbasicToBounds() moves each back onto its
+    // true bound, so the basis is a vertex of the model again, before the
+    // solve accepts an optimum and when it stops; the caller then recomputes
+    // the basic primals (it returns true when it moved anything).
+    bool nonbasic_off_bounds = false;
+
     auto clearBoundPerturbation = [&]() {
         if (!bound_perturb_active_) {
             return;
@@ -1820,6 +1833,28 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         bound_perturb_active_ = false;
         std::fill(lower_bound_perturb_.begin(), lower_bound_perturb_.end(), 0.0);
         std::fill(upper_bound_perturb_.begin(), upper_bound_perturb_.end(), 0.0);
+    };
+
+    auto snapNonbasicToBounds = [&]() -> bool {
+        if (!nonbasic_off_bounds) {
+            return false;
+        }
+        nonbasic_off_bounds = false;
+        for (Index k : nonbasic_) {
+            const std::size_t ks = static_cast<std::size_t>(k);
+            switch (var_status_[k]) {
+                case BasisStatus::AtLower:
+                case BasisStatus::Fixed:
+                    primal_[k] = base_var_lower[ks];
+                    break;
+                case BasisStatus::AtUpper:
+                    primal_[k] = base_var_upper[ks];
+                    break;
+                default:
+                    break;
+            }
+        }
+        return true;
     };
 
     // Activate or escalate bound perturbation using problem-adapted magnitudes.
@@ -1885,6 +1920,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             ++bound_perturb_activations_;
         }
         bound_perturb_active_ = true;
+        nonbasic_off_bounds = true;
         bound_perturb_level_ = level;
         return true;
     };
@@ -1971,12 +2007,15 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (!bound_perturb_active_) {
                 // First activation at level 0.
                 if (activateBoundPerturbation(0)) {
+                    bound_perturb_streak_mark = degenerate_pivot_streak;
                     in_cleanup_phase = false;
                     need_infeasible_rebuild = true;
                 }
-            } else if (degenerate_pivot_streak - options_.bound_perturbation_stall_pivots >=
+            } else if (degenerate_pivot_streak - bound_perturb_streak_mark >=
                        options_.bound_perturbation_stall_pivots) {
-                // Degeneracy persists despite perturbation: escalate.
+                // Degeneracy persists despite perturbation: escalate one
+                // level per further bound_perturbation_stall_pivots.
+                bound_perturb_streak_mark = degenerate_pivot_streak;
                 if (escalateBoundPerturbation()) {
                     need_infeasible_rebuild = true;
                 }
@@ -2322,10 +2361,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
 
             if (entering_p < 0) {
-                if (bound_perturb_active_) {
+                if (bound_perturb_active_ || nonbasic_off_bounds) {
                     // Cleanup phase: freeze basis, restore original bounds,
-                    // recompute primals/duals, and re-validate.
+                    // put the nonbasics back on them, recompute
+                    // primals/duals, and re-validate.
                     clearBoundPerturbation();
+                    snapNonbasicToBounds();
                     bound_perturb_level_ = 0;
                     computePrimals();
                     computeDuals();
@@ -3751,6 +3792,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     }
 
     clearBoundPerturbation();
+    if (snapNonbasicToBounds() && status_ != Status::Error) {
+        // Stopped with nonbasics off their true bounds (a limit, a proof of
+        // infeasibility): report the primals of the basis's vertex.
+        computePrimals();
+    }
     const bool stopped_shifted = has_cost_perturb || has_cost_shift;
     clearCostShifts();
     clearCostPerturbation();
