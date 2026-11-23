@@ -697,7 +697,8 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     // is stricter than the certificate and rejects many correct cold verdicts
     // (#249's measurements, #282). solve()'s unscaled clean-up still re-solves
     // a scaled cold Optimal or Infeasible the model's units refute (#307,
-    // #306, #305).
+    // #306, #305), and solve() withdraws to Error an Infeasible whose ray
+    // fails after it (#318).
     if (!warm) {
         return res;
     }
@@ -1077,8 +1078,9 @@ bool DualSimplexSolver::primalHoldsUnscaled() const {
 // units (dualRayMeetsContract()) is cleaned up the same way (#305): on scaled
 // cut models the scaled pivots skip entries the scaling makes look like
 // round-off, and the unscaled re-solve from the same basis repairs most such
-// rays. It has no point to put back, and solve() withdraws a ray that still
-// fails to Error (#318).
+// rays. It has no point to put back: a clean-up that stops on a limit is
+// withdrawn to Error here, and solve() withdraws a ray that still fails to
+// Error (#318).
 //
 // `checked` means solve()'s fallback already ran verdictHolds() on this
 // verdict and it passed, so only an Optimal's point is checked here.
@@ -1203,6 +1205,14 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     clean.iterations += res.iterations;
     clean.work_units += res.work_units;
     iterations_ = clean.iterations;
+    // A refuted Infeasible whose clean-up stops on a limit has no verdict and
+    // a point of no standing: the dual-infeasible retry can reach Infeasible
+    // from a basis that is not dual feasible, so its objective is no bound
+    // for strong branching to read. Error, as with no budget (#318).
+    if (res.status == Status::Infeasible &&
+        (clean.status == Status::IterLimit || clean.status == Status::TimeLimit)) {
+        return withdrawVerdict(clean, Status::Error);
+    }
     return clean;
 }
 

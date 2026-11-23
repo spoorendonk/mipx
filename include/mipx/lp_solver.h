@@ -52,7 +52,10 @@ public:
     /// re-solve's ray against the contract below in the model's units and
     /// re-solves cold when it fails; if no budget is left for that, or the
     /// cold run stops on a limit or Error, it reports that status and no ray
-    /// (issue #249). A cold solve's ray is not checked.
+    /// (issue #249). A cold solve's ray that fails the contract is re-solved
+    /// on the unscaled model from its basis; if the ray still fails, or that
+    /// re-solve stops on a limit, the dual simplex reports Error and no ray
+    /// (issues #305, #318): it never returns an Infeasible whose ray fails.
     ///
     /// Contract, for the ray y and d = A^T y:
     ///   - y_i > 0 only where row_upper_i is finite, y_i < 0 only where
