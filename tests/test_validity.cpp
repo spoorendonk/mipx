@@ -830,6 +830,13 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions dominated = o;
     dominated.enable_dominated_columns = true;
     cases.push_back({"dominated columns (opt-in)", dominated, false});
+    // A dependent equation holds wherever the others do, so dropping it
+    // keeps every feasible point. The audit's models never reach the pass
+    // (see presolveReductions()); the case checks that enabling it does no
+    // harm to them.
+    PresolveOptions dependent = o;
+    dependent.enable_dependent_equations = true;
+    cases.push_back({"dependent equations (opt-in)", dependent});
     PresolveOptions all = o;
     all.enable_coefficient_tightening = true;
     all.enable_probing = true;
@@ -838,6 +845,7 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_aggregator = true;
     all.enable_zero_cost_singletons = true;
     all.enable_extended_dual_fixing = true;
+    all.enable_dependent_equations = true;
     cases.push_back({"all opt-in but parallel columns and single equations", all});
     all.enable_parallel_cols = true;
     all.enable_single_equation_dual_fixing = true;
@@ -898,6 +906,10 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_dominated_columns; }},
         {"forcing columns", &PresolveStats::forcing_col_changes,
          [](const PresolveOptions& o) { return o.enable_dominated_columns; }},
+        // Dependent equations (#393) have no entry: they run on LPs only, the
+        // enumeration takes two continuous columns at most, and with two
+        // columns doubleton equations and parallel rows take every equation
+        // before them. The unit tests in test_presolve.cpp check them.
         {"empty columns", &PresolveStats::empty_col_changes, always},
         {"coefficient tightening", &PresolveStats::coeff_tightening_changes,
          [](const PresolveOptions& o) { return o.enable_coefficient_tightening; }},

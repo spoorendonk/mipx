@@ -265,6 +265,14 @@ struct PresolveStats {
     /// their rows rather than fixed (#383).
     Index forcing_col_changes = 0;
     Real dominated_col_seconds = 0.0;
+    /// Equations the enable_dependent_equations pass dropped (#393).
+    Index dependent_equation_changes = 0;
+    /// Columns the factorization left without a pivot that were fictitious,
+    /// so dropped nothing (HiGHS's "fictitious rows skipped").
+    Index dependent_equation_fictitious = 0;
+    /// 1 when the factorization ran out of time and nothing was dropped.
+    Index dependent_equation_timeouts = 0;
+    Real dependent_equation_seconds = 0.0;
 };
 
 struct PresolveOptions {
@@ -320,6 +328,21 @@ struct PresolveOptions {
     /// PresolveStats::implied_row_dual_bounds. Off by default until
     /// benchmarked.
     bool enable_dominated_columns = false;
+    /// Dependent equations, as HiGHS's removeDependentEquations (#393), on an
+    /// LP: the active equations, each with its rhs as one more entry, are
+    /// factored by the rank-revealing LU, and an equation left without a
+    /// pivot is a combination of the others, rhs included, and is dropped.
+    /// One whose row is a combination of others but whose rhs is not keeps
+    /// a pivot and stays, as in HiGHS, for the LP solve to find infeasible.
+    /// Runs once, when the reduction loop first stalls; the loop goes on if
+    /// it dropped more than 0.05% of the rows. Off by default until
+    /// benchmarked.
+    bool enable_dependent_equations = false;
+    /// Seconds that factorization may take; past it nothing is dropped.
+    /// HiGHS gives it max(1, min(0.01 * time_limit, 100)). mipx's presolve
+    /// has no time limit, so the default is HiGHS's cap of 100; a caller
+    /// with a time limit passes HiGHS's formula.
+    double dependent_equations_time_limit = 100.0;
     /// Run root probing inside the reduction loop (fixings + implication-based
     /// coefficient strengthening). Off by default: probing is the most
     /// expensive pass and its default is decided by benchmarking.
@@ -400,6 +423,12 @@ private:
                               const std::vector<Index>& dirty_rows,
                               std::vector<uint8_t>& next_dirty_rows,
                               std::vector<uint8_t>& next_dirty_cols);
+    Index removeDependentEquations(LpProblem& lp, std::vector<bool>& col_removed,
+                                   std::vector<bool>& row_removed,
+                                   std::vector<Index>& row_active_nnz,
+                                   std::vector<Index>& col_active_nnz,
+                                   std::vector<uint8_t>& next_dirty_rows,
+                                   std::vector<uint8_t>& next_dirty_cols);
     Index detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
                                  std::vector<bool>& row_removed,
                                  const std::vector<Index>& dirty_rows,

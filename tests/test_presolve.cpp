@@ -3791,3 +3791,83 @@ TEST_CASE("Presolve: dominated columns from implied row-dual bounds", "[presolve
         CHECK(presolver.stats().dominated_col_changes == 0);
     }
 }
+
+namespace {
+
+PresolveOptions dependentOptions(bool on) {
+    PresolveOptions o;
+    o.enable_dependent_equations = on;
+    return o;
+}
+
+/// min x0 + 2 x1 + 3 x2 + 4 x3 over x in [0, 10]^4: r0 and r1 equations,
+/// r2 = r0 + r1 in its row, with rhs `r2_rhs` (25 agrees with r0 + r1). Four
+/// entries a row and no two columns parallel, so the other reductions leave
+/// the equations to the dependent-equations pass.
+LpProblem dependentModel(Real r2_rhs) {
+    return rowsModel({1.0, 2.0, 3.0, 4.0}, {0.0, 0.0, 0.0, 0.0}, {10.0, 10.0, 10.0, 10.0},
+                     {{10.0, 10.0, {{0, 1.0}, {1, 1.0}, {2, 1.0}, {3, 1.0}}},
+                      {15.0, 15.0, {{0, 1.0}, {1, 2.0}, {2, 3.0}, {3, 4.0}}},
+                      {r2_rhs, r2_rhs, {{0, 2.0}, {1, 3.0}, {2, 4.0}, {3, 5.0}}}});
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: dependent equations through the rank-revealing LU", "[presolve]") {
+    SECTION("a dependent equation with a consistent rhs is dropped") {
+        const LpProblem lp = dependentModel(25.0);
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver, dependentOptions(true));
+        CHECK(presolver.stats().dependent_equation_changes == 1);
+        CHECK(presolver.stats().dependent_equation_fictitious == 0);
+        CHECK(presolver.stats().dependent_equation_timeouts == 0);
+        CHECK(pointViolation(lp, full) <= 1e-6);
+        const Real direct = directOptimum(lp);
+        CHECK_THAT(objectiveAt(lp, full),
+                   WithinAbs(direct, 1e-9 * std::max(1.0, std::abs(direct))));
+    }
+    SECTION("the same row with an inconsistent rhs is kept") {
+        // r2's row is r0 + r1 but 26 != 25: the rhs row takes the pivot, and
+        // HiGHS leaves the infeasibility to the LP solve.
+        Presolver presolver;
+        presolver.setOptions(dependentOptions(true));
+        const LpProblem reduced = presolver.presolve(dependentModel(26.0));
+        CHECK(presolver.stats().dependent_equation_changes == 0);
+        CHECK(reduced.num_rows == 3);
+    }
+    SECTION("independent equations: nothing is dropped") {
+        LpProblem lp = dependentModel(25.0);
+        // x3's coefficient in r2 is 6, not 5: r2 is no longer r0 + r1, and
+        // x = (5, 5, 0, 0) still meets all three.
+        lp.matrix = SparseMatrix(3, 4,
+                                 {{0, 0, 1.0},
+                                  {0, 1, 1.0},
+                                  {0, 2, 1.0},
+                                  {0, 3, 1.0},
+                                  {1, 0, 1.0},
+                                  {1, 1, 2.0},
+                                  {1, 2, 3.0},
+                                  {1, 3, 4.0},
+                                  {2, 0, 2.0},
+                                  {2, 1, 3.0},
+                                  {2, 2, 4.0},
+                                  {2, 3, 6.0}});
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, dependentOptions(true));
+        CHECK(presolver.stats().dependent_equation_changes == 0);
+    }
+    SECTION("off by default: nothing is dropped") {
+        const LpProblem lp = dependentModel(25.0);
+        Presolver presolver;
+        const auto full = presolveSolvePostsolve(lp, presolver, PresolveOptions{});
+        CHECK(presolver.stats().dependent_equation_changes == 0);
+        CHECK(pointViolation(lp, full) <= 1e-6);
+    }
+    SECTION("a mixed-integer model is left alone, as in HiGHS") {
+        LpProblem lp = dependentModel(25.0);
+        lp.col_type[0] = VarType::Integer;
+        Presolver presolver;
+        presolveSolvePostsolve(lp, presolver, dependentOptions(true));
+        CHECK(presolver.stats().dependent_equation_changes == 0);
+    }
+}

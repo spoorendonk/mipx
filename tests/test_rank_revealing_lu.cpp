@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <cmath>
 #include <cstddef>
 #include <random>
@@ -224,20 +225,32 @@ TEST_CASE("RankRevealingLU: a near-combination is dependent within the pivot tol
 
 TEST_CASE("RankRevealingLU: a second build after a deficient one gives the same result",
           "[lu][rank_revealing_lu]") {
-    // The deficiency path resizes permute_ and iwork_; a repeat build on the
-    // same setup starts over from the matrix.
-    const Csc a = makeCsc(5, {{{0, 1}, {1, 2}},
-                              {{2, 3}, {3, 1}},
-                              {{0, 2}, {1, 4}},
-                              {{0, 1}, {1, 2}, {2, -3}, {3, -1}},
-                              {{4, 5}}});
+    // A repeat build on the same setup starts over from the matrix. With
+    // num_basic != num_row the deficiency path also resizes permute_ and
+    // iwork_, which the second section repeats.
     RankRevealingLU lu;
-    CHECK(factor(lu, a) == 2);
-    CHECK(lu.build() == 2);
-    CHECK(lu.rankDeficiency() == 2);
-    CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0, 2});
-    CHECK(toVector(lu.rowWithNoPivot()) == std::vector<Index>{1, 3});
-    CHECK(toVector(lu.colWithNoPivot()) == std::vector<Index>{0, 2});
+    SECTION("square") {
+        const Csc a = makeCsc(5, {{{0, 1}, {1, 2}},
+                                  {{2, 3}, {3, 1}},
+                                  {{0, 2}, {1, 4}},
+                                  {{0, 1}, {1, 2}, {2, -3}, {3, -1}},
+                                  {{4, 5}}});
+        CHECK(factor(lu, a) == 2);
+        CHECK(lu.build() == 2);
+        CHECK(lu.rankDeficiency() == 2);
+        CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0, 2});
+        CHECK(toVector(lu.rowWithNoPivot()) == std::vector<Index>{1, 3});
+        CHECK(toVector(lu.colWithNoPivot()) == std::vector<Index>{0, 2});
+    }
+    SECTION("fewer columns than rows") {
+        const Csc a = makeCsc(4, {{{0, 1}, {1, 1}}, {{0, 2}, {1, 2}}, {{2, 1}, {3, 1}}});
+        CHECK(factor(lu, a) == 1);
+        CHECK(lu.build() == 1);
+        CHECK(lu.rankDeficiency() == 2);
+        CHECK(toVector(lu.varWithNoPivot()) == std::vector<Index>{0, -1});
+        CHECK(toVector(lu.rowWithNoPivot()) == std::vector<Index>{1, 3});
+        CHECK(toVector(lu.colWithNoPivot()) == std::vector<Index>{0, 3});
+    }
 }
 
 TEST_CASE("RankRevealingLU: an empty column has no pivot", "[lu][rank_revealing_lu]") {
@@ -377,6 +390,8 @@ TEST_CASE("RankRevealingLU: setup rejects a malformed matrix", "[lu][rank_reveal
     const std::vector<Index> overshoot{0, 5, 2};
     const std::vector<Index> two_rows{0, 1};
     CHECK_THROWS_AS(lu.setup(3, overshoot, two_rows, value), std::invalid_argument);
+    CHECK_THROWS_WITH(lu.setup(3, overshoot, two_rows, value),
+                      Catch::Matchers::ContainsSubstring("not monotone"));
 }
 
 TEST_CASE("RankRevealingLU: build before setup throws", "[lu][rank_revealing_lu]") {

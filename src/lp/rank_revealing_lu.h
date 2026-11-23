@@ -66,7 +66,8 @@ public:
     /// no row twice in a column) and `value`. The spans are not copied and
     /// must outlive build(). The thresholds are clamped to their limits, as
     /// HFactor does, and the time limit is reset to none. Throws
-    /// std::invalid_argument on inconsistent sizes or a bad row index.
+    /// std::invalid_argument on inconsistent sizes or a bad row index, before
+    /// changing anything: a setup() that throws keeps the previous one.
     void setup(Index num_row, std::span<const Index> start, std::span<const Index> index,
                std::span<const Real> value, Real pivot_threshold = kDefaultPivotThreshold,
                Real pivot_tolerance = kDefaultPivotTolerance);

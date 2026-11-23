@@ -55,6 +55,7 @@ add_library(mipx STATIC
     heuristics/budget.cpp
     heuristics/runtime.cpp
     heuristics/symmetry.cpp
+    presolve/dependent_equations.cpp
     presolve/dual_bounds.cpp
     presolve/presolve.cpp
     presolve/presolve_matrix.cpp

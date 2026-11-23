@@ -13,6 +13,9 @@ Translated in mipx:
 - `src/lp/rank_revealing_lu.h`, `src/lp/rank_revealing_lu.cpp`: the
   elimination of `HFactor::build()` (HiGHS 1.16: `highs/util/HFactor.cpp`,
   `highs/util/HFactor.h`, `highs/util/HFactorConst.h`).
+- `src/presolve/dependent_equations.h`, `src/presolve/dependent_equations.cpp`:
+  `HPresolve::removeDependentEquations()` up to the removal (HiGHS 1.16:
+  `highs/presolve/HPresolveDependent.cpp`).
 
 ```
 MIT License

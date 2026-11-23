@@ -50,7 +50,7 @@ const std::string kUsage =
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
     "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n"
     "       [--zero-cost-singletons] [--extended-dual-fixing] [--single-equation-dual-fixing]\n"
-    "       [--dominated-columns]\n";
+    "       [--dominated-columns] [--dependent-equations]\n";
 
 struct Options {
     pb::CommonOptions common;
@@ -70,6 +70,8 @@ struct Options {
     bool single_equation_dual_fixing = false;
     /// PresolveOptions::enable_dominated_columns (#361), off by default.
     bool dominated_columns = false;
+    /// PresolveOptions::enable_dependent_equations (#393), off by default.
+    bool dependent_equations = false;
     std::string solu;
     double rel_tol = 1e-6;
     double time_limit = -1.0;
@@ -106,6 +108,8 @@ Options parse(int argc, char** argv) {
             opt.single_equation_dual_fixing = true;
         } else if (arg == "--dominated-columns") {
             opt.dominated_columns = true;
+        } else if (arg == "--dependent-equations") {
+            opt.dependent_equations = true;
         } else if (arg == "--solu") {
             opt.solu = value();
         } else if (arg == "--rel-tol") {
@@ -299,6 +303,9 @@ constexpr Rule kRules[] = {
     {"zero_cost_singleton", &PresolveStats::zero_cost_singleton_changes,
      &PresolveStats::zero_cost_singleton_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
+    // HiGHS's bench calls the rule dependent_equations.
+    {"dependent_equations", &PresolveStats::dependent_equation_changes,
+     &PresolveStats::dependent_equation_seconds},
     {"implied_bounds_relaxed", &PresolveStats::implied_bounds_relaxed,
      &PresolveStats::implied_bounds_relaxed_seconds},
 };
@@ -340,6 +347,7 @@ int main(int argc, char** argv) {
         popts.enable_extended_dual_fixing = opt.extended_dual_fixing;
         popts.enable_single_equation_dual_fixing = opt.single_equation_dual_fixing;
         popts.enable_dominated_columns = opt.dominated_columns;
+        popts.enable_dependent_equations = opt.dependent_equations;
         presolver.setOptions(popts);
         try {
             // Into a fresh LP, so freeing the last repeat's is not timed.
@@ -388,6 +396,8 @@ int main(int argc, char** argv) {
     row.addReal("dual_bounds_seconds", st.dual_bounds_seconds);
     row.addInt("weakly_dominated_col", st.weakly_dominated_col_changes);
     row.addInt("forcing_col", st.forcing_col_changes);
+    row.addInt("dependent_equations_fictitious", st.dependent_equation_fictitious);
+    row.addInt("dependent_equations_timeouts", st.dependent_equation_timeouts);
     for (const Rule& rule : kRules) {
         row.addInt(std::string(rule.name) + "_changes", st.*rule.changes);
     }

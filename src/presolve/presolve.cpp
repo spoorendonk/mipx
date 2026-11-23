@@ -2,6 +2,7 @@
 
 #include "../heuristics/common.h"
 #include "compensated_sum.h"
+#include "dependent_equations.h"
 #include "dual_bounds.h"
 #include "mipx/implication_graph.h"
 #include "mipx/probing.h"
@@ -2093,6 +2094,32 @@ Index Presolver::removeDominatedRows(LpProblem& lp, std::vector<bool>& col_remov
     return changes;
 }
 
+// Dependent equations (#393), found as HiGHS finds them
+// (dependent_equations.h), go as redundant rows: nothing to restore in
+// postsolve, and the op keeps the row for a later dual pass.
+Index Presolver::removeDependentEquations(LpProblem& lp, std::vector<bool>& col_removed,
+                                          std::vector<bool>& row_removed,
+                                          std::vector<Index>& row_active_nnz,
+                                          std::vector<Index>& col_active_nnz,
+                                          std::vector<uint8_t>& next_dirty_rows,
+                                          std::vector<uint8_t>& next_dirty_cols) {
+    const DependentEquations found = findDependentEquations(
+        lp, *work_, col_removed, row_removed, options_.dependent_equations_time_limit);
+    stats_.dependent_equation_fictitious += found.fictitious;
+    if (found.timed_out) {
+        ++stats_.dependent_equation_timeouts;
+    }
+    Index changes = 0;
+    for (const Index i : found.rows) {
+        removeActiveRow(*work_, i, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                        next_dirty_rows, next_dirty_cols);
+        ++changes;
+        ++stats_.rows_removed;
+        postsolve_stack_.push(PostsolveDominatedRow{i});
+    }
+    return changes;
+}
+
 Index Presolver::detectImpliedEquations(LpProblem& lp, std::vector<bool>& col_removed,
                                         std::vector<bool>& row_removed,
                                         const std::vector<Index>& dirty_rows,
@@ -3907,10 +3934,12 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         return changes;
     };
 
+    const bool lp_only = std::none_of(lp.col_type.begin(), lp.col_type.end(),
+                                      [](VarType t) { return t != VarType::Continuous; });
     // Dominated columns read LP duals, so they run on an LP only (#376).
-    const bool dominated_columns = options_.enable_dominated_columns &&
-                                   std::none_of(lp.col_type.begin(), lp.col_type.end(),
-                                                [](VarType t) { return t != VarType::Continuous; });
+    const bool dominated_columns = options_.enable_dominated_columns && lp_only;
+    // HiGHS runs dependent equations on an LP only, too.
+    bool dependent_equations_done = false;
 
     // Iterative reduction loop.
     for (Index round = 0; round < max_rounds_ && !infeasible_; ++round) {
@@ -4112,6 +4141,27 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                     ++stats_.rounds_with_changes;
                 }
                 break;
+            }
+        }
+
+        // Dependent equations run where HiGHS runs them, on an LP, once the
+        // loop's other reductions, the aggregator and probing included, have
+        // stalled (or the rounds run out), and once. The loop goes on only
+        // if they shrink the problem by more than HiGHS's 0.05%
+        // (problemSizeReduction, a percentage of the rows here, as only rows
+        // go).
+        if (options_.enable_dependent_equations && lp_only && !dependent_equations_done &&
+            (total_changes == 0 || round + 1 == max_rounds_)) {
+            dependent_equations_done = true;
+            const Index active_rows =
+                static_cast<Index>(std::count(row_removed.begin(), row_removed.end(), false));
+            ch = timed(stats_.dependent_equation_seconds, [&] {
+                return removeDependentEquations(lp, col_removed, row_removed, row_active_nnz,
+                                                col_active_nnz, next_dirty_rows, next_dirty_cols);
+            });
+            stats_.dependent_equation_changes += ch;
+            if (100.0 * static_cast<Real>(ch) > 0.05 * static_cast<Real>(active_rows)) {
+                total_changes += ch;
             }
         }
 
