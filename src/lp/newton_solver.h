@@ -40,7 +40,8 @@ public:
     /// normal equations; zeros elsewhere), for tests and diagnostics.
     struct FactorStats {
         std::size_t nnz_l = 0;
-        Index dense_cols = 0;  // columns of A left out of the factor
+        Index dense_cols = 0;   // columns of A left out of the factor
+        Index schur_order = 0;  // dense columns + shifted pivots, last factorize
     };
     [[nodiscard]] virtual FactorStats factorStats() const { return {}; }
 
@@ -50,7 +51,10 @@ protected:
 
 // CPU backends (always available).
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
-std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver();
+// max_schur_order bounds the dense-column Schur complement (#314): order^2
+// reals and one solve per column each iteration. Past it, the dense columns
+// go back into the factor. Smaller only in tests.
+std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver(Index max_schur_order = 4096);
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).

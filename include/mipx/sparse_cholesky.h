@@ -55,10 +55,10 @@ public:
         /// than infinite_pivot, and is listed in shiftedPivots(): the caller
         /// that compensates for it (a Schur complement) gets M's solve back.
         std::span<const Real> dependent_shift;
-        /// On a row with dependent_shift > 0, a pivot counts as dependent at
-        /// this tolerance when it is above dependent_tol: the shift is taken
-        /// back out exactly, so a small pivot is shifted rather than left to
-        /// make the factor ill-conditioned (Andersen 1996).
+        /// On a row with dependent_shift > 0, the dependent test uses
+        /// max(dependent_tol, shift_tol): the caller takes the shift back out
+        /// exactly, so a small but nonzero pivot is shifted too rather than
+        /// left to make the factor ill-conditioned (Andersen 1996).
         Real shift_tol = 0.0;
     };
 

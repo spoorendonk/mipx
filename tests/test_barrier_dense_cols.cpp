@@ -27,7 +27,9 @@ constexpr Index kDense = 3;
 // it in A_s but not in A (the dense columns tell them apart).
 constexpr Index kDup = 30;
 
-SparseMatrix buildPlantedMatrix(Index* n_out) {
+// dup_dense: row kDup repeats row kDup - 1's dense entries as well, so the
+// two rows are dependent in A (and M) too.
+SparseMatrix buildPlantedMatrix(Index* n_out, bool dup_dense = false) {
     std::mt19937 rng(314);
     std::uniform_real_distribution<Real> val(0.5, 2.0);
     std::vector<Triplet> t;
@@ -51,8 +53,11 @@ SparseMatrix buildPlantedMatrix(Index* n_out) {
         }
     }
     for (Index d = 0; d < kDense; ++d) {
+        Real prev = 0.0;
         for (Index i = 0; i < kRows; ++i) {
-            t.push_back({i, col, val(rng) * (d % 2 == 0 ? 1.0 : -1.0)});
+            const Real v = val(rng) * (d % 2 == 0 ? 1.0 : -1.0);
+            t.push_back({i, col, dup_dense && i == kDup ? prev : v});
+            prev = v;
         }
         ++col;
     }
@@ -64,12 +69,17 @@ struct Step {
     std::vector<Real> dz, dy, ds;
 };
 
-Step newtonStep(NewtonSolver& solver, Index n, Real theta_spread) {
+// Theta_j = z_j / s_j: both 10^(spread * U(-1,1)), times dense_scale on the
+// kDense last (dense) columns' z.
+// tie_dup: rp equal on rows kDup - 1 and kDup, so with those rows equal in A
+// the system is consistent and it does not matter which of them is dropped.
+Step newtonStep(NewtonSolver& solver, Index n, Real theta_spread, Real dense_scale = 1.0,
+                Real reg = 1e-10, bool tie_dup = false) {
     std::mt19937 rng(7);
     std::uniform_real_distribution<Real> u(-1.0, 1.0);
     std::vector<Real> z(static_cast<size_t>(n)), s(static_cast<size_t>(n));
     for (Index j = 0; j < n; ++j) {
-        z[j] = std::pow(10.0, theta_spread * u(rng));
+        z[j] = std::pow(10.0, theta_spread * u(rng)) * (j >= n - kDense ? dense_scale : 1.0);
         s[j] = std::pow(10.0, theta_spread * u(rng));
     }
     std::vector<Real> rp(static_cast<size_t>(kRows)), rd(static_cast<size_t>(n)),
@@ -80,7 +90,10 @@ Step newtonStep(NewtonSolver& solver, Index n, Real theta_spread) {
         v = u(rng);
     for (auto& v : rc)
         v = u(rng);
-    REQUIRE(solver.factorize(z, s, 1e-10));
+    if (tie_dup) {
+        rp[kDup] = rp[kDup - 1];
+    }
+    REQUIRE(solver.factorize(z, s, reg));
     Step st;
     st.dz.assign(static_cast<size_t>(n), 0.0);
     st.ds.assign(static_cast<size_t>(n), 0.0);
@@ -119,20 +132,119 @@ TEST_CASE("Sparse NE dense columns: Newton step matches the dense normal equatio
     REQUIRE(sparse->setup(A, kRows, n, opts));
     CHECK(sparse->factorStats().dense_cols == kDense);
     const Step got = newtonStep(*sparse, n, spread);
+    // The last row and row kDup are shifted in M_s and compensated.
+    CHECK(sparse->factorStats().schur_order >= kDense + 2);
 
     CHECK(relDiff(got.dy, want.dy) < 1e-8);
     CHECK(relDiff(got.dz, want.dz) < 1e-8);
     CHECK(relDiff(got.ds, want.ds) < 1e-8);
 }
 
+TEST_CASE("Sparse NE dense columns: a small dense share still keeps the row",
+          "[barrier][sparse-ne][dense-cols]") {
+    // Theta of the dense columns 1e-9 of the sparse ones: rows kDup - 1 and
+    // kDup differ in M only by about 1e-9 of their diagonal, well above the
+    // dependent-pivot bar, so the full factor keeps row kDup and so must the
+    // Schur complement (it is shifted, not dropped).
+    Index n = 0;
+    const SparseMatrix A = buildPlantedMatrix(&n);
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ir_steps = 0;
+
+    auto ref = createCpuCholeskySolver();
+    REQUIRE(ref->setup(A, kRows, n, opts));
+    const Step want = newtonStep(*ref, n, 0.0, 1e-9);
+
+    auto sparse = createCpuSparseCholeskySolver();
+    REQUIRE(sparse->setup(A, kRows, n, opts));
+    const Step got = newtonStep(*sparse, n, 0.0, 1e-9);
+    // Row kDup is shifted (a rule that skipped it would leave only the last
+    // row's shift here: order kDense + 1).
+    CHECK(sparse->factorStats().schur_order >= kDense + 2);
+    // M's condition is about 1e9 here.
+    CHECK(relDiff(got.dy, want.dy) < 1e-5);
+    CHECK(relDiff(got.dz, want.dz) < 1e-5);
+}
+
+TEST_CASE("Sparse NE dense columns: a row dependent in M too is dropped as the full factor does",
+          "[barrier][sparse-ne][dense-cols]") {
+    // Rows kDup - 1 and kDup are equal in A: both factors drop one of them.
+    // Which one depends on the ordering, so rp is tied on the pair (dropping
+    // either equation then gives the same step) and dy is compared through
+    // A' dy (dz, ds) and the sum of the two rows' dy. The later pivot of the pair
+    // is about 2 reg, so it is dependent (net of reg, against 1e-13 of the
+    // diagonal) only with reg small next to the diagonal: reg 1e-12 and a
+    // dense share in the hundreds.
+    Index n = 0;
+    const SparseMatrix A = buildPlantedMatrix(&n, /*dup_dense=*/true);
+    const Real spread = GENERATE(0.0, 0.5);
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ir_steps = 0;
+    constexpr Real kScale = 100.0;
+    constexpr Real kReg = 1e-12;
+
+    auto ref = createCpuCholeskySolver();
+    REQUIRE(ref->setup(A, kRows, n, opts));
+    const Step want = newtonStep(*ref, n, spread, kScale, kReg, /*tie_dup=*/true);
+
+    auto sparse = createCpuSparseCholeskySolver();
+    REQUIRE(sparse->setup(A, kRows, n, opts));
+    const Step got = newtonStep(*sparse, n, spread, kScale, kReg, /*tie_dup=*/true);
+    CHECK(sparse->factorStats().schur_order >= kDense + 2);
+
+    CHECK(relDiff(got.dz, want.dz) < 1e-8);
+    CHECK(relDiff(got.ds, want.ds) < 1e-8);
+    // Kept, the pair's null direction would carry dy of about 1/reg.
+    auto maxAbs = [](const std::vector<Real>& v) {
+        Real r = 0.0;
+        for (const Real x : v) {
+            r = std::max(r, std::abs(x));
+        }
+        return r;
+    };
+    CHECK(maxAbs(want.dy) < 1e6);
+    CHECK(maxAbs(got.dy) < 1e6);
+    const Real pair_got = got.dy[kDup - 1] + got.dy[kDup];
+    const Real pair_want = want.dy[kDup - 1] + want.dy[kDup];
+    CHECK_THAT(pair_got, Catch::Matchers::WithinAbs(pair_want, 1e-8 * (1.0 + std::abs(pair_want))));
+}
+
+TEST_CASE("Sparse NE dense columns: past the Schur order cap they go back into the factor",
+          "[barrier][sparse-ne][dense-cols]") {
+    Index n = 0;
+    const SparseMatrix A = buildPlantedMatrix(&n);
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ir_steps = 0;
+
+    auto ref = createCpuCholeskySolver();
+    REQUIRE(ref->setup(A, kRows, n, opts));
+    const Step want = newtonStep(*ref, n, 1.5);
+
+    // kDense dense columns alone exceed a cap of 2.
+    auto sparse = createCpuSparseCholeskySolver(2);
+    REQUIRE(sparse->setup(A, kRows, n, opts));
+    CHECK(sparse->factorStats().dense_cols == kDense);
+    const Step got = newtonStep(*sparse, n, 1.5);
+    CHECK(sparse->factorStats().dense_cols == 0);
+    CHECK(sparse->factorStats().schur_order == 0);
+    CHECK(sparse->factorStats().nnz_l == static_cast<size_t>(kRows) * (kRows + 1) / 2);
+    CHECK(relDiff(got.dy, want.dy) < 1e-8);
+    CHECK(relDiff(got.dz, want.dz) < 1e-8);
+}
+
 TEST_CASE("SparseCholesky: a shifted dependent pivot factors M + added e e'",
           "[sparse-cholesky][dense-cols]") {
-    // M = [[2,1,1],[1,1,1],[1,1,1]] + reg I: rows 1 and 2 are dependent, so
-    // the last pivot cancels to about reg; row 2 may be shifted.
+    // M = [[2,1,1],[1,1,1],[1,1,1+eps]] + reg I: with eps = 0 rows 1 and 2
+    // are dependent, so the last pivot cancels to about reg; with eps = 1e-9
+    // it is above dependent_tol but below shift_tol. Row 2 may be shifted.
     const Real reg = 1e-10;
+    const Real eps = GENERATE(0.0, 1e-9);
     const std::vector<Index> ptr = {0, 3, 5, 6};
     const std::vector<Index> idx = {0, 1, 2, 1, 2, 2};
-    const std::vector<Real> val = {2 + reg, 1, 1, 1 + reg, 1, 1 + reg};
+    const std::vector<Real> val = {2 + reg, 1, 1, 1 + reg, 1, 1 + eps + reg};
     const std::vector<Index> perm = {0, 1, 2};
     SparseCholesky chol;
     REQUIRE(chol.analyze(3, ptr, idx, perm));
@@ -146,7 +258,8 @@ TEST_CASE("SparseCholesky: a shifted dependent pivot factors M + added e e'",
     const auto sp = chol.shiftedPivots()[0];
     CHECK(sp.row == 2);
     // Dense M + added e2 e2', solved by Cramer's rule against b.
-    Real m[3][3] = {{2 + reg, 1, 1}, {1, 1 + reg, 1}, {1, 1, 1 + reg + sp.added}};
+    CHECK(chol.numDependentPivots() == 0);
+    Real m[3][3] = {{2 + reg, 1, 1}, {1, 1 + reg, 1}, {1, 1, 1 + eps + reg + sp.added}};
     std::vector<Real> b = {1.0, 2.0, 3.0};
     auto det = [](Real a[3][3]) {
         return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
