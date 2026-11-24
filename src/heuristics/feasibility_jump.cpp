@@ -144,7 +144,7 @@ std::optional<HeuristicSolution> FeasibilityJumpHeuristic::run(
 
                 for (Real delta_val : {-1.0, 1.0}) {
                     Real new_val = current + delta_val;
-                    if (problem.col_type[j] == VarType::Binary) {
+                    if (isBinaryColumn(problem, j)) {
                         new_val = (new_val >= 0.5) ? 1.0 : 0.0;
                     }
                     new_val = clampToBounds(new_val, problem.col_lower[j], problem.col_upper[j]);
@@ -248,7 +248,7 @@ std::optional<HeuristicSolution> FeasibilityJumpHeuristic::run(
                 // Deterministic perturbation based on restart number and variable index.
                 if (((restart * 7 + j * 13) % 5) == 0) {
                     Real new_val = x[j];
-                    if (problem.col_type[j] == VarType::Binary) {
+                    if (isBinaryColumn(problem, j)) {
                         new_val = 1.0 - x[j];
                     } else {
                         new_val = x[j] + ((restart % 2 == 0) ? 1.0 : -1.0);

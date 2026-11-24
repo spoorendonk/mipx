@@ -77,7 +77,7 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem, std::span<co
                 valid = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Binary && a > 1e-9) {
+            if (isBinaryColumn(problem, j) && a > 1e-9) {
                 const Real x = (j < static_cast<Index>(primals.size())) ? primals[j] : 0.0;
                 items.push_back({j, a, x});
             }

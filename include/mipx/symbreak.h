@@ -44,7 +44,9 @@ public:
 
     /// Generate symmetry-breaking constraints from generators.
     /// @param generators   Automorphism generators (on variable indices).
-    /// @param col_type     Variable types.
+    /// @param col_type     Variable types; a column counts as binary only when
+    ///                     typed VarType::Binary, so pass binaryAwareType's
+    ///                     for a model with Integer [0, 1] columns.
     /// @param num_cols     Number of variables.
     /// @param max_constraints  Maximum number of constraints to generate.
     /// @return Vector of symmetry-breaking constraints.

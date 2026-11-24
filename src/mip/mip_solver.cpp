@@ -82,11 +82,7 @@ void countVarTypes(const LpProblem& problem, Int& n_binary, Int& n_integer, Int&
         if (problem.col_type[j] == VarType::Continuous) {
             ++n_continuous;
         } else {
-            bool is_binary =
-                (problem.col_type[j] == VarType::Binary) ||
-                (problem.col_lower[j] >= -1e-12 && problem.col_lower[j] <= 1e-12 &&
-                 problem.col_upper[j] >= 1.0 - 1e-12 && problem.col_upper[j] <= 1.0 + 1e-12);
-            if (is_binary) {
+            if (isBinaryColumn(problem, j)) {
                 ++n_binary;
             } else {
                 ++n_integer;
@@ -423,7 +419,7 @@ void canonicalizePoint(const LpProblem& problem, std::vector<Real>& x) {
     }
     for (Index j = 0; j < problem.num_cols; ++j) {
         Real value = clampValue(x[j], problem.col_lower[j], problem.col_upper[j]);
-        if (problem.col_type[j] == VarType::Binary) {
+        if (isBinaryColumn(problem, j)) {
             value = (value >= 0.5) ? 1.0 : 0.0;
         } else if (problem.col_type[j] == VarType::Integer) {
             value = std::round(value);
@@ -449,7 +445,7 @@ void randomInitializePoint(const LpProblem& problem, std::span<const Index> disc
         const Real ub = std::max(lb, fallbackUpperBound(problem.col_upper[j]));
         if (problem.col_type[j] == VarType::Continuous) {
             x[j] = clampValue(0.5 * (lb + ub), problem.col_lower[j], problem.col_upper[j]);
-        } else if (problem.col_type[j] == VarType::Binary) {
+        } else if (isBinaryColumn(problem, j)) {
             x[j] = std::uniform_int_distribution<int>(0, 1)(rng) ? 1.0 : 0.0;
         } else {
             const int lo = static_cast<int>(std::ceil(lb - 1e-9));
@@ -463,8 +459,7 @@ void randomInitializePoint(const LpProblem& problem, std::span<const Index> disc
     }
     // Add a small deterministic perturbation to diversify restarts.
     for (Index j : discrete_vars) {
-        if (problem.col_type[j] == VarType::Binary &&
-            std::uniform_int_distribution<int>(0, 7)(rng) == 0) {
+        if (isBinaryColumn(problem, j) && std::uniform_int_distribution<int>(0, 7)(rng) == 0) {
             x[j] = 1.0 - x[j];
         }
     }
@@ -572,7 +567,7 @@ void greedyRepair(const LpProblem& problem, std::vector<Real>& x, Int max_passes
                         continue;
                     }
 
-                    if (problem.col_type[j] == VarType::Binary) {
+                    if (isBinaryColumn(problem, j)) {
                         candidate = (candidate >= 0.5) ? 1.0 : 0.0;
                     } else if (problem.col_type[j] == VarType::Integer) {
                         candidate = std::round(candidate);
@@ -638,7 +633,7 @@ std::optional<HeuristicSolution> runLpFreeFeasJump(const LpProblem& problem,
                 clampValue(current + 1.0, problem.col_lower[j], problem.col_upper[j]),
             };
             for (Real c : candidates) {
-                if (problem.col_type[j] == VarType::Binary) {
+                if (isBinaryColumn(problem, j)) {
                     c = (c >= 0.5) ? 1.0 : 0.0;
                 }
                 if (problem.col_type[j] == VarType::Integer) {
@@ -757,7 +752,7 @@ std::optional<HeuristicSolution> runLpFreeLocalMip(const LpProblem& problem,
             clampValue(current - 1.0, problem.col_lower[j], problem.col_upper[j]),
             clampValue(current + 1.0, problem.col_lower[j], problem.col_upper[j]),
         };
-        if (problem.col_type[j] == VarType::Binary) {
+        if (isBinaryColumn(problem, j)) {
             candidates = {1.0 - current, current};
         }
 
@@ -846,7 +841,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
 
     auto fallbackDiscreteValue = [&](Index j, Real lb, Real ub, bool high) -> Real {
         Real v = high ? ub : lb;
-        if (problem.col_type[j] == VarType::Binary) {
+        if (isBinaryColumn(problem, j)) {
             v = high ? 1.0 : 0.0;
         } else if (problem.col_type[j] == VarType::Integer) {
             v = std::round(v);
@@ -890,7 +885,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
         for (Int k = 0; k < fix_count; ++k) {
             const Index j = ranked[static_cast<std::size_t>(k)].var;
             Real v = candidate.values[j];
-            if (problem.col_type[j] == VarType::Binary) {
+            if (isBinaryColumn(problem, j)) {
                 v = (v >= 0.5) ? 1.0 : 0.0;
             } else if (problem.col_type[j] == VarType::Integer) {
                 v = std::round(v);
@@ -975,7 +970,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
             const Real hint = clampValue(lp_primals[j], lb, ub);
             Real down = std::floor(hint);
             Real up = std::ceil(hint);
-            if (problem.col_type[j] == VarType::Binary) {
+            if (isBinaryColumn(problem, j)) {
                 down = 0.0;
                 up = 1.0;
             }
@@ -990,7 +985,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
             if (problem.col_type[j] == VarType::Integer) {
                 value = std::round(value);
             }
-            if (problem.col_type[j] == VarType::Binary) {
+            if (isBinaryColumn(problem, j)) {
                 value = (value >= 0.5) ? 1.0 : 0.0;
             }
             return clampValue(value, lb, ub);
@@ -1194,7 +1189,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
                     }
                     const Real cur = x[j];
                     std::array<Real, 2> candidates{};
-                    if (problem.col_type[j] == VarType::Binary) {
+                    if (isBinaryColumn(problem, j)) {
                         candidates = {0.0, 1.0};
                     } else if (problem.col_type[j] == VarType::Integer) {
                         const Real down = std::floor(cur);
@@ -1212,7 +1207,7 @@ std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
                         if (problem.col_type[j] == VarType::Integer) {
                             cand = std::round(cand);
                         }
-                        if (problem.col_type[j] == VarType::Binary) {
+                        if (isBinaryColumn(problem, j)) {
                             cand = (cand >= 0.5) ? 1.0 : 0.0;
                         }
                         cand = clampValue(cand, implied_lb[j], implied_ub[j]);
@@ -1334,7 +1329,7 @@ std::optional<HeuristicSolution> runLpLightDiving(const LpProblem& problem,
         Real up = std::ceil(v);
         down = clampValue(down, problem.col_lower[best_var], problem.col_upper[best_var]);
         up = clampValue(up, problem.col_lower[best_var], problem.col_upper[best_var]);
-        if (problem.col_type[best_var] == VarType::Binary) {
+        if (isBinaryColumn(problem, best_var)) {
             down = (down >= 0.5) ? 1.0 : 0.0;
             up = (up >= 0.5) ? 1.0 : 0.0;
         }
@@ -1415,7 +1410,7 @@ void MipSolver::buildCliqueTable() {
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    conflict_graph_.build(problem_, BinaryColumns::ZeroOne);
+    conflict_graph_.build(problem_);
     clique_table_.build(problem_, conflict_graph_);
     clique_stats_.build_time_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

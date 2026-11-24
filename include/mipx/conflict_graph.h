@@ -20,14 +20,6 @@ struct Literal {
     [[nodiscard]] Literal complement() const { return {var, !complemented}; }
 };
 
-/// Which columns a conflict graph treats as binary.
-enum class BinaryColumns {
-    /// Every 0/1 column, isBinaryColumn: typed Binary or Integer over [0, 1].
-    ZeroOne,
-    /// Only columns typed VarType::Binary.
-    TypedOnly,
-};
-
 /// Explicit conflict graph for binary variables.
 ///
 /// Two literals conflict if they cannot both be 1 simultaneously.
@@ -42,8 +34,9 @@ public:
     /// Detects conflicts from:
     ///  - Set-packing/partitioning rows (all binary, all coeffs ~1, rhs ~1)
     ///  - Knapsack analysis (pairs of binaries whose coefficients exceed rhs)
-    /// over the columns @p columns selects, read off @p problem's bounds.
-    void build(const LpProblem& problem, BinaryColumns columns = BinaryColumns::ZeroOne);
+    /// over the 0/1 columns of @p problem (isBinaryColumn: typed Binary, or
+    /// Integer over [0, 1] by @p problem's bounds).
+    void build(const LpProblem& problem);
 
     /// Add a conflict edge between two literals.
     void addConflict(Literal a, Literal b);

@@ -66,7 +66,7 @@ ColoredGraph buildIncidenceGraph(const LpProblem& problem) {
 
     // Add variable vertices (0..num_cols-1).
     for (Index j = 0; j < problem.num_cols; ++j) {
-        VarSig sig{problem.col_type[j], hashDouble(problem.obj[j]),
+        VarSig sig{binaryAwareType(problem, j), hashDouble(problem.obj[j]),
                    hashDouble(problem.col_lower[j]), hashDouble(problem.col_upper[j])};
         auto [it, inserted] = var_color_map.try_emplace(sig, next_color);
         if (inserted)

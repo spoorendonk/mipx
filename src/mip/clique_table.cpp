@@ -8,8 +8,8 @@ namespace mipx {
 void CliqueTable::build(const LpProblem& problem, const ConflictGraph& graph) {
     num_cols_ = problem.num_cols;
     cliques_.clear();
-    // The table's binaries are the graph's, so a caller choosing which columns
-    // count (BinaryColumns) chooses for both.
+    // The table's binaries are the graph's, so the two always agree on which
+    // columns count.
     binary_.assign(static_cast<std::size_t>(num_cols_), false);
     for (Index j = 0; j < num_cols_; ++j) {
         binary_[static_cast<std::size_t>(j)] = graph.isBinary(j);

@@ -40,7 +40,7 @@ void setLiteral(const Literal& lit, bool one, std::vector<int>& assign) {
 /// so the pass never proposes a value the bounds forbid.
 void assignBoundFixedBinaries(const LpProblem& problem, std::vector<int>& assign) {
     for (Index col = 0; col < problem.num_cols; ++col) {
-        if (problem.col_type[col] != VarType::Binary) {
+        if (!isBinaryColumn(problem, col)) {
             continue;
         }
         if (problem.col_lower[col] > kCliqueActivationThreshold) {
@@ -158,7 +158,7 @@ bool isBoundFeasibleAndIntegral(const LpProblem& problem, std::span<const Real> 
 Index countBinaries(const LpProblem& problem) {
     Index count = 0;
     for (Index col = 0; col < problem.num_cols; ++col) {
-        if (problem.col_type[col] == VarType::Binary) {
+        if (isBinaryColumn(problem, col)) {
             ++count;
         }
     }
@@ -190,13 +190,12 @@ std::optional<HeuristicSolution> CliqueRoundingHeuristic::run(
         return std::nullopt;
     }
 
-    // Typed binaries only, as countBinaries and the bound pass count them.
-    // Widening this heuristic to Integer [0, 1] columns would change the
-    // default search, which #218 leaves as it was, and needs care besides:
-    // the problem here may carry node bounds, under which a general integer
-    // tightened to [0, 1] would read as binary.
+    // The 0/1 columns of @p problem, as countBinaries and the bound pass count
+    // them (#259). A general integer whose bounds @p problem has tightened to
+    // [0, 1] counts too, which is sound: the candidate only has to be feasible
+    // for those bounds, and it is checked against the rows below.
     ConflictGraph graph;
-    graph.build(problem, BinaryColumns::TypedOnly);
+    graph.build(problem);
     CliqueTable table;
     table.build(problem, graph);
     last_clique_count_ = static_cast<Int>(table.numCliques());

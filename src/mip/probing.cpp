@@ -25,10 +25,7 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     std::vector<Index> binary_vars;
     binary_vars.reserve(static_cast<std::size_t>(problem.num_cols));
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (problem.col_type[j] == VarType::Binary ||
-            (problem.col_type[j] == VarType::Integer && problem.col_lower[j] >= -kTol &&
-             problem.col_lower[j] <= kTol && problem.col_upper[j] >= 1.0 - kTol &&
-             problem.col_upper[j] <= 1.0 + kTol)) {
+        if (isBinaryColumn(problem, j)) {
             // Only probe variables that aren't already fixed.
             if (problem.col_upper[j] - problem.col_lower[j] > kTol) {
                 binary_vars.push_back(j);
@@ -247,7 +244,7 @@ void ProbingEngine::learnVariableBounds(Index fixed_var, bool fixed_val, const L
             continue;
         }
         // VUBs/VLBs are primarily useful for non-binary variables.
-        if (problem.col_type[j] == VarType::Binary) {
+        if (isBinaryColumn(problem, j)) {
             continue;
         }
 

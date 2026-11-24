@@ -69,7 +69,7 @@ std::optional<HeuristicSolution> OneOptHeuristic::run(const LpProblem& problem,
 
         for (Real delta : {-1.0, 1.0}) {
             Real new_val = x[j] + delta;
-            if (problem.col_type[j] == VarType::Binary) {
+            if (isBinaryColumn(problem, j)) {
                 new_val = (new_val >= 0.5) ? 1.0 : 0.0;
             }
             new_val = clampToBounds(new_val, problem.col_lower[j], problem.col_upper[j]);
@@ -174,10 +174,10 @@ std::optional<HeuristicSolution> TwoOptHeuristic::run(const LpProblem& problem,
                     Real new_a = x[ja] + da;
                     Real new_b = x[jb] + db;
 
-                    if (problem.col_type[ja] == VarType::Binary) {
+                    if (isBinaryColumn(problem, ja)) {
                         new_a = (new_a >= 0.5) ? 1.0 : 0.0;
                     }
-                    if (problem.col_type[jb] == VarType::Binary) {
+                    if (isBinaryColumn(problem, jb)) {
                         new_b = (new_b >= 0.5) ? 1.0 : 0.0;
                     }
                     new_a = clampToBounds(new_a, problem.col_lower[ja], problem.col_upper[ja]);

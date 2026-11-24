@@ -324,7 +324,7 @@ Int SeparatorManager::separateCover(const LpProblem& problem, std::span<const Re
                 valid = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Binary && a > 1e-9) {
+            if (isBinaryColumn(problem, j) && a > 1e-9) {
                 items.push_back({j, a});
             }
         }
@@ -420,7 +420,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
         for (Index px = 0; px < row.size() && accepted < max_cuts_per_family_; ++px) {
             const Index x = row.indices[px];
             const Real ax = row.values[px];
-            if (ax <= 1e-9 || problem.col_type[x] == VarType::Binary) {
+            if (ax <= 1e-9 || isBinaryColumn(problem, x)) {
                 continue;
             }
             // The scan over y makes a long row quadratic: check per x too.
@@ -434,7 +434,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
                 }
                 const Index y = row.indices[py];
                 const Real ay = row.values[py];
-                if (problem.col_type[y] != VarType::Binary || ay <= 1e-9) {
+                if (!isBinaryColumn(problem, y) || ay <= 1e-9) {
                     continue;
                 }
                 ++stats.attempted;
@@ -470,7 +470,7 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
     if (vb_store_ != nullptr) {
         for (Index j = 0;
              j < problem.num_cols && accepted < max_cuts_per_family_ && !pastDeadline(); ++j) {
-            if (problem.col_type[j] == VarType::Binary) {
+            if (isBinaryColumn(problem, j)) {
                 continue;
             }
 
@@ -563,7 +563,7 @@ Int SeparatorManager::separateClique(const LpProblem& problem, std::span<const R
                 nonnegative = false;
                 break;
             }
-            if (problem.col_type[j] == VarType::Binary && a > 1e-9) {
+            if (isBinaryColumn(problem, j) && a > 1e-9) {
                 binaries.push_back({j, a});
             }
         }

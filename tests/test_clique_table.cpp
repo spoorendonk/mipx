@@ -526,12 +526,6 @@ TEST_CASE("ConflictGraph: Integer [0, 1] columns count as binaries", "[clique_ta
     CHECK(table.numCliques() >= 2);
     const std::vector<Real> primals = {0.5, 0.5, 0.0, 0.5, 0.5};
     CHECK_FALSE(table.cliquePartition(primals, prob).empty());
-
-    // Asked for typed binaries only, the same model has none.
-    ConflictGraph typed;
-    typed.build(prob, BinaryColumns::TypedOnly);
-    CHECK(typed.numBinaries() == 0);
-    CHECK(typed.numEdges() == 0);
 }
 
 TEST_CASE("ConflictGraph: a general integer column is not a binary", "[clique_table]") {

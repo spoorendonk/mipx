@@ -73,7 +73,7 @@ void SymmetryManager::detectByColumnSignature(const LpProblem& problem) {
         sig.obj = problem.obj[j];
         sig.lb = problem.col_lower[j];
         sig.ub = problem.col_upper[j];
-        sig.type = problem.col_type[j];
+        sig.type = binaryAwareType(problem, j);
         auto column = problem.matrix.col(j);
         sig.entries.reserve(static_cast<size_t>(column.size()));
         for (Index k = 0; k < column.size(); ++k) {
@@ -257,8 +257,14 @@ Index SymmetryManager::addSymbreakConstraints(LpProblem& problem) {
         return 0;
     }
 
-    auto constraints = symbreak_generator_.generate(automorphism_result_.generators,
-                                                    problem.col_type, problem.num_cols);
+    // The generator tells binaries by their type, so hand it the 0/1 columns
+    // typed Binary: MIPLIB's Integer [0, 1] columns get symresacks too.
+    std::vector<VarType> types(static_cast<std::size_t>(problem.num_cols));
+    for (Index j = 0; j < problem.num_cols; ++j) {
+        types[static_cast<std::size_t>(j)] = binaryAwareType(problem, j);
+    }
+    auto constraints =
+        symbreak_generator_.generate(automorphism_result_.generators, types, problem.num_cols);
 
     Index added = SymbreakGenerator::addConstraints(problem, constraints);
     cut_work_units_ += static_cast<double>(added) * 2.0;

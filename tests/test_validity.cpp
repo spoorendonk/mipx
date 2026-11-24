@@ -1257,7 +1257,7 @@ TEST_CASE("Validity: bound propagation keeps every feasible point of the node", 
 
         // The global structures the tree attaches, built on the root model.
         ConflictGraph graph;
-        graph.build(lp, BinaryColumns::ZeroOne);
+        graph.build(lp);
         CliqueTable cliques;
         cliques.build(lp, graph);
         ImplicationGraph implications;
@@ -1395,7 +1395,7 @@ TEST_CASE("Validity: conflicts and cliques hold at every feasible point", "[vali
         const LpProblem lp = linearized(models[t]);
         INFO("model " << t << ":\n" << describe(lp));
         ConflictGraph graph;
-        graph.build(lp, BinaryColumns::ZeroOne);
+        graph.build(lp);
         CliqueTable cliques;
         cliques.build(lp, graph);
         cliques.mergeAndSubsume();

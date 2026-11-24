@@ -127,4 +127,11 @@ void removeColumns(LpProblem& problem, std::span<const Index> sorted_cols);
            (type == VarType::Integer && problem.col_lower[j] == 0.0 && problem.col_upper[j] == 1.0);
 }
 
+/// Column @p j's type, with every isBinaryColumn column read as
+/// VarType::Binary: for code that keys on a type rather than asking about one
+/// column, so a MARKER integer over [0, 1] and a BV column compare equal.
+[[nodiscard]] inline VarType binaryAwareType(const LpProblem& problem, Index j) {
+    return isBinaryColumn(problem, j) ? VarType::Binary : problem.col_type[j];
+}
+
 }  // namespace mipx

@@ -7,17 +7,14 @@
 
 namespace mipx {
 
-void ConflictGraph::build(const LpProblem& problem, BinaryColumns columns) {
+void ConflictGraph::build(const LpProblem& problem) {
     // Identify binary variables and build the mapping.
     col_to_bin_.assign(problem.num_cols, -1);
     bin_to_col_.clear();
     bin_to_col_.reserve(problem.num_cols);
 
     for (Index j = 0; j < problem.num_cols; ++j) {
-        const bool binary = (columns == BinaryColumns::TypedOnly)
-                                ? problem.col_type[j] == VarType::Binary
-                                : isBinaryColumn(problem, j);
-        if (binary) {
+        if (isBinaryColumn(problem, j)) {
             col_to_bin_[j] = static_cast<Index>(bin_to_col_.size());
             bin_to_col_.push_back(j);
         }

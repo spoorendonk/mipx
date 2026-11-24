@@ -10,21 +10,6 @@ namespace mipx {
 
 using namespace heuristic_detail;
 
-namespace {
-
-bool isBinaryVar(const LpProblem& problem, Index j) {
-    if (problem.col_type[j] == VarType::Binary) {
-        return true;
-    }
-    if (problem.col_type[j] == VarType::Continuous) {
-        return false;
-    }
-    return problem.col_lower[j] >= -kFeasTol && problem.col_lower[j] <= kFeasTol &&
-           problem.col_upper[j] >= 1.0 - kFeasTol && problem.col_upper[j] <= 1.0 + kFeasTol;
-}
-
-}  // namespace
-
 std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
     [[maybe_unused]] const LpProblem& problem, [[maybe_unused]] DualSimplexSolver& lp,
     [[maybe_unused]] std::span<const Real> primals, [[maybe_unused]] Real incumbent) {
@@ -48,7 +33,7 @@ std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
     std::vector<Index> bin_cols;
     bin_cols.reserve(n);
     for (Index j = 0; j < n; ++j) {
-        if (isBinaryVar(problem, j)) {
+        if (isBinaryColumn(problem, j)) {
             bin_cols.push_back(j);
         }
     }
