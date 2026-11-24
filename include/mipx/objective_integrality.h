@@ -34,8 +34,11 @@ struct ObjectiveLattice {
 /// fixed by their bounds go into the offset whatever their type; any other
 /// continuous or semi-continuous column with a nonzero coefficient means no
 /// lattice. The scale is found much as SCIP finds its objective scalar: a
-/// rational p/q within 1e-9 of each coefficient with q <= 1000, the lcm m of
-/// the q's at most 1e6, and s = gcd(m c_j) / m.
+/// rational p/q within 1e-9 (absolute) of each coefficient with q <= 1000,
+/// the lcm m of the q's at most 1e6, and s = gcd(m c_j) / m. The lattice is
+/// then rejected when the coefficients' rounding, summed over each column's
+/// largest bound magnitude, could move a solution off it by more than a tenth
+/// of pruneBound's margin (an infinite bound with any rounding at all).
 [[nodiscard]] ObjectiveLattice detectObjectiveLattice(const LpProblem& problem);
 
 }  // namespace mipx

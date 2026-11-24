@@ -450,7 +450,9 @@ public:
     /// 1e-6. Off by default until benchmarked.
     void setObjectiveIntegralityEnabled(bool enabled) { objective_integrality_enabled_ = enabled; }
     /// The lattice the last solve detected; undetected when the option is off
-    /// or the objective is not integral.
+    /// or the objective is not integral. It describes the solver's
+    /// internal model, not the one loaded: the presolved minimization (a
+    /// maximization negated) with the root's fixings folded into the offset.
     [[nodiscard]] const ObjectiveLattice& getObjectiveLattice() const { return objective_lattice_; }
     /// Called with every solution submitted as an incumbent (from a
     /// heuristic, an integral node LP or the root), whether or not it improves

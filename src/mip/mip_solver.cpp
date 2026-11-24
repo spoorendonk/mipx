@@ -4128,6 +4128,9 @@ MipResult MipSolver::solveMinimizationOnce() {
     rc_fixer_.reset();
     objective_cutoff_bounds_.reset();
     objective_propagator_.reset();
+    // A lattice is detected per solve, and only with the option on: one left
+    // from an earlier solve or model would prune on this one.
+    objective_lattice_ = {};
     obj_prop_node_tightenings_.store(0, std::memory_order_relaxed);
     obj_prop_node_infeasible_.store(0, std::memory_order_relaxed);
     obj_prop_repropagations_.store(0, std::memory_order_relaxed);

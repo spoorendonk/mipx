@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <vector>
@@ -14,6 +15,8 @@ namespace {
 
 constexpr std::int64_t kMaxDenominator = 1000;
 constexpr std::int64_t kMaxScale = 1000000;
+// Absolute, as SCIP's integrality epsilon is: a relative one would snap any
+// coefficient past ~1e9 to an integer whatever its fraction.
 constexpr Real kRationalTol = 1e-9;
 // The pruning tolerance every node test used before #261.
 constexpr Real kStandardPruneTol = 1e-6;
@@ -23,6 +26,10 @@ constexpr Real kLatticeMargin = 1e-3;
 constexpr Real kRelativeMargin = 1e-7;
 // Coefficients beyond this are integers or rejected: m * c must stay exact.
 constexpr Real kMaxCoefficient = 1e9;
+// The most a solution's objective may stray from the lattice through the
+// coefficients' own rounding, sum |c_j - k_j s| max(|l_j|, |u_j|), as a share
+// of the margin pruneBound leaves (kLatticeMargin s).
+constexpr Real kMaxDriftShare = 0.1;
 
 bool isIntegralType(VarType type) {
     return type == VarType::Integer || type == VarType::Binary || type == VarType::SemiInteger;
@@ -31,7 +38,7 @@ bool isIntegralType(VarType type) {
 // The denominator of the first continued-fraction convergent of x > 0 within
 // kRationalTol of it, or 0 when none has a denominator up to kMaxDenominator.
 std::int64_t rationalDenominator(Real x) {
-    const Real tol = kRationalTol * std::max(1.0, x);
+    const Real tol = kRationalTol;
     if (std::abs(x - std::round(x)) <= tol) {
         return 1;
     }
@@ -88,9 +95,17 @@ Real ObjectiveLattice::pruneBound(Real incumbent) const {
     return std::min(standard, below + margin);
 }
 
-ObjectiveLattice detectObjectiveLattice(const LpProblem& problem) {
-    Real offset = problem.obj_offset;
-    std::vector<Real> coefs;
+namespace {
+
+struct CostedColumn {
+    Index col;
+    Real coef;  // |c_j|
+};
+
+// The unfixed columns with a cost into `costed`, the fixed ones' contribution
+// into `offset`. False when one of them rules a lattice out.
+bool collectCostedColumns(const LpProblem& problem, std::vector<CostedColumn>& costed,
+                          Real& offset) {
     for (Index j = 0; j < problem.num_cols; ++j) {
         const Real c = problem.obj[j];
         if (c == 0.0) {
@@ -99,51 +114,91 @@ ObjectiveLattice detectObjectiveLattice(const LpProblem& problem) {
         const VarType type = problem.col_type[j];
         // A semi-continuous column is 0 or anywhere in [l, u], fixed or not.
         if (type == VarType::SemiContinuous) {
-            return {};
+            return false;
         }
         if (type != VarType::SemiInteger && problem.col_lower[j] == problem.col_upper[j]) {
             offset += c * problem.col_lower[j];
             continue;
         }
         if (!isIntegralType(type)) {
-            return {};
+            return false;
         }
-        coefs.push_back(std::abs(c));
+        costed.push_back({j, std::abs(c)});
     }
-    if (coefs.empty() || !std::isfinite(offset)) {
-        return {};
-    }
+    return true;
+}
 
+// The lcm m of the coefficients' rational denominators, or 0 when one has
+// none or m passes kMaxScale.
+std::int64_t commonDenominator(const std::vector<CostedColumn>& costed) {
     std::int64_t m = 1;
-    for (const Real c : coefs) {
-        const std::int64_t q = rationalDenominator(c);
+    for (const CostedColumn& entry : costed) {
+        const std::int64_t q = rationalDenominator(entry.coef);
         if (q == 0) {
-            return {};
+            return 0;
         }
         m = std::lcm(m, q);
         if (m > kMaxScale) {
-            return {};
+            return 0;
         }
     }
+    return m;
+}
+
+// s = gcd(m c_j) / m, or 0 when a coefficient is not within kRationalTol of
+// its lattice point k_j / m, or when their distances, times how far each
+// column reaches, could move a solution off the lattice by more than
+// kMaxDriftShare of pruneBound's margin.
+Real latticeScale(const LpProblem& problem, const std::vector<CostedColumn>& costed,
+                  std::int64_t m) {
     const Real scale_m = static_cast<Real>(m);
     std::int64_t g = 0;
-    for (const Real c : coefs) {
-        const Real mc = scale_m * c;
+    Real drift = 0.0;
+    for (const CostedColumn& entry : costed) {
+        const Real mc = scale_m * entry.coef;
         if (mc > 9.0e15) {
-            return {};
+            return 0.0;
         }
         const std::int64_t k = std::llround(mc);
-        if (std::abs(mc - static_cast<Real>(k)) > kRationalTol * scale_m * std::max(1.0, c)) {
-            return {};
+        const Real delta = std::abs(entry.coef - (static_cast<Real>(k) / scale_m));
+        if (delta > kRationalTol) {
+            return 0.0;
+        }
+        if (delta > 0.0) {
+            const Real reach = std::max(std::abs(problem.col_lower[entry.col]),
+                                        std::abs(problem.col_upper[entry.col]));
+            if (!std::isfinite(reach)) {
+                return 0.0;
+            }
+            drift += delta * reach;
         }
         g = std::gcd(g, k);
     }
     if (g == 0) {
+        return 0.0;
+    }
+    const Real scale = static_cast<Real>(g) / scale_m;
+    return drift > kMaxDriftShare * kLatticeMargin * scale ? 0.0 : scale;
+}
+
+}  // namespace
+
+ObjectiveLattice detectObjectiveLattice(const LpProblem& problem) {
+    Real offset = problem.obj_offset;
+    std::vector<CostedColumn> costed;
+    if (!collectCostedColumns(problem, costed, offset) || costed.empty() ||
+        !std::isfinite(offset)) {
+        return {};
+    }
+    const std::int64_t m = commonDenominator(costed);
+    if (m == 0) {
         return {};
     }
     ObjectiveLattice lattice;
-    lattice.scale = static_cast<Real>(g) / scale_m;
-    lattice.offset = offset;
+    lattice.scale = latticeScale(problem, costed, m);
+    if (lattice.detected()) {
+        lattice.offset = offset;
+    }
     return lattice;
 }
 

@@ -94,14 +94,25 @@ LpProblem oddCycleCover(Index n) {
     return lp;
 }
 
-MipResult solveOddCycle(bool integrality, MipSolver& solver) {
+MipResult solveOddCycle(bool integrality, MipSolver& solver, int threads = 1) {
     solver.setVerbose(false);
-    solver.setNumThreads(1);
+    solver.setNumThreads(threads);
     solver.setGapTolerance(0.0);
     solver.setCutsEnabled(false);
     solver.setObjectiveIntegralityEnabled(integrality);
     solver.load(oddCycleCover(7));
     return solver.solve();
+}
+
+/// The odd-cycle cover as max -sum x - 0.5: optimum -4.5.
+LpProblem oddCycleCoverMax(Index n) {
+    LpProblem lp = oddCycleCover(n);
+    lp.sense = Sense::Maximize;
+    for (Real& c : lp.obj) {
+        c = -c;
+    }
+    lp.obj_offset = -0.5;
+    return lp;
 }
 
 }  // namespace
@@ -138,6 +149,31 @@ TEST_CASE("ObjectiveLattice: no lattice without a rational common scale", "[obji
         detectObjectiveLattice(integerBox({1.0 / 997.0, 1.0 / 991.0, 1.0 / 983.0})).detected());
     // A denominator past 1000.
     CHECK_FALSE(detectObjectiveLattice(integerBox({1.0 / 1009.0})).detected());
+    // Large coefficients are not snapped by a relative tolerance: with x1 + x2
+    // = 1 and an offset of -1e9 these would put solutions 0.2 and 0.3 on one
+    // lattice point.
+    CHECK_FALSE(detectObjectiveLattice(integerBox({1e9 + 0.2, 1e9 + 0.3, 1.0})).detected());
+    CHECK_FALSE(detectObjectiveLattice(integerBox({1000.0000005, 1.0})).detected());
+}
+
+TEST_CASE("ObjectiveLattice: coefficient rounding is bounded over the column ranges", "[objint]") {
+    // 1 + 1e-10 is within the rational tolerance of 1.
+    const Real nearly_one = 1.0 + 1e-10;
+    // Over [0, 5] it strays 5e-10 from the lattice: well inside the margin.
+    CHECK(detectObjectiveLattice(integerBox({nearly_one, 2.0})).detected());
+    // Over [0, 1e7] it strays up to 1e-3, the whole margin.
+    CHECK_FALSE(
+        detectObjectiveLattice(boxProblem({nearly_one, 2.0}, {VarType::Integer, VarType::Integer},
+                                          {0.0, 0.0}, {1e7, 5.0}))
+            .detected());
+    // Unbounded, any rounding at all rules it out; none at all does not.
+    CHECK_FALSE(
+        detectObjectiveLattice(boxProblem({nearly_one, 2.0}, {VarType::Integer, VarType::Integer},
+                                          {0.0, 0.0}, {kInf, 5.0}))
+            .detected());
+    CHECK(detectObjectiveLattice(
+              boxProblem({1.0, 2.0}, {VarType::Integer, VarType::Integer}, {0.0, 0.0}, {kInf, 5.0}))
+              .detected());
 }
 
 TEST_CASE("ObjectiveLattice: continuous columns", "[objint]") {
@@ -219,4 +255,38 @@ TEST_CASE("MipSolver: objective integrality on a scaled objective and with propa
     CHECK_THAT(on.getObjectiveLattice().scale, WithinAbs(0.5, 1e-12));
     CHECK_THAT(on_result.objective, WithinAbs(off_result.objective, 1e-6));
     CHECK(on_result.nodes <= off_result.nodes);
+}
+
+TEST_CASE("MipSolver: objective integrality on a maximization with an offset", "[mip][objint]") {
+    for (const bool integrality : {false, true}) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(1);
+        solver.setGapTolerance(0.0);
+        solver.setCutsEnabled(false);
+        solver.setObjectiveIntegralityEnabled(integrality);
+        solver.load(oddCycleCoverMax(7));
+        const MipResult result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(solver.getObjectiveLattice().detected() == integrality);
+        CHECK_THAT(result.objective, WithinAbs(-4.5, 1e-6));
+    }
+}
+
+TEST_CASE("MipSolver: objective integrality with two threads", "[mip][objint]") {
+    MipSolver solver;
+    const MipResult result = solveOddCycle(true, solver, 2);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(solver.getObjectiveLattice().detected());
+    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-6));
+}
+
+TEST_CASE("MipSolver: a lattice does not outlive its solve", "[mip][objint]") {
+    MipSolver solver;
+    REQUIRE(solveOddCycle(true, solver).status == Status::Optimal);
+    REQUIRE(solver.getObjectiveLattice().detected());
+    const MipResult again = solveOddCycle(false, solver);
+    REQUIRE(again.status == Status::Optimal);
+    CHECK_FALSE(solver.getObjectiveLattice().detected());
+    CHECK_THAT(again.objective, WithinAbs(4.0, 1e-6));
 }
