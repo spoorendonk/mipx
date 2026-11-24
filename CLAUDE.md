@@ -26,22 +26,24 @@ This is a preference, not a prohibition. Shelling out to `grep`/`rg` is fine whe
 ## Development Workflow
 
 ```
-plan (non-trivial) → implement → test → /review → push to main
+plan (non-trivial) → implement → test → /review → wcp queue submit → lands on main
 ```
 
-`.githooks/pre-commit` checks and does not fix: it runs `clang-format --dry-run -Werror` over every *tracked* C/C++ file, not just the staged ones, plus `ruff` and `mypy` through `uv run` where they can be run (a tool that cannot is reported and skipped). A commit is refused while any tracked file has drifted from `.clang-format`, and `--no-verify` is not the answer. Run `clang-format -i` on the files it names and commit that reflow as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate: it refuses merge commits on main and a push without a review receipt (see Agent Self-Review), then runs the `## Build & Test` blocks in a fresh worktree as a local CI. That local CI is the only gate: there are no GitHub Actions workflows, and any future one runs at most weekly (`schedule`) or by hand (`workflow_dispatch`), never on push or pull request.
+`.githooks/pre-commit` checks and does not fix: it runs `clang-format --dry-run -Werror` over every *tracked* C/C++ file, not just the staged ones, plus `ruff` and `mypy` through `uv run` where they can be run (a tool that cannot is reported and skipped). A commit is refused while any tracked file has drifted from `.clang-format`, and `--no-verify` is not the answer. Run `clang-format -i` on the files it names and commit that reflow as its own `style:` commit *before* the functional change, so the fix commit stays readable and reviewers can verify the reformat is semantically empty. Run tests locally before considering work done — don't skip the suite even on changes that look trivial. The pre-push hook is the final gate: it refuses merge commits on main and a push without a review receipt (see Agent Self-Review), then runs the `## Build & Test` blocks in a fresh worktree as a local CI. Main lands through a merge queue (see Git Workflow), so that gate runs on the queue's host, when its runner lands the commit. That local CI is the only gate: there are no GitHub Actions workflows, and any future one runs at most weekly (`schedule`) or by hand (`workflow_dispatch`), never on push or pull request.
 
 ## Git Workflow
 
-Trunk-based development with linear history on main. Commit directly to main and push when local gates pass.
+Trunk-based development with linear history on main. Commit directly to main, and land it through the merge queue when local gates pass.
+
+**Main lands through a wcp merge queue.** Record the review receipt (see Agent Self-Review), then run `wcp queue submit`: it pushes HEAD and its receipt to origin as a queue entry, and rebases a HEAD that is behind main first. The queue's runner rebases the entry onto main, runs the pre-push gate and lands it on main. The session is told by message whether it landed or why not; `wcp queue wait <entry>`, run as a background command, blocks until it does. `wcp queue list` shows what is waiting, and `wcp queue submit --first` puts a fix of a red main ahead of the line. A direct `git push` to main is refused while the queue is set up, because origin carries `refs/wcp/merge-queue/main`. `PRE_PUSH_QUEUE_LANDING=1 git push ...` is only for a deliberate bypass of the queue, never a way around a refusal.
 
 Feature branches are optional for larger changes:
 - Always branch from main. Run `git checkout main && git pull` first.
 - Never branch from another feature branch.
 - Keep branches short-lived; rebase or squash merge — no merge commits on main.
 
-After a successful push:
-- **Close any gh issue the work resolved**: `gh issue close <num> -c "<one-line note>"`. Do this for every issue covered by the push.
+After the commit lands on main:
+- **Close any gh issue the work resolved**: `gh issue close <num> -c "<one-line note>"`. Do this for every issue the landed commits cover.
 - **Delete the feature branch** if one was used: `git branch -d <branch>` locally, plus `git push origin --delete <branch>` if it was pushed. Don't leave stale branches behind.
 
 ## This Document Carries A Provenance Line
@@ -118,14 +120,14 @@ Issues get picked up later in fresh sessions, often by a different agent with no
 
 **Any agent or agent team that produces code must run `/review` on its own changes before that code can merge to main.** No subagent returns unreviewed work; no orchestrator merges unreviewed work. This applies to every agent team, not just the parallel-issue workflow.
 
-**Then record the review, and push it with the commit**, or `pre-push` refuses the push:
+**Then record the review, and queue it with the commit**, or `wcp queue submit` refuses it:
 
 ```sh
 git update-ref "refs/reviews/$(git rev-parse HEAD)" HEAD
-git push --atomic origin HEAD "refs/reviews/$(git rev-parse HEAD)"
+wcp queue submit
 ```
 
-The receipt, `refs/reviews/<sha>`, records that a review happened at that commit and nothing more; `--atomic` lands the branch and its receipt together or not at all. A later commit has no receipt, so the commit that fixes what a review found needs reviewing too. Record it only on a clean tree — commit first, then review, then record — or it names a commit that does not contain what was read.
+The receipt, `refs/reviews/<sha>`, records that a review happened at that commit and nothing more; `wcp queue submit` pushes the commit and its receipt together as one queue entry, and the runner lands them on main (see Git Workflow). A later commit has no receipt, so the commit that fixes what a review found needs reviewing too. Record it only on a clean tree — commit first, then review, then record — or it names a commit that does not contain what was read.
 
 ## Parallel Issue Workflow
 
@@ -135,7 +137,7 @@ When the user brings multiple gh issues to work on at once:
 2. **Orchestrator role.** Spawn one subagent per issue (Agent tool with `isolation: "worktree"`). Subagents branch from main, not from the orchestrator's working branch, and work in their own git worktree. Pass each subagent its gh issue number and any plan file path.
 3. **Subagents self-review** per the Agent Self-Review rule above. Subagents commit locally in their worktree and **do not push** — worktrees share `.git`, so the orchestrator sees their commits via `git log <branch>` with no network round-trip.
 4. **No merging without user OK.** Subagents never merge into main; the orchestrator never merges a subagent's branch without explicit user approval.
-5. **Final combined review, then push.** The orchestrator integrates all approved branches into local main, runs `/review` over the merged result, and only then records the receipt and pushes (`git push --atomic origin HEAD "refs/reviews/$(git rev-parse HEAD)"`, as above). No pushes — of main or feature branches — happen before that final review.
+5. **Final combined review, then queue.** The orchestrator integrates all approved branches into local main, runs `/review` over the merged result, and only then records the receipt and queues it (`wcp queue submit`, as above). No pushes or queue entries — of main or feature branches — happen before that final review.
 
 **Integrate without merge commits.** "Merge" above means the result, not the command: main keeps linear history, so `git merge --no-ff` is wrong here and the pre-push hook refuses a push that adds a merge commit to main. Fast-forward the first branch (`git merge --ff-only <branch>`), then `git cherry-pick` each remaining branch's commits in order. Cherry-picked branches are no longer ancestors of main, so `git branch -d` will refuse them: verify with `git cherry main <branch>` (every line prefixed `-` means already applied) and then `git branch -D`.
 
