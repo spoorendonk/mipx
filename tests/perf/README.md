@@ -86,29 +86,34 @@ backend still holds its m × m normal equations, about 2.2 GB on stocfor3
 not the memory. It takes minutes, so it has its own ctest label and stays out
 of `instance-gate` and the commit and push gates.
 
-The `barrier-cg` suite (#331) runs the same two backends over the first
-column-generation master of each of the 15 public CommaLab instances of the
-cold LP panel (#272: grid1-9, planar30/50/80/100/150/300), against
-`instance_gate/barrier_cg_expected.csv` and `tests/data/cg_masters/cg_masters.solu`
-(HiGHS's objective for each master, as mcf recorded it). Both backends take
-about 1.5 s together. The masters are not in git; generate them with
-[mcf](https://github.com/tinnet-ai/mcf) and its `data/commalab` instances:
+The `barrier-cg` suite (#358) runs the same two backends over one later
+column-generation master per public CommaLab instance of the cold LP panel
+(#272: grid1-9, planar30/50/80/100/150/300). Each master has a path column
+that shares a demand row and a capacity row, giving the normal equations
+off-diagonal entries. This replaces the diagonal first-master panel (#331)
+and keeps the gate at 30 solves. It checks both backends against
+`instance_gate/barrier_cg_expected.csv` and the recorded HiGHS objectives in
+`tests/data/cg_masters_later/cg_masters.solu`. The suite passes `--no-presolve`
+so the CLI cannot solve a master before entering the barrier. The barrier's
+own presolve still runs. All 15 sparse factorizations show fill on the pinned
+panel, and the two backends together take about 12 s on the test host.
+
+Generate the MPS files with [mcf](https://github.com/tinnet-ai/mcf) at
+`220af3c`, built with `MCF_WITH_HIGHS=ON`, and its `data/commalab` instances:
 
 ```bash
 python3 tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab
 ```
 
-It runs one column-generation iteration per instance with `lp_dump`, writes
-`<name>.mps` into `tests/data/cg_masters/`, and rewrites the `.solu`; it
-refuses a master whose objective mipx would read differently (a maximisation,
-an objective offset, a free row, which the dump writes as a second `N` row)
-or whose first solve was not optimal, and changes nothing there when any
-master fails. Without the masters the suite reports `Skipped`.
-
-A first master holds only its initial columns, one nonzero each, so its
-normal equations are diagonal: the suite checks the barrier's answers and
-stopping on these LPs, not its sparse factorization's fill, which Netlib's
-half covers (a later master per instance is #358).
+The generator runs up to five iterations per instance on HiGHS simplex
+with presolve off and requests `lp_dump_every=1`. The recorder writes the
+full master just before each solve. The generator picks the first coupled
+snapshot after solve 0, looks up its matching `solve` record in `ops.txt`,
+and writes `<name>.mps` and the `.solu` in `tests/data/cg_masters_later/`.
+It requires a finite optimal objective for a minimisation LP with zero
+objective offset and no free rows. A failed dump leaves the published
+panel untouched. The suite reports `Skipped` until the later masters are
+generated. First-master downloads live in a separate directory.
 
 The whole gate (both suites, both backends) takes about 5.7 minutes, nearly
 all of it the dense backend on Netlib; there is no faster subset in the commit
@@ -523,6 +528,8 @@ column 1; and `ops.txt`, one change or solve per line with indices as of the
 LP it applies to (`add_cols`, `del_cols`, `add_rows`, `del_rows`,
 `col_bounds`, `row_bounds`, `col_costs`, `coeffs`, `solve <seq> <status>
 <obj> <iters> <secs>`), numbers in `%.17g`.
+With `lp_dump_every=K`, the recorder also writes `master_NNNN.mps` for
+every solve number that is a multiple of K, with its preceding edits applied.
 
 Arms: `dual-warm` keeps one dual simplex and applies each change to it, so its
 basis carries over (a `coeffs` change, which `LpSolver` has no call for,

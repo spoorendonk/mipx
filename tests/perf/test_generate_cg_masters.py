@@ -1,4 +1,4 @@
-"""Tests for generate_cg_masters.py: dump parsing and the refusals (#331)."""
+"""Tests for selecting a later CG master and its recorded objective (#358)."""
 
 from __future__ import annotations
 
@@ -39,36 +39,42 @@ def load_gate() -> ModuleType:
     return module
 
 
-# The recorder starts data lines in column 1, as mcf writes them. A column
-# named N, outside ROWS, is not an objective row.
-MPS_ONE_N = (
-    "NAME m\nROWS\nN obj\nG r0\nCOLUMNS\nx obj 1 r0 1\nN obj 2 r0 1\nRHS\nrhs r0 1\nENDATA\n"
+MPS_DIAGONAL = (
+    "NAME m\nROWS\nN obj\nG r0\nL r1\nCOLUMNS\nc0 obj 1\nc0 r0 1\nc0 r1 0\n"
+    "c1 obj 2\nc1 r1 1\nRHS\nrhs r0 1\nrhs r1 3\nENDATA\n"
 )
-MPS_TWO_N = "NAME m\nROWS\nN obj\nN free\nG r0\nCOLUMNS\nx obj 1 r0 1\nENDATA\n"
+MPS_COUPLED = MPS_DIAGONAL.replace("c0 r1 0", "c0 r1 1")
+MPS_FREE_ROW = MPS_COUPLED.replace("N obj\n", "N obj\nN free\n")
 
 
-def test_objective_rows_counts_n_rows_in_rows_only(tmp_path: Path) -> None:
-    one = tmp_path / "one.mps"
-    one.write_text(MPS_ONE_N, encoding="utf-8")
-    two = tmp_path / "two.mps"
-    two.write_text(MPS_TWO_N, encoding="utf-8")
-    assert gen.objective_rows(one) == 1
-    assert gen.objective_rows(two) == 2
+def test_capacity_and_demand_must_share_a_nonzero_column(tmp_path: Path) -> None:
+    mps = tmp_path / "master.mps"
+    mps.write_text(MPS_DIAGONAL, encoding="utf-8")
+    assert not gen.has_capacity_path(mps)
+    mps.write_text(MPS_COUPLED, encoding="utf-8")
+    assert gen.has_capacity_path(mps)
 
 
-def test_first_solve_reads_the_first_op_as_the_solve(tmp_path: Path) -> None:
+def test_selects_first_coupled_later_snapshot_and_its_own_solve(tmp_path: Path) -> None:
     ops = tmp_path / "ops.txt"
     ops.write_text(
-        "\nsolve 0 optimal 12.5 3\ncol_costs 1 0 9\nsolve 1 optimal 11 4\n", encoding="utf-8"
+        "solve 0 optimal 9 3 0.1\ncol_costs 1 0 8\nsolve 1 optimal 8 4 0.2\n"
+        "coeffs 1 1 0 1\nsolve 2 optimal 5 2 0.3\nsolve 3 optimal 4 2 0.4\n",
+        encoding="utf-8",
     )
-    assert gen.first_solve(ops) == ("optimal", 12.5)
-    # A change before the first solve: that solve is not of the MPS.
-    ops.write_text("col_costs 1 0 9\nsolve 0 optimal 12.5 3\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="not a solve"):
-        gen.first_solve(ops)
-    ops.write_text("", encoding="utf-8")
-    with pytest.raises(ValueError, match="no solve line"):
-        gen.first_solve(ops)
+    for seq, mps in enumerate([MPS_DIAGONAL, MPS_DIAGONAL, MPS_COUPLED, MPS_COUPLED]):
+        (tmp_path / f"master_{seq:04d}.mps").write_text(mps, encoding="utf-8")
+    assert gen.later_master(tmp_path) == (tmp_path / "master_0002.mps", 5)
+
+
+@pytest.mark.parametrize("objective", ["nan", "inf", "-inf"])
+def test_later_master_requires_a_finite_reference(tmp_path: Path, objective: str) -> None:
+    (tmp_path / "ops.txt").write_text(
+        f"solve 0 optimal 9 3 0.1\nsolve 1 optimal {objective} 4 0.2\n", encoding="utf-8"
+    )
+    (tmp_path / "master_0001.mps").write_text(MPS_COUPLED, encoding="utf-8")
+    with pytest.raises(ValueError, match="finite optimal objective"):
+        gen.later_master(tmp_path)
 
 
 def test_read_manifest_splits_on_the_first_equals(tmp_path: Path) -> None:
@@ -97,11 +103,15 @@ sense = "max" if source.startswith("grid3") else "min"
 offset = "1.5" if source.startswith("grid4") else "0"
 if not source.startswith("grid9"):
     (lp / "manifest.txt").write_text(f"format = {fmt}\\nsense={sense}\\nobj_offset={offset}\\n")
-mps = @MPS_TWO@ if source.startswith("grid5") else @MPS_ONE@
-(lp / "master_0000.mps").write_text(mps)
+assert "lp_dump_every=1" in sys.argv
+(lp / "master_0000.mps").write_text(@MPS_DIAGONAL@)
+mps = @MPS_FREE_ROW@ if source.startswith("grid5") else @MPS_COUPLED@
+if source.startswith("planar30.gz"):
+    mps = @MPS_DIAGONAL@
+(lp / "master_0001.mps").write_text(mps)
 status = "infeasible" if source.startswith("grid6") else "optimal"
-(lp / "ops.txt").write_text(f"solve 0 {status} 42.25 7\\n")
-sys.exit(1)  # one iteration ends at the iteration limit
+(lp / "ops.txt").write_text(f"solve 0 optimal 55 4 0.1\\nsolve 1 {status} 42.25 7 0.2\\n")
+sys.exit(1)  # the CG run may hit the iteration limit
 """
 
 REFUSED = {
@@ -113,13 +123,18 @@ REFUSED = {
     "grid7": "no instance file",
     "grid8": "unsupported dump format",
     "grid9": "manifest.txt",
+    "planar30": "no later master",
 }
 
 
 def fake_mcf(tmp_path: Path) -> tuple[Path, Path]:
     """The fake mcf and an instance directory without grid7's file."""
     mcf = tmp_path / "mcf"
-    script = FAKE_MCF.replace("@MPS_ONE@", repr(MPS_ONE_N)).replace("@MPS_TWO@", repr(MPS_TWO_N))
+    script = (
+        FAKE_MCF.replace("@MPS_DIAGONAL@", repr(MPS_DIAGONAL))
+        .replace("@MPS_COUPLED@", repr(MPS_COUPLED))
+        .replace("@MPS_FREE_ROW@", repr(MPS_FREE_ROW))
+    )
     mcf.write_text(script, encoding="utf-8")
     mcf.chmod(mcf.stat().st_mode | stat.S_IXUSR)
     instances = tmp_path / "commalab"
@@ -171,6 +186,7 @@ def test_main_writes_a_solu_the_gate_reads(tmp_path: Path, monkeypatch: pytest.M
     assert sorted(refs) == sorted(gen.INSTANCES)
     assert all(ref.kind == "opt" and ref.value == 42.25 for ref in refs.values())
     assert sorted(p.stem for p in out.glob("*.mps")) == sorted(gen.INSTANCES)
+    assert all(p.read_text(encoding="utf-8") == MPS_COUPLED for p in out.glob("*.mps"))
     assert [p.name for p in out.iterdir() if p.name.startswith(".dump_")] == []
 
 

@@ -33,10 +33,11 @@ tests/data/*_roundtrip.mps
 # The second cg master of the public CommaLab grid2, from the same recorder:
 # CpuAugmented's regression LP (#270).
 !tests/data/grid2_master_0001.mps
-# The cg masters are generated (tests/perf/generate_cg_masters.py); their
-# references are checked in.
+# Legacy first-master downloads (#331).
 tests/data/cg_masters/*
-!tests/data/cg_masters/cg_masters.solu
+# Later masters are generated (#358); their reference objectives are tracked.
+tests/data/cg_masters_later/*
+!tests/data/cg_masters_later/cg_masters.solu
 
 # Scratch planning docs
 plan-barrier.md
