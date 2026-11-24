@@ -122,6 +122,26 @@ python3 tests/perf/run_instance_gate.py barrier-cg                       # the c
 ctest --test-dir build -L barrier-gate --output-on-failure               # both suites
 ```
 
+## Root heuristic deadline benchmark
+
+This benchmark runs the one-thread seeded set cover from #355 through `MipSolver`,
+with the root LP heuristic thresholds raised. Build the target explicitly, then
+run it with a time limit in seconds (8 by default).
+
+```bash
+cmake --build build --target mipx-root-heuristic-deadline-bench
+./build/mipx-root-heuristic-deadline-bench 8 > root-heuristic-deadline.csv
+```
+
+The CSV records the solver outcome, bound, work, reported time, and wall time
+relative to the limit. On the original one-thread run for #355, the root LP and
+cuts used about 7.4 s of the 8 s limit. The solve ran about 0.96 s past the limit
+before the root portfolio got the deadline and about 0.07 s past it after the
+fix. Use those figures as historical measurements and record fresh samples on
+the same host and build when comparing revisions. Root LP and cut times vary
+with load, so the stopping stage can differ between runs. The correctness suite
+checks deterministic expiry at a root heuristic LP via `HeuristicRuntime`.
+
 # Performance Regression Gate
 
 Use the benchmark scripts + `check_regression.py` to enforce no-regression policy.

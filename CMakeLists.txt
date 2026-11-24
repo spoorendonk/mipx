@@ -195,6 +195,11 @@ if(MIPX_BUILD_CLI)
     add_executable(mipx-presolve-bench tests/perf/presolve_bench.cpp)
     target_link_libraries(mipx-presolve-bench PRIVATE mipx)
     mipx_set_compiler_flags(mipx-presolve-bench)
+
+    add_executable(mipx-root-heuristic-deadline-bench EXCLUDE_FROM_ALL
+                   tests/perf/root_heuristic_deadline_bench.cpp)
+    target_link_libraries(mipx-root-heuristic-deadline-bench PRIVATE mipx)
+    mipx_set_compiler_flags(mipx-root-heuristic-deadline-bench)
 endif()
 
 # --- Bench-only HiGHS comparator (#268) ---
