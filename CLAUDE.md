@@ -268,8 +268,11 @@ the pushed tree. `[tool.uv] cache-keys` in `pyproject.toml` makes a kept
 that no longer matches `pyproject.toml` instead of rewriting it. A gate host
 needs only `uv` on its PATH (and network for the build requirements on a cold
 uv cache). A pytest that cannot run fails the gate; only exit 5 (no tests
-collected) passes. This build is the pyproject's configuration (no TBB, no
-GPU, portable SIMD), separate from the CMake build above.
+collected) passes. So the binding tests import `mipx` plainly, never through
+`pytest.importorskip`: a skipped module collects nothing, exits 5 and would
+pass a tree whose bindings were never installed (#255). This build is the
+pyproject's configuration (no TBB, no GPU, portable SIMD), separate from the
+CMake build above.
 
 The commit and push gates run **correctness tests only**. The tests themselves
 take ~4s; the pytest step adds the bindings' build. The instance-driven Netlib/MIPLIB tests are labelled

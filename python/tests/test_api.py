@@ -1,9 +1,11 @@
 from collections.abc import Callable
 from pathlib import Path
 
+# A plain import, not pytest.importorskip: a missing mipx skipped the module,
+# pytest then exited 5 (no tests collected), and the gate's test block passes
+# exit 5, so a tree whose bindings never got installed passed it (#255).
+import mipx
 import pytest
-
-mipx = pytest.importorskip("mipx")
 
 
 def tiny_mps_path() -> Path:
