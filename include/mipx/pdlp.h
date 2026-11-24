@@ -38,9 +38,8 @@ struct PdlpOptions {
     // times the spectral-norm step. A step is never rejected and retried.
     // The CPU loop compares consecutive reflected iterates and adjusts every
     // iteration, between the primal and the dual update; the GPU path
-    // compares the pdhg points of consecutive convergence checks
-    // (termination_eval_frequency iterations apart) and adjusts once per
-    // batch. No convergence guarantee is claimed for it.
+    // compares the PDHG points of consecutive convergence checks and
+    // adjusts once per batch. No convergence guarantee is claimed for it.
     bool adaptive_step = false;
     Real adaptive_step_down = 0.7;  // Shrink factor when step > 0.998/L.
     Real adaptive_step_up = 1.0;    // Grow factor otherwise; 1 never grows.
@@ -55,7 +54,7 @@ struct PdlpOptions {
     Real pid_kd = 0.0;
     Real pid_i_smooth = 0.3;
 
-    // Restart (fixed-point based).
+    // Fixed-point restart rules and convergence check interval.
     Real restart_sufficient_decay = 0.2;
     Real restart_necessary_decay = 0.5;
     Real restart_artificial_fraction = 0.36;
@@ -102,6 +101,21 @@ struct PdlpOptions {
     // Execution.
     bool verbose = true;
     const std::atomic<bool>* stop_flag = nullptr;
+
+    // Optional decay rules. A fraction in (0, 1) enables a rule.
+    Real restart_gap_decay = 0.0;
+    Real restart_kkt_decay = 0.0;
+    // Adapt termination_eval_frequency within [50, 1000] using KKT progress.
+    bool adaptive_eval_frequency = false;
+};
+
+struct PdlpRestartStats {
+    Int first_batch = 0;
+    Int sufficient_fpe = 0;
+    Int necessary_fpe = 0;
+    Int artificial = 0;
+    Int gap = 0;
+    Int kkt = 0;
 };
 
 class PdlpSolver : public LpSolver {
@@ -146,6 +160,8 @@ public:
     void setOptions(const PdlpOptions& options) { options_ = options; }
     [[nodiscard]] const PdlpOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    /// Restart counts from the last solve, including polishing.
+    [[nodiscard]] const PdlpRestartStats& restartStats() const { return restart_stats_; }
     /// Whether solve() can take the GPU path: a CUDA build, a device, and
     /// device code for it (#192). Checked once per process; false on a CPU
     /// build. use_gpu falls back to the CPU path without it.
@@ -196,6 +212,7 @@ private:
     Int iterations_ = 0;
     bool used_gpu_ = false;
     bool gpu_fallback_ = false;  // solveGpu() could not start; solve() runs on the CPU
+    PdlpRestartStats restart_stats_{};
 
     // Warm-start (original/unscaled space).
     std::vector<Real> warm_start_x_;

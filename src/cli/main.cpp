@@ -67,7 +67,8 @@ void printUsage(FILE* out) {
                  "[--dual-row-price-actual-work] "
                  "[--search-stable|--search-default|--search-aggressive] "
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
-                 "[--pdlp-opt-norm l2|linf] "
+                 "[--pdlp-opt-norm l2|linf] [--pdlp-restart-gap-decay F] "
+                 "[--pdlp-restart-kkt-decay F] [--pdlp-adaptive-eval-frequency] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--barrier-hsd] "
@@ -114,7 +115,7 @@ int main(int argc, char* argv[]) {
     bool barrier_implicit_bounds = false;
     bool barrier_hsd = false;
     mipx::Int barrier_gondzio = 0;
-    mipx::PdlpOptimalityNorm pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
+    mipx::PdlpOptions pdlp_options;
     bool relax_integrality = false;
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
@@ -393,9 +394,9 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--pdlp-opt-norm" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "l2") {
-                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::L2;
+                pdlp_options.optimality_norm = mipx::PdlpOptimalityNorm::L2;
             } else if (mode == "linf") {
-                pdlp_optimality_norm = mipx::PdlpOptimalityNorm::LInf;
+                pdlp_options.optimality_norm = mipx::PdlpOptimalityNorm::LInf;
             } else {
                 std::fprintf(stderr,
                              "Invalid --pdlp-opt-norm value: %s "
@@ -403,6 +404,22 @@ int main(int argc, char* argv[]) {
                              mode.c_str());
                 return 1;
             }
+        } else if ((arg == "--pdlp-restart-gap-decay" || arg == "--pdlp-restart-kkt-decay") &&
+                   i + 1 < argc) {
+            const char* value = argv[++i];
+            char* end = nullptr;
+            const double fraction = std::strtod(value, &end);
+            if (end == value || *end != '\0' || !(fraction >= 0.0 && fraction < 1.0)) {
+                std::fprintf(stderr, "Invalid %s value: %s (expected a fraction in [0, 1))\n",
+                             argv[i - 1], value);
+                return 1;
+            }
+            if (arg == "--pdlp-restart-gap-decay")
+                pdlp_options.restart_gap_decay = fraction;
+            else
+                pdlp_options.restart_kkt_decay = fraction;
+        } else if (arg == "--pdlp-adaptive-eval-frequency") {
+            pdlp_options.adaptive_eval_frequency = true;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {
@@ -773,13 +790,12 @@ int main(int argc, char* argv[]) {
                 }
                 if (lp_mode == LpMode::Pdlp) {
                     mipx::PdlpSolver solver;
-                    mipx::PdlpOptions popts;
+                    auto popts = pdlp_options;
                     popts.verbose = verbose;
                     popts.use_gpu = barrier_gpu;
                     popts.gpu_min_rows = barrier_gpu_min_rows;
                     popts.gpu_min_nnz = barrier_gpu_min_nnz;
                     popts.max_solve_seconds = seconds;
-                    popts.optimality_norm = pdlp_optimality_norm;
                     solver.setOptions(popts);
                     solver.load(model);
                     run.result = solver.solve();

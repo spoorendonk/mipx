@@ -1,3 +1,4 @@
+#include "lp/pdlp_restart.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
@@ -13,6 +14,7 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <random>
 #include <utility>
 
@@ -109,6 +111,141 @@ TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     CHECK(x[0] >= -1e-6);
     CHECK(x[1] >= -1e-6);
     CHECK(x[0] + x[1] <= 4.0 + 1e-3);
+}
+
+TEST_CASE("PDLP: restart gap and KKT error use their respective normalizations", "[pdlp]") {
+    using pdlp_detail::ProjectedErrors;
+
+    const auto gap_dominates = ProjectedErrors::measure(0.1, 0.2, -2.0, -4.0);
+    CHECK_THAT(gap_dominates.gap, WithinAbs(2.0 / 3.0, 1e-15));
+    CHECK_THAT(gap_dominates.kkt, WithinAbs(2.0 / 7.0, 1e-15));
+    CHECK(ProjectedErrors::measure(0.4, 0.1, 2.0, 4.0).kkt == 0.4);
+    CHECK(ProjectedErrors::measure(0.1, 0.4, 2.0, 4.0).kkt == 0.4);
+
+    const auto large_same_sign = ProjectedErrors::measure(0.0, 0.0, 1e308, 9e307);
+    CHECK_THAT(large_same_sign.gap, WithinAbs(0.1, 1e-15));
+    CHECK_THAT(large_same_sign.kkt, WithinAbs(1.0 / 19.0, 1e-15));
+    const auto large_opposite_sign = ProjectedErrors::measure(0.0, 0.0, 1e308, -1e308);
+    CHECK_THAT(large_opposite_sign.gap, WithinAbs(2.0, 1e-15));
+    CHECK_THAT(large_opposite_sign.kkt, WithinAbs(1.0, 1e-15));
+}
+
+TEST_CASE("PDLP: adaptive evaluations start at the requested interval and stay bounded", "[pdlp]") {
+    PdlpOptions options;
+    options.termination_eval_frequency = 175;
+    options.adaptive_eval_frequency = true;
+    pdlp_detail::EvaluationCadence cadence(options);
+
+    CHECK(cadence.interval() == 175);
+    cadence.observe(1.0);
+    CHECK(cadence.interval() == 175);
+    cadence.observe(0.75);
+    CHECK(cadence.interval() == 350);
+    cadence.observe(0.5);
+    cadence.observe(0.25);
+    CHECK(cadence.interval() == 1000);
+    cadence.observe(0.24);
+    CHECK(cadence.interval() == 1000);
+    for (Int i = 0; i < 4; ++i)
+        cadence.observe(0.24);
+    CHECK(cadence.interval() == 62);
+    CHECK_FALSE(cadence.periodicCheck(0));
+    cadence.observe(0.24);
+    CHECK(cadence.interval() == 50);
+    CHECK(cadence.periodicCheck(0));
+
+    pdlp_detail::EvaluationCadence invalid_cadence(options);
+    invalid_cadence.observe(std::numeric_limits<Real>::infinity());
+    CHECK(invalid_cadence.interval() == 175);
+    invalid_cadence.observe(std::numeric_limits<Real>::infinity());
+    CHECK(invalid_cadence.interval() == 87);
+
+    options.termination_eval_frequency = 10;
+    CHECK(pdlp_detail::EvaluationCadence(options).interval() == 50);
+    options.adaptive_eval_frequency = false;
+    pdlp_detail::EvaluationCadence fixed(options);
+    fixed.observe(1.0);
+    fixed.observe(0.5);
+    CHECK(fixed.interval() == 10);
+    CHECK_FALSE(fixed.periodicCheck(50));
+    CHECK(fixed.periodicCheck(100));
+}
+
+namespace {
+
+void checkOptionalRestartRules(bool use_gpu) {
+    PdlpOptions options;
+    options.verbose = false;
+    options.use_gpu = use_gpu;
+    options.gpu_min_rows = 0;
+    options.gpu_min_nnz = 0;
+    options.termination_eval_frequency = 5;
+    options.max_iter = 100;
+    options.primal_tol = 0.0;
+    options.dual_tol = 0.0;
+    options.optimality_tol = 0.0;
+    options.update_primal_weight = false;
+    options.restart_sufficient_decay = 0.0;
+    options.restart_necessary_decay = 0.0;
+    options.restart_artificial_fraction = 1.0;
+
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(buildSimpleLp());
+    const auto run = [&](Real gap, Real kkt) {
+        options.restart_gap_decay = gap;
+        options.restart_kkt_decay = kkt;
+        solver.setOptions(options);
+        REQUIRE(solver.solve().status == Status::IterLimit);
+        CHECK(solver.usedGpu() == use_gpu);
+        CHECK(solver.restartStats().first_batch == 1);
+    };
+
+    run(0.9, 0.0);
+    CHECK(solver.restartStats().gap > 0);
+    CHECK(solver.restartStats().kkt == 0);
+    run(0.0, 0.9);
+    CHECK(solver.restartStats().gap == 0);
+    CHECK(solver.restartStats().kkt > 0);
+    run(0.0, 0.0);
+    CHECK(solver.restartStats().gap == 0);
+    CHECK(solver.restartStats().kkt == 0);
+
+    // This trajectory improves fast enough to increase the interval.
+    // The 275-step budget also exercises a final partial batch.
+    options.max_iter = 275;
+    options.termination_eval_frequency = 50;
+    run(0.0, 0.9);
+    const Int fixed_restarts = solver.restartStats().kkt;
+    options.adaptive_eval_frequency = true;
+    run(0.0, 0.9);
+    CHECK(solver.restartStats().kkt > 0);
+    CHECK(solver.restartStats().kkt < fixed_restarts);
+
+    // The main phase converges at its first check. Report restarts taken
+    // while polishing, even if the original converged solution is kept.
+    options.adaptive_eval_frequency = false;
+    options.termination_eval_frequency = 5;
+    options.primal_tol = options.dual_tol = options.optimality_tol = 0.15;
+    options.polish_primal_tol = options.polish_dual_tol = 0.0;
+    options.polish_max_iter = 25;
+    solver.setOptions(options);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.restartStats().first_batch == 1);
+    CHECK(solver.restartStats().kkt > 0);
+}
+
+}  // namespace
+
+TEST_CASE("PdlpSolver: optional restart rules fire independently and stats reset", "[pdlp]") {
+    checkOptionalRestartRules(false);
+}
+
+TEST_CASE("PdlpSolver: GPU optional restart rules fire independently and stats reset",
+          "[pdlp][gpu]") {
+    if (!PdlpSolver::gpuAvailable())
+        SKIP("No usable CUDA device.");
+    checkOptionalRestartRules(true);
 }
 
 TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {

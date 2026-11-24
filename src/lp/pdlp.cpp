@@ -1,6 +1,7 @@
 #include "mipx/pdlp.h"
 
 #include "pdlp_residual.h"
+#include "pdlp_restart.h"
 
 #include <algorithm>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <limits>
 #include <random>
+#include <utility>
 
 #ifdef MIPX_HAS_CUDA
 // clang-format off
@@ -21,6 +23,10 @@
 namespace mipx {
 
 namespace {
+
+using pdlp_detail::EvaluationCadence;
+using pdlp_detail::ProjectedErrors;
+using pdlp_detail::RestartPolicy;
 
 inline bool isFinite(Real v) {
     return std::isfinite(v);
@@ -983,6 +989,7 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
 // ---------------------------------------------------------------------------
 
 LpResult PdlpSolver::solve() {
+    restart_stats_ = {};
     if (!loaded_) {
         status_ = Status::Error;
         return {status_, 0.0, 0, 0.0};
@@ -1075,7 +1082,9 @@ LpResult PdlpSolver::solve() {
     Real primal_weight = options_.primal_weight;
 
     // Halpern PDHG state.
-    const Int N = options_.termination_eval_frequency;
+    EvaluationCadence cadence(options_);
+    const Int first_interval = cadence.interval();
+    RestartPolicy restart(options_, restart_stats_);
 
     std::vector<Real> current_x(static_cast<size_t>(n), 0.0);
     std::vector<Real> current_y(static_cast<size_t>(m), 0.0);
@@ -1157,6 +1166,55 @@ LpResult PdlpSolver::solve() {
         aa_result.resize(static_cast<size_t>(aa_dim));
     }
 
+    // Projected primal and dual objectives in the original objective space.
+    auto projectedObjectives = [&] {
+        const Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
+        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
+        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+
+        // Dual objective via support function (scaled space).
+        // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
+        // where delta*(z) = sup_{s in [l,u]} z*s = max(0,z)*u + min(0,z)*l.
+        // Corrected dual objective: project reduced costs and dual values
+        // to be sign-feasible, then compute dual function.
+        // d(y) = sum_j col_term[j] + sum_i row_term[i] where:
+        //   col_term[j] = g_j * lb_j if g_j > 0, g_j * ub_j if g_j < 0
+        //   row_term[i] = -y_i * ru_i if y_i > 0, -y_i * rl_i if y_i < 0
+        Real dobj_col = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            Real grad = cscaled_[j] + at_pdhg_y[j];
+            Real lb = scaled_col_lower_[j];
+            Real ub = scaled_col_upper_[j];
+            // Project grad to dual-feasible region.
+            if (!isFinite(lb))
+                grad = std::min(grad, 0.0);
+            if (!isFinite(ub))
+                grad = std::max(grad, 0.0);
+            if (grad > 0.0 && isFinite(lb))
+                dobj_col += grad * lb;
+            else if (grad < 0.0 && isFinite(ub))
+                dobj_col += grad * ub;
+        }
+        Real dobj_row = 0.0;
+        for (Index i = 0; i < m; ++i) {
+            Real yi = pdhg_y[i];
+            Real rl = scaled_row_lower_[i];
+            Real ru = scaled_row_upper_[i];
+            // Project y to sign-feasible region.
+            if (!isFinite(ru))
+                yi = std::min(yi, 0.0);
+            if (!isFinite(rl))
+                yi = std::max(yi, 0.0);
+            if (yi > 0.0 && isFinite(ru))
+                dobj_row -= yi * ru;
+            else if (yi < 0.0 && isFinite(rl))
+                dobj_row -= yi * rl;
+        }
+        Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
+
+        return std::pair{pobj, dobj};
+    };
+
     while (total_count < options_.max_iter) {
         if (timeLimitReached(t0, options_.max_solve_seconds)) {
             status_ = Status::TimeLimit;
@@ -1169,8 +1227,8 @@ LpResult PdlpSolver::solve() {
             return {status_, 0.0, iterations_, 0.0};
         }
 
-        // Run a batch of N Halpern PDHG iterations.
-        Int batch = std::min(N, options_.max_iter - total_count);
+        // Run a batch of Halpern PDHG iterations.
+        const Int batch = std::min(cadence.interval(), options_.max_iter - total_count);
         for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
             if (timeLimitReached(t0, options_.max_solve_seconds)) {
                 status_ = Status::TimeLimit;
@@ -1328,61 +1386,20 @@ LpResult PdlpSolver::solve() {
                                        ? rel_dual_resid_inf
                                        : rel_dual_resid;
 
-        // Compare objective gap in true objective space after reversing the
-        // bound/objective rescaling used in the PDLP model.
-        Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
-        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
-        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
-
-        // Dual objective via support function (scaled space).
-        // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
-        // where delta*(z) = sup_{s in [l,u]} z*s = max(0,z)*u + min(0,z)*l.
-        // Corrected dual objective: project reduced costs and dual values
-        // to be sign-feasible, then compute dual function.
-        // d(y) = sum_j col_term[j] + sum_i row_term[i] where:
-        //   col_term[j] = g_j * lb_j if g_j > 0, g_j * ub_j if g_j < 0
-        //   row_term[i] = -y_i * ru_i if y_i > 0, -y_i * rl_i if y_i < 0
-        Real dobj_col = 0.0;
-        for (Index j = 0; j < n; ++j) {
-            Real grad = cscaled_[j] + at_pdhg_y[j];
-            Real lb = scaled_col_lower_[j];
-            Real ub = scaled_col_upper_[j];
-            // Project grad to dual-feasible region.
-            if (!isFinite(lb))
-                grad = std::min(grad, 0.0);
-            if (!isFinite(ub))
-                grad = std::max(grad, 0.0);
-            if (grad > 0.0 && isFinite(lb))
-                dobj_col += grad * lb;
-            else if (grad < 0.0 && isFinite(ub))
-                dobj_col += grad * ub;
-        }
-        Real dobj_row = 0.0;
-        for (Index i = 0; i < m; ++i) {
-            Real yi = pdhg_y[i];
-            Real rl = scaled_row_lower_[i];
-            Real ru = scaled_row_upper_[i];
-            // Project y to sign-feasible region.
-            if (!isFinite(ru))
-                yi = std::min(yi, 0.0);
-            if (!isFinite(rl))
-                yi = std::max(yi, 0.0);
-            if (yi > 0.0 && isFinite(ru))
-                dobj_row -= yi * ru;
-            else if (yi < 0.0 && isFinite(rl))
-                dobj_row -= yi * rl;
-        }
-        Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
-
+        const auto [pobj, dobj] = projectedObjectives();
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
-        if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
-            // Log true-space primal objective for readability.
-            Real pobj_log = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+        const ProjectedErrors errors =
+            restart.needsProjectedErrors()
+                ? ProjectedErrors::measure(rel_primal_term, rel_dual_term, pobj, dobj)
+                : ProjectedErrors{};
+        cadence.observe(errors.kkt);
+        const bool periodic_check = cadence.periodicCheck(total_count);
+        if (options_.verbose && (total_count <= first_interval || periodic_check)) {
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e\n",
-                total_count, pobj_log, rel_primal_term, rel_dual_term, rel_gap, fpe, primal_weight,
+                total_count, pobj, rel_primal_term, rel_dual_term, rel_gap, fpe, primal_weight,
                 step);
         }
 
@@ -1396,7 +1413,7 @@ LpResult PdlpSolver::solve() {
         // Check periodically (every 10 batches after an initial warm-up)
         // to avoid overhead. We unscale iterates to original space and
         // verify certificates.
-        if (total_count >= 10 * N && total_count % (10 * N) == 0) {
+        if (periodic_check) {
             // Unscale the iterates to the original space. The dual ray does
             // not depend on the objective, so unlike the dual values it does
             // not take obj_sign_: with it, no maximization was ever found
@@ -1429,20 +1446,9 @@ LpResult PdlpSolver::solve() {
         }
 
         // --- Restart decision ---
-        bool do_restart = false;
-        if (total_count == N) {
-            // Always restart after first batch.
-            do_restart = true;
-        } else if (initial_fpe > 0.0 && fpe <= options_.restart_sufficient_decay * initial_fpe) {
-            do_restart = true;
-        } else if (initial_fpe > 0.0 && fpe <= options_.restart_necessary_decay * initial_fpe &&
-                   fpe > last_trial_fpe) {
-            do_restart = true;
-        } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
-                                                   static_cast<Real>(total_count))) {
-            do_restart = true;
-        }
-
+        const bool do_restart =
+            restart.restart(total_count == first_interval, inner_count, total_count, fpe,
+                            initial_fpe, last_trial_fpe, errors, total_count);
         last_trial_fpe = fpe;
 
         if (do_restart) {
@@ -1643,6 +1649,8 @@ LpResult PdlpSolver::solve() {
 
             Int polish_count = 0;
             bool polish_converged = false;
+            EvaluationCadence polish_cadence(options_);
+            RestartPolicy polish_restart(options_, restart_stats_);
 
             while (polish_count < options_.polish_max_iter) {
                 if (timeLimitReached(t0, options_.max_solve_seconds))
@@ -1651,8 +1659,10 @@ LpResult PdlpSolver::solve() {
                     options_.stop_flag->load(std::memory_order_relaxed))
                     break;
 
-                Int batch = std::min(N, options_.polish_max_iter - polish_count);
-                for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+                const Int batch =
+                    std::min(polish_cadence.interval(), options_.polish_max_iter - polish_count);
+                Int k_offset = 1;
+                for (; k_offset <= batch; ++k_offset) {
                     if (timeLimitReached(t0, options_.max_solve_seconds))
                         break;
                     Real lambda = static_cast<Real>(inner_count + k_offset) /
@@ -1695,9 +1705,12 @@ LpResult PdlpSolver::solve() {
                         current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
                     }
                 }
+                const Int completed = k_offset - 1;
+                polish_count += completed;
+                total_count += completed;
+                if (completed < batch)
+                    break;  // The interrupted batch did not reach a check.
                 inner_count += batch;
-                polish_count += batch;
-                total_count += batch;
 
                 // Fixed-point residual ‖z − T(z)‖_P, as in the main loop.
                 Real fpe = pdlpFixedPointResidual(
@@ -1746,7 +1759,13 @@ LpResult PdlpSolver::solve() {
                 Real rel_primal_resid_pol = std::sqrt(pr_sq) / (1.0 + bound_norm);
                 Real rel_dual_resid_pol = std::sqrt(dr_sq) / (1.0 + c_norm);
 
-                if (options_.verbose && polish_count % (10 * N) == 0) {
+                ProjectedErrors errors;
+                if (polish_restart.needsProjectedErrors()) {
+                    const auto [pobj, dobj] = projectedObjectives();
+                    errors = ProjectedErrors::measure(rp_now, rd_now, pobj, dobj);
+                }
+                polish_cadence.observe(errors.kkt);
+                if (options_.verbose && polish_cadence.periodicCheck(polish_count)) {
                     std::printf(
                         "PDLP polish %7d  pinf=% .2e  dinf=% .2e  "
                         "fpe=% .2e\n",
@@ -1759,21 +1778,9 @@ LpResult PdlpSolver::solve() {
                 }
 
                 // Restart decision (same logic as main loop).
-                bool do_restart = false;
-                if (polish_count == batch) {
-                    do_restart = true;
-                } else if (initial_fpe > 0.0 &&
-                           fpe <= options_.restart_sufficient_decay * initial_fpe) {
-                    do_restart = true;
-                } else if (initial_fpe > 0.0 &&
-                           fpe <= options_.restart_necessary_decay * initial_fpe &&
-                           fpe > last_trial_fpe) {
-                    do_restart = true;
-                } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
-                                                           static_cast<Real>(polish_count))) {
-                    do_restart = true;
-                }
-
+                const bool do_restart =
+                    polish_restart.restart(polish_count == batch, inner_count, polish_count, fpe,
+                                           initial_fpe, last_trial_fpe, errors, total_count);
                 last_trial_fpe = fpe;
 
                 if (do_restart) {
@@ -2236,7 +2243,9 @@ LpResult PdlpSolver::solveGpu() {
         pdlpPreconditionedNormStepCap(scaled_a_, tau_base_, sigma_base_, step_initial);
     cudaMemcpy(d_step, &step, sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_primal_weight, &primal_weight, sizeof(Real), cudaMemcpyHostToDevice);
-    const Int N = options_.termination_eval_frequency;
+    EvaluationCadence cadence(options_);
+    const Int first_interval = cadence.interval();
+    RestartPolicy restart(options_, restart_stats_);
 
     Int inner_count = 0;
     Int total_count = 0;
@@ -2287,9 +2296,20 @@ LpResult PdlpSolver::solveGpu() {
     // CUDA graph capture state.
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t graphExec = nullptr;
+    Int graph_batch_size = 0;
     bool graphCaptureFailed = false;
 
-    // Helper: launch one batch of N inner iterations (no graph).
+    auto destroyBatchGraph = [&] {
+        if (graphExec) {
+            cudaGraphExecDestroy(graphExec);
+            graphExec = nullptr;
+        }
+        if (graph) {
+            cudaGraphDestroy(graph);
+            graph = nullptr;
+        }
+    };
+
     auto launchBatch = [&](Int batch) {
         for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
             launchComputeLambda(d_lambda, d_inner_count, k_offset, stream);
@@ -2305,6 +2325,50 @@ LpResult PdlpSolver::solveGpu() {
                                   d_row_upper, d_row_constraint_type, stream);
         }
         return true;
+    };
+
+    auto launchMainBatch = [&](Int batch) {
+        if (cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
+                            stream) != cudaSuccess)
+            return false;
+        if (batch != cadence.interval() || graphCaptureFailed)
+            return launchBatch(batch);
+        if (graphExec && batch == graph_batch_size)
+            return cudaGraphLaunch(graphExec, stream) == cudaSuccess;
+
+        // The adaptive interval changed, or this is the first full batch.
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+        destroyBatchGraph();
+        if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) == cudaSuccess) {
+            const bool captured_steps = launchBatch(batch);
+            const auto result = cudaStreamEndCapture(stream, &graph);
+            if (captured_steps && result == cudaSuccess && graph &&
+                cudaGraphInstantiate(&graphExec, graph, 0) == cudaSuccess) {
+                graph_batch_size = batch;
+                return cudaGraphLaunch(graphExec, stream) == cudaSuccess;
+            }
+        }
+
+        // Capture never executed the batch. Submit its steps directly once.
+        graphCaptureFailed = true;
+        cudaGetLastError();
+        return launchBatch(batch);
+    };
+
+    auto projectedObjectives = [&] {
+        const Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
+        const Real pobj = original_.obj_offset + obj_sign_ * h_metrics->primal_obj * obj_unscale;
+        const Real dobj =
+            original_.obj_offset +
+            obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row) * obj_unscale;
+        return std::pair{pobj, dobj};
+    };
+
+    auto downloadMetrics = [&] {
+        return cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                               cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+               cudaStreamSynchronize(stream) == cudaSuccess;
     };
 
     if (power_iter_spmv_failed) {
@@ -2328,56 +2392,11 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         {
-            Int batch = std::min(N, options_.max_iter - total_count);
+            const Int batch = std::min(cadence.interval(), options_.max_iter - total_count);
 
-            if (batch == N && !graphCaptureFailed) {
-                if (graphExec == nullptr) {
-                    // First full batch: capture the graph.
-                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaStreamSynchronize(stream);
-                    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-                    if (!launchBatch(batch)) {
-                        // Ensure the stream exits capture mode on early failure.
-                        cudaStreamEndCapture(stream, &graph);
-                        failGpuSolve(total_count);
-                        goto cleanup;
-                    }
-                    cudaStreamEndCapture(stream, &graph);
-                    if (graph == nullptr) {
-                        // Graph capture failed permanently — fall back to
-                        // non-graph launches for remainder of solve. Clear
-                        // the capture's error, or the check after the loop
-                        // takes it for a failed kernel.
-                        graphCaptureFailed = true;
-                        cudaGetLastError();
-                        cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                        cudaMemcpyHostToDevice, stream);
-                        if (!launchBatch(batch)) {
-                            failGpuSolve(total_count);
-                            goto cleanup;
-                        }
-                    } else {
-                        cudaGraphInstantiate(&graphExec, graph, 0);
-                        // Execute the captured graph for this first batch.
-                        cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                        cudaMemcpyHostToDevice, stream);
-                        cudaGraphLaunch(graphExec, stream);
-                    }
-                } else {
-                    // Subsequent full batches: update d_inner_count and replay.
-                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaGraphLaunch(graphExec, stream);
-                }
-            } else {
-                // Last partial batch: fall back to non-graph launches.
-                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
-                                stream);
-                if (!launchBatch(batch)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
+            if (!launchMainBatch(batch)) {
+                failGpuSolve(total_count);
+                goto cleanup;
             }
 
             inner_count += batch;
@@ -2414,9 +2433,10 @@ LpResult PdlpSolver::solveGpu() {
                                     stream);
 
         // Transfer metrics to host.
-        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
+        if (!downloadMetrics()) {
+            failGpuSolve(total_count);
+            goto cleanup;
+        }
 
         // Host-side convergence computation.
         Real abs_primal_resid = std::sqrt(h_metrics->primal_resid_sq);
@@ -2432,11 +2452,7 @@ LpResult PdlpSolver::solveGpu() {
                                        ? rel_dual_resid_inf
                                        : rel_dual_resid;
 
-        Real pobj_scaled = h_metrics->primal_obj;
-        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
-        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
-        Real dobj = original_.obj_offset +
-                    obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row) * obj_unscale;
+        const auto [pobj, dobj] = projectedObjectives();
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
         Real fpe =
@@ -2445,12 +2461,17 @@ LpResult PdlpSolver::solveGpu() {
         if (initial_fpe < 0.0)
             initial_fpe = fpe;
 
-        if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
-            Real pobj_log = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+        const ProjectedErrors errors =
+            restart.needsProjectedErrors()
+                ? ProjectedErrors::measure(rel_primal_term, rel_dual_term, pobj, dobj)
+                : ProjectedErrors{};
+        cadence.observe(errors.kkt);
+        const bool periodic_check = cadence.periodicCheck(total_count);
+        if (options_.verbose && (total_count <= first_interval || periodic_check)) {
             std::printf(
                 "PDLP %7d  pobj=% .8e  pinf=% .2e  dinf=% .2e  gap=% .2e  "
                 "fpe=% .2e  pw=% .2e  step=% .2e  [GPU]\n",
-                total_count, pobj_log, rel_primal_term, rel_dual_term, rel_gap, fpe, primal_weight,
+                total_count, pobj, rel_primal_term, rel_dual_term, rel_gap, fpe, primal_weight,
                 step);
         }
 
@@ -2504,7 +2525,7 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         // --- Infeasibility / unboundedness detection (GPU path) ---
-        if (total_count >= 10 * N && total_count % (10 * N) == 0) {
+        if (periodic_check) {
             // Download iterates for certificate checks.
             std::vector<Real> pdhg_x_host(sn), pdhg_y_host(sm);
             cudaMemcpy(pdhg_x_host.data(), d_pdhg_x, sn * sizeof(Real), cudaMemcpyDeviceToHost);
@@ -2534,19 +2555,9 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         // --- Restart decision ---
-        bool do_restart = false;
-        if (total_count == N) {
-            do_restart = true;
-        } else if (initial_fpe > 0.0 && fpe <= options_.restart_sufficient_decay * initial_fpe) {
-            do_restart = true;
-        } else if (initial_fpe > 0.0 && fpe <= options_.restart_necessary_decay * initial_fpe &&
-                   fpe > last_trial_fpe) {
-            do_restart = true;
-        } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
-                                                   static_cast<Real>(total_count))) {
-            do_restart = true;
-        }
-
+        const bool do_restart =
+            restart.restart(total_count == first_interval, inner_count, total_count, fpe,
+                            initial_fpe, last_trial_fpe, errors, total_count);
         last_trial_fpe = fpe;
 
         if (do_restart) {
@@ -2695,9 +2706,10 @@ LpResult PdlpSolver::solveGpu() {
                                     d_row_upper, d_finite_row_lower, d_finite_row_upper,
                                     d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
                                     stream);
-        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
+        if (!downloadMetrics()) {
+            failGpuSolve(total_count);
+            goto cleanup;
+        }
 
         Real rp_gpu = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                           ? h_metrics->primal_resid_max / (1.0 + bound_norm)
@@ -2729,19 +2741,12 @@ LpResult PdlpSolver::solveGpu() {
             initial_fpe = -1.0;
             last_trial_fpe = std::numeric_limits<Real>::infinity();
 
-            // Invalidate the CUDA graph — polish phase may have
-            // different batch sizes and we don't want stale captures.
-            if (graphExec) {
-                cudaGraphExecDestroy(graphExec);
-                graphExec = nullptr;
-            }
-            if (graph) {
-                cudaGraphDestroy(graph);
-                graph = nullptr;
-            }
+            destroyBatchGraph();
 
             Int polish_count = 0;
             bool polish_converged = false;
+            EvaluationCadence polish_cadence(options_);
+            RestartPolicy polish_restart(options_, restart_stats_);
 
             while (polish_count < options_.polish_max_iter) {
                 if (timeLimitReached(t0, options_.max_solve_seconds))
@@ -2750,12 +2755,13 @@ LpResult PdlpSolver::solveGpu() {
                     options_.stop_flag->load(std::memory_order_relaxed))
                     break;
 
-                Int batch = std::min(N, options_.polish_max_iter - polish_count);
+                const Int batch =
+                    std::min(polish_cadence.interval(), options_.polish_max_iter - polish_count);
 
-                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
-                                stream);
-                if (!launchBatch(batch)) {
-                    failGpuSolve(total_count + polish_count);
+                if (cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
+                                    cudaMemcpyHostToDevice, stream) != cudaSuccess ||
+                    !launchBatch(batch)) {
+                    failGpuSolve(total_count);
                     goto cleanup;
                 }
 
@@ -2787,9 +2793,10 @@ LpResult PdlpSolver::solveGpu() {
                                             d_row_lower, d_row_upper, d_finite_row_lower,
                                             d_finite_row_upper, d_primal_resid_scale, d_sigma_base,
                                             primal_weight, d_metrics, stream);
-                cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
-                                cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
+                if (!downloadMetrics()) {
+                    failGpuSolve(total_count);
+                    goto cleanup;
+                }
 
                 Real rp_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                                   ? h_metrics->primal_resid_max / (1.0 + bound_norm)
@@ -2807,7 +2814,13 @@ LpResult PdlpSolver::solveGpu() {
                 if (initial_fpe < 0.0)
                     initial_fpe = fpe;
 
-                if (options_.verbose && polish_count % (10 * N) == 0) {
+                ProjectedErrors errors;
+                if (polish_restart.needsProjectedErrors()) {
+                    const auto [pobj, dobj] = projectedObjectives();
+                    errors = ProjectedErrors::measure(rp_now, rd_now, pobj, dobj);
+                }
+                polish_cadence.observe(errors.kkt);
+                if (options_.verbose && polish_cadence.periodicCheck(polish_count)) {
                     std::printf(
                         "PDLP polish %7d  pinf=% .2e  dinf=% .2e  "
                         "fpe=% .2e  [GPU]\n",
@@ -2820,21 +2833,9 @@ LpResult PdlpSolver::solveGpu() {
                 }
 
                 // Restart decision.
-                bool do_restart = false;
-                if (polish_count == batch) {
-                    do_restart = true;
-                } else if (initial_fpe > 0.0 &&
-                           fpe <= options_.restart_sufficient_decay * initial_fpe) {
-                    do_restart = true;
-                } else if (initial_fpe > 0.0 &&
-                           fpe <= options_.restart_necessary_decay * initial_fpe &&
-                           fpe > last_trial_fpe) {
-                    do_restart = true;
-                } else if (inner_count >= static_cast<Int>(options_.restart_artificial_fraction *
-                                                           static_cast<Real>(polish_count))) {
-                    do_restart = true;
-                }
-
+                const bool do_restart =
+                    polish_restart.restart(polish_count == batch, inner_count, polish_count, fpe,
+                                           initial_fpe, last_trial_fpe, errors, total_count);
                 last_trial_fpe = fpe;
 
                 if (do_restart) {
@@ -2932,11 +2933,7 @@ LpResult PdlpSolver::solveGpu() {
     }
 
 cleanup:
-    // Destroy CUDA graph.
-    if (graphExec)
-        cudaGraphExecDestroy(graphExec);
-    if (graph)
-        cudaGraphDestroy(graph);
+    destroyBatchGraph();
 
     // Destroy cuSPARSE descriptors.
     if (desc_current_y)
