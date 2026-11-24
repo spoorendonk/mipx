@@ -25,6 +25,8 @@ tests/data/*_roundtrip.mps
 !tests/data/tiny.mps
 !tests/data/empty_model.mps
 !tests/data/malformed.mps
+# The MPS extension-section fixtures of #254, one per section.
+!tests/data/mps_*.mps
 # A column-generation LP sequence of the public CommaLab grid1, written by
 # mcf's LP recorder (#267's tier-0 replay).
 !tests/data/lpseq/**/*.mps

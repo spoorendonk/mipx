@@ -506,10 +506,14 @@ int main(int argc, char* argv[]) {
     }
 
     try {
-        if (relax_integrality && lp.hasIntegers()) {
+        if (relax_integrality) {
             for (auto& t : lp.col_type) {
                 t = mipx::VarType::Continuous;
             }
+            // Dropping SOS and indicator constraints relaxes the model as
+            // well; kept, they would send it back to the MIP solver.
+            lp.sos_constraints.clear();
+            lp.indicator_constraints.clear();
         }
         mipx::Logger log;
         mipx::PresolveOptions presolve_opts;
@@ -527,7 +531,10 @@ int main(int argc, char* argv[]) {
             presolve_opts.probing_time_limit = *presolve_probing_time;
         }
 
-        if (lp.hasIntegers()) {
+        // SOS and indicator constraints on continuous columns still make a
+        // MIP: MipSolver linearizes them with binaries, where the LP path
+        // would drop them (#254).
+        if (lp.hasIntegers() || mipx::hasAdvancedModelFeatures(lp)) {
             // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
             solver.setNumThreads(num_threads);

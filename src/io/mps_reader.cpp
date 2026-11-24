@@ -458,9 +458,28 @@ Real parseReal(std::string_view s) {
     return val;
 }
 
-// Skipped: a header this reader knows but does not read (the extension
-// sections of #254); its data lines are ignored, as before.
-enum class Section { None, Name, ObjSense, Rows, Columns, Rhs, Ranges, Bounds, Endata, Skipped };
+// Unsupported: an extension section that changes the model and that this
+// reader does not read (quadratic, piecewise-linear, general constraints);
+// a file carrying one is refused rather than solved as a different model
+// (#254). Skipped: a section whose data lines are ignored -- BRANCH, which
+// carries branching priorities and leaves the model as it is, and any
+// section of a file that has not shown itself to be MPS yet (see readMps).
+enum class Section {
+    None,
+    Name,
+    ObjSense,
+    ObjName,
+    Rows,
+    Columns,
+    Rhs,
+    Ranges,
+    Bounds,
+    Sos,
+    Indicators,
+    Endata,
+    Unsupported,
+    Skipped
+};
 
 Section keywordSection(std::string_view s);
 
@@ -481,9 +500,12 @@ bool isNumber(std::string_view s) {
 // "RHS", "OBJSENSE MAX", "OBJNAME obj". A data line has more tokens, or a
 // value second (a row named BOUNDS in an RHS without a set name), so an RHS
 // set named RHS or a column named BOUNDS stays data. NAME is a header only
-// before any section (it may carry a name with spaces). A lone unknown word
-// is an unknown section, skipped as before, except a sense under OBJSENSE.
-// The caller has skipped empty lines, so tokens.n >= 1 here.
+// before any section (it may carry a name with spaces). "LAZYCONS 1" after
+// ROWS is a header with its level, where no data line has a number second.
+// A lone unknown word is an unknown section, which readMps refuses, except
+// where a lone word is data: a sense under OBJSENSE, the row OBJNAME names,
+// an SOS member without a weight. The caller has skipped empty lines, so
+// tokens.n >= 1 here.
 std::optional<Section> headerOf(std::string_view line, const Tokens& tokens, Section current) {
     if (std::isspace(static_cast<unsigned char>(line[0]))) {
         return std::nullopt;
@@ -496,8 +518,12 @@ std::optional<Section> headerOf(std::string_view line, const Tokens& tokens, Sec
         (tokens.n == 1 || (tokens.n == 2 && !isNumber(tokens[1])))) {
         return s;
     }
-    if (s == Section::None && tokens.n == 1 &&
-        !(current == Section::ObjSense && isObjSenseWord(tokens[0]))) {
+    if (tokens.n == 2 && tokens[0] == "LAZYCONS" && current == Section::Rows) {
+        return s;
+    }
+    const bool lone_word_is_data = (current == Section::ObjSense && isObjSenseWord(tokens[0])) ||
+                                   current == Section::ObjName || current == Section::Sos;
+    if (s == Section::None && tokens.n == 1 && !lone_word_is_data) {
         return Section::None;
     }
     return std::nullopt;
@@ -507,7 +533,8 @@ Section keywordSection(std::string_view s) {
     if (s == "NAME") {
         return Section::Name;
     }
-    if (s == "OBJSENSE") {
+    // CPLEX's documentation spells the section both ways.
+    if (s == "OBJSENSE" || s == "OBJSEN") {
         return Section::ObjSense;
     }
     if (s == "ROWS") {
@@ -531,11 +558,25 @@ Section keywordSection(std::string_view s) {
     if (s == "ENDATA") {
         return Section::Endata;
     }
-    for (const std::string_view skipped :
-         {"OBJNAME", "SOS", "INDICATORS", "QUADOBJ", "QSECTION", "QMATRIX", "QCMATRIX", "CSECTION",
-          "PWLOBJ", "GENCONS", "REFROW", "BRANCH"}) {
-        if (s == skipped) {
-            return Section::Skipped;
+    if (s == "OBJNAME") {
+        return Section::ObjName;
+    }
+    if (s == "SOS") {
+        return Section::Sos;
+    }
+    if (s == "INDICATORS") {
+        return Section::Indicators;
+    }
+    if (s == "BRANCH") {
+        return Section::Skipped;
+    }
+    // REFROW gives SOS weights from a row's coefficients, so reading the SOS
+    // section without it would weigh the members wrongly.
+    for (const std::string_view unsupported :
+         {"QUADOBJ", "QSECTION", "QMATRIX", "QCMATRIX", "CSECTION", "PWLOBJ", "GENCONS", "REFROW",
+          "NLOBJ", "NLCONS", "SCENARIOS"}) {
+        if (s == unsupported) {
+            return Section::Unsupported;
         }
     }
     return Section::None;
@@ -572,6 +613,140 @@ Sense parseObjSense(std::string_view value) {
 /// written on it, the convention CPLEX and HiGHS follow.
 constexpr Index kObjectiveRow = -1;
 constexpr Index kDroppedFreeRow = -2;
+
+using SosConstraint = LpProblem::SosConstraint;
+using IndicatorConstraint = LpProblem::IndicatorConstraint;
+
+Index existingColumn(const StringMap& col_map, std::string_view name, std::string_view section) {
+    const auto it = col_map.find(name);
+    if (it == col_map.end()) {
+        throw std::runtime_error("MPS: " + std::string(section) + " names unknown column '" +
+                                 std::string(name) + "'");
+    }
+    return it->second;
+}
+
+/// One line of the SOS section, in CPLEX's and Gurobi's layout: a set opens
+/// with "S1 name" or "S2 name" (older writers put the word SOS before the
+/// name and a priority after it, both ignored here), and each member line is
+/// "column weight". A member without a weight takes its position in the set,
+/// the order CPLEX gives members when no REFROW weighs them.
+void readSosLine(const Tokens& tokens, const StringMap& col_map, std::vector<SosConstraint>& sets) {
+    const bool opens_set =
+        (tokens[0] == "S1" || tokens[0] == "S2") && (tokens.n == 1 || !isNumber(tokens[1]));
+    if (opens_set) {
+        SosConstraint& set = sets.emplace_back();
+        set.type = tokens[0] == "S1" ? SosConstraint::Type::Sos1 : SosConstraint::Type::Sos2;
+        if (tokens.n >= 3 && tokens[1] == "SOS" && !isNumber(tokens[2])) {
+            set.name = std::string(tokens[2]);
+        } else if (tokens.n >= 2) {
+            set.name = std::string(tokens[1]);
+        } else {
+            set.name = "sos" + std::to_string(sets.size());
+        }
+        return;
+    }
+    if (sets.empty()) {
+        throw std::runtime_error("MPS: SOS member '" + std::string(tokens[0]) +
+                                 "' comes before any S1 or S2 line");
+    }
+    if (tokens.n > 2) {
+        throw std::runtime_error("MPS: SOS member line for '" + std::string(tokens[0]) +
+                                 "' has more than a column and a weight");
+    }
+    SosConstraint& set = sets.back();
+    set.vars.push_back(existingColumn(col_map, tokens[0], "SOS"));
+    set.weights.push_back(tokens.n == 2 ? parseReal(tokens[1])
+                                        : static_cast<Real>(set.vars.size()));
+}
+
+/// An INDICATORS line, "IF row column value": the row holds when the binary
+/// column takes the value. The row stays in the row data until the bounds
+/// are known (extractIndicatorRows).
+struct PendingIndicator {
+    Index row = -1;
+    Index col = -1;
+    bool active_value = true;
+};
+
+PendingIndicator readIndicatorLine(const Tokens& tokens, const StringMap& row_map,
+                                   const StringMap& col_map) {
+    if (tokens.n != 4 || tokens[0] != "IF") {
+        throw std::runtime_error("MPS: INDICATORS line must read 'IF row column value', not '" +
+                                 std::string(tokens[0]) + " ...'");
+    }
+    const auto row = row_map.find(tokens[1]);
+    if (row == row_map.end()) {
+        throw std::runtime_error("MPS: INDICATORS names unknown row '" + std::string(tokens[1]) +
+                                 "'");
+    }
+    if (row->second < 0) {
+        throw std::runtime_error("MPS: INDICATORS names free (N) row '" + std::string(tokens[1]) +
+                                 "'");
+    }
+    const Real value = parseReal(tokens[3]);
+    if (value != 0.0 && value != 1.0) {
+        throw std::runtime_error("MPS: INDICATORS value for row '" + std::string(tokens[1]) +
+                                 "' must be 0 or 1, not '" + std::string(tokens[3]) + "'");
+    }
+    return {row->second, existingColumn(col_map, tokens[2], "INDICATORS"), value == 1.0};
+}
+
+/// Move each indicator's row out of the linear rows into an indicator
+/// constraint carrying the row's coefficients and bounds. A ranged row cannot
+/// be one (CPLEX's rule), and a row can carry only one indicator.
+void extractIndicatorRows(LpProblem& prob, const std::vector<PendingIndicator>& pending,
+                          const std::vector<Real>& range_values) {
+    if (pending.empty()) {
+        return;
+    }
+    std::vector<char> is_indicator(static_cast<std::size_t>(prob.num_rows), 0);
+    for (const PendingIndicator& p : pending) {
+        const std::string& row_name = prob.row_names[p.row];
+        if (is_indicator[p.row] != 0) {
+            throw std::runtime_error("MPS: INDICATORS names row '" + row_name + "' twice");
+        }
+        if (range_values[p.row] != 0.0) {
+            throw std::runtime_error("MPS: INDICATORS row '" + row_name + "' is a ranged row");
+        }
+        is_indicator[p.row] = 1;
+        const SparseVectorView row = prob.matrix.row(p.row);
+        IndicatorConstraint& ic = prob.indicator_constraints.emplace_back();
+        ic.binary_var = p.col;
+        ic.active_value = p.active_value;
+        ic.indices.assign(row.indices.begin(), row.indices.end());
+        ic.values.assign(row.values.begin(), row.values.end());
+        ic.lower = prob.row_lower[p.row];
+        ic.upper = prob.row_upper[p.row];
+        ic.name = row_name;
+    }
+
+    std::vector<Real> values;
+    std::vector<Index> col_indices;
+    std::vector<Index> row_starts{0};
+    Index kept = 0;
+    for (Index i = 0; i < prob.num_rows; ++i) {
+        if (is_indicator[i] != 0) {
+            continue;
+        }
+        const SparseVectorView row = prob.matrix.row(i);
+        values.insert(values.end(), row.values.begin(), row.values.end());
+        col_indices.insert(col_indices.end(), row.indices.begin(), row.indices.end());
+        row_starts.push_back(static_cast<Index>(values.size()));
+        if (kept != i) {
+            prob.row_lower[kept] = prob.row_lower[i];
+            prob.row_upper[kept] = prob.row_upper[i];
+            prob.row_names[kept] = std::move(prob.row_names[i]);
+        }
+        ++kept;
+    }
+    prob.num_rows = kept;
+    prob.row_lower.resize(kept);
+    prob.row_upper.resize(kept);
+    prob.row_names.resize(kept);
+    prob.matrix = SparseMatrix(kept, prob.num_cols, std::move(values), std::move(col_indices),
+                               std::move(row_starts));
+}
 
 }  // namespace
 
@@ -627,7 +802,21 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
 
     bool in_integer_section = false;
     bool have_objective_row = false;
+    bool saw_mps_section = false;
+    std::string deferred_refusal;
     Section section = Section::None;
+
+    // OBJNAME picks the objective among the N rows; without it the first is.
+    // CPLEX puts it before ROWS, the only place it can still decide.
+    std::string obj_name;
+    auto setObjName = [&](std::string_view name) {
+        if (!row_map.empty()) {
+            throw std::runtime_error("MPS: OBJNAME '" + std::string(name) + "' comes after ROWS");
+        }
+        obj_name = std::string(name);
+    };
+
+    std::vector<PendingIndicator> pending_indicators;
 
     // Column name cache: MPS groups columns contiguously, so the same
     // column name repeats on consecutive lines.  Cache the last lookup.
@@ -687,17 +876,47 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
             // this really is an MPS file. NAME carries no model data, and
             // BOUNDS is a section keyword in CPLEX LP too -- counting either
             // would let a wrong-format file pass as MPS.
-            if (diag != nullptr && (section == Section::Rows || section == Section::Columns ||
-                                    section == Section::Rhs || section == Section::Ranges ||
-                                    section == Section::Endata)) {
-                diag->saw_format_section = true;
+            if (section == Section::Rows || section == Section::Columns ||
+                section == Section::Rhs || section == Section::Ranges ||
+                section == Section::Endata) {
+                saw_mps_section = true;
+                if (diag != nullptr) {
+                    diag->saw_format_section = true;
+                }
+            }
+            // An extension section this reader cannot read, or an unknown
+            // one, is refused by name (#254). Before any MPS-exclusive header
+            // the file may be another format altogether (CPLEX LP spells a
+            // section SOS too), where readModel's format error says more, so
+            // the refusal waits for the end and the section is skipped.
+            const bool extension = section == Section::Unsupported || section == Section::None ||
+                                   section == Section::Sos || section == Section::Indicators;
+            if (extension) {
+                const std::string word(tokens[0]);
+                std::string refusal =
+                    section == Section::Unsupported ? "MPS: section '" + word + "' is not supported"
+                    : section == Section::None      ? "MPS: unknown section '" + word + "'"
+                                               : "MPS: section '" + word + "' comes before ROWS";
+                if (saw_mps_section && section != Section::Sos && section != Section::Indicators) {
+                    throw std::runtime_error(refusal);
+                }
+                if (!saw_mps_section) {
+                    if (deferred_refusal.empty()) {
+                        deferred_refusal = std::move(refusal);
+                    }
+                    section = Section::Skipped;
+                }
             }
             if (section == Section::Name && tokens.n >= 2) {
                 prob.name = std::string(tokens[1]);
             }
-            // Free MPS may put the sense on the section line itself.
+            // Free MPS may put the sense on the section line itself, and the
+            // objective's name on the OBJNAME line.
             if (section == Section::ObjSense && tokens.n >= 2) {
                 prob.sense = parseObjSense(tokens[1]);
+            }
+            if (section == Section::ObjName && tokens.n >= 2) {
+                setObjName(tokens[1]);
             }
             if (section == Section::Endata) {
                 break;
@@ -715,6 +934,11 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                 break;
             }
 
+            case Section::ObjName: {
+                setObjName(tokens[0]);
+                break;
+            }
+
             case Section::Rows: {
                 if (tokens.n < 2) {
                     break;
@@ -722,9 +946,11 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                 char sense = tokens[0][0];
                 auto name = tokens[1];
                 if (sense == 'N') {
+                    const bool is_objective =
+                        obj_name.empty() ? !have_objective_row : name == obj_name;
                     row_map.emplace(std::string(name),
-                                    have_objective_row ? kDroppedFreeRow : kObjectiveRow);
-                    have_objective_row = true;
+                                    is_objective ? kObjectiveRow : kDroppedFreeRow);
+                    have_objective_row = have_objective_row || is_objective;
                 } else {
                     Index idx = prob.num_rows++;
                     row_map.emplace(std::string(name), idx);
@@ -741,8 +967,19 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                         in_integer_section = true;
                     } else if (tokens[2] == "'INTEND'") {
                         in_integer_section = false;
+                    } else {
+                        // CPLEX's 'SOSORG'/'SOSEND' form of SOS, and any
+                        // other marker, would otherwise be dropped (#254).
+                        throw std::runtime_error("MPS: marker " + std::string(tokens[2]) +
+                                                 " is not supported");
                     }
                     break;
+                }
+                // The SOS marker form may put S1 or S2 before the marker's
+                // name, which moves 'MARKER' one field on.
+                if (tokens.n >= 4 && tokens[2] == "'MARKER'") {
+                    throw std::runtime_error("MPS: marker " + std::string(tokens[3]) +
+                                             " is not supported");
                 }
 
                 if (tokens.n < 3) {
@@ -881,9 +1118,26 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                 break;
             }
 
+            case Section::Sos: {
+                readSosLine(tokens, col_map, prob.sos_constraints);
+                break;
+            }
+
+            case Section::Indicators: {
+                pending_indicators.push_back(readIndicatorLine(tokens, row_map, col_map));
+                break;
+            }
+
             default:
                 break;
         }
+    }
+
+    if (saw_mps_section && !deferred_refusal.empty()) {
+        throw std::runtime_error(deferred_refusal);
+    }
+    if (!obj_name.empty() && !have_objective_row) {
+        throw std::runtime_error("MPS: OBJNAME '" + obj_name + "' names no free (N) row");
     }
 
     // Build CSR via counting sort (#2 — replaces triplet sort).
@@ -1008,6 +1262,7 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
         }
     }
 
+    extractIndicatorRows(prob, pending_indicators, range_values);
     return prob;
 }
 

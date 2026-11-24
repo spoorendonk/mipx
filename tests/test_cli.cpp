@@ -23,6 +23,8 @@
 #include <string_view>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -151,6 +153,58 @@ TEST_CASE("CLI: a valid MPS instance is unaffected", "[cli][io]") {
     CHECK(run.exit_code == 0);
     CHECK(run.mentions("Status: Infeasible"));
     CHECK_FALSE(run.mentions("Error:"));
+}
+
+TEST_CASE("CLI: an MPS file's SOS sets reach the solver", "[cli][io]") {
+    // Issue #254. The columns are continuous, so the CLI took the LP path and
+    // reported 7 even once the reader kept the sets.
+    const auto run = runSolver("'" + testDataDir() + "/mps_sos.mps' --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Optimal"));
+    CHECK(run.mentions("Objective: 4.0000000000e+00"));
+}
+
+TEST_CASE("CLI: an MPS file's indicator constraints reach the solver", "[cli][io]") {
+    const auto run = runSolver("'" + testDataDir() + "/mps_indicators.mps' --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Optimal"));
+    CHECK(run.mentions("Objective: 1.7000000000e+01"));
+}
+
+TEST_CASE("CLI: --relax-integrality drops SOS and indicator constraints", "[cli][io]") {
+    // The LP relaxation keeps neither: 5 + 2 for the sets, 10 + 10 + 5 for
+    // the indicators.
+    const auto sos = runSolver("'" + testDataDir() + "/mps_sos.mps' --relax-integrality --quiet");
+    CHECK(sos.exit_code == 0);
+    CHECK(sos.mentions("Objective: 7.0000000000e+00"));
+    const auto ind =
+        runSolver("'" + testDataDir() + "/mps_indicators.mps' --relax-integrality --quiet");
+    CHECK(ind.exit_code == 0);
+    CHECK(ind.mentions("Objective: 2.5000000000e+01"));
+}
+
+TEST_CASE("CLI: an MPS file's OBJNAME picks the objective", "[cli][io]") {
+    const auto run = runSolver("'" + testDataDir() + "/mps_objname.mps' --quiet");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Objective: -4.0000000000e+00"));
+}
+
+TEST_CASE("CLI: an MPS section the reader cannot read is refused by name", "[cli][io]") {
+    for (const auto& [file, section] :
+         std::vector<std::pair<std::string, std::string>>{{"mps_quadobj.mps", "QUADOBJ"},
+                                                          {"mps_qmatrix.mps", "QMATRIX"},
+                                                          {"mps_qcmatrix.mps", "QCMATRIX"},
+                                                          {"mps_unknown_section.mps", "FROBNICATE"},
+                                                          {"mps_sos_marker.mps", "SOSORG"}}) {
+        INFO(file);
+        const auto run = runSolver("'" + testDataDir() + "/" + file + "' --quiet");
+        CHECK(run.exit_code != 0);
+        CHECK(run.mentions(section));
+        CHECK_FALSE(run.mentions("Status:"));
+    }
 }
 
 TEST_CASE("CLI: an LP that ends without an optimum reports no objective", "[cli]") {

@@ -181,9 +181,8 @@ TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") 
     // first token is a section keyword is a header. Read as headers, these
     // lines left a 0 x 0 model that solved to 0 (#267). A column named
     // BOUNDS, an RHS set named RHS and a bound set named BOUNDS are data
-    // (more tokens than a header); the
-    // SOS section (#254) and an unknown one (SCENARIOS) are still skipped,
-    // their lines not taken for bounds.
+    // (more tokens than a header). The SOS section's lines are read as SOS
+    // (#254), not taken for bounds, and a member alone on its line is data.
     const std::string path = testDataDir() + "/free_unindented.mps";
     {
         std::ofstream out(path);
@@ -206,8 +205,7 @@ TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") 
                "SOS\n"
                "S1 SOS s1 1\n"
                "c0 1\n"
-               "SCENARIOS\n"
-               "UP BND c1 9\n"
+               "c1\n"
                "ENDATA\n";
     }
     auto lp = readMps(path);
@@ -223,6 +221,9 @@ TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") 
     CHECK(lp.col_upper[0] == 2.5);
     CHECK(lp.col_upper[1] == kInf);
     CHECK(lp.matrix.coeff(1, 1) == 1.0);
+    REQUIRE(lp.sos_constraints.size() == 1);
+    CHECK(lp.sos_constraints[0].vars == std::vector<Index>{0, 1});
+    CHECK(lp.sos_constraints[0].weights == std::vector<Real>{1.0, 2.0});
 }
 
 TEST_CASE("MPS writer: round trip keeps every digit and a row named obj", "[io][mps]") {
@@ -374,6 +375,178 @@ TEST_CASE("MPS reader: only the first N row is the objective", "[io][mps]") {
     CHECK(lp.row_names[0] == "R1");
     CHECK(lp.row_lower[0] == 1.0);
     CHECK(lp.matrix.numNonzeros() == 2);
+}
+
+namespace {
+
+/// The message readMps throws for `file` in tests/data, or "" if it reads.
+std::string mpsReadError(const std::string& file) {
+    try {
+        (void)readMps(testDataDir() + "/" + file);
+    } catch (const std::runtime_error& e) {
+        return e.what();
+    }
+    return "";
+}
+
+}  // namespace
+
+TEST_CASE("MPS reader: the SOS section becomes SOS constraints", "[io][mps]") {
+    // Issue #254: the section was skipped, solving the model without its sets.
+    const auto lp = readMps(testDataDir() + "/mps_sos.mps");
+
+    REQUIRE(lp.num_cols == 6);
+    REQUIRE(lp.sos_constraints.size() == 2);
+    const auto& s1 = lp.sos_constraints[0];
+    CHECK(s1.type == LpProblem::SosConstraint::Type::Sos1);
+    CHECK(s1.name == "s1");
+    CHECK(s1.vars == std::vector<Index>{0, 1, 2});
+    CHECK(s1.weights == std::vector<Real>{1.0, 2.0, 3.0});
+    const auto& s2 = lp.sos_constraints[1];
+    CHECK(s2.type == LpProblem::SosConstraint::Type::Sos2);
+    CHECK(s2.name == "s2");
+    CHECK(s2.vars == std::vector<Index>{3, 4, 5});
+    // Unweighted members take their positions.
+    CHECK(s2.weights == std::vector<Real>{1.0, 2.0, 3.0});
+
+    const auto result = solveFeatureModel(lp);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-6));
+}
+
+TEST_CASE("MPS reader: an INDICATORS row becomes an indicator constraint", "[io][mps]") {
+    const auto lp = readMps(testDataDir() + "/mps_indicators.mps");
+
+    // Both rows are indicators, so none is left as a linear row.
+    CHECK(lp.num_rows == 0);
+    CHECK(lp.row_names.empty());
+    CHECK(lp.matrix.numNonzeros() == 0);
+    REQUIRE(lp.indicator_constraints.size() == 2);
+    const auto& rx = lp.indicator_constraints[0];
+    CHECK(rx.name == "RX");
+    CHECK(rx.binary_var == 2);
+    CHECK(rx.active_value);
+    CHECK(rx.indices == std::vector<Index>{0});
+    CHECK(rx.values == std::vector<Real>{1.0});
+    CHECK(rx.lower == -kInf);
+    CHECK(rx.upper == 2.0);
+    const auto& ry = lp.indicator_constraints[1];
+    CHECK(ry.name == "RY");
+    CHECK_FALSE(ry.active_value);
+    CHECK(ry.indices == std::vector<Index>{1});
+    CHECK(ry.upper == 3.0);
+
+    const auto result = solveFeatureModel(lp);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(17.0, 1e-6));
+}
+
+TEST_CASE("MPS reader: an indicator row leaves the other rows in place", "[io][mps]") {
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("mipx_indicator_middle_" + std::to_string(::getpid()) + ".mps"))
+                                 .string();
+    {
+        std::ofstream out(path);
+        out << "NAME IND\nROWS\n N OBJ\n G R0\n L RX\n E R2\nCOLUMNS\n"
+               " X OBJ 1 R0 1\n X RX 1 R2 2\n B OBJ 1 R2 1\n"
+               "RHS\n RHS R0 1 RX 5\n RHS R2 3\nBOUNDS\n UP BND X 10\n BV BND B\n"
+               "INDICATORS\n IF RX B 1\nENDATA\n";
+    }
+    const auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    REQUIRE(lp.num_rows == 2);
+    CHECK(lp.row_names == std::vector<std::string>{"R0", "R2"});
+    CHECK(lp.row_lower == std::vector<Real>{1.0, 3.0});
+    CHECK(lp.row_upper == std::vector<Real>{kInf, 3.0});
+    const auto r2 = lp.matrix.row(1);
+    CHECK(std::vector<Index>(r2.indices.begin(), r2.indices.end()) == std::vector<Index>{0, 1});
+    CHECK(std::vector<Real>(r2.values.begin(), r2.values.end()) == std::vector<Real>{2.0, 1.0});
+    REQUIRE(lp.indicator_constraints.size() == 1);
+    CHECK(lp.indicator_constraints[0].upper == 5.0);
+}
+
+TEST_CASE("MPS reader: OBJNAME picks the objective among the free rows", "[io][mps]") {
+    const auto lp = readMps(testDataDir() + "/mps_objname.mps");
+
+    CHECK(lp.obj == std::vector<Real>{-1.0});
+    REQUIRE(lp.num_rows == 1);
+    CHECK(lp.row_names[0] == "CAP");
+}
+
+TEST_CASE("MPS reader: a section it cannot read is refused by name", "[io][mps]") {
+    // Issue #254: these were skipped, solving the linear part as the model.
+    for (const auto& [file, section] :
+         std::vector<std::pair<std::string, std::string>>{{"mps_quadobj.mps", "QUADOBJ"},
+                                                          {"mps_qmatrix.mps", "QMATRIX"},
+                                                          {"mps_qcmatrix.mps", "QCMATRIX"},
+                                                          {"mps_unknown_section.mps", "FROBNICATE"},
+                                                          {"mps_sos_marker.mps", "'SOSORG'"}}) {
+        INFO(file);
+        const std::string error = mpsReadError(file);
+        CHECK(error.find(section) != std::string::npos);
+    }
+}
+
+TEST_CASE("MPS reader: malformed SOS, INDICATORS and OBJNAME data is refused", "[io][mps]") {
+    const auto refusal = [](const std::string& content) {
+        const std::string path = (std::filesystem::temp_directory_path() /
+                                  ("mipx_bad_extension_" + std::to_string(::getpid()) + ".mps"))
+                                     .string();
+        {
+            std::ofstream out(path, std::ios::trunc);
+            out << content;
+        }
+        std::string error;
+        try {
+            (void)readMps(path);
+        } catch (const std::runtime_error& e) {
+            error = e.what();
+        }
+        std::filesystem::remove(path);
+        return error;
+    };
+    const std::string head =
+        "NAME BAD\nROWS\n N OBJ\n L R1\n L R2\nCOLUMNS\n X OBJ 1 R1 1\n B R2 1\n"
+        "RHS\n RHS R1 1\nRANGES\n RNG R2 4\nBOUNDS\n BV BND B\n";
+    for (const auto& [body, expected] : std::vector<std::pair<std::string, std::string>>{
+             {"SOS\n X 1\n", "before any S1 or S2"},
+             {"SOS\n S1 s\n NOPE 1\n", "unknown column 'NOPE'"},
+             {"INDICATORS\n IF R1 B 2\n", "must be 0 or 1"},
+             {"INDICATORS\n IF NOPE B 1\n", "unknown row 'NOPE'"},
+             {"INDICATORS\n IF OBJ B 1\n", "free (N) row 'OBJ'"},
+             {"INDICATORS\n IF R1 NOPE 1\n", "unknown column 'NOPE'"},
+             {"INDICATORS\n IF R1 B\n", "IF row column value"},
+             {"INDICATORS\n IF R1 B 1\n IF R1 B 0\n", "names row 'R1' twice"},
+             {"INDICATORS\n IF R2 B 1\n", "ranged row"}}) {
+        INFO(body);
+        CHECK(refusal(head + body + "ENDATA\n").find(expected) != std::string::npos);
+    }
+
+    CHECK(refusal("NAME B\nOBJNAME NOPE\nROWS\n N OBJ\nCOLUMNS\n X OBJ 1\nENDATA\n")
+              .find("names no free (N) row") != std::string::npos);
+    CHECK(refusal("NAME B\nROWS\n N OBJ\nOBJNAME OBJ\nCOLUMNS\n X OBJ 1\nENDATA\n")
+              .find("comes after ROWS") != std::string::npos);
+    // An extension section before ROWS is refused at the end of an MPS file.
+    CHECK(refusal("NAME B\nQUADOBJ\n X X 1\nROWS\n N OBJ\nCOLUMNS\n X OBJ 1\nENDATA\n")
+              .find("'QUADOBJ'") != std::string::npos);
+}
+
+TEST_CASE("MPS reader: LAZYCONS with a level and OBJSEN are headers", "[io][mps]") {
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("mipx_lazycons_" + std::to_string(::getpid()) + ".mps"))
+                                 .string();
+    {
+        std::ofstream out(path);
+        out << "NAME LAZY\nOBJSEN\n    MAX\nROWS\n N OBJ\n L R1\nLAZYCONS 1\n L R2\n"
+               "COLUMNS\n X OBJ 1 R1 1\n X R2 1\nRHS\n RHS R1 4 R2 3\nENDATA\n";
+    }
+    const auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    CHECK(lp.sense == Sense::Maximize);
+    CHECK(lp.row_names == std::vector<std::string>{"R1", "R2"});
+    CHECK(lp.row_upper == std::vector<Real>{4.0, 3.0});
 }
 
 TEST_CASE("LP reader: tiny.lp", "[io][lp]") {
