@@ -198,7 +198,8 @@ TEST_CASE("Barrier auto compares sparse factors after dense-column splitting",
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
 }
 
-TEST_CASE("Barrier auto avoids a cheaper dense factor above the cap", "[barrier][dualize]") {
+TEST_CASE("Barrier auto avoids a cheaper factor above the cap", "[barrier][dualize]") {
+    const bool sparse = GENERATE(false, true);
     LpProblem lp;
     lp.num_cols = 1;
     lp.col_lower = {0.0};
@@ -211,12 +212,15 @@ TEST_CASE("Barrier auto avoids a cheaper dense factor above the cap", "[barrier]
     lp.matrix = SparseMatrix(2, 1, {{0, 0, 1.0}, {1, 0, 1.0}});
 
     auto opts = dualOptions();
+    if (sparse) {
+        opts.algorithm = BarrierAlgorithm::CpuSparseCholesky;
+    }
     opts.dualize = BarrierDualize::Auto;
     BarrierSolver solver;
     solver.setOptions(opts);
     solver.load(lp);
     REQUIRE_FALSE(solver.usedDualization());
-    opts.ne_max_bytes = 16;
+    opts.ne_max_bytes = sparse ? 100 : 16;
     solver.setOptions(opts);
     CHECK(solver.usedDualization());
     const auto result = solver.solve();

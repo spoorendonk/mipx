@@ -1724,15 +1724,36 @@ double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions
             computeAugPattern(matrix, m, n, starts, indices);
         } else {
             computeNePattern(matrix, peeled, starts, indices);
-            if (peel_dense_columns && options.ne_max_bytes != 0 &&
-                sparseNeMatrixBytes(indices.size(), m) >= options.ne_max_bytes) {
-                return kInf;  // M alone leaves no room for the factor.
-            }
         }
-        SymbolicFact symbolic;
-        symbolicAnalyze(static_cast<Index>(dim), starts, indices, symbolic, options.ordering);
-        for (std::size_t j = 0; j < dim; ++j) {
-            countColumn(1.0 + symbolic.l_col_ptr[j + 1] - symbolic.l_col_ptr[j]);
+        if (peel_dense_columns && options.ne_max_bytes != 0) {
+            const auto matrix_bytes = sparseNeMatrixBytes(indices.size(), m);
+            if (matrix_bytes >= options.ne_max_bytes) {
+                return kInf;
+            }
+            // In a bounded-size trial, use the backend's actual supernode
+            // layout to count the factor and its storage against the cap.
+            BarrierOrdering ordering = options.ordering;
+            if (ordering == BarrierOrdering::Auto || ordering == BarrierOrdering::CuDSS) {
+                ordering = autoSelectOrdering(m, starts[m]);
+            }
+            std::vector<Index> perm;
+            std::vector<Index> iperm;
+            const bool ordered = ordering == BarrierOrdering::Nd
+                                     ? computeNd(m, starts, indices, perm, iperm)
+                                     : amdOrder(m, starts, indices, perm, iperm);
+            SparseCholesky factor;
+            if (!ordered ||
+                !factor.analyze(m, starts, indices, perm, options.ne_max_bytes - matrix_bytes)) {
+                return kInf;
+            }
+            factor_entries = static_cast<double>(factor.stats().nnz_l);
+            factor_work = factor.stats().factor_flops;
+        } else {
+            SymbolicFact symbolic;
+            symbolicAnalyze(static_cast<Index>(dim), starts, indices, symbolic, options.ordering);
+            for (std::size_t j = 0; j < dim; ++j) {
+                countColumn(1.0 + symbolic.l_col_ptr[j + 1] - symbolic.l_col_ptr[j]);
+            }
         }
     } else if (augmented) {
         for (Index i = 0; i < m; ++i) {
