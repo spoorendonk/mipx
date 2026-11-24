@@ -1092,6 +1092,11 @@ LpResult PdlpSolver::solve() {
     std::vector<Real> ax(static_cast<size_t>(m), 0.0);
     std::vector<Real> delta_y_vec(static_cast<size_t>(m), 0.0);
     std::vector<Real> at_delta_y(static_cast<size_t>(n), 0.0);
+    auto fixedPointError = [&] {
+        return pdlpFixedPointResidual(scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y,
+                                      tau_base_, sigma_base_, primal_weight,
+                                      std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
+    };
 
     // Previous A*reflected_x for the adaptive step size.
     std::vector<Real> prev_a_xrefl;
@@ -1265,17 +1270,15 @@ LpResult PdlpSolver::solve() {
                 reflected_y[i] = 2.0 * pdhg_yi - current_y[i];
                 current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
             }
+            // The first projected step measures the residual at the epoch anchor.
+            if (initial_fpe < 0.0)
+                initial_fpe = fixedPointError();
         }
         inner_count += batch;
         total_count += batch;
 
         // --- Fixed-point residual ‖z − T(z)‖_P for the restart decision ---
-        Real fpe = pdlpFixedPointResidual(scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y,
-                                          tau_base_, sigma_base_, primal_weight,
-                                          std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
-
-        if (initial_fpe < 0.0)
-            initial_fpe = fpe;
+        Real fpe = fixedPointError();
 
         // --- Convergence check on pdhg_x, pdhg_y ---
         scaled_a_.multiply(pdhg_x, ax);
@@ -1557,7 +1560,7 @@ LpResult PdlpSolver::solve() {
                 }
             }
             inner_count = 0;
-            initial_fpe = -1.0;  // Will be set on next batch.
+            initial_fpe = -1.0;
             last_trial_fpe = std::numeric_limits<Real>::infinity();
             have_prev_iterate = false;  // Reset adaptive state on restart.
         }
@@ -1694,17 +1697,15 @@ LpResult PdlpSolver::solve() {
                         reflected_y[i] = 2.0 * pdhg_yi - current_y[i];
                         current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
                     }
+                    if (initial_fpe < 0.0)
+                        initial_fpe = fixedPointError();
                 }
                 inner_count += batch;
                 polish_count += batch;
                 total_count += batch;
 
                 // Fixed-point residual ‖z − T(z)‖_P, as in the main loop.
-                Real fpe = pdlpFixedPointResidual(
-                    scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y, tau_base_, sigma_base_,
-                    primal_weight, std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
-                if (initial_fpe < 0.0)
-                    initial_fpe = fpe;
+                Real fpe = fixedPointError();
 
                 // Convergence check with polish tolerances.
                 scaled_a_.multiply(pdhg_x, ax);
@@ -2289,9 +2290,8 @@ LpResult PdlpSolver::solveGpu() {
     cudaGraphExec_t graphExec = nullptr;
     bool graphCaptureFailed = false;
 
-    // Helper: launch one batch of N inner iterations (no graph).
-    auto launchBatch = [&](Int batch) {
-        for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+    auto launchSteps = [&](Int first_offset, Int last_offset) {
+        for (Int k_offset = first_offset; k_offset <= last_offset; ++k_offset) {
             launchComputeLambda(d_lambda, d_inner_count, k_offset, stream);
             if (!spmv_at(desc_current_y, desc_at_y))
                 return false;
@@ -2305,6 +2305,73 @@ LpResult PdlpSolver::solveGpu() {
                                   d_row_upper, d_row_constraint_type, stream);
         }
         return true;
+    };
+
+    auto computeProjectedMetrics = [&] {
+        if (!spmv_a(desc_pdhg_x, desc_ax))
+            return false;
+        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
+        if (!spmv_at(desc_delta_y, desc_at_delta_y) || !spmv_at(desc_pdhg_y, desc_at_y))
+            return false;
+
+        launchZeroMetrics(d_metrics, stream);
+        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
+                                    d_col_lower, d_col_upper, d_finite_col_lower,
+                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
+                                    d_tau_base, primal_weight, d_metrics, stream);
+        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
+                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
+                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
+                                    stream);
+        if (cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+            return false;
+        return cudaStreamSynchronize(stream) == cudaSuccess;
+    };
+
+    auto fixedPointError = [&] {
+        return pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross,
+                         std::min(step, fpe_step_cap));
+    };
+
+    // Step one runs outside the graph so it can supply the epoch's anchor
+    // residual before the remaining steps overwrite its projected point.
+    auto beginBatch = [&] {
+        if (cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
+                            stream) != cudaSuccess)
+            return false;
+        if (!launchSteps(1, 1))
+            return false;
+        if (initial_fpe < 0.0) {
+            if (!computeProjectedMetrics())
+                return false;
+            initial_fpe = fixedPointError();
+        }
+        return true;
+    };
+
+    auto launchBatchTail = [&](Int batch) {
+        if (batch != N || batch == 1 || graphCaptureFailed)
+            return launchSteps(2, batch);
+        if (graphExec)
+            return cudaGraphLaunch(graphExec, stream) == cudaSuccess;
+        if (cudaStreamSynchronize(stream) != cudaSuccess)
+            return false;
+
+        if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) == cudaSuccess) {
+            const bool captured_steps = launchSteps(2, batch);
+            const auto result = cudaStreamEndCapture(stream, &graph);
+            if (captured_steps && result == cudaSuccess && graph &&
+                cudaGraphInstantiate(&graphExec, graph, 0) == cudaSuccess) {
+                return cudaGraphLaunch(graphExec, stream) == cudaSuccess;
+            }
+        }
+
+        // No graph was launched. Run the tail directly once and keep this
+        // mode for the rest of the solve.
+        graphCaptureFailed = true;
+        cudaGetLastError();
+        return launchSteps(2, batch);
     };
 
     if (power_iter_spmv_failed) {
@@ -2329,55 +2396,9 @@ LpResult PdlpSolver::solveGpu() {
 
         {
             Int batch = std::min(N, options_.max_iter - total_count);
-
-            if (batch == N && !graphCaptureFailed) {
-                if (graphExec == nullptr) {
-                    // First full batch: capture the graph.
-                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaStreamSynchronize(stream);
-                    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-                    if (!launchBatch(batch)) {
-                        // Ensure the stream exits capture mode on early failure.
-                        cudaStreamEndCapture(stream, &graph);
-                        failGpuSolve(total_count);
-                        goto cleanup;
-                    }
-                    cudaStreamEndCapture(stream, &graph);
-                    if (graph == nullptr) {
-                        // Graph capture failed permanently — fall back to
-                        // non-graph launches for remainder of solve. Clear
-                        // the capture's error, or the check after the loop
-                        // takes it for a failed kernel.
-                        graphCaptureFailed = true;
-                        cudaGetLastError();
-                        cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                        cudaMemcpyHostToDevice, stream);
-                        if (!launchBatch(batch)) {
-                            failGpuSolve(total_count);
-                            goto cleanup;
-                        }
-                    } else {
-                        cudaGraphInstantiate(&graphExec, graph, 0);
-                        // Execute the captured graph for this first batch.
-                        cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                        cudaMemcpyHostToDevice, stream);
-                        cudaGraphLaunch(graphExec, stream);
-                    }
-                } else {
-                    // Subsequent full batches: update d_inner_count and replay.
-                    cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                    cudaMemcpyHostToDevice, stream);
-                    cudaGraphLaunch(graphExec, stream);
-                }
-            } else {
-                // Last partial batch: fall back to non-graph launches.
-                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
-                                stream);
-                if (!launchBatch(batch)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
+            if (!beginBatch() || !launchBatchTail(batch)) {
+                failGpuSolve(total_count);
+                goto cleanup;
             }
 
             inner_count += batch;
@@ -2385,38 +2406,10 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         // --- Convergence check ---
-        // Compute A * pdhg_x, delta_y = reflected_y - pdhg_y (the dual part of
-        // z - T(z), #251), A^T * delta_y, then refresh A^T * pdhg_y.
-        if (!spmv_a(desc_pdhg_x, desc_ax)) {
+        if (!computeProjectedMetrics()) {
             failGpuSolve(total_count);
             goto cleanup;
         }
-        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        // Refresh A^T * pdhg_y immediately before convergence reduction.
-        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-
-        // Fused reduction.
-        launchZeroMetrics(d_metrics, stream);
-        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
-                                    d_col_lower, d_col_upper, d_finite_col_lower,
-                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    d_tau_base, primal_weight, d_metrics, stream);
-        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
-                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
-                                    stream);
-
-        // Transfer metrics to host.
-        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
 
         // Host-side convergence computation.
         Real abs_primal_resid = std::sqrt(h_metrics->primal_resid_sq);
@@ -2439,11 +2432,7 @@ LpResult PdlpSolver::solveGpu() {
                     obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row) * obj_unscale;
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
-        Real fpe =
-            pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross, std::min(step, fpe_step_cap));
-
-        if (initial_fpe < 0.0)
-            initial_fpe = fpe;
+        Real fpe = fixedPointError();
 
         if (options_.verbose && (total_count <= N || total_count % (10 * N) == 0)) {
             Real pobj_log = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
@@ -2672,32 +2661,10 @@ LpResult PdlpSolver::solveGpu() {
     if (converged && options_.enable_polishing &&
         !timeLimitReached(t0, options_.max_solve_seconds)) {
         // Evaluate current residuals on host via the metrics struct.
-        if (!spmv_a(desc_pdhg_x, desc_ax)) {
+        if (!computeProjectedMetrics()) {
             failGpuSolve(total_count);
             goto cleanup;
         }
-        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-
-        launchZeroMetrics(d_metrics, stream);
-        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
-                                    d_col_lower, d_col_upper, d_finite_col_lower,
-                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    d_tau_base, primal_weight, d_metrics, stream);
-        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
-                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
-                                    stream);
-        cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
-                        stream);
-        cudaStreamSynchronize(stream);
 
         Real rp_gpu = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                           ? h_metrics->primal_resid_max / (1.0 + bound_norm)
@@ -2752,10 +2719,8 @@ LpResult PdlpSolver::solveGpu() {
 
                 Int batch = std::min(N, options_.polish_max_iter - polish_count);
 
-                cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
-                                stream);
-                if (!launchBatch(batch)) {
-                    failGpuSolve(total_count + polish_count);
+                if (!beginBatch() || !launchSteps(2, batch)) {
+                    failGpuSolve(total_count);
                     goto cleanup;
                 }
 
@@ -2764,32 +2729,10 @@ LpResult PdlpSolver::solveGpu() {
                 total_count += batch;
 
                 // Convergence check.
-                if (!spmv_a(desc_pdhg_x, desc_ax)) {
+                if (!computeProjectedMetrics()) {
                     failGpuSolve(total_count);
                     goto cleanup;
                 }
-                launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-                if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
-                if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
-
-                launchZeroMetrics(d_metrics, stream);
-                launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled,
-                                            d_at_y, d_col_lower, d_col_upper, d_finite_col_lower,
-                                            d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                            d_tau_base, primal_weight, d_metrics, stream);
-                launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax,
-                                            d_row_lower, d_row_upper, d_finite_row_lower,
-                                            d_finite_row_upper, d_primal_resid_scale, d_sigma_base,
-                                            primal_weight, d_metrics, stream);
-                cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
-                                cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
 
                 Real rp_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                                   ? h_metrics->primal_resid_max / (1.0 + bound_norm)
@@ -2802,10 +2745,7 @@ LpResult PdlpSolver::solveGpu() {
                     std::sqrt(h_metrics->primal_resid_sq) / (1.0 + bound_norm);
                 Real rel_dual_resid_pol = std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
 
-                Real fpe = pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross,
-                                     std::min(step, fpe_step_cap));
-                if (initial_fpe < 0.0)
-                    initial_fpe = fpe;
+                Real fpe = fixedPointError();
 
                 if (options_.verbose && polish_count % (10 * N) == 0) {
                     std::printf(

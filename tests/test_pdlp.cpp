@@ -111,6 +111,60 @@ TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     CHECK(x[0] + x[1] <= 4.0 + 1e-3);
 }
 
+namespace {
+
+void checkFirstStepRestart(bool use_gpu) {
+    LpProblem lp;
+    lp.num_rows = 2;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {-10.0, -10.0};
+    lp.col_upper = {10.0, 10.0};
+    lp.row_lower = {0.0, 1.0};
+    lp.row_upper = lp.row_lower;
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {1, 1, 0.4}});
+
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = use_gpu;
+    opts.gpu_min_rows = 0;
+    opts.gpu_min_nnz = 0;
+    opts.do_ruiz_scaling = false;
+    opts.do_pock_chambolle_scaling = false;
+    opts.do_bound_obj_rescaling = false;
+    opts.update_primal_weight = false;
+    opts.enable_polishing = false;
+    opts.restart_necessary_decay = 0.0;
+    opts.restart_artificial_fraction = 1.0;
+    opts.termination_eval_frequency = 7;
+    opts.max_iter = 21;
+    opts.primal_tol = opts.dual_tol = opts.optimality_tol = 0.015;
+
+    // At iteration 14 the residual is about 9.4% of the one at iteration 8,
+    // triggering a restart. A baseline taken at 14 misses that restart and
+    // exhausts the iteration limit.
+    PdlpSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(solver.usedGpu() == use_gpu);
+    CHECK(result.iterations == 21);
+}
+
+}  // namespace
+
+TEST_CASE("PdlpSolver: restart decay is measured from the first step of the epoch", "[pdlp]") {
+    checkFirstStepRestart(false);
+}
+
+TEST_CASE("PdlpSolver: GPU restart decay is measured from the first step", "[pdlp][gpu]") {
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
+    }
+    checkFirstStepRestart(true);
+}
+
 TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {
     auto lp = buildBoundsOnlyLp();
 
