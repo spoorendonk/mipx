@@ -49,8 +49,11 @@ you mean the list to hold at that limit. Review the diff before committing it: a
 regression, and `disagree` is a bug to file, not a class to accept.
 
 The lists currently cover the instances the unit tests already gate: dual
-simplex on nine Netlib LPs, and barrier and PDLP on a four-instance smoke subset
-(barrier is `dnf` throughout, see #204). PDLP also runs forplan, greenbeb and
+simplex on nine Netlib LPs, and barrier and PDLP on a four-instance smoke subset.
+The barrier matches to 1e-6 on all four since #204, so a barrier that stops
+converging on one fails the gate (#256). Those rows were observed on the CPU
+barrier: the `lp` suite passes no `--no-gpu`, so a CUDA build runs the GPU
+barrier there, which no run has checked against them yet. PDLP also runs forplan, greenbeb and
 bnl2, which it once reported Optimal up to 7.7% from the optimum (#205): `dnf`
 is expected there, and the gate fails if they disagree again. The MIP list covers flugpl, gen, gt2
 and p0201. gt2 is `dnf`: the tree search has not finished it since #278
