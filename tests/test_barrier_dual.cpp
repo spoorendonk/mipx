@@ -154,11 +154,12 @@ TEST_CASE("Barrier auto dualization can solve a tall LP within the dense factor 
     CHECK_THAT(result.objective, WithinAbs(2.0, 1e-6));
 }
 
-TEST_CASE("Barrier auto keeps the sparser primal factor even with more rows than columns",
+TEST_CASE("Barrier auto compares sparse factors after dense-column splitting",
           "[barrier][dualize]") {
+    const bool split_columns = GENERATE(false, true);
     LpProblem lp;
-    lp.num_cols = 24;
-    lp.num_rows = 30;
+    lp.num_cols = split_columns ? 64 : 24;
+    lp.num_rows = 2 * lp.num_cols + 1;
     lp.col_lower.assign(lp.num_cols, 0.0);
     lp.col_upper.assign(lp.num_cols, kInf);
     lp.col_type.assign(lp.num_cols, VarType::Continuous);
@@ -179,10 +180,45 @@ TEST_CASE("Barrier auto keeps the sparser primal factor even with more rows than
     auto opts = dualOptions();
     opts.algorithm = BarrierAlgorithm::CpuSparseCholesky;
     opts.dualize = BarrierDualize::Auto;
+    if (split_columns) {
+        // The primal matrix alone exceeds the cap. Peeling the dual's
+        // one dense column lets its diagonal sparse factor fit.
+        opts.ne_max_bytes = 5000;
+    } else {
+        // Without the split, the wide sum row makes the dual factor dense.
+        opts.ne_max_dense_cols = 0;
+    }
     BarrierSolver solver;
     solver.setOptions(opts);
     solver.load(lp);
-    CHECK_FALSE(solver.usedDualization());
+    CHECK(solver.usedDualization() == split_columns);
+    const auto result = solver.solve();
+    INFO(solver.lastError());
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+}
+
+TEST_CASE("Barrier auto avoids a cheaper dense factor above the cap", "[barrier][dualize]") {
+    LpProblem lp;
+    lp.num_cols = 1;
+    lp.col_lower = {0.0};
+    lp.col_upper = {kInf};
+    lp.obj = {1.0};
+    lp.col_type = {VarType::Continuous};
+    lp.num_rows = 2;
+    lp.row_lower = {1.0, 1.0};
+    lp.row_upper = lp.row_lower;
+    lp.matrix = SparseMatrix(2, 1, {{0, 0, 1.0}, {1, 0, 1.0}});
+
+    auto opts = dualOptions();
+    opts.dualize = BarrierDualize::Auto;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    REQUIRE_FALSE(solver.usedDualization());
+    opts.ne_max_bytes = 16;
+    solver.setOptions(opts);
+    CHECK(solver.usedDualization());
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
@@ -222,6 +258,7 @@ TEST_CASE("Barrier dualized HSD reports infeasibility and unboundedness in prima
     lp.col_upper = {kInf, kInf};
     lp.col_type.assign(lp.num_cols, VarType::Continuous);
     Status expected = Status::Infeasible;
+    auto opts = dualOptions();
     SECTION("Primal infeasible") {
         lp.obj = {1.0, 1.0};
         lp.num_rows = 2;
@@ -244,7 +281,16 @@ TEST_CASE("Barrier dualized HSD reports infeasibility and unboundedness in prima
         lp.row_upper = {kInf, kInf};
         lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {0, 1, -1.0}, {1, 0, -1.0}, {1, 1, 1.0}});
     }
-    auto opts = dualOptions();
+    SECTION("The unboundedness probe also needs the compact factor") {
+        lp.col_lower[1] = -kInf;
+        lp.obj = {0.0, -1.0};
+        lp.num_rows = 3;
+        lp.row_lower = {1.0, 1.0, 1.0};
+        lp.row_upper = {kInf, kInf, kInf};
+        lp.matrix = SparseMatrix(3, 2, {{0, 0, 1.0}, {1, 0, 1.0}, {2, 0, 1.0}});
+        opts.ne_max_bytes = 32;
+        expected = Status::Unbounded;
+    }
     opts.homogeneous = true;
     BarrierSolver solver;
     solver.setOptions(opts);

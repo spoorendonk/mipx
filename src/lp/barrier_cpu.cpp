@@ -479,6 +479,77 @@ static void computeAugPattern(const SparseMatrix& A, Index m, Index n,
     }
 }
 
+std::vector<Index> selectDenseNeColumns(const SparseMatrix& matrix, const BarrierOptions& opts) {
+    std::vector<Index> dense;
+    if (opts.ne_max_dense_cols <= 0) {
+        return dense;
+    }
+    const auto threshold = std::max<Index>(
+        16, static_cast<Index>(opts.dense_col_fraction * static_cast<Real>(matrix.numRows())));
+    for (Index j = 0; j < matrix.numCols(); ++j) {
+        if (matrix.col(j).size() > threshold) {
+            dense.push_back(j);
+        }
+    }
+    std::stable_sort(dense.begin(), dense.end(),
+                     [&](Index a, Index b) { return matrix.col(a).size() > matrix.col(b).size(); });
+    if (dense.size() > static_cast<size_t>(opts.ne_max_dense_cols)) {
+        dense.resize(static_cast<size_t>(opts.ne_max_dense_cols));
+    }
+    std::sort(dense.begin(), dense.end());
+    return dense;
+}
+
+enum class NePatternStatus { Ready, Interrupted, TooLarge };
+
+// Column k of the lower-triangular pattern lists k and the later rows that
+// share a retained column of A with it.
+NePatternStatus computeNePattern(const SparseMatrix& matrix, std::span<const char> dense,
+                                 std::vector<Index>& starts, std::vector<Index>& indices,
+                                 const Deadline& deadline = {}) {
+    const Index m = matrix.numRows();
+    starts.assign(static_cast<size_t>(m) + 1, 0);
+    indices.clear();
+    std::vector<Index> mark(static_cast<size_t>(m), -1);
+    // Check by work done: a single row may touch many long columns.
+    constexpr std::size_t kCheckEvery = std::size_t{1} << 20;
+    std::size_t work = 0;
+    for (Index k = 0; k < m; ++k) {
+        if (work >= kCheckEvery) {
+            work = 0;
+            if (deadline.passed()) {
+                return NePatternStatus::Interrupted;
+            }
+        }
+        mark[k] = k;
+        indices.push_back(k);
+        const auto row = matrix.row(k);
+        work += static_cast<std::size_t>(row.size()) + 1;
+        for (const Index j : row.indices) {
+            if (dense[j] != 0) {
+                continue;
+            }
+            const auto column = matrix.col(j);
+            work += static_cast<std::size_t>(column.size());
+            for (const Index i : column.indices) {
+                if (i > k && mark[i] != k) {
+                    mark[i] = k;
+                    indices.push_back(i);
+                }
+            }
+        }
+        if (indices.size() > static_cast<std::size_t>(std::numeric_limits<Index>::max())) {
+            return NePatternStatus::TooLarge;
+        }
+        starts[k + 1] = static_cast<Index>(indices.size());
+    }
+    return NePatternStatus::Ready;
+}
+
+std::size_t sparseNeMatrixBytes(std::size_t entries, Index rows) {
+    return (entries + static_cast<std::size_t>(rows)) * (sizeof(Index) + sizeof(Real));
+}
+
 // ============================================================================
 // Forward / backward solves
 // ============================================================================
@@ -982,24 +1053,8 @@ private:
     static constexpr Real kShiftTol = 1e-6;
 
     void findDenseColumns(const BarrierOptions& opts) {
-        dense_cols_.clear();
+        dense_cols_ = selectDenseNeColumns(*a_, opts);
         is_dense_.assign(static_cast<size_t>(n_), 0);
-        if (opts.ne_max_dense_cols <= 0) {
-            return;
-        }
-        const auto thresh = std::max<Index>(
-            16, static_cast<Index>(opts.dense_col_fraction * static_cast<Real>(m_)));
-        for (Index j = 0; j < n_; ++j) {
-            if (a_->col(j).size() > thresh) {
-                dense_cols_.push_back(j);
-            }
-        }
-        std::stable_sort(dense_cols_.begin(), dense_cols_.end(),
-                         [&](Index a, Index b) { return a_->col(a).size() > a_->col(b).size(); });
-        if (dense_cols_.size() > static_cast<size_t>(opts.ne_max_dense_cols)) {
-            dense_cols_.resize(static_cast<size_t>(opts.ne_max_dense_cols));
-        }
-        std::sort(dense_cols_.begin(), dense_cols_.end());
         for (const Index j : dense_cols_) {
             is_dense_[j] = 1;
         }
@@ -1017,11 +1072,6 @@ private:
         analyzed_ = false;
         const BarrierOptions& opts = opts_;
         const Index m = m_;
-        // Pattern of M_s, each pair once: column k of the pattern lists k and
-        // the rows i > k sharing a sparse column of A with row k.
-        ne_ptr_.assign(static_cast<size_t>(m) + 1, 0);
-        ne_idx_.clear();
-        std::vector<Index> mark(static_cast<size_t>(m), -1);
         // The pattern, the ordering and the analysis all check the deadline
         // (#347): on a large LP each takes seconds.
         auto timedOut = [&] {
@@ -1032,40 +1082,15 @@ private:
                                          : "time limit reached in the normal-equations analysis";
             return true;
         };
-        // Checked by work done, not by rows: a row costs the lengths of its
-        // columns, which can be thousands each.
-        constexpr std::size_t kCheckEvery = std::size_t{1} << 20;
-        std::size_t work = 0;
-        for (Index k = 0; k < m; ++k) {
-            if (work >= kCheckEvery) {
-                work = 0;
-                if (timedOut()) {
-                    return false;
-                }
-            }
-            mark[k] = k;
-            ne_idx_.push_back(k);
-            const auto rk = a_->row(k);
-            work += static_cast<std::size_t>(rk.size()) + 1;
-            for (Index q = 0; q < rk.size(); ++q) {
-                if (is_dense_[rk.indices[q]] != 0) {
-                    continue;
-                }
-                const auto cj = a_->col(rk.indices[q]);
-                work += static_cast<std::size_t>(cj.size());
-                for (Index p = 0; p < cj.size(); ++p) {
-                    const Index i = cj.indices[p];
-                    if (i > k && mark[i] != k) {
-                        mark[i] = k;
-                        ne_idx_.push_back(i);
-                    }
-                }
-            }
-            if (ne_idx_.size() > static_cast<std::size_t>(std::numeric_limits<Index>::max())) {
+        switch (computeNePattern(*a_, is_dense_, ne_ptr_, ne_idx_, deadline_)) {
+            case NePatternStatus::Interrupted:
+                timedOut();
+                return false;
+            case NePatternStatus::TooLarge:
                 error_ = "normal-equations pattern has more than 2^31 entries";
                 return false;
-            }
-            ne_ptr_[k + 1] = static_cast<Index>(ne_idx_.size());
+            case NePatternStatus::Ready:
+                break;
         }
 
         BarrierOrdering ordering = opts.ordering;
@@ -1092,9 +1117,7 @@ private:
         // alone fill it, so analyze refuses rather than reading 0 as no cap.
         std::size_t cap = factorMemoryCap(opts);
         if (cap != 0) {
-            const std::size_t ne_bytes =
-                ne_idx_.size() * (sizeof(Index) + sizeof(Real)) +
-                static_cast<std::size_t>(m) * (sizeof(Index) + sizeof(Real));
+            const std::size_t ne_bytes = sparseNeMatrixBytes(ne_idx_.size(), m);
             cap = cap > ne_bytes ? cap - ne_bytes : 1;
         }
         const bool analyzed = chol_.analyze(m, ne_ptr_, ne_idx_, perm, cap, deadline_);
@@ -1663,6 +1686,84 @@ private:
 // ============================================================================
 // Factory functions
 // ============================================================================
+
+double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions& options,
+                                bool augmented, bool peel_dense_columns) {
+    const Index m = matrix.numRows();
+    const Index n = matrix.numCols();
+    const auto dim = static_cast<std::size_t>(m) + (augmented ? n : 0);
+    const auto dense =
+        peel_dense_columns ? selectDenseNeColumns(matrix, options) : std::vector<Index>{};
+    std::vector<char> peeled(static_cast<size_t>(n), 0);
+    for (const Index col : dense) {
+        peeled[col] = 1;
+    }
+
+    const auto square = [](double value) { return value * value; };
+    double formation = 0.0;
+    if (!augmented) {
+        for (Index j = 0; j < n; ++j) {
+            if (peeled[j] == 0) {
+                formation += square(matrix.col(j).size());
+            }
+        }
+    }
+
+    double factor_work = 0.0;
+    double factor_entries = 0.0;
+    const auto countColumn = [&](double length) {
+        factor_entries += length;
+        factor_work += square(length);
+    };
+    // Bound the extra setup before solve(): no dense symbolic trial on a
+    // large formulation or quadratic traversal of long columns.
+    if (dim <= 512 && formation <= 1e6) {
+        std::vector<Index> starts;
+        std::vector<Index> indices;
+        if (augmented) {
+            computeAugPattern(matrix, m, n, starts, indices);
+        } else {
+            computeNePattern(matrix, peeled, starts, indices);
+            if (peel_dense_columns && options.ne_max_bytes != 0 &&
+                sparseNeMatrixBytes(indices.size(), m) >= options.ne_max_bytes) {
+                return kInf;  // M alone leaves no room for the factor.
+            }
+        }
+        SymbolicFact symbolic;
+        symbolicAnalyze(static_cast<Index>(dim), starts, indices, symbolic, options.ordering);
+        for (std::size_t j = 0; j < dim; ++j) {
+            countColumn(1.0 + symbolic.l_col_ptr[j + 1] - symbolic.l_col_ptr[j]);
+        }
+    } else if (augmented) {
+        for (Index i = 0; i < m; ++i) {
+            countColumn(1.0 + matrix.row(i).size());
+        }
+        for (Index j = 0; j < n; ++j) {
+            countColumn(1.0 + matrix.col(j).size());
+        }
+    } else {
+        // Each retained column can contribute at most d-1 neighbors to a
+        // row it touches. Count them without materializing the intersection.
+        std::vector<double> degree(static_cast<size_t>(m), 1.0);
+        for (Index j = 0; j < n; ++j) {
+            if (peeled[j] == 0) {
+                const auto column = matrix.col(j);
+                for (const Index i : column.indices) {
+                    degree[i] += column.size() - 1;
+                }
+            }
+        }
+        for (const double length : degree) {
+            countColumn(std::min(length, static_cast<double>(m)));
+        }
+    }
+
+    // Forming and factoring the Schur complement takes one sparse solve
+    // per peeled column, their pairwise products and a dense LU.
+    const double k = static_cast<double>(dense.size());
+    const double schur_work = 4.0 * k * factor_entries + m * k * k + (2.0 / 3.0) * k * k * k;
+    return matrix.numNonzeros() + formation + factor_work + schur_work;
+}
 
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver() {
     return std::make_unique<CpuCholeskySolver>();

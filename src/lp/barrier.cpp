@@ -213,11 +213,6 @@ BarrierAlgorithm barrierAlgorithm(const BarrierOptions& options, bool prefer_aug
     return algorithm;
 }
 
-// Estimate the work per Newton factorization without materializing A*A'.
-// A column of degree d contributes d*d assembly work and up to d-1
-// neighbors to each row it touches. The square of each estimated factor
-// column length models the work of eliminating it. For the augmented
-// system, use the bipartite row/column graph directly.
 double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& options,
                            bool has_upper) {
     const Index m = matrix.numRows();
@@ -230,38 +225,17 @@ double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& opt
     const bool augmented = algorithm == BarrierAlgorithm::CpuAugmented ||
                            algorithm == BarrierAlgorithm::GpuAugmented ||
                            (algorithm == BarrierAlgorithm::GpuCholesky && prefer_augmented);
-    const auto square = [](double value) { return value * value; };
-    double work = matrix.numNonzeros();
-    if (augmented) {
-        for (Index i = 0; i < m; ++i) {
-            work += square(1.0 + matrix.row(i).size());
-        }
-        for (Index j = 0; j < n; ++j) {
-            work += square(1.0 + matrix.col(j).size());
-        }
-        return work;
-    }
-
     if (algorithm == BarrierAlgorithm::CpuCholesky) {
+        const auto dim = static_cast<std::size_t>(m);
+        if (options.ne_max_bytes != 0 && dim > options.ne_max_bytes / sizeof(Real) / dim) {
+            return kInf;
+        }
         const double rows = m;
-        work += rows * rows * rows / 3.0;
-        for (Index j = 0; j < n; ++j) {
-            work += square(matrix.col(j).size());
-        }
-        return work;
+        // The dense implementation forms M with one matrix product per row.
+        return rows * rows * rows / 3.0 + (rows + 1.0) * matrix.numNonzeros();
     }
-    std::vector<double> neighbors(static_cast<size_t>(m), 1.0);
-    for (Index j = 0; j < n; ++j) {
-        const auto column = matrix.col(j);
-        work += square(column.size());
-        for (const Index row : column.indices) {
-            neighbors[row] += column.size() - 1;
-        }
-    }
-    for (const double degree : neighbors) {
-        work += square(std::min(degree, static_cast<double>(m)));
-    }
-    return work;
+    return estimateSparseNewtonWork(matrix, options, augmented,
+                                    algorithm == BarrierAlgorithm::CpuSparseCholesky);
 }
 
 // ============================================================================
@@ -1498,11 +1472,14 @@ void BarrierSolver::load(const LpProblem& problem) {
 }
 
 void BarrierSolver::setOptions(const BarrierOptions& options) {
-    const bool reselect = options.dualize == BarrierDualize::Auto &&
-                          (options.algorithm != options_.algorithm ||
-                           options.dense_col_fraction != options_.dense_col_fraction ||
-                           options.gondzio_correctors != options_.gondzio_correctors ||
-                           options.homogeneous != options_.homogeneous);
+    const bool reselect =
+        options.dualize == BarrierDualize::Auto &&
+        (options.algorithm != options_.algorithm || options.ordering != options_.ordering ||
+         options.dense_col_fraction != options_.dense_col_fraction ||
+         options.ne_max_bytes != options_.ne_max_bytes ||
+         options.ne_max_dense_cols != options_.ne_max_dense_cols ||
+         options.gondzio_correctors != options_.gondzio_correctors ||
+         options.homogeneous != options_.homogeneous);
     const bool reshape = options.dualize != options_.dualize ||
                          options.presolve != options_.presolve ||
                          options.implicit_upper_bounds != options_.implicit_upper_bounds ||
@@ -2598,23 +2575,35 @@ LpResult BarrierSolver::solve() {
         const bool original_dual_infeasible =
             (outcome == BarrierIpmOutcome::DualInfeasible) != dualized_;
         if (original_dual_infeasible) {
-            const double left = deadline_.remainingSeconds();
-            if (left == 0.0) {
+            if (deadline_.orStop(options_.stop_flag).stopped()) {
+                return limitReached(Status::IterLimit, iters);
+            }
+            if (deadline_.passed()) {
                 return limitReached(Status::TimeLimit, iters);
             }
             LpProblem feasibility = original_;
             std::fill(feasibility.obj.begin(), feasibility.obj.end(), 0.0);
+            feasibility.obj_offset = 0.0;
             BarrierOptions fopts = options_;
             fopts.crossover = false;
-            fopts.max_solve_seconds = left;
             if (dualized_) {
-                fopts.dualize = BarrierDualize::Off;
+                // Its dual remains compact and has b = 0. In that form
+                // z = 0 is feasible, so it cannot issue the certificate
+                // that would recursively need another feasibility check.
+                fopts.dualize = BarrierDualize::On;
                 fopts.homogeneous = true;
-                fopts.implicit_upper_bounds = false;
             }
             BarrierSolver check;
             check.setOptions(fopts);
             check.load(feasibility);
+            if (deadline_.orStop(options_.stop_flag).stopped()) {
+                return limitReached(Status::IterLimit, iters);
+            }
+            fopts.max_solve_seconds = deadline_.remainingSeconds();
+            if (fopts.max_solve_seconds == 0.0) {
+                return limitReached(Status::TimeLimit, iters);
+            }
+            check.setOptions(fopts);
             const LpResult f = check.solve();
             iterations_ += f.iterations;
             if (options_.verbose) {

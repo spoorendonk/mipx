@@ -75,6 +75,11 @@ std::unique_ptr<NewtonSolver> createCpuCholeskySolver();
 std::unique_ptr<NewtonSolver> createCpuSparseCholeskySolver(Index max_schur_order = 4096);
 std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 
+// Compare barrier reformulations with a bounded symbolic factorization for
+// small patterns and a linear-time degree estimate on large ones.
+double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions& options,
+                                bool augmented, bool peel_dense_columns);
+
 // The denominator of the homogeneous self-dual loop's dtau (#370), given
 // u = (u_z, u_y) solved from (b, c, 0) at the iterate (z, s, tau, kappa):
 // max(b'u_y - c'u_z, q) + kappa / tau, with q = u_z' S Z^-1 u_z. For an exact
