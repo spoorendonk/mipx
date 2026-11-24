@@ -1174,6 +1174,68 @@ TEST_CASE("MipSolver: work units are positive", "[mip][work_units]") {
     CHECK(result.work_units > 0.0);
 }
 
+TEST_CASE("MipSolver: actual row-price work is opt-in for root and node LPs",
+          "[mip][work_units][row_price]") {
+    // min x + 2y subject to x + y >= 4.5, with nonnegative integers.
+    // The slack basis is dual feasible, and branching at x = 4.5 makes
+    // the down child's warm start primal infeasible again.
+    auto problem = buildBranchingMip();
+    problem.obj = {1.0, 2.0};
+    problem.row_lower = {4.5};
+    problem.row_upper = {kInf};
+
+    const auto [threads, mode] =
+        GENERATE(table<Int, ParallelMode>({{1, ParallelMode::Deterministic},
+                                           {2, ParallelMode::Deterministic},
+                                           {2, ParallelMode::Opportunistic}}));
+    CAPTURE(threads, static_cast<int>(mode));
+    auto solve = [&](Int node_limit, std::optional<bool> actual_work) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(false);
+        solver.setSymmetryEnabled(false);
+        solver.setTreePresolveEnabled(false);
+        solver.setObjectivePropagationEnabled(false);
+        solver.setObjectiveIntegralityEnabled(false);
+        solver.setNumThreads(threads);
+        solver.setParallelMode(mode);
+        solver.setNodeLimit(node_limit);
+        if (actual_work.has_value()) {
+            solver.setDualRowPriceActualWork(*actual_work);
+        }
+        solver.load(problem);
+        return solver.solve();
+    };
+
+    const auto root_default = solve(1, std::nullopt);
+    const auto root_flat = solve(1, false);
+    const auto root_actual = solve(1, true);
+    REQUIRE(root_flat.status == Status::NodeLimit);
+    CHECK(root_flat.nodes == 1);
+    CHECK(root_default.work_units == root_flat.work_units);
+    CHECK(root_actual.status == root_flat.status);
+    CHECK(root_actual.lp_iterations == root_flat.lp_iterations);
+    CHECK(root_actual.work_units > root_flat.work_units);
+
+    const auto tree_default = solve(10, std::nullopt);
+    const auto tree_flat = solve(10, false);
+    const auto tree_actual = solve(10, true);
+    REQUIRE(tree_flat.status == Status::Optimal);
+    REQUIRE(tree_flat.nodes > root_flat.nodes);
+    REQUIRE(tree_flat.lp_iterations > root_flat.lp_iterations);
+    CHECK(tree_flat.objective == 5.0);
+    CHECK(tree_default.work_units == tree_flat.work_units);
+    CHECK(tree_actual.status == tree_flat.status);
+    CHECK(tree_actual.objective == tree_flat.objective);
+    CHECK(tree_actual.lp_iterations == tree_flat.lp_iterations);
+    CHECK(tree_actual.nodes == tree_flat.nodes);
+    // For one row the actual charge includes the row visit and slack
+    // entry that the flat charge omits. Subtract the root contribution.
+    CHECK(tree_actual.work_units - root_actual.work_units >
+          tree_flat.work_units - root_flat.work_units);
+}
+
 TEST_CASE("MipSolver: exact refinement default remains off and non-regressive",
           "[mip][exact_refinement]") {
     auto lp = buildBranchingMip();

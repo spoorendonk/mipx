@@ -74,7 +74,7 @@ void printUsage(FILE* out) {
                  "[--barrier-hsd] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
-                 "[--verbose|--quiet] [--print-backend]\n"
+                 "[--verbose|--quiet] [--print-backend] [--print-det-heur-gate]\n"
                  "\n"
                  "The model file is read as MPS unless it ends in .lp, "
                  "ignoring any .gz/.bz2\n"
@@ -101,6 +101,7 @@ int main(int argc, char* argv[]) {
     double gap_tol = 1e-4;
     bool verbose = true;
     bool print_backend = false;
+    bool print_det_heur_gate = false;
     bool presolve = true;
     bool presolve_forcing_rows = true;
     bool presolve_dual_fixing = true;
@@ -287,6 +288,8 @@ int main(int argc, char* argv[]) {
             verbose = false;
         } else if (arg == "--print-backend") {
             print_backend = true;
+        } else if (arg == "--print-det-heur-gate") {
+            print_det_heur_gate = true;
         } else if (arg == "--barrier") {
             lp_mode = LpMode::Barrier;
         } else if (arg == "--pdlp") {
@@ -570,6 +573,7 @@ int main(int argc, char* argv[]) {
             solver.setPresolve(presolve);
             solver.setRootPresolveOptions(presolve_opts);
             solver.setCutsEnabled(cuts_enabled);
+            solver.setDualRowPriceActualWork(dual_row_price_actual_work);
             if (lp_mode == LpMode::Barrier) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::BarrierRoot);
             } else if (lp_mode == LpMode::Pdlp) {
@@ -689,6 +693,11 @@ int main(int argc, char* argv[]) {
             log.log("Nodes: %d\n", result.nodes);
             log.log("LP iterations: %d\n", result.lp_iterations);
             log.log("Work units: %.2f\n", result.work_units);
+            if (print_det_heur_gate) {
+                log.log("Deterministic tree heuristic gate openings: %llu\n",
+                        static_cast<unsigned long long>(
+                            solver.getSearchStats().det_heur_gate_openings));
+            }
             log.log("Time: %.2fs\n", result.time_seconds);
         } else {
             // LP solve — print banner from CLI.

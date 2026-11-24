@@ -182,6 +182,8 @@ struct MipSearchStats {
     Int plunge_rounding_calls = 0;
     /// Plunge-leaf rounding calls that improved the incumbent.
     Int plunge_rounding_improvements = 0;
+    /// Openings of the work-unit heuristic gate in the deterministic parallel tree.
+    uint64_t det_heur_gate_openings = 0;
 };
 
 struct MipTreePresolveStats {
@@ -349,6 +351,8 @@ public:
     }
     void setNumThreads(Int n) { num_threads_ = n; }
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
+    /// Charge dual-simplex pivot-row assembly for the work it performs.
+    void setDualRowPriceActualWork(bool enabled) { dual_row_price_actual_work_ = enabled; }
     void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
     void setBarrierOrdering(BarrierOrdering ord) { barrier_ordering_ = ord; }
     void setBarrierUseGpu(bool use_gpu) {
@@ -613,11 +617,10 @@ private:
                                                            Status* completion_status) const;
     /// integralNodeIncumbent() against `model`, the gate being
     /// heuristic_detail::isFeasiblePoint on it.
-    static std::optional<HeuristicSolution> completeIncumbent(const LpProblem& model,
-                                                              std::span<const Real> x,
-                                                              Real node_obj, double& work_units,
-                                                              Deadline deadline = {},
-                                                              Status* completion_status = nullptr);
+    std::optional<HeuristicSolution> completeIncumbent(const LpProblem& model,
+                                                       std::span<const Real> x, Real node_obj,
+                                                       double& work_units, Deadline deadline = {},
+                                                       Status* completion_status = nullptr) const;
 
     // Compute optimality gap.
     Real computeGap(Real incumbent, Real best_bound) const;
@@ -755,6 +758,7 @@ private:
     double cut_per_round_work_budget_ = 5.0e4;
     double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
+    bool dual_row_price_actual_work_ = false;
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
