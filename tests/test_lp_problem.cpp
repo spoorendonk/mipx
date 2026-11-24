@@ -530,6 +530,45 @@ TEST_CASE("MPS reader: malformed SOS, INDICATORS and OBJNAME data is refused", "
     // An extension section before ROWS is refused at the end of an MPS file.
     CHECK(refusal("NAME B\nQUADOBJ\n X X 1\nROWS\n N OBJ\nCOLUMNS\n X OBJ 1\nENDATA\n")
               .find("'QUADOBJ'") != std::string::npos);
+    CHECK(refusal("NAME B\nSOS\n S1 s\nROWS\n N OBJ\nCOLUMNS\n X OBJ 1\nENDATA\n")
+              .find("'SOS' comes before ROWS") != std::string::npos);
+
+    // A refused header that carries numbers is still a header, not data for
+    // the section before it (Gurobi's scenario count, MOSEK's cone fields).
+    const std::string model = "NAME B\nROWS\n N OBJ\n L C1\nCOLUMNS\n X OBJ 1 C1 1\nBOUNDS\n";
+    CHECK(refusal(model + "SCENARIOS 3\n X OBJ 0\nENDATA\n").find("'SCENARIOS'") !=
+          std::string::npos);
+    CHECK(refusal(model + "CSECTION k 3e-1 PPOW\n X\nENDATA\n").find("'CSECTION'") !=
+          std::string::npos);
+    CHECK(refusal("NAME B\nROWS\n N OBJ0 2 1 0 0\n N OBJ1 1 1 0 0\nCOLUMNS\n X OBJ0 1\nENDATA\n")
+              .find("multi-objective") != std::string::npos);
+}
+
+TEST_CASE("MPS reader: OBJNAME may name a row with a number", "[io][mps]") {
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("mipx_objname_number_" + std::to_string(::getpid()) + ".mps"))
+                                 .string();
+    {
+        std::ofstream out(path);
+        out << "NAME B\nOBJNAME 2\nROWS\n N 1\n N 2\nCOLUMNS\n X 1 5 2 7\nENDATA\n";
+    }
+    const auto lp = readMps(path);
+    std::filesystem::remove(path);
+
+    CHECK(lp.obj == std::vector<Real>{7.0});
+}
+
+TEST_CASE("readModel: an LP file with an SOS section read as MPS is a format error",
+          "[io][format]") {
+    const std::string path = (std::filesystem::temp_directory_path() /
+                              ("mipx_lp_sos_" + std::to_string(::getpid()) + ".txt"))
+                                 .string();
+    {
+        std::ofstream out(path);
+        out << "MAXIMIZE\n obj: x + y\nSUBJECT TO\n c1: x + y <= 3\nSOS\n s1: S1:: x:1 y:2\nEND\n";
+    }
+    CHECK_THROWS_AS(readModel(path, ModelFormat::Mps), ModelFormatError);
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("MPS reader: LAZYCONS with a level and OBJSEN are headers", "[io][mps]") {

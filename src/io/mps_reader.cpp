@@ -521,6 +521,19 @@ std::optional<Section> headerOf(std::string_view line, const Tokens& tokens, Sec
     if (tokens.n == 2 && tokens[0] == "LAZYCONS" && current == Section::Rows) {
         return s;
     }
+    // A section readMps refuses is a header whatever follows it: Gurobi's
+    // "SCENARIOS 3" and MOSEK's "CSECTION k 3e-1 PPOW" carry numbers, and
+    // read as data they would rewrite the section before them. Only a column
+    // or set named after one of them is misread, and refused, which is safe.
+    if (s == Section::Unsupported) {
+        return s;
+    }
+    // OBJNAME belongs before ROWS, where no data line starts in column 1 with
+    // it, so a row named with a number ("OBJNAME 2") is still its header.
+    if (s == Section::ObjName && tokens.n == 2 &&
+        (current == Section::None || current == Section::Name || current == Section::ObjSense)) {
+        return s;
+    }
     const bool lone_word_is_data = (current == Section::ObjSense && isObjSenseWord(tokens[0])) ||
                                    current == Section::ObjName || current == Section::Sos;
     if (s == Section::None && tokens.n == 1 && !lone_word_is_data) {
@@ -946,6 +959,14 @@ LpProblem readMps(const std::string& filename, ReadDiagnostics* diag) {
                 char sense = tokens[0][0];
                 auto name = tokens[1];
                 if (sense == 'N') {
+                    // Gurobi declares each of several objectives as an N row
+                    // with priority, weight and tolerance fields; read as
+                    // one, the model would lose all but the first.
+                    if (tokens.n > 2) {
+                        throw std::runtime_error("MPS: N row '" + std::string(name) +
+                                                 "' carries multi-objective fields, which "
+                                                 "are not supported");
+                    }
                     const bool is_objective =
                         obj_name.empty() ? !have_objective_row : name == obj_name;
                     row_map.emplace(std::string(name),
