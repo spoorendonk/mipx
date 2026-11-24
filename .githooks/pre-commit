@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-commit base=7c9a87877f23
+# wcp: pre-commit base=269528b9c966
 # Format, lint and type-check the Python half, and check the C++ half's format,
 # before the commit is made.
 #
@@ -67,6 +67,27 @@ esac
 if [ -z "$precheck" ] && [ $# -gt 0 ]; then
 	printf 'pre-commit: unknown argument "%s"; the one this hook takes is --precheck, followed by any arguments for uv sync.\n' "$1" >&2
 	exit 2
+fi
+
+# A staged quick block moves whole-tree checks to the gate's precheck (#1085).
+# Only the explicit --precheck invocation runs these checks in every worktree.
+# Match the quick reader's universal newlines without changing other CI blocks.
+ci_block() {
+	printf '%s\n' "$staged_claude" |
+		awk -v tag="$1" '{ if (tag == "quick") { sub(/\r$/, ""); gsub(/\r/, "\n") } print }' |
+		sed -n -e '/^## Build & Test/,/^## /{' \
+			-e "/^\`\`\`$1\$/,/^\`\`\`\$/{ /^\`\`\`/d; p; }" \
+			-e '}'
+}
+
+has_ci_block() { ci_block "$1" | grep -q '[^[:space:]]'; }
+
+if [ -z "$precheck" ] && staged_claude=$(git show :CLAUDE.md 2>/dev/null) &&
+	has_ci_block quick &&
+	ci_block precheck | grep -Eq '^[[:space:]]*sh[[:space:]]+\.githooks/pre-commit[[:space:]]+--precheck([[:space:]]|$)' &&
+	{ has_ci_block build || has_ci_block test; }; then
+	echo "pre-commit: whole-tree checks run in the gate's precheck." >&2
+	exit 0
 fi
 
 status=0

@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-push base=854596d13285
+# wcp: pre-push base=f4447156fe9a
 # Linear history on the trunk, then the review receipt.
 #
 # A real file in this repository, not a shim — see the note in `commit-msg` for
@@ -772,8 +772,10 @@ EOF
 #
 # **A push to the merge queue** (`refs/queue/*`, `wcp queue submit`) runs no
 # local CI, unless `PRE_PUSH_QUEUE_GATE=1`: the queue's runner gates what it
-# lands. `wcp queue submit` sets it for a `git push --dry-run` of an entry the
-# runner could land without a rebase, so that the session's gate run counts.
+# lands. For repositories without a `quick` block, `wcp queue submit` can
+# still set it for the legacy session gate. A repository with a `quick` block
+# runs its full precheck, build, tests and lint in the queue's landing gate
+# (#1085). Standalone pushes still run the local CI.
 #
 # **The gate receipt** (#296). When every step passed, the hook records it as
 # `refs/gates/<sha>`, which a merge queue's runner can land the commit on
@@ -854,6 +856,11 @@ extract_block() {
 	sed -n -e '/^## Build & Test/,/^## /{' \
 		-e "/^\`\`\`$1\$/,/^\`\`\`\$/{ /^\`\`\`/d; p; }" \
 		-e '}'
+}
+
+# quick.script reads Git's output with Python's universal newlines.
+has_quick_block() {
+	awk '{ sub(/\r$/, ""); gsub(/\r/, "\n"); print }' | extract_block quick | grep -q '[^[:space:]]'
 }
 
 #: Seconds as `1h02m03s`, `2m03s` or `3s`, for awk.
@@ -1221,7 +1228,9 @@ CHANGED
 # nothing kept. Either way a header is screened by its stub, not its
 # includers. The full lint is ctest's (#668).
 every_source_reason() {
-	if [ "${PRE_PUSH_FULL_LINT:-0}" = 1 ]; then
+	if [ "$ci_full_lint" = yes ]; then
+		echo 'queue landing with a quick block'
+	elif [ "${PRE_PUSH_FULL_LINT:-0}" = 1 ]; then
 		echo 'PRE_PUSH_FULL_LINT=1'
 	elif printf '%s\n' "$CI_CHANGED" | grep -qx '/unknown'; then
 		echo 'what the push changes is unknown'
@@ -2179,12 +2188,14 @@ def nearest_record(cache: Cache, base: str, test_dir: str) -> tuple[dict[str, st
     return None, base
 
 
-def unit_job(unit: Unit, filter_: str) -> Job:
-    db = database(unit.database)
+def unit_job(unit: Unit, filter_: str, *, keyed: bool = True) -> Job:
     cmd = with_option(unit.cmd, HEADER_FILTER, filter_) if filter_ else list(unit.cmd)
-    entries = db.all_entries(unit.path) if db else []
-    closure = db.closure(unit.path) if db else None
-    key = key_of(unit, cmd, entries, closure, "")
+    key = None
+    if keyed:
+        db = database(unit.database)
+        entries = db.all_entries(unit.path) if db else []
+        closure = db.closure(unit.path) if db else None
+        key = key_of(unit, cmd, entries, closure, "")
     try:
         size = os.path.getsize(unit.path)
     except OSError:
@@ -2294,6 +2305,12 @@ def main() -> int:
             print(u.name)
     if not direct:
         return 0
+
+    if E.get("CI_TIDY_QUEUE_FULL") == "yes":
+        # Each unit sees its own headers through the registered command.
+        # Retain the pin check above and the configuration diagnosis in run().
+        jobs = [unit_job(u, "", keyed=False) for u in direct]
+        return execute(dedupe(jobs), Cache(""), jobs_n, {}, full)
 
     # Who includes what, from each unit's dependency log.
     includers: dict[str, list[Unit]] = {}
@@ -2621,6 +2638,7 @@ tidy_itself() {
 		CI_TIDY_CONFIG_FILES="$BUILD_FILES|$CONFIGURE_LIKE|(^|/)\.clang-tidy\$" \
 		CI_TIDY_CONFIG_INPUTS=$config_inputs \
 		CI_TIDY_CACHE=$CI_TIDY_CACHE CI_TIDY_JOBS=$CI_TIDY_JOBS CI_TIDY_BUDGET=$CI_TIDY_BUDGET \
+		CI_TIDY_QUEUE_FULL=$ci_full_lint \
 		CI_TIDY_CLOCK="${CI_TIMINGS%/*}/lint-clock" CI_TIDY_CTEST_ARGS=$2 CI_TIDY_SKIPPED=$(tidy_skipped) \
 		CI_SRC=$CI_SRC CI_LOGICAL_SRC=$CI_LOGICAL_SRC CI_CHANGED=$CI_CHANGED \
 		"$python" -I -c "$runner"
@@ -3533,6 +3551,11 @@ local_ci() {
 	fi
 
 	claude=$(git show "$sha:CLAUDE.md" 2>/dev/null)
+	ci_full_lint=''
+	if [ "${PRE_PUSH_QUEUE_LANDING:-0}" = 1 ] && [ "$CI_LINT_ONLY" != 1 ] &&
+		printf '%s\n' "$claude" | has_quick_block; then
+		ci_full_lint=yes
+	fi
 	ok=1
 	begun=$(now)
 	# A `lint` block, when the project has one, is where the `clang_tidy:`
@@ -3962,14 +3985,22 @@ heredoc_read=''
 while heredoc_read=1; read -r local_ref local_sha remote_ref remote_sha extra; do
 	[ -n "${remote_sha:-}" ] || continue
 	[ -z "${extra:-}" ] || continue
-	case $remote_ref in
-	refs/heads/*) ;;
-	refs/queue/*) [ "${PRE_PUSH_QUEUE_GATE:-0}" = 1 ] || continue ;;
-	*) continue ;;
-	esac
 	is_sha "$local_sha" && is_sha "$remote_sha" || continue
 	is_absent "$local_sha" && continue
 	[ "$local_sha" = "$remote_sha" ] && continue
+	case $remote_ref in
+	refs/heads/*) ;;
+	refs/queue/*)
+		[ "${PRE_PUSH_QUEUE_GATE:-0}" = 1 ] || continue
+		# A legacy submitter can still ask for a dry-run gate of its entry.
+		# Preserve the runner's explicit precheck-only request on that ref.
+		if [ -z "$precheck_only" ] && git show "$local_sha:CLAUDE.md" 2>/dev/null | has_quick_block; then
+			err "=== Local CI: the quick block is the submit check; the runner gates it ==="
+			continue
+		fi
+		;;
+	*) continue ;;
+	esac
 	base=''
 	if is_absent "$remote_sha"; then
 		for trunk in $TRUNKS; do
