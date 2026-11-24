@@ -25,8 +25,12 @@ namespace mipx {
 /// norm_step = min(step, base_step), as in current cuPDLPx (P is indefinite
 /// for a step boosted past the global one; the port-source commit 83f9ffd
 /// still used the step itself). The Pock-Chambolle per-entry step bases
-/// stay out of the weighting, as they did before: mipx applies them on top of
-/// a rescaled matrix whose bases are near 1, and cuPDLPx has none.
+/// (tau_base_ = 1/‖col‖, sigma_base_ = 1/‖row‖, far from 1 on dense columns
+/// or rows) stay out of the weighting, as they did before #251. The metric in
+/// which the preconditioned step is nonexpansive would weight dx² by
+/// ω/tau_base and dy² by 1/(ω·sigma_base); cuPDLPx folds its preconditioning
+/// into the matrix, so its unweighted norm is that one. Leaving them out is a
+/// known gap (#401), not a choice the reference makes.
 ///
 /// ‖(dx, dy)‖_P from its parts: movement = ω‖dx‖² + ‖dy‖²/ω and
 /// cross = dxᵀAᵀdy. The GPU path reduces the parts on the device.
