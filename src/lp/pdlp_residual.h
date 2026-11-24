@@ -2,6 +2,7 @@
 
 #include "mipx/core.h"
 #include "mipx/sparse_matrix.h"
+#include "pdlp_sum.h"
 
 #include <algorithm>
 #include <cmath>
@@ -78,24 +79,25 @@ inline Real pdlpFixedPointResidual(const SparseMatrix& a, std::span<const Real> 
     const auto m = pdhg_y.size();
     delta_y.resize(m);
     at_delta_y.resize(n);
-    Real dx_sq = 0.0;
+    pdlp_detail::ConvergenceSum dx_sq;
     for (std::size_t j = 0; j < n; ++j) {
         const Real dx = reflected_x[j] - pdhg_x[j];
-        dx_sq += dx * dx / tau_base[j];
+        dx_sq.add(dx * dx / tau_base[j]);
     }
-    Real dy_sq = 0.0;
+    pdlp_detail::ConvergenceSum dy_sq;
     for (std::size_t i = 0; i < m; ++i) {
         delta_y[i] = reflected_y[i] - pdhg_y[i];
-        dy_sq += delta_y[i] * delta_y[i] / sigma_base[i];
+        dy_sq.add(delta_y[i] * delta_y[i] / sigma_base[i]);
     }
-    Real cross = 0.0;
+    pdlp_detail::ConvergenceSum cross;
     if (m > 0 && n > 0) {
         a.multiplyTranspose(delta_y, at_delta_y);
         for (std::size_t j = 0; j < n; ++j) {
-            cross += at_delta_y[j] * (reflected_x[j] - pdhg_x[j]);
+            cross.add(at_delta_y[j] * (reflected_x[j] - pdhg_x[j]));
         }
     }
-    return pdlpPNorm(dx_sq * primal_weight + dy_sq / primal_weight, cross, norm_step);
+    return pdlpPNorm(dx_sq.value() * primal_weight + dy_sq.value() / primal_weight, cross.value(),
+                     norm_step);
 }
 
 }  // namespace mipx

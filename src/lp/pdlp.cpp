@@ -2,6 +2,7 @@
 
 #include "pdlp_residual.h"
 #include "pdlp_restart.h"
+#include "pdlp_sum.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,6 +25,7 @@ namespace mipx {
 
 namespace {
 
+using pdlp_detail::ConvergenceSum;
 using pdlp_detail::EvaluationCadence;
 using pdlp_detail::ProjectedErrors;
 using pdlp_detail::RestartPolicy;
@@ -53,6 +55,22 @@ inline Real dot(std::span<const Real> a, std::span<const Real> b) {
     return s;
 }
 
+ConvergenceSum convergenceDot(std::span<const Real> a, std::span<const Real> b, Real offset = 0.0) {
+    ConvergenceSum sum(offset);
+    for (std::size_t i = 0; i < a.size(); ++i)
+        sum.add(a[i] * b[i]);
+    return sum;
+}
+
+Real convergenceDistance(std::span<const Real> a, std::span<const Real> b) {
+    ConvergenceSum squared;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const Real delta = a[i] - b[i];
+        squared.add(delta * delta);
+    }
+    return std::sqrt(squared.value());
+}
+
 struct PdlpTerminationNorms {
     Real objective = 0.0;
     Real bounds = 0.0;
@@ -74,17 +92,17 @@ inline PdlpTerminationNorms computeTerminationNorms(const LpProblem& problem,
         return norms;
     }
 
-    norms.objective = l2Norm(problem.obj);
-    Real bound_sq = 0.0;
+    norms.objective = std::sqrt(convergenceDot(problem.obj, problem.obj).value());
+    ConvergenceSum bound_sq;
     for (Index i = 0; i < problem.num_rows; ++i) {
         const Real rl = problem.row_lower[i];
         const Real ru = problem.row_upper[i];
         if (isFinite(ru))
-            bound_sq += ru * ru;
+            bound_sq.add(ru * ru);
         if (isFinite(rl) && rl != ru)
-            bound_sq += rl * rl;
+            bound_sq.add(rl * rl);
     }
-    norms.bounds = std::sqrt(bound_sq);
+    norms.bounds = std::sqrt(bound_sq.value());
     return norms;
 }
 
@@ -928,7 +946,7 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
     std::vector<Real> col_terms(cscaled_.size());
     for (Index j = 0; j < n; ++j)
         col_terms[j] = std::abs(cscaled_[j]);
-    Real dobj_row = 0.0;
+    ConvergenceSum dual_rows;
     for (Index i = 0; i < m; ++i) {
         const auto row = scaled_a_.row(i);
         Real ax = 0.0;
@@ -944,26 +962,26 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
         row_viol[i] = std::abs(ax - side);
         row_terms[i] = ax_terms + std::abs(side);
         if (y[i] > 0.0)
-            dobj_row -= y[i] * scaled_row_upper_[i];
+            dual_rows.add(-y[i] * scaled_row_upper_[i]);
         else if (y[i] < 0.0)
-            dobj_row -= y[i] * scaled_row_lower_[i];
+            dual_rows.add(-y[i] * scaled_row_lower_[i]);
     }
 
     // How far the row violations the test allows can move the objective, to
     // first order: y is the optimum's sensitivity to the row sides.
-    Real slack = 0.0;
+    ConvergenceSum slack;
     const Real row_floor = kPointFloor * infNorm(row_terms);
     for (Index i = 0; i < m; ++i) {
         if (row_viol[i] > options_.primal_tol * (row_terms[i] + row_floor))
             return false;
-        slack += std::abs(y[i]) * row_viol[i];
+        slack.add(std::abs(y[i]) * row_viol[i]);
     }
 
-    Real pobj_scaled = 0.0;
-    Real dobj_col = 0.0;
+    ConvergenceSum primal_objective;
+    ConvergenceSum dual_cols;
     const Real col_floor = kPointFloor * infNorm(col_terms);
     for (Index j = 0; j < n; ++j) {
-        pobj_scaled += cscaled_[j] * x[j];
+        primal_objective.add(cscaled_[j] * x[j]);
         const Real grad = cscaled_[j] + at_y[j];
         const Real lb = scaled_col_lower_[j];
         const Real ub = scaled_col_upper_[j];
@@ -971,16 +989,18 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
             if (std::abs(grad) > options_.dual_tol * (col_terms[j] + col_floor))
                 return false;
         } else if (grad > 0.0) {
-            dobj_col += grad * lb;
+            dual_cols.add(grad * lb);
         } else if (grad < 0.0) {
-            dobj_col += grad * ub;
+            dual_cols.add(grad * ub);
         }
     }
 
     const Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
-    const Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
-    const Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
-    return std::abs(pobj - dobj) + slack * obj_unscale <=
+    dual_cols.merge(dual_rows);
+    const Real pobj =
+        primal_objective.scaledWithOffset(obj_sign_ * obj_unscale, original_.obj_offset);
+    const Real dobj = dual_cols.scaledWithOffset(obj_sign_ * obj_unscale, original_.obj_offset);
+    return std::abs(pobj - dobj) + slack.value() * obj_unscale <=
            options_.optimality_tol * (1.0 + std::abs(pobj) + std::abs(dobj));
 }
 
@@ -1020,7 +1040,6 @@ LpResult PdlpSolver::solve() {
     // Bounds-only LP (m == 0): clamp to bounds in cost-minimizing direction.
     if (m == 0) {
         primal_orig_.resize(static_cast<size_t>(n));
-        Real obj_val = original_.obj_offset;
         bool unbounded = false;
         for (Index j = 0; j < n; ++j) {
             Real c = cscaled_[j];  // already obj_sign * obj * col_scale
@@ -1044,14 +1063,13 @@ LpResult PdlpSolver::solve() {
             }
             // Unscale (col_scale + constraint_scale).
             primal_orig_[j] = xj * col_scale_[j] / constraint_scale_;
-            obj_val += original_.obj[j] * primal_orig_[j];
         }
         if (unbounded) {
             status_ = Status::Unbounded;
             return {status_, 0.0, 0, 0.0};
         }
         dual_orig_.assign(static_cast<size_t>(original_.num_rows), 0.0);
-        objective_ = obj_val;
+        objective_ = convergenceDot(primal_orig_, original_.obj, original_.obj_offset).value();
         status_ = Status::Optimal;
         iterations_ = 0;
         return {status_, objective_, 0, 0.0};
@@ -1168,9 +1186,9 @@ LpResult PdlpSolver::solve() {
 
     // Projected primal and dual objectives in the original objective space.
     auto projectedObjectives = [&] {
-        const Real pobj_scaled = dot(cscaled_, std::span<const Real>(pdhg_x));
-        Real obj_unscale = 1.0 / (objective_scale_ * constraint_scale_);
-        Real pobj = original_.obj_offset + obj_sign_ * pobj_scaled * obj_unscale;
+        const Real scale = obj_sign_ / (objective_scale_ * constraint_scale_);
+        const Real pobj =
+            convergenceDot(cscaled_, pdhg_x).scaledWithOffset(scale, original_.obj_offset);
 
         // Dual objective via support function (scaled space).
         // dobj = -delta*_{[lb,ub]}(-grad) - delta*_{[rl,ru]}(y)
@@ -1180,7 +1198,7 @@ LpResult PdlpSolver::solve() {
         // d(y) = sum_j col_term[j] + sum_i row_term[i] where:
         //   col_term[j] = g_j * lb_j if g_j > 0, g_j * ub_j if g_j < 0
         //   row_term[i] = -y_i * ru_i if y_i > 0, -y_i * rl_i if y_i < 0
-        Real dobj_col = 0.0;
+        ConvergenceSum dual_cols;
         for (Index j = 0; j < n; ++j) {
             Real grad = cscaled_[j] + at_pdhg_y[j];
             Real lb = scaled_col_lower_[j];
@@ -1191,11 +1209,11 @@ LpResult PdlpSolver::solve() {
             if (!isFinite(ub))
                 grad = std::max(grad, 0.0);
             if (grad > 0.0 && isFinite(lb))
-                dobj_col += grad * lb;
+                dual_cols.add(grad * lb);
             else if (grad < 0.0 && isFinite(ub))
-                dobj_col += grad * ub;
+                dual_cols.add(grad * ub);
         }
-        Real dobj_row = 0.0;
+        ConvergenceSum dual_rows;
         for (Index i = 0; i < m; ++i) {
             Real yi = pdhg_y[i];
             Real rl = scaled_row_lower_[i];
@@ -1206,11 +1224,12 @@ LpResult PdlpSolver::solve() {
             if (!isFinite(rl))
                 yi = std::max(yi, 0.0);
             if (yi > 0.0 && isFinite(ru))
-                dobj_row -= yi * ru;
+                dual_rows.add(-yi * ru);
             else if (yi < 0.0 && isFinite(rl))
-                dobj_row -= yi * rl;
+                dual_rows.add(-yi * rl);
         }
-        Real dobj = original_.obj_offset + obj_sign_ * (dobj_col + dobj_row) * obj_unscale;
+        dual_cols.merge(dual_rows);
+        const Real dobj = dual_cols.scaledWithOffset(scale, original_.obj_offset);
 
         return std::pair{pobj, dobj};
     };
@@ -1339,22 +1358,22 @@ LpResult PdlpSolver::solve() {
         scaled_a_.multiply(pdhg_x, ax);
 
         // Primal residual.
-        Real primal_resid_sq = 0.0;
+        ConvergenceSum primal_resid_sq;
         Real primal_resid_max = 0.0;
         for (Index i = 0; i < m; ++i) {
             Real violation_scaled =
                 ax[i] - std::clamp(ax[i], scaled_row_lower_[i], scaled_row_upper_[i]);
             Real violation = violation_scaled / (constraint_scale_ * row_scale_[i]);
-            primal_resid_sq += violation * violation;
+            primal_resid_sq.add(violation * violation);
             primal_resid_max = std::max(primal_resid_max, std::abs(violation));
         }
-        Real abs_primal_resid = std::sqrt(primal_resid_sq);
+        Real abs_primal_resid = std::sqrt(primal_resid_sq.value());
         Real rel_primal_resid = abs_primal_resid / (1.0 + bound_norm);
         Real rel_primal_resid_inf = primal_resid_max / (1.0 + bound_norm);
 
         // Refresh A^T * pdhg_y for convergence checks on the current iterate.
         scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
-        Real dual_resid_sq = 0.0;
+        ConvergenceSum dual_resid_sq;
         Real dual_resid_max = 0.0;
         for (Index j = 0; j < n; ++j) {
             Real grad = cscaled_[j] + at_pdhg_y[j];
@@ -1373,10 +1392,10 @@ LpResult PdlpSolver::solve() {
                 dr = grad;
             }
             Real dr_orig = dr / (objective_scale_ * col_scale_[j]);
-            dual_resid_sq += dr_orig * dr_orig;
+            dual_resid_sq.add(dr_orig * dr_orig);
             dual_resid_max = std::max(dual_resid_max, std::abs(dr_orig));
         }
-        Real abs_dual_resid = std::sqrt(dual_resid_sq);
+        Real abs_dual_resid = std::sqrt(dual_resid_sq.value());
         Real rel_dual_resid = abs_dual_resid / (1.0 + c_norm);
         Real rel_dual_resid_inf = dual_resid_max / (1.0 + c_norm);
         const Real rel_primal_term = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
@@ -1454,17 +1473,8 @@ LpResult PdlpSolver::solve() {
         if (do_restart) {
             // PI controller for primal weight update.
             if (options_.update_primal_weight) {
-                Real primal_dist = 0.0, dual_dist = 0.0;
-                for (Index j = 0; j < n; ++j) {
-                    Real d = pdhg_x[j] - initial_x[j];
-                    primal_dist += d * d;
-                }
-                primal_dist = std::sqrt(primal_dist);
-                for (Index i = 0; i < m; ++i) {
-                    Real d = pdhg_y[i] - initial_y[i];
-                    dual_dist += d * d;
-                }
-                dual_dist = std::sqrt(dual_dist);
+                const Real primal_dist = convergenceDistance(pdhg_x, initial_x);
+                const Real dual_dist = convergenceDistance(pdhg_y, initial_y);
 
                 Real ratio_infeas =
                     (rel_primal_resid > 1e-15) ? rel_dual_resid / rel_primal_resid : 0.0;
@@ -1588,20 +1598,20 @@ LpResult PdlpSolver::solve() {
         // last-computed pdhg_x / pdhg_y which are still valid).
         scaled_a_.multiply(pdhg_x, ax);
 
-        Real polish_primal_sq = 0.0;
+        ConvergenceSum polish_primal_sq;
         Real polish_primal_max = 0.0;
         for (Index i = 0; i < m; ++i) {
             Real viol = ax[i] - std::clamp(ax[i], scaled_row_lower_[i], scaled_row_upper_[i]);
             Real v = viol / (constraint_scale_ * row_scale_[i]);
-            polish_primal_sq += v * v;
+            polish_primal_sq.add(v * v);
             polish_primal_max = std::max(polish_primal_max, std::abs(v));
         }
         Real rp = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                       ? polish_primal_max / (1.0 + bound_norm)
-                      : std::sqrt(polish_primal_sq) / (1.0 + bound_norm);
+                      : std::sqrt(polish_primal_sq.value()) / (1.0 + bound_norm);
 
         scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
-        Real polish_dual_sq = 0.0;
+        ConvergenceSum polish_dual_sq;
         Real polish_dual_max = 0.0;
         for (Index j = 0; j < n; ++j) {
             Real grad = cscaled_[j] + at_pdhg_y[j];
@@ -1616,12 +1626,12 @@ LpResult PdlpSolver::solve() {
             else
                 dr = grad;
             Real dr_orig = dr / (objective_scale_ * col_scale_[j]);
-            polish_dual_sq += dr_orig * dr_orig;
+            polish_dual_sq.add(dr_orig * dr_orig);
             polish_dual_max = std::max(polish_dual_max, std::abs(dr_orig));
         }
         Real rd = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                       ? polish_dual_max / (1.0 + c_norm)
-                      : std::sqrt(polish_dual_sq) / (1.0 + c_norm);
+                      : std::sqrt(polish_dual_sq.value()) / (1.0 + c_norm);
 
         bool needs_polish = rp > options_.polish_primal_tol || rd > options_.polish_dual_tol;
 
@@ -1722,20 +1732,23 @@ LpResult PdlpSolver::solve() {
                 // Convergence check with polish tolerances.
                 scaled_a_.multiply(pdhg_x, ax);
 
-                Real pr_sq = 0.0, pr_max = 0.0;
+                ConvergenceSum pr_sq;
+                Real pr_max = 0.0;
                 for (Index i = 0; i < m; ++i) {
                     Real viol =
                         ax[i] - std::clamp(ax[i], scaled_row_lower_[i], scaled_row_upper_[i]);
                     Real v = viol / (constraint_scale_ * row_scale_[i]);
-                    pr_sq += v * v;
+                    pr_sq.add(v * v);
                     pr_max = std::max(pr_max, std::abs(v));
                 }
+                const Real rel_primal_resid_pol = std::sqrt(pr_sq.value()) / (1.0 + bound_norm);
                 Real rp_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                                   ? pr_max / (1.0 + bound_norm)
-                                  : std::sqrt(pr_sq) / (1.0 + bound_norm);
+                                  : rel_primal_resid_pol;
 
                 scaled_a_.multiplyTranspose(pdhg_y, at_pdhg_y);
-                Real dr_sq = 0.0, dr_max = 0.0;
+                ConvergenceSum dr_sq;
+                Real dr_max = 0.0;
                 for (Index j = 0; j < n; ++j) {
                     Real grad = cscaled_[j] + at_pdhg_y[j];
                     Real xj = pdhg_x[j];
@@ -1749,15 +1762,13 @@ LpResult PdlpSolver::solve() {
                     else
                         d = grad;
                     Real d_orig = d / (objective_scale_ * col_scale_[j]);
-                    dr_sq += d_orig * d_orig;
+                    dr_sq.add(d_orig * d_orig);
                     dr_max = std::max(dr_max, std::abs(d_orig));
                 }
+                const Real rel_dual_resid_pol = std::sqrt(dr_sq.value()) / (1.0 + c_norm);
                 Real rd_now = (options_.optimality_norm == PdlpOptimalityNorm::LInf)
                                   ? dr_max / (1.0 + c_norm)
-                                  : std::sqrt(dr_sq) / (1.0 + c_norm);
-
-                Real rel_primal_resid_pol = std::sqrt(pr_sq) / (1.0 + bound_norm);
-                Real rel_dual_resid_pol = std::sqrt(dr_sq) / (1.0 + c_norm);
+                                  : rel_dual_resid_pol;
 
                 ProjectedErrors errors;
                 if (polish_restart.needsProjectedErrors()) {
@@ -1785,17 +1796,8 @@ LpResult PdlpSolver::solve() {
 
                 if (do_restart) {
                     if (options_.update_primal_weight) {
-                        Real pdist = 0.0, ddist = 0.0;
-                        for (Index j = 0; j < n; ++j) {
-                            Real d = pdhg_x[j] - initial_x[j];
-                            pdist += d * d;
-                        }
-                        pdist = std::sqrt(pdist);
-                        for (Index i = 0; i < m; ++i) {
-                            Real d = pdhg_y[i] - initial_y[i];
-                            ddist += d * d;
-                        }
-                        ddist = std::sqrt(ddist);
+                        const Real pdist = convergenceDistance(pdhg_x, initial_x);
+                        const Real ddist = convergenceDistance(pdhg_y, initial_y);
 
                         Real ratio = (rel_primal_resid_pol > 1e-15)
                                          ? rel_dual_resid_pol / rel_primal_resid_pol
@@ -1867,11 +1869,7 @@ LpResult PdlpSolver::solve() {
         }
 
         // Compute objective from original primals.
-        Real obj_val = original_.obj_offset;
-        for (Index j = 0; j < n; ++j) {
-            obj_val += original_.obj[j] * primal_orig_[j];
-        }
-        objective_ = obj_val;
+        objective_ = convergenceDot(primal_orig_, original_.obj, original_.obj_offset).value();
         status_ = Status::Optimal;
     } else {
         status_ = timeLimitReached(t0, options_.max_solve_seconds) ? Status::TimeLimit
@@ -2920,11 +2918,7 @@ LpResult PdlpSolver::solveGpu() {
             dual_orig_[i] = obj_sign_ * pdhg_y_host[i] * row_scale_[i] * inv_obj_scale;
         }
 
-        Real obj_val = original_.obj_offset;
-        for (Index j = 0; j < n; ++j) {
-            obj_val += original_.obj[j] * primal_orig_[j];
-        }
-        objective_ = obj_val;
+        objective_ = convergenceDot(primal_orig_, original_.obj, original_.obj_offset).value();
         status_ = Status::Optimal;
     } else {
         status_ = timeLimitReached(t0, options_.max_solve_seconds) ? Status::TimeLimit

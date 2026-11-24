@@ -250,6 +250,10 @@ TEST_CASE("PdlpSolver: GPU optional restart rules fire independently and stats r
 
 TEST_CASE("PdlpSolver: handles bounds-only LP", "[pdlp]") {
     auto lp = buildBoundsOnlyLp();
+    SECTION("objective storage matches the model columns") {}
+    SECTION("objective storage extends beyond the model columns") {
+        lp.obj.push_back(std::numeric_limits<Real>::quiet_NaN());
+    }
 
     PdlpSolver solver;
     PdlpOptions opts;
@@ -278,6 +282,85 @@ TEST_CASE("PdlpSolver: solves simple LP with default options", "[pdlp]") {
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-4));
+}
+
+TEST_CASE("PdlpSolver: keeps small objective terms across cancellation", "[pdlp]") {
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {1e16, 1.0, -1e16};
+    lp.col_lower = {1.0, 1.0, 0.0};
+    lp.col_upper = {2.0, 2.0, 1.0};
+    lp.col_type.assign(3, VarType::Continuous);
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {2.0};
+    lp.matrix = SparseMatrix(1, 3, {{0, 1, 1.0}});
+
+    PdlpOptions options;
+    options.use_gpu = false;
+    options.do_ruiz_scaling = false;
+    options.do_pock_chambolle_scaling = false;
+    options.do_bound_obj_rescaling = false;
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 1.0);
+}
+
+TEST_CASE("PdlpSolver: keeps the objective gap when the offset cancels large terms", "[pdlp]") {
+    auto lp = buildSimpleLp();
+    lp.obj = {1e16, 1.0};
+    lp.obj_offset = -1e16;
+    lp.col_lower = {1.0, 0.0};
+    lp.col_upper = {2.0, 2.0};
+    lp.matrix = SparseMatrix(1, 2, {{0, 1, 1.0}});
+
+    PdlpOptions options;
+    options.use_gpu = false;
+    options.do_ruiz_scaling = false;
+    options.do_pock_chambolle_scaling = false;
+    options.do_bound_obj_rescaling = false;
+    options.max_iter = 1;
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(lp);
+    // In the first step x[1] moves from 1.5 to 0.502. Its contribution
+    // to the primal objective remains different from the dual bound of zero.
+    solver.setWarmStart(std::vector<Real>{1.0, 1.5}, std::vector<Real>{0.0});
+    CHECK(solver.solve().status == Status::IterLimit);
+}
+
+TEST_CASE("PdlpSolver: combines dual row and column totals after cancellation", "[pdlp]") {
+    constexpr Real large = 1e154;
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {large, -large, large};
+    lp.col_lower.assign(3, large);
+    lp.col_upper = lp.col_lower;
+    lp.col_type.assign(3, VarType::Continuous);
+    lp.num_rows = 2;
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {-large, large};
+    lp.matrix = SparseMatrix(2, 3, {{0, 0, -1.0}, {1, 1, 1.0}});
+
+    PdlpOptions options;
+    options.use_gpu = false;
+    options.do_ruiz_scaling = false;
+    options.do_pock_chambolle_scaling = false;
+    options.do_bound_obj_rescaling = false;
+    options.optimality_norm = PdlpOptimalityNorm::LInf;
+    options.max_iter = 1;
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(lp);
+    solver.setWarmStart(lp.col_lower, std::vector<Real>{large, large});
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == large * large);
 }
 
 TEST_CASE("PdlpSolver: max_solve_seconds enforces time limit", "[pdlp][time_limit]") {

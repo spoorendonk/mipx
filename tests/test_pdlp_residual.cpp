@@ -56,6 +56,21 @@ TEST_CASE("PDLP caps the P-norm step when diagonal scaling amplifies the matrix"
     CHECK(pdlpPreconditionedNormStepCap(a, unit, unit, 5.0) == 5.0);
 }
 
+TEST_CASE("PDLP fixed-point residual keeps small squared movements", "[pdlp][pdlp_residual]") {
+    constexpr Index n = 1025;
+    const SparseMatrix a(0, n);
+    const std::vector<Real> pdhg_x(n, 0.0);
+    std::vector<Real> reflected_x(n, 1.0);
+    reflected_x.front() = 0x1p27;
+    const std::vector<Real> tau_base(n, 1.0);
+    std::vector<Real> delta_y;
+    std::vector<Real> at_delta_y;
+
+    const Real r = pdlpFixedPointResidual(a, pdhg_x, reflected_x, {}, {}, tau_base, {}, 1.0, 0.25,
+                                          delta_y, at_delta_y);
+    CHECK(r == std::sqrt(0x1p54 + (n - 1)));
+}
+
 // The cross term enters with a minus sign: mipx's step is Chambolle-Pock with
 // K = A, whose metric is [I/τ, −Aᵀ; −A, I/σ]. Only then is the PDHG step
 // nonexpansive in it, which the restart rules' decay assumes.
