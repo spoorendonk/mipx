@@ -1063,7 +1063,7 @@ LpResult PdlpSolver::solve() {
     Real spectral = estimateSpectralNorm();
     Real step = 0.998 / spectral;
 
-    // Adaptive step size state (Malitsky-Tam style).
+    // Adaptive step size state (mipx's heuristic; see PdlpOptions).
     const bool adaptive = options_.adaptive_step;
     const Real step_initial = step;
     const Real step_lb = step_initial * options_.adaptive_step_min;
@@ -1091,7 +1091,7 @@ LpResult PdlpSolver::solve() {
     std::vector<Real> delta_y_vec(static_cast<size_t>(m), 0.0);
     std::vector<Real> at_delta_y(static_cast<size_t>(n), 0.0);
 
-    // Previous A*reflected_x for adaptive step size (Malitsky-Tam).
+    // Previous A*reflected_x for the adaptive step size.
     std::vector<Real> prev_a_xrefl;
     std::vector<Real> prev_reflected_x;
     if (adaptive) {
@@ -1193,8 +1193,10 @@ LpResult PdlpSolver::solve() {
             // 3. A * reflected_x → a_xrefl.
             scaled_a_.multiply(reflected_x, a_xrefl);
 
-            // 3b. Adaptive step size (Malitsky-Tam): estimate local Lipschitz
-            // from consecutive iterates and adjust step within bounded range.
+            // 3b. Adaptive step size (mipx's grow/shrink heuristic, see
+            // PdlpOptions): estimate a local Lipschitz constant from
+            // consecutive reflected iterates and adjust the step within a
+            // bounded range.
             if (adaptive && have_prev_iterate) {
                 // ||A*(x_k - x_{k-1})||^2 weighted by sigma_base.
                 Real a_diff_sq = 0.0;
@@ -1211,8 +1213,8 @@ LpResult PdlpSolver::solve() {
                 if (x_diff_sq > 1e-30) {
                     // Local spectral norm estimate (preconditioned).
                     Real local_lip_sq = a_diff_sq / x_diff_sq;
-                    // Malitsky-Tam: step <= 1/local_lip for safety.
-                    // Use geometric mean of current step and 1/local_lip.
+                    // Shrink when the step exceeds 0.998/local_lip, else
+                    // grow; the factors are adaptive_step_down/_up.
                     Real local_step = 0.998 / std::sqrt(std::max(local_lip_sq, 1e-30));
                     Real new_step;
                     if (step > local_step) {
@@ -1560,11 +1562,13 @@ LpResult PdlpSolver::solve() {
     iterations_ = total_count;
 
     // -----------------------------------------------------------------------
-    // Feasibility polishing phase (cuPDLPx-style post-solve).
+    // Polishing phase (post-solve).
     //
     // After the main PDHG loop converges, one residual (primal or dual) may
     // be nearly tight while the other stalls. We run additional PDHG
-    // iterations targeting the tighter polish tolerances. The polish reuses
+    // iterations on the same problem, targeting the tighter polish
+    // tolerances. This is not PDLP's feasibility polishing, which solves
+    // separate zero-objective primal and dual feasibility problems. The polish reuses
     // the restart logic and primal weight controller from the main loop.
     // -----------------------------------------------------------------------
     if (converged && options_.enable_polishing) {
@@ -2654,7 +2658,7 @@ LpResult PdlpSolver::solveGpu() {
     iterations_ = total_count;
 
     // -------------------------------------------------------------------
-    // GPU feasibility polishing phase.
+    // GPU polishing phase: continued PDHG, as in the CPU path.
     // -------------------------------------------------------------------
     if (converged && options_.enable_polishing &&
         !timeLimitReached(t0, options_.max_solve_seconds)) {

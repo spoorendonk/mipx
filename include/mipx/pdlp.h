@@ -28,10 +28,18 @@ struct PdlpOptions {
     Int sv_max_iter = 5000;
     Real sv_tol = 1e-4;
 
-    // Adaptive step size (Malitsky-Tam style line search).
+    // Adaptive step size: a mipx heuristic, not a published rule. It is not
+    // Malitsky-Tam's forward-reflected-backward line search, nor PDLP's
+    // adaptive step (Applegate et al. 2021, §3.1); cuPDLPx keeps the step
+    // constant. From consecutive primal iterates it estimates a local
+    // Lipschitz constant L = ‖AΔx‖/‖Δx‖ (preconditioner-weighted), shrinks
+    // the step by adaptive_step_down when it exceeds 0.998/L and otherwise
+    // grows it by adaptive_step_up, within [adaptive_step_min,
+    // adaptive_step_max] times the spectral-norm step. No convergence
+    // guarantee is claimed for it.
     bool adaptive_step = false;
-    Real adaptive_step_down = 0.7;  // Shrink factor when descent violated.
-    Real adaptive_step_up = 1.0;    // Grow factor on successful steps.
+    Real adaptive_step_down = 0.7;  // Shrink factor when step > 0.998/L.
+    Real adaptive_step_up = 1.0;    // Grow factor otherwise.
     Real adaptive_step_min = 1e-6;  // Lower bound relative to initial step.
     Real adaptive_step_max = 1e3;   // Upper bound relative to initial step.
 
@@ -53,7 +61,10 @@ struct PdlpOptions {
     // scaling/solve. 0 = disabled (default).
     Real matrix_zero_tol = 0.0;
 
-    // Feasibility polishing (post-solve).
+    // Polishing (post-solve): more PDHG iterations on the same problem until
+    // the residuals meet the polish tolerances. Not PDLP's feasibility
+    // polishing, which solves separate zero-objective primal and dual
+    // feasibility problems.
     bool enable_polishing = true;
     Real polish_primal_tol = 1e-6;
     Real polish_dual_tol = 1e-6;

@@ -1395,7 +1395,7 @@ TEST_CASE("PdlpSolver: Anderson acceleration GPU matches CPU", "[pdlp][anderson]
 }
 
 // ---------------------------------------------------------------------------
-// Feasibility polishing tests
+// Polishing tests (continued PDHG at the polish tolerances)
 // ---------------------------------------------------------------------------
 
 TEST_CASE("PdlpSolver: polishing enabled does not regress simple LP", "[pdlp][polishing]") {
@@ -1578,11 +1578,20 @@ TEST_CASE("PdlpSolver: an empty row that excludes 0 makes a column-free LP infea
     }
 }
 
-TEST_CASE("PdlpSolver: an infeasible LP with an improving ray is not unbounded", "[pdlp]") {
+TEST_CASE("PdlpSolver: an infeasible LP with an improving ray is infeasible, not unbounded",
+          "[pdlp]") {
     // Each LP is infeasible but has an improving ray. The ray alone proves
     // nothing without a feasible point (#246). A large objective makes the
     // primal iterates run off along the ray before the dual ones prove
     // infeasibility.
+    //
+    // Every case and cost must end Infeasible: not Unbounded (the #246 bug),
+    // and not Optimal, IterLimit or Error either, which would mean the
+    // infeasibility was never proved (#252). PdlpSolver does not implement
+    // getDualRay(), but it reports Infeasible (on a model with columns) only
+    // when a candidate passes the getDualRay() contract checks in the
+    // original space (RayDetector in pdlp.cpp, #239), so the status stands
+    // for the certificate.
     //   - "apart": x2 >= 1 and x2 <= 0, off the ray x1 = x3 = 1 of min -x1,
     //     plus x1 - x3 = 0.
     //   - "on ray": x1 - x3 >= 1 and x1 - x3 <= 0, the rows the same ray
@@ -1641,8 +1650,7 @@ TEST_CASE("PdlpSolver: an infeasible LP with an improving ray is not unbounded",
             solver.load(lp);
             const Status st = solver.solve().status;
             INFO(c.name << ", cost " << cost << ", status " << static_cast<int>(st));
-            CHECK(st != Status::Unbounded);
-            CHECK(st != Status::Optimal);
+            CHECK(st == Status::Infeasible);
         }
     }
 }
