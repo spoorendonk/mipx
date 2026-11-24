@@ -10,7 +10,8 @@
 #
 #     uv sync    # clang-format==22.1.8 and clang-tidy==22.1.8 into .venv/bin
 #
-# `.venv/bin` is searched first, as the hooks search it. At configure time a
+# This checkout's `.venv/bin` is searched first, then PATH (the hooks also try
+# the main checkout's from a linked worktree; CMake does not). At configure, a
 # missing tool, or one of another major version than the pin's, is a warning,
 # or an error with MIPX_REQUIRE_CLANG_TOOLS=ON, its default when the CI
 # environment variable is set (and not `false` or `0`). The wheel build
@@ -43,8 +44,12 @@ else()
     foreach(_mipx_tool IN ITEMS clang-format clang-tidy)
         string(MAKE_C_IDENTIFIER "MIPX_${_mipx_tool}_EXE" _mipx_var)
         string(TOUPPER "${_mipx_var}" _mipx_var)
+        # Not cached, so a `uv sync` after the first configure is found by the
+        # next one; `.venv/bin` alone first, so no CMAKE_PREFIX_PATH outranks
+        # it. A -D of the variable skips both searches.
         find_program(${_mipx_var} NAMES ${_mipx_tool}
-                     HINTS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin" NAMES_PER_DIR)
+                     PATHS "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin" NO_DEFAULT_PATH NO_CACHE)
+        find_program(${_mipx_var} NAMES ${_mipx_tool} NO_CACHE)
         if(NOT ${_mipx_var})
             _mipx_clang_tools_complain(
                 "${_mipx_tool} not found; `uv sync` installs ${_mipx_clang_pin} into .venv")

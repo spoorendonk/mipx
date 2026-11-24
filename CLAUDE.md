@@ -183,9 +183,10 @@ When implementing from papers, pseudocode, or open-source references:
 - Style: Google-based, enforced by `.clang-format` and `.clang-tidy`.
 - clang-format and clang-tidy are **22.1.8**, the group's one toolchain
   version, pinned in `.clang-format-version`. `uv sync` installs both into
-  `.venv/bin` (pyproject's `dev` group), which the hooks and CMake search
-  before PATH; the pre-commit hook skips a clang-format of another version,
-  loudly. At configure, a missing tool or another major version is a warning,
+  `.venv/bin` (pyproject's `dev` group, which `uv run` installs by default).
+  The hooks search it before PATH, from a linked worktree the main
+  checkout's too; CMake searches only its own checkout's, then PATH. The
+  pre-commit hook skips a clang-format of another version, loudly. At configure, a missing tool or another major version is a warning,
   or an error with `MIPX_REQUIRE_CLANG_TOOLS=ON` (on by default when `CI` is
   set). mipx registers no `clang_tidy:` tests, so no gate runs clang-tidy;
   `.clang-tidy` sets its header filter explicitly (22's default takes every
@@ -277,8 +278,8 @@ that checkout's `.venv`) and tests those, so the gate's fresh worktree tests
 the pushed tree. `[tool.uv] cache-keys` in `pyproject.toml` makes a kept
 `.venv` rebuild after a C++ or bindings edit. `--locked` fails on a `uv.lock`
 that no longer matches `pyproject.toml` instead of rewriting it. A gate host
-needs only `uv` on its PATH (and network for the build requirements on a cold
-uv cache). A pytest that cannot run fails the gate; only exit 5 (no tests
+needs only `uv` on its PATH (and network for the build requirements, and the
+`dev` group's clang-format and clang-tidy wheels, ~45 MB, on a cold uv cache). A pytest that cannot run fails the gate; only exit 5 (no tests
 collected) passes. So the binding tests import `mipx` plainly, never through
 `pytest.importorskip`: a skipped module collects nothing, exits 5 and would
 pass a tree whose bindings were never installed (#255). This build is the
