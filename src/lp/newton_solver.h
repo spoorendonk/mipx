@@ -85,6 +85,19 @@ Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::sp
                        std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
                        Real tau, Real kappa);
 
+// One direction of the homogeneous self-dual loop (#370, #335) from the
+// backend's two solves at the iterate's (tau, kappa): p = (p_z, p_y, p_s) for
+// (eta rp, eta rd, rc) and u for (b, c, 0), with denom = hsdGapDenominator.
+// dtau = (eta_rg + c'p_z - b'p_y + rk / tau) / denom,
+// dkappa = (rk - kappa dtau) / tau and d = p + dtau u, where eta_rg is eta
+// times the gap residual (zero for a Gondzio corrector, whose rk is t_k).
+// Returns false if dtau, dkappa or an entry of d is not finite.
+bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<const Real> pz,
+                  std::span<const Real> py, std::span<const Real> ps, std::span<const Real> uz,
+                  std::span<const Real> uy, std::span<const Real> us, Real tau, Real kappa,
+                  Real denom, Real eta_rg, Real rk, std::span<Real> dz, std::span<Real> dy,
+                  std::span<Real> ds, Real& dtau, Real& dkappa);
+
 // The HSD loop's infeasibility test (#371) at an iterate (z, y, s, tau,
 // kappa) with az = A z, at_y = A'y, c'z and b'y, and mu_rel its mu relative
 // to the starting one (scale-invariant, see the definition):

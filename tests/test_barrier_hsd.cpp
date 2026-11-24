@@ -11,6 +11,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -130,6 +131,90 @@ TEST_CASE("Barrier HSD: dtau denominator is bounded below by u_z' S Z^-1 u_z", "
     const std::vector<Real> c2{1.0, 3.0};
     const std::vector<Real> uy4{4.0};
     CHECK(std::abs(hsdGapDenominator(b, c2, uz, uy4, z, s, tau, kappa) - 6.5) <= 1e-15);
+}
+
+TEST_CASE("Barrier HSD: a direction solves all five rows of the HSD Newton system",
+          "[barrier][hsd][gondzio]") {
+    // From the backend's two solves, hsdDirection must give a d that solves
+    //   A dz - b dtau = eta rp,  A'dy + ds - c dtau = eta rd,
+    //   -c'dz + b'dy - dkappa = eta rg,  S dz + Z ds = rc,  kappa dtau + tau dkappa = rk:
+    // Mehrotra's direction (eta != 0) and Gondzio's corrector (#335), which is
+    // the same system for (0, 0, 0, t_c, t_k).
+    constexpr Index m = 2;
+    constexpr Index n = 3;
+    const SparseMatrix A(m, n, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 1, 1.0}, {1, 2, 2.0}});
+    const std::vector<Real> b{1.0, 2.0};
+    const std::vector<Real> c{1.0, -1.0, 0.5};
+    const std::vector<Real> z{0.7, 1.3, 0.4};
+    const std::vector<Real> s{0.9, 0.2, 1.6};
+    const Real tau = 0.8;
+    const Real kappa = 0.3;
+    const std::vector<Real> rc{0.25, -0.5, 0.125};
+    const Real rk = -0.375;
+
+    const bool corrector = GENERATE(false, true);
+    const int backend = GENERATE(0, 1, 2);
+    INFO("corrector " << corrector << ", backend " << backend);
+    // eta times rp, rd, rg: zero for the corrector.
+    const Real eta = corrector ? 0.0 : 0.6;
+    std::vector<Real> rp{0.3, -0.2};
+    std::vector<Real> rd{-0.1, 0.4, 0.2};
+    const Real rg = 0.15;
+    for (Real& v : rp) {
+        v *= eta;
+    }
+    for (Real& v : rd) {
+        v *= eta;
+    }
+
+    std::unique_ptr<NewtonSolver> solver = backend == 0   ? createCpuCholeskySolver()
+                                           : backend == 1 ? createCpuAugmentedSolver()
+                                                          : createCpuSparseCholeskySolver();
+    BarrierOptions opts;
+    opts.verbose = false;
+    REQUIRE(solver->setup(A, m, n, opts));
+    REQUIRE(solver->factorize(z, s, 1e-12));
+    const std::vector<Real> zero_n(n, 0.0);
+    std::vector<Real> uz(n), uy(m), us(n), pz(n), py(m), ps(n);
+    REQUIRE(solver->solveNewton(b, c, zero_n, uz, uy, us));
+    REQUIRE(solver->solveNewton(rp, rd, rc, pz, py, ps));
+    const Real denom = hsdGapDenominator(b, c, uz, uy, z, s, tau, kappa);
+    REQUIRE(denom > 0.0);
+
+    std::vector<Real> dz(n), dy(m), ds(n);
+    Real dtau = 0.0;
+    Real dkappa = 0.0;
+    REQUIRE(hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, eta * rg, rk, dz, dy, ds,
+                         dtau, dkappa));
+    CHECK(std::abs(dtau) > 1e-3);  // the u terms are exercised
+
+    constexpr Real kTol = 1e-8;
+    std::vector<Real> adz(m, 0.0), atdy(n, 0.0);
+    A.multiply(dz, adz);
+    A.multiplyTranspose(dy, atdy);
+    for (Index i = 0; i < m; ++i) {
+        CHECK(std::abs(adz[i] - b[i] * dtau - rp[i]) <= kTol);
+    }
+    Real ctdz = 0.0;
+    Real btdy = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        CHECK(std::abs(atdy[j] + ds[j] - c[j] * dtau - rd[j]) <= kTol);
+        CHECK(std::abs(s[j] * dz[j] + z[j] * ds[j] - rc[j]) <= kTol);
+        ctdz += c[j] * dz[j];
+    }
+    for (Index i = 0; i < m; ++i) {
+        btdy += b[i] * dy[i];
+    }
+    CHECK(std::abs(-ctdz + btdy - dkappa - eta * rg) <= kTol);
+    CHECK(std::abs(kappa * dtau + tau * dkappa - rk) <= kTol);
+
+    // A non-finite entry of d is reported (#335 review), also one that leaves
+    // dtau and dkappa finite: p_s enters neither.
+    std::vector<Real> bad_ps = ps;
+    bad_ps[1] = std::numeric_limits<Real>::quiet_NaN();
+    CHECK_FALSE(hsdDirection(b, c, pz, py, bad_ps, uz, uy, us, tau, kappa, denom, eta * rg, rk, dz,
+                             dy, ds, dtau, dkappa));
+    CHECK(std::isfinite(dtau));
 }
 
 TEST_CASE("Barrier HSD: small LP reaches its optimum on the IPM's own point", "[barrier][hsd]") {

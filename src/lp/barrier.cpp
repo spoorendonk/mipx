@@ -482,7 +482,9 @@ struct GondzioCorrectors {
 // (1 + k) E_s ~ E_f is the one of arXiv:2508.04370 without its refinement
 // terms. The cap alone where the backend gives no cost estimate. The caller
 // counts once, at the first factorization: a Schur complement that grows
-// later does not change it.
+// later does not change it. The homogeneous loop takes one more solve per
+// factorization (u), which this count leaves out: there k can be one more
+// than the estimate pays for, within the same cap (#335).
 Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
     if (cap <= 0) {
         return 0;
@@ -1163,16 +1165,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
             if (!solver.solveNewton(rp_eta, rd_eta, rc, pz, py, ps)) {
                 return false;
             }
-            dtau = (eta * rg + dot(c, pz) - dot(b, py) + rk / tau) / denom;
-            dkappa = (rk - kappa * dtau) / tau;
-            for (Index j = 0; j < n; ++j) {
-                dz_out[j] = pz[j] + dtau * uz[j];
-                ds_out[j] = ps[j] + dtau * us[j];
-            }
-            for (Index i = 0; i < m; ++i) {
-                dy_out[i] = py[i] + dtau * uy[i];
-            }
-            return std::isfinite(dtau) && std::isfinite(dkappa);
+            return hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, eta * rg, rk,
+                                dz_out, dy_out, ds_out, dtau, dkappa);
         };
         // The largest step in [0, 1] keeping z, s, tau and kappa positive,
         // times fraction.
@@ -1223,16 +1217,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
                 if (!solver.solveNewton(zero_m, zero_n, t_c, pz, py, ps)) {
                     return false;
                 }
-                dtau_m = (dot(c, pz) - dot(b, py) + t_k / tau) / denom;
-                dkappa_m = (t_k - kappa * dtau_m) / tau;
-                for (Index j = 0; j < n; ++j) {
-                    mz[j] = pz[j] + dtau_m * uz[j];
-                    ms[j] = ps[j] + dtau_m * us[j];
-                }
-                for (Index i = 0; i < m; ++i) {
-                    my[i] = py[i] + dtau_m * uy[i];
-                }
-                return std::isfinite(dtau_m) && std::isfinite(dkappa_m);
+                return hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, 0.0, t_k, mz,
+                                    my, ms, dtau_m, dkappa_m);
             };
             auto fullStep = [&](std::span<const Real> dz_in, std::span<const Real> ds_in, Real dt,
                                 Real dk) { return stepFor(dz_in, ds_in, dt, dk, 1.0); };
@@ -1298,6 +1284,26 @@ Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::sp
         q += s[j] * uz[j] * uz[j] / z[j];
     }
     return std::max(dot(b, uy) - dot(c, uz), q) + kappa / tau;
+}
+
+bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<const Real> pz,
+                  std::span<const Real> py, std::span<const Real> ps, std::span<const Real> uz,
+                  std::span<const Real> uy, std::span<const Real> us, Real tau, Real kappa,
+                  Real denom, Real eta_rg, Real rk, std::span<Real> dz, std::span<Real> dy,
+                  std::span<Real> ds, Real& dtau, Real& dkappa) {
+    dtau = (eta_rg + dot(c, pz) - dot(b, py) + rk / tau) / denom;
+    dkappa = (rk - kappa * dtau) / tau;
+    bool finite = std::isfinite(dtau) && std::isfinite(dkappa);
+    for (size_t j = 0; j < dz.size(); ++j) {
+        dz[j] = pz[j] + dtau * uz[j];
+        ds[j] = ps[j] + dtau * us[j];
+        finite = finite && std::isfinite(dz[j]) && std::isfinite(ds[j]);
+    }
+    for (size_t i = 0; i < dy.size(); ++i) {
+        dy[i] = py[i] + dtau * uy[i];
+        finite = finite && std::isfinite(dy[i]);
+    }
+    return finite;
 }
 
 // The HSD loop's infeasibility test (#371), after Andersen & Andersen (2000),
