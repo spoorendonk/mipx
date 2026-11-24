@@ -2139,8 +2139,11 @@ CrossoverBound nearestCrossoverBound(Real value, Real lower, Real upper) {
 
 std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
                                                        std::span<const Real> primal,
+                                                       std::span<const Real> reduced_costs,
                                                        const Deadline& deadline) {
     constexpr Real kBoundTol = 1e-6;
+    constexpr Real kDualBoundTol = 1e-3;
+    constexpr Real kReducedCostTol = 1e-6;
     const Index n = lp.num_cols;
     const Index m = lp.num_rows;
     std::vector<BasisStatus> basis(static_cast<size_t>(n + m));
@@ -2175,7 +2178,15 @@ std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
         }
         const auto bound = nearestCrossoverBound(primal[j], lp.col_lower[j], lp.col_upper[j]);
         basis[j] = bound.status;
-        if (bound.distance <= kBoundTol) {
+        // A positive IPM gap can leave bound-active columns slightly in the
+        // interior. For a one-sided column, the reduced cost is its bound
+        // multiplier (up to sign). Measure it against the column's cost
+        // so a small relative dual residual does not drive this screen.
+        const bool one_sided = isFinite(lp.col_lower[j]) != isFinite(lp.col_upper[j]);
+        const bool dual_at_bound =
+            one_sided && bound.distance <= kDualBoundTol &&
+            std::abs(reduced_costs[j]) > kReducedCostTol * std::max(1.0, std::abs(lp.obj[j]));
+        if (bound.distance <= kBoundTol || dual_at_bound) {
             continue;
         }
         const auto col = lp.matrix.col(j);
@@ -2227,7 +2238,25 @@ std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
 bool BarrierSolver::runCrossover() {
     crossover_status_ = Status::Error;
     const auto deadline = deadline_.orStop(options_.stop_flag);
-    const auto basis = crossoverBasis(original_, primal_orig_, deadline);
+    std::optional<std::vector<BasisStatus>> basis;
+    if (!deadline.passed()) {
+        auto reduced_costs = getReducedCosts();
+        if (presolve_active_) {
+            // A multiplier on a tightened bound can price a removed row
+            // rather than the original column bound.
+            const auto& col_map = presolver_.colMapping();
+            for (Index k = 0; k < presolved_.num_cols; ++k) {
+                const Index j = col_map[k];
+                if (original_.col_lower[j] != presolved_.col_lower[k] ||
+                    original_.col_upper[j] != presolved_.col_upper[k]) {
+                    reduced_costs[j] = 0.0;
+                }
+            }
+        }
+        if (!deadline.passed()) {
+            basis = crossoverBasis(original_, primal_orig_, reduced_costs, deadline);
+        }
+    }
     if (!basis || deadline.passed()) {
         crossover_status_ = deadline_.passed() ? Status::TimeLimit : Status::IterLimit;
         return false;

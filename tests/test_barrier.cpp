@@ -741,6 +741,70 @@ TEST_CASE("BarrierSolver crossover: triangle LP basis is valid", "[barrier][cros
     CHECK(ds_result.iterations <= 5);
 }
 
+TEST_CASE("BarrierSolver crossover: a presolved bound keeps its original column basic",
+          "[barrier][crossover]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {1.0, 0.5};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.row_lower = {0.0005, 1.0};
+    lp.row_upper = {kInf, 1.0};
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
+
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = true;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(0.50025, 1e-9));
+    // The singleton row's multiplier belongs to x >= 0.0005 in the
+    // presolved LP. In the original LP x and y can both start basic.
+    CHECK(solver.crossoverStats().attempted);
+    CHECK(solver.crossoverIterations() == 0);
+    const auto basis = solver.getBasis();
+    REQUIRE(basis.size() == 4);
+    CHECK(basis[0] == BasisStatus::Basic);
+    CHECK(basis[1] == BasisStatus::Basic);
+}
+
+TEST_CASE("BarrierSolver crossover: a small interior column stays basic", "[barrier][crossover]") {
+    LpProblem lp;
+    lp.num_cols = 1;
+    lp.num_rows = 1;
+    lp.obj = {20000.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {kInf};
+    lp.col_type = {VarType::Continuous};
+    lp.row_lower = {0.0005};
+    lp.row_upper = {0.0005};
+    lp.matrix = SparseMatrix(1, 1, {{0, 0, 1.0}});
+
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(10.0, 1e-9));
+    CHECK(solver.crossoverStats().attempted);
+    CHECK(solver.crossoverIterations() == 0);
+    const auto basis = solver.getBasis();
+    REQUIRE(basis.size() == 2);
+    CHECK(basis[0] == BasisStatus::Basic);
+}
+
 TEST_CASE("BarrierSolver crossover: dependent interior columns leave room for a slack",
           "[barrier][crossover]") {
     LpProblem lp;
