@@ -25,5 +25,13 @@ CheckOptions:
     value: lower_case
 
 WarningsAsErrors: ''
-HeaderFilterRegex: '.*'
+# First-party headers only, set explicitly: clang-tidy 22's default is every
+# non-system header, and FetchContent's `_deps/` (Catch2, nanobind) has its
+# own `src/` and `include/` directories (#262).
+HeaderFilterRegex: '/(include/mipx|src|tests)/'
+ExcludeHeaderFilterRegex: '/_deps/'
+# The build compiles with GCC and -Wpedantic -Werror; clang 22 reports
+# __COUNTER__, which Catch2's TEST_CASE expands to, as a C2y extension, and
+# -Werror makes that an error in every test source. GCC does not (#262).
+ExtraArgs: ['-Wno-c2y-extensions']
 FormatStyle: file

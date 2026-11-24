@@ -19,6 +19,12 @@ Issues = "https://github.com/spoorendonk/mipx/issues"
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
+# The group's clang tools, exactly the version `.clang-format-version` pins
+# (#262): `uv sync` puts them in .venv/bin, which the hooks and the CMake
+# check search before PATH, so the format gate is the same on every host.
+[dependency-groups]
+dev = ["clang-format==22.1.8", "clang-tidy==22.1.8"]
+
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 cmake.version = ">=3.25"

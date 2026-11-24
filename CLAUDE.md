@@ -181,6 +181,17 @@ When implementing from papers, pseudocode, or open-source references:
 
 - Target C++23. Use modern features (`std::expected`, concepts, ranges, `constexpr`).
 - Style: Google-based, enforced by `.clang-format` and `.clang-tidy`.
+- clang-format and clang-tidy are **22.1.8**, the group's one toolchain
+  version, pinned in `.clang-format-version`. `uv sync` installs both into
+  `.venv/bin` (pyproject's `dev` group), which the hooks and CMake search
+  before PATH; the pre-commit hook skips a clang-format of another version,
+  loudly. At configure, a missing tool or another major version is a warning,
+  or an error with `MIPX_REQUIRE_CLANG_TOOLS=ON` (on by default when `CI` is
+  set). mipx registers no `clang_tidy:` tests, so no gate runs clang-tidy;
+  `.clang-tidy` sets its header filter explicitly (22's default takes every
+  non-system header, `_deps/` included), and it and `.clangd` pass
+  `-Wno-c2y-extensions`, as clang 22 makes Catch2's `__COUNTER__` an error
+  under the build's `-Wpedantic -Werror` (#262).
 - Use `#pragma once` for include guards.
 - Minimize includes in headers. Forward-declare where possible.
 
@@ -348,6 +359,7 @@ All C++ tests compile into a single `mipx-tests` binary (Catch2). You can also r
 | `MIPX_STRICT_WARNINGS` | ON | `-Werror` |
 | `MIPX_USE_CCACHE` | ON | Use `ccache`/`sccache` as compiler launcher when installed |
 | `MIPX_USE_BLAS` | auto-detect (OFF in the wheel) | BLAS-3 for the barrier's sparse NE Cholesky blocks, loaded at run time (#290) |
+| `MIPX_REQUIRE_CLANG_TOOLS` | ON when `CI` is set, else OFF | Fail configure, not warn, on a missing clang-format/clang-tidy or one of another major version than `.clang-format-version` (#262) |
 
 `CMAKE_CUDA_ARCHITECTURES` is cached at first configure, so a `build/` made
 before #192 keeps nvcc's default (75), whose code the driver cannot JIT for an

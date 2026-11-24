@@ -1,4 +1,7 @@
 CompileFlags:
   CompilationDatabase: build/
+  # As .clang-tidy's ExtraArgs: clang 22 calls Catch2's __COUNTER__ a C2y
+  # extension, an error under the build's -Wpedantic -Werror (#262).
+  Add: [-Wno-c2y-extensions]
 Diagnostics:
   UnusedIncludes: Strict
