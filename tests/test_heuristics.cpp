@@ -4,6 +4,7 @@
 #include "mipx/heuristics.h"
 #include "mipx/lp_problem.h"
 
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
@@ -1670,6 +1671,57 @@ TEST_CASE("TwoOptHeuristic: requires incumbent", "[heuristics]") {
 // ===========================================================================
 // Root portfolio wiring
 // ===========================================================================
+
+TEST_CASE("HeuristicRuntime: time limit stops a root heuristic LP", "[heuristics][time_limit]") {
+    struct ExpireOnHeuristicSolve final : DualSimplexSolver {
+        std::atomic<bool> expired{false};
+        std::vector<Status> statuses;
+
+        LpResult solve() override {
+            // Expire after admission to the heuristic. The stop flag tells the
+            // portfolio's copy of the deadline, and the zero time left tells
+            // the simplex solve, without waiting for a wall-clock interval.
+            expired.store(true, std::memory_order_relaxed);
+            auto options = getOptions();
+            options.deadline = Deadline::after(0.0);
+            setOptions(options);
+            auto result = DualSimplexSolver::solve();
+            statuses.push_back(result.status);
+            return result;
+        }
+    } lp;
+
+    const auto problem = buildFractionalSingleIntMip();
+    lp.load(problem);
+    REQUIRE(lp.DualSimplexSolver::solve().status == Status::Optimal);
+    const auto primals = lp.getPrimalValues();
+    // Rounding 4.6 up violates the row, leaving the auxiliary LP eligible.
+    REQUIRE_THAT(primals[0], WithinAbs(4.6, 1e-6));
+    auto options = lp.getOptions();
+    options.deadline = Deadline{}.orStop(&lp.expired);
+    lp.setOptions(options);
+
+    HeuristicRuntimeConfig config;
+    config.mode = HeuristicRuntimeMode::Opportunistic;
+    HeuristicRuntime runtime(config);
+    const RootHeuristicContext ctx{
+        .problem = problem,
+        .lp = lp,
+        .primals = primals,
+        .root_int_inf = 1,
+        .root_int_vars = 1,
+    };
+    Real incumbent = kInf;
+    std::vector<Real> best_solution;
+    const auto out = runtime.runRootPortfolio(ctx, incumbent, best_solution);
+
+    CHECK(out.rounding_improvements == 0);
+    CHECK(out.auxobj_calls == 1);
+    REQUIRE(lp.statuses.size() == 1);
+    CHECK(lp.statuses.front() == Status::TimeLimit);
+    CHECK(out.auxobj_improvements == 0);
+    CHECK(out.zeroobj_calls == 0);
+}
 
 // Pins the wiring of runRootPortfolio: every heuristic in the root portfolio
 // must actually be invoked. Without this the per-heuristic call counters are

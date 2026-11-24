@@ -886,38 +886,6 @@ TEST_CASE("MipSolver: time limit stops the tree's LPs", "[mip][benchmark][time_l
     checkSetCoverIncumbent(lp, result.solution);
 }
 
-// #355: the time limit holds through the root heuristics. On this wider
-// model the root LP and cuts take ~7.4 s of the limit, and the root
-// heuristic portfolio, opened to every heuristic by the thresholds (the
-// defaults admit its LP heuristics only on models with few integers), runs
-// past it: before its LPs got the time left the solve overran 8 s by 0.96 s
-// (32-core box, one thread), after by 0.07 s. Wall-clock, so [benchmark]
-// keeps it out of the default suite.
-TEST_CASE("MipSolver: time limit stops the root heuristics", "[mip][benchmark][time_limit]") {
-    constexpr double kLimit = 8.0;
-    constexpr double kAllowedOverrun = 0.2;
-    const auto lp = buildSlowRootSetCover(400, 80000, 8);
-    MipSolver solver;
-    solver.setVerbose(false);
-    solver.setNumThreads(1);
-    solver.setRootHeuristicThresholds(1000, 100000);
-    solver.setTimeLimit(kLimit);
-    solver.load(lp);
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto result = solver.solve();
-    const double wall =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-    CHECK(result.status == Status::TimeLimit);
-    // The root LP finished (a bound) and no tree ran: the limit fell in the
-    // root stage after the LP, where the portfolio runs.
-    CHECK(result.nodes <= 1);
-    CHECK(std::isfinite(result.best_bound));
-    CHECK(wall <= kLimit + kAllowedOverrun);
-    CHECK(result.time_seconds <= kLimit + kAllowedOverrun);
-    checkSetCoverIncumbent(lp, result.solution);
-}
-
 // #336, deterministic: with no time at all, every root policy, the race
 // included, returns TimeLimit with no bound and no node beyond the root.
 TEST_CASE("MipSolver: a zero time limit stops in the root with no bound", "[mip][time_limit]") {
