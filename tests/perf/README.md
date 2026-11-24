@@ -246,6 +246,16 @@ SOTA guard policy for dual-simplex work:
 - Do not accept speedups from numerically weaker legacy shortcuts.
 - Treat status/objective mismatches as correctness failures before perf claims.
 
+## Presolve Postsolve Check
+
+`mipx-presolve-bench MODEL --check-postsolve` solves the reduced LP and
+checks the reconstructed point's feasibility and objective on the original
+LP. To use HiGHS for the solves, configure with `-DMIPX_BENCH_HIGHS=ON` and
+run `mipx-presolve-check-highs MODEL --check-postsolve`. This uses one HiGHS
+thread with the same mipx postsolve and checks. Supply an LP reference in
+`--solu FILE` to skip the original solve when the reduced solve finds an
+optimum.
+
 ## Presolve Matrix (Smoke + Internal)
 
 Run presolve correctness/performance comparisons against HiGHS across a matrix

@@ -107,6 +107,13 @@ if(TARGET mipx-presolve-bench)
     )
     add_dependencies(mipx-tests mipx-presolve-bench)
 endif()
+if(TARGET mipx-presolve-check-highs)
+    target_compile_definitions(mipx-tests PRIVATE MIPX_HAS_PRESOLVE_CHECK_HIGHS_BINARY)
+    set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+        MIPX_PRESOLVE_CHECK_HIGHS_BINARY="$<TARGET_FILE:mipx-presolve-check-highs>"
+    )
+    add_dependencies(mipx-tests mipx-presolve-check-highs)
+endif()
 
 # LP sequence replay (#267): column generation's masters on the public
 # CommaLab grid1, as mcf's LP recorder wrote them, replayed on every LP solver

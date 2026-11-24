@@ -52,8 +52,9 @@ std::vector<std::string> splitCsv(const std::string& line) {
 
 /// Run mipx-presolve-bench with `args` (paths single-quoted by the caller)
 /// and read the row after its "instance," header line.
-BenchRun runBench(const std::string& args) {
-    const std::string command = "'" + mipx::test::presolveBenchBinary() + "' " + args + " 2>&1";
+BenchRun runBench(const std::string& args,
+                  const std::string& binary = mipx::test::presolveBenchBinary()) {
+    const std::string command = "'" + binary + "' " + args + " 2>&1";
     BenchRun run;
     FILE* pipe = popen(command.c_str(), "r");
     REQUIRE(pipe != nullptr);
@@ -106,6 +107,55 @@ struct TempFile {
 };
 
 }  // namespace
+
+#if defined(MIPX_HAS_PRESOLVE_CHECK_HIGHS_BINARY)
+TEST_CASE("Presolve bench: HiGHS solves the reduced LP for postsolve", "[presolve][bench]") {
+    const std::string binary = mipx::test::presolveCheckHighsBinary();
+    const auto run = runBench(dataFile("presolve_bench.lp") + " --check-postsolve", binary);
+    INFO(run.output);
+    REQUIRE(run.exit_code == 0);
+    REQUIRE_FALSE(run.row.empty());
+    CHECK(run.row.at("check") == "pass");
+    CHECK(run.row.at("reduced_status") == "optimal");
+    CHECK(run.row.at("original_status") == "optimal");
+    CHECK(run.real("violation") <= 1e-6);
+    CHECK(run.real("objective") == -5.0);
+    CHECK(run.real("rel_err") <= 1e-6);
+
+    // The two backends agree on the fixture above. A tiny nonzero coefficient
+    // in the original LP distinguishes HiGHS, which would silently drop it.
+    const TempFile tiny_coefficient("tiny_coefficient.lp", R"(Minimize
+ obj: x
+Subject To
+ r: 0.0000000000005 x + y >= 1
+End
+)");
+    const auto dual = runBench(tiny_coefficient.quoted() + " --check-postsolve");
+    INFO(dual.output);
+    REQUIRE(dual.exit_code == 0);
+    CHECK(dual.row.at("check") == "pass");
+    const auto highs = runBench(tiny_coefficient.quoted() + " --check-postsolve", binary);
+    CHECK(highs.exit_code == 2);
+    CHECK(highs.output.find("a coefficient below 1e-12, which HiGHS drops") != std::string::npos);
+}
+
+TEST_CASE("Presolve bench: HiGHS checks rows of a column-free LP", "[presolve][bench]") {
+    const TempFile inconsistent("column_free.lp", R"(Minimize
+ obj: 0
+Subject To
+ r: 0 >= 0.0000005
+End
+)");
+    const auto run = runBench(inconsistent.quoted() + " --check-postsolve",
+                              mipx::test::presolveCheckHighsBinary());
+    INFO(run.output);
+    REQUIRE(run.exit_code == 0);
+    REQUIRE_FALSE(run.row.empty());
+    CHECK(run.row.at("check") == "pass");
+    CHECK(run.row.at("reduced_status") == "infeasible");
+    CHECK(run.row.at("original_status") == "infeasible");
+}
+#endif
 
 TEST_CASE("Presolve bench: reports sizes and the reductions that fire", "[presolve][bench]") {
     const auto run = runBench(dataFile("presolve_bench.lp") + " --check-postsolve --repeats 3");

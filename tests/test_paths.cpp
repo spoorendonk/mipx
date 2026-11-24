@@ -18,4 +18,10 @@ std::string presolveBenchBinary() {
 }
 #endif
 
+#ifdef MIPX_HAS_PRESOLVE_CHECK_HIGHS_BINARY
+std::string presolveCheckHighsBinary() {
+    return MIPX_PRESOLVE_CHECK_HIGHS_BINARY;
+}
+#endif
+
 }  // namespace mipx::test

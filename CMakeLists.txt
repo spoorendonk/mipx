@@ -211,7 +211,7 @@ endif()
 # archive, pinned by hash, built static with HiPO (needs a BLAS, e.g.
 # libopenblas-dev).
 option(MIPX_BENCH_HIGHS
-       "Build mipx-lpseq-replay-highs and mipx-presolve-bench-highs, fetching HiGHS v1.16.0 (bench only)"
+       "Fetch HiGHS v1.16.0 for the LP sequence and presolve benches (bench only)"
        OFF)
 if(MIPX_BENCH_HIGHS)
     function(mipx_fetch_highs)
@@ -247,6 +247,14 @@ if(MIPX_BENCH_HIGHS)
     add_executable(mipx-presolve-bench-highs tests/perf/presolve_bench_highs.cpp)
     target_link_libraries(mipx-presolve-bench-highs PRIVATE mipx highs::highs)
     mipx_set_compiler_flags(mipx-presolve-bench-highs)
+
+    if(TARGET mipx-presolve-bench)
+        # Keep HiGHS and its startup dependencies out of the regular bench.
+        add_executable(mipx-presolve-check-highs tests/perf/presolve_bench.cpp)
+        target_compile_definitions(mipx-presolve-check-highs PRIVATE MIPX_PRESOLVE_BENCH_USE_HIGHS)
+        target_link_libraries(mipx-presolve-check-highs PRIVATE mipx highs::highs)
+        mipx_set_compiler_flags(mipx-presolve-check-highs)
+    endif()
 endif()
 
 # --- Python extension ---

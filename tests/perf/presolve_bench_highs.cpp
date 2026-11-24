@@ -20,6 +20,7 @@
 // 2 on a usage or read error.
 
 #include "presolve_bench_common.h"
+#include "presolve_bench_highs_model.h"
 
 #include <array>
 #include <cmath>
@@ -36,60 +37,14 @@ namespace pb = mipx::presolve_bench;
 
 namespace {
 
-static_assert(sizeof(HighsInt) == sizeof(Index), "HiGHS built with 64-bit HighsInt");
-
 const std::string kUsage =
     "Usage: mipx-presolve-bench-highs <model> [--name NAME] [--format auto|mps|lp]\n"
     "       [--repeats N] [--csv FILE]\n";
 
-// As in mipx-lpseq-replay-highs: HiGHS's limits widened to their ends, so it
-// takes the LP mipx read; what it would still drop is refused.
-constexpr double kHighsSmallestEntry = 1e-12;
-
-bool widenLimits(Highs& h) {
-    return h.setOptionValue("infinite_bound", kHighsInf) == HighsStatus::kOk &&
-           h.setOptionValue("infinite_cost", kHighsInf) == HighsStatus::kOk &&
-           h.setOptionValue("large_matrix_value", kHighsInf) == HighsStatus::kOk &&
-           h.setOptionValue("small_matrix_value", kHighsSmallestEntry) == HighsStatus::kOk;
-}
-
-HighsLp toHighs(const LpProblem& lp) {
-    HighsLp h;
-    h.num_col_ = lp.num_cols;
-    h.num_row_ = lp.num_rows;
-    h.sense_ = lp.sense == Sense::Maximize ? ObjSense::kMaximize : ObjSense::kMinimize;
-    h.offset_ = lp.obj_offset;
-    h.col_cost_ = lp.obj;
-    h.col_lower_ = lp.col_lower;
-    h.col_upper_ = lp.col_upper;
-    h.row_lower_ = lp.row_lower;
-    h.row_upper_ = lp.row_upper;
-    // No integrality: readOrExit relaxed it, so HiGHS runs its LP presolve.
-    h.a_matrix_.format_ = MatrixFormat::kRowwise;
-    h.a_matrix_.num_col_ = lp.num_cols;
-    h.a_matrix_.num_row_ = lp.num_rows;
-    const auto starts = lp.matrix.csr_row_starts();
-    const auto cols = lp.matrix.csr_col_indices();
-    const auto values = lp.matrix.csr_values();
-    h.a_matrix_.start_.assign(starts.begin(), starts.end());
-    h.a_matrix_.index_.assign(cols.begin(), cols.end());
-    h.a_matrix_.value_.assign(values.begin(), values.end());
-    if (h.a_matrix_.start_.empty()) {
-        h.a_matrix_.start_.assign(1, 0);
-    }
-    for (const double v : h.a_matrix_.value_) {
-        if (v != 0.0 && std::abs(v) <= kHighsSmallestEntry) {
-            std::fprintf(stderr, "Error: a coefficient below 1e-12, which HiGHS drops\n");
-            std::exit(pb::kExitUsage);
-        }
-    }
-    return h;
-}
-
 /// A Highs holding `lp`, set for a presolve-only run.
 std::unique_ptr<Highs> loaded(const HighsLp& lp, bool rule_logging) {
     auto h = std::make_unique<Highs>();
-    const bool ok = widenLimits(*h) &&
+    const bool ok = pb::widenHighsLimits(*h) &&
                     h->setOptionValue("output_flag", false) == HighsStatus::kOk &&
                     h->setOptionValue("threads", 1) == HighsStatus::kOk &&
                     h->setOptionValue("presolve", "on") == HighsStatus::kOk &&
@@ -178,7 +133,7 @@ int main(int argc, char** argv) {
     }
     const std::string instance = opt.name.empty() ? pb::instanceName(opt.path) : opt.name;
     const LpProblem lp = pb::readOrExit(opt);
-    const HighsLp hlp = toHighs(lp);
+    const HighsLp hlp = pb::toHighs(lp);
 
     // Untimed and first (see the header).
     const auto logged = loaded(hlp, true);

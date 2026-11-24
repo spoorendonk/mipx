@@ -11,14 +11,16 @@
 // times of the last call; `loop_seconds` is its time_seconds (its setup and
 // reduction loop), the rest of that call's time building the reduced LP.
 //
-// --check-postsolve solves the reduced LP with dual simplex, postsolves the
+// --check-postsolve solves the reduced LP, postsolves the
 // point, and checks it against the model as read: every bound and row to
 // 1e-6 (pointHoldsModel) and its objective within --rel-tol (1e-6, relative to
 // max(1, |reference|)) of the reference: the instance's =opt= line in --solu
-// FILE (an LP optimum), else a dual simplex solve of the model as read. A
-// presolve verdict of infeasible, or a reduced LP that is not optimal, must
-// match that solve's status. A solve that hits --time-limit is reported as
-// "limit"; a solver error on either side is a fail.
+// FILE (an LP optimum), else a solve of the model as read.
+// mipx-presolve-check-highs (MIPX_BENCH_HIGHS) solves both LPs with HiGHS
+// on one thread.
+// A presolve verdict of infeasible, or a reduced LP that is not optimal,
+// must match the original solve's status. A solve that hits --time-limit
+// is reported as "limit"; a solver error on either side is a fail.
 //
 // Status: reduced, reduced_to_empty, not_reduced (sizes unchanged, though
 // bounds may have been tightened; HiGHS's not_reduced means no reduction at
@@ -26,9 +28,16 @@
 // threw; every column after the common ones empty). Exit 0, 1 when the check
 // fails or presolve threw, 2 on a usage or read error.
 
-#include "mipx/dual_simplex.h"
 #include "mipx/presolve.h"
 #include "presolve_bench_common.h"
+
+#if defined(MIPX_PRESOLVE_BENCH_USE_HIGHS)
+#include "presolve_bench_highs_model.h"
+
+#include <simplex/SimplexConst.h>
+#else
+#include "mipx/dual_simplex.h"
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -46,7 +55,12 @@ namespace pb = mipx::presolve_bench;
 namespace {
 
 const std::string kUsage =
-    "Usage: mipx-presolve-bench <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
+#if defined(MIPX_PRESOLVE_BENCH_USE_HIGHS)
+    "Usage: mipx-presolve-check-highs"
+#else
+    "Usage: mipx-presolve-bench"
+#endif
+    " <model> [--name NAME] [--format auto|mps|lp] [--repeats N]\n"
     "       [--csv FILE] [--check-postsolve [--solu FILE] [--rel-tol T] [--time-limit S]]\n"
     "       [--parallel-cols] [--free-col-substitution] [--doubleton-fill-in] [--aggregator]\n"
     "       [--zero-cost-singletons] [--extended-dual-fixing] [--single-equation-dual-fixing]\n"
@@ -173,7 +187,8 @@ struct Solve {
     std::vector<Real> x;
 };
 
-Solve solveDual(const LpProblem& lp, double time_limit) {
+#if !defined(MIPX_PRESOLVE_BENCH_USE_HIGHS)
+Solve solveForCheck(const LpProblem& lp, double time_limit) {
     Solve s;
     if (lp.num_cols == 0 && lp.num_rows == 0) {
         s.status = Status::Optimal;
@@ -189,6 +204,74 @@ Solve solveDual(const LpProblem& lp, double time_limit) {
     s.x = solver.getPrimalValues();
     return s;
 }
+
+#else
+Solve solveForCheck(const LpProblem& lp, double time_limit) {
+    Highs solver;
+    // HiGHS reports a model without columns as empty without checking its rows.
+    if (lp.num_cols == 0) {
+        double tolerance = 0.0;
+        if (solver.getOptionValue("primal_feasibility_tolerance", tolerance) != HighsStatus::kOk) {
+            return {};
+        }
+        return {pointViolation(lp, {}) <= tolerance ? Status::Optimal : Status::Infeasible, {}};
+    }
+    if (!pb::widenHighsLimits(solver) ||
+        solver.setOptionValue("output_flag", false) != HighsStatus::kOk ||
+        solver.setOptionValue("threads", 1) != HighsStatus::kOk ||
+        solver.setOptionValue("allow_unbounded_or_infeasible", true) != HighsStatus::kOk ||
+        (time_limit >= 0.0 &&
+         solver.setOptionValue("time_limit", time_limit) != HighsStatus::kOk)) {
+        std::fprintf(stderr, "Error: HiGHS refused an option\n");
+        return {};
+    }
+    if (solver.passModel(pb::toHighs(lp)) == HighsStatus::kError) {
+        std::fprintf(stderr, "Error: HiGHS refused the model\n");
+        return {};
+    }
+    HighsStatus run_status = solver.run();
+    if (solver.getModelStatus() == HighsModelStatus::kUnboundedOrInfeasible) {
+        // HiGHS 1.16 can mask a time limit while resolving this presolve verdict.
+        // Resolve it explicitly with primal simplex under the same cumulative clock.
+        if (time_limit >= 0.0 && solver.getRunTime() >= time_limit) {
+            return {Status::TimeLimit, {}};
+        }
+        if (solver.setOptionValue("presolve", "off") != HighsStatus::kOk ||
+            solver.setOptionValue("solver", "simplex") != HighsStatus::kOk ||
+            solver.setOptionValue("simplex_strategy",
+                                  static_cast<HighsInt>(kSimplexStrategyPrimal)) !=
+                HighsStatus::kOk) {
+            std::fprintf(stderr, "Error: HiGHS refused the primal simplex fallback\n");
+            return {};
+        }
+        run_status = solver.run();
+    }
+    if (run_status == HighsStatus::kError) {
+        std::fprintf(stderr, "Error: HiGHS could not solve the model\n");
+        return {};
+    }
+    switch (solver.getModelStatus()) {
+        case HighsModelStatus::kOptimal: {
+            const HighsSolution& solution = solver.getSolution();
+            if (solution.value_valid &&
+                solution.col_value.size() == static_cast<std::size_t>(lp.num_cols)) {
+                return {Status::Optimal, solution.col_value};
+            }
+            return {};
+        }
+        case HighsModelStatus::kInfeasible:
+            return {Status::Infeasible, {}};
+        case HighsModelStatus::kUnbounded:
+            return {Status::Unbounded, {}};
+        case HighsModelStatus::kTimeLimit:
+            return {Status::TimeLimit, {}};
+        case HighsModelStatus::kIterationLimit:
+            return {Status::IterLimit, {}};
+        default:
+            return {};
+    }
+}
+#endif
 
 bool isLimit(Status s) {
     return s == Status::IterLimit || s == Status::TimeLimit || s == Status::NodeLimit;
@@ -221,7 +304,7 @@ Check checkPostsolve(const Options& opt, const std::string& instance, const LpPr
     std::optional<Solve> original;
     const auto solveOriginal = [&]() -> const Solve& {
         if (!original) {
-            original = solveDual(lp, opt.time_limit);
+            original = solveForCheck(lp, opt.time_limit);
             c.original_status = statusName(original->status);
         }
         return *original;
@@ -244,7 +327,7 @@ Check checkPostsolve(const Options& opt, const std::string& instance, const LpPr
         sameVerdict(Status::Infeasible);
         return c;
     }
-    const Solve r = solveDual(reduced, opt.time_limit);
+    const Solve r = solveForCheck(reduced, opt.time_limit);
     c.reduced_status = statusName(r.status);
     if (r.status != Status::Optimal) {
         sameVerdict(r.status);
