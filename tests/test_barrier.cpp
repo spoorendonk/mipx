@@ -687,6 +687,9 @@ TEST_CASE("BarrierSolver crossover: simple LP returns valid basis", "[barrier][c
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-4.0, 1e-5));
+    CHECK(solver.crossoverStats().attempted);
+    CHECK_FALSE(solver.crossoverStats().singular_recovery);
+    CHECK_FALSE(solver.crossoverStats().cold_fallback);
 
     auto basis = solver.getBasis();
     REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
@@ -738,6 +741,40 @@ TEST_CASE("BarrierSolver crossover: triangle LP basis is valid", "[barrier][cros
     CHECK(ds_result.iterations <= 5);
 }
 
+TEST_CASE("BarrierSolver crossover: dependent interior columns leave room for a slack",
+          "[barrier][crossover]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {1.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.row_lower = {1.0, 1.0};
+    lp.row_upper = {1.0, 1.0};
+    // Duplicate coefficients in raw CSR also exercise candidate assembly.
+    lp.matrix = SparseMatrix(2, 2, {0.5, 0.5, 1.0, 1.0, 1.0}, {0, 0, 1, 0, 1}, {0, 3, 5});
+
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+    CHECK(solver.crossoverStats().attempted);
+    CHECK_FALSE(solver.crossoverStats().singular_recovery);
+    CHECK_FALSE(solver.crossoverStats().cold_fallback);
+    const auto basis = solver.getBasis();
+    REQUIRE(basis.size() == 4);
+    CHECK(std::count(basis.begin(), basis.begin() + 2, BasisStatus::Basic) == 1);
+    CHECK(std::count(basis.begin() + 2, basis.end(), BasisStatus::Basic) == 1);
+}
+
 TEST_CASE("BarrierSolver crossover disabled: getBasis returns empty", "[barrier][crossover]") {
     auto lp = buildSimpleLp();
     BarrierSolver solver;
@@ -751,6 +788,7 @@ TEST_CASE("BarrierSolver crossover disabled: getBasis returns empty", "[barrier]
 
     REQUIRE(result.status == Status::Optimal);
     CHECK(solver.getBasis().empty());
+    CHECK_FALSE(solver.crossoverStats().attempted);
 }
 
 TEST_CASE("BarrierSolver crossover: wide dense LP", "[barrier][crossover]") {

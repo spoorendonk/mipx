@@ -822,6 +822,12 @@ TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+    CHECK(solver.basisStartStats().singular_recovery);
+    CHECK_FALSE(solver.basisStartStats().cold_start);
+
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK_FALSE(solver.basisStartStats().singular_recovery);
+    CHECK_FALSE(solver.basisStartStats().cold_start);
 }
 
 // ---------------------------------------------------------------------------

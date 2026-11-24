@@ -2,6 +2,7 @@
 
 #include "lp/newton_solver.h"
 #include "mipx/barrier.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "test_paths.hpp"
 
@@ -74,6 +75,7 @@ struct Crossed {
     bool homogeneous = false;
     std::vector<BasisStatus> basis;
     Int iters = 0;  // crossover's simplex iterations
+    BarrierSolver::CrossoverStats stats;
 };
 
 Crossed crossWith(const LpProblem& lp, BarrierOptions opts) {
@@ -86,6 +88,7 @@ Crossed crossWith(const LpProblem& lp, BarrierOptions opts) {
     out.homogeneous = solver.usedHomogeneous();
     out.basis = solver.getBasis();
     out.iters = solver.crossoverIterations();
+    out.stats = solver.crossoverStats();
     return out;
 }
 
@@ -573,12 +576,8 @@ TEST_CASE("Barrier HSD: Netlib LPs reach the same objectives", "[barrier][hsd][n
     CHECK(std::abs(result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
 }
 
-// Crossover from the homogeneous loop's iterate (#294): the LP point
-// (x, y, s) / tau it hands over reaches the same objective and a basis.
-// Not a test of the point itself: on most of these LPs crossover's basis
-// guess is singular, from either loop, and the simplex restarts from a
-// crash basis (#398).
-TEST_CASE("Barrier HSD: Netlib LPs cross over to a basis", "[barrier][hsd][netlib][crossover]") {
+TEST_CASE("Barrier: Netlib crossover uses the proposed basis",
+          "[barrier][hsd][netlib][crossover]") {
     using Case = std::pair<const char*, Real>;
     auto [name, expected] =
         GENERATE(Case{"adlittle", 2.2549496316e+05}, Case{"afiro", -4.6475314286e+02},
@@ -589,19 +588,30 @@ TEST_CASE("Barrier HSD: Netlib LPs cross over to a basis", "[barrier][hsd][netli
                  Case{"stocfor1", -4.1131976219e+04}, Case{"bore3d", 1.3730803942e+03},
                  Case{"recipe", -2.6661600000e+02});
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
-    INFO(name << " algo " << static_cast<int>(algo));
+    const bool homogeneous = GENERATE(false, true);
+    CAPTURE(name, static_cast<int>(algo), homogeneous);
     const std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
     if (!std::filesystem::exists(path)) {
         SKIP("Netlib instance " + std::string(name) + " not downloaded");
     }
     const auto lp = readMps(path);
-    auto opts = quietOptions(true, algo);
+    auto opts = quietOptions(homogeneous, algo);
     opts.presolve = true;
-    const auto hsd = crossWith(lp, opts);
-    CHECK(hsd.homogeneous);
-    REQUIRE(hsd.result.status == Status::Optimal);
-    CHECK(std::abs(hsd.result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
-    checkBasis(hsd.basis, lp);
+    const auto crossed = crossWith(lp, opts);
+    DualSimplexSolver cold;
+    cold.load(lp);
+    cold.setVerbose(false);
+    const auto cold_result = cold.solve();
+    CAPTURE(cold_result.iterations, crossed.iters);
+    REQUIRE(cold_result.status == Status::Optimal);
+    CHECK(crossed.homogeneous == homogeneous);
+    REQUIRE(crossed.result.status == Status::Optimal);
+    CHECK(std::abs(crossed.result.objective - expected) <=
+          1e-6 * std::max(1.0, std::abs(expected)));
+    CHECK(crossed.stats.attempted);
+    CHECK_FALSE(crossed.stats.singular_recovery);
+    CHECK_FALSE(crossed.stats.cold_fallback);
+    checkBasis(crossed.basis, lp);
 }
 
 // A homogeneous run that stops short of tolerance hands its best iterate to

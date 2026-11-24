@@ -148,6 +148,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     status_ = Status::Error;
     iterations_ = 0;
     has_basis_ = false;
+    basis_start_stats_ = {};
     nonbasic_pos_.clear();
     bound_perturb_active_ = false;
     bound_perturb_activations_ = 0;
@@ -718,6 +719,7 @@ LpResult DualSimplexSolver::solve() {
     // clean-up included; each pass restarts only the density history.
     row_price_stats_ = RowPriceStats{};
     dse_fallback_stats_ = DseFallbackStats{};
+    basis_start_stats_ = {};
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);
     res = cleanUpUnscaled(res, start, checked);
@@ -1592,6 +1594,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
     const bool cold_start = !has_basis_;
     if (cold_start) {
+        basis_start_stats_.cold_start = true;
         // Cold start: set up crash basis (all-slack + optional crash passes).
         setupCrashBasis();
     }
@@ -1610,6 +1613,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     };
 
     auto recoverFromSingularBasis = [&]() -> bool {
+        basis_start_stats_.singular_recovery = true;
         ++basis_epoch;
         setupCrashBasis();
         try {

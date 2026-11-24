@@ -350,6 +350,13 @@ public:
         return dse_fallback_stats_;
     }
 
+    /// Basis starts and recoveries across all passes of the most recent solve().
+    struct BasisStartStats {
+        bool cold_start = false;
+        bool singular_recovery = false;
+    };
+    [[nodiscard]] BasisStartStats basisStartStats() const { return basis_start_stats_; }
+
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
@@ -476,6 +483,7 @@ private:
     bool loaded_ = false;
     bool has_basis_ = false;  // true after first solve or setBasis()
     bool verbose_ = true;
+    BasisStartStats basis_start_stats_;
 
     // Pricing weights (one per basis position, size num_rows).
     // When DSE is active, these hold exact steepest-edge weights w_i = ||B^{-1} e_i||^2.

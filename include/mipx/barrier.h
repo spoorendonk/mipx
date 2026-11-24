@@ -156,6 +156,13 @@ public:
     // Simplex iterations of the last solve's crossover, cold fallback
     // included; 0 when it did not run (or its basis guess was optimal).
     [[nodiscard]] Int crossoverIterations() const { return crossover_iters_; }
+    /// How the simplex cleanup ran in the most recent barrier solve.
+    struct CrossoverStats {
+        bool attempted = false;
+        bool singular_recovery = false;
+        bool cold_fallback = false;
+    };
+    [[nodiscard]] CrossoverStats crossoverStats() const { return crossover_stats_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
 
 private:
@@ -207,6 +214,7 @@ private:
     Real objective_ = 0.0;
     Int iterations_ = 0;
     Int crossover_iters_ = 0;
+    CrossoverStats crossover_stats_;
     Status crossover_status_ =
         Status::Error;  // Infeasible/Unbounded if either crossover run proved it
     bool used_gpu_ = false;

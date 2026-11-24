@@ -1,6 +1,7 @@
 #include "lp/rank_revealing_lu.h"
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <cmath>
@@ -371,6 +372,17 @@ TEST_CASE("RankRevealingLU: a tiny time limit times out the kernel", "[lu][rank_
     // A negative limit is none.
     lu.setTimeLimit(-1.0);
     CHECK(lu.build() == unlimited);
+}
+
+TEST_CASE("RankRevealingLU: build obeys a deadline and a stop request without losing setup",
+          "[lu][rank_revealing_lu]") {
+    const Csc a = makeCsc(2, {{{0, 1.0}}, {{1, 1.0}}});
+    RankRevealingLU lu;
+    lu.setup(a.num_row, a.start, a.index, a.value);
+    const std::atomic<bool> stop{true};
+    CHECK(lu.build(Deadline{}.orStop(&stop)) == RankRevealingLU::kBuildKernelReturnTimeout);
+    CHECK(lu.build(Deadline::after(0)) == RankRevealingLU::kBuildKernelReturnTimeout);
+    CHECK(lu.build() == 0);
 }
 
 TEST_CASE("RankRevealingLU: setup rejects a malformed matrix", "[lu][rank_revealing_lu]") {

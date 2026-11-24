@@ -26,6 +26,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 
 #include <chrono>
 #include <cstdint>
@@ -78,11 +79,12 @@ public:
     void setTimeLimit(double time_limit);
 
     /// HFactor::build up to buildMarkSingC. Returns kBuildKernelReturnTimeout
-    /// on a timeout, else the rank deficiency of the columns: with
+    /// if the build reaches a time limit or receives a stop request, else
+    /// the rank deficiency of the columns: with
     /// num_basic < num_row, rankDeficiency() less the num_row - num_basic
     /// rows no column could have covered. Throws std::logic_error before
     /// setup().
-    [[nodiscard]] Index build();
+    [[nodiscard]] Index build(const Deadline& deadline = {});
 
     [[nodiscard]] Index numRow() const { return num_row_; }
     [[nodiscard]] Index numBasic() const { return num_basic_; }
@@ -114,8 +116,8 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
-    void buildSimple();
-    Index buildKernel();
+    bool buildSimple(const Deadline& deadline);
+    Index buildKernel(const Deadline& deadline);
     void buildHandleRankDeficiency();
     void buildMarkSingC();
     void zeroCol(Index j_col, Real pivot_multiplier);

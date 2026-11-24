@@ -152,7 +152,7 @@ void RankRevealingLU::colFixMax(Index i_col) {
     mc_min_pivot_[i_col] = std::max(max_value * pivot_threshold_, pivot_tolerance_);
 }
 
-Index RankRevealingLU::build() {
+Index RankRevealingLU::build(const Deadline& deadline) {
     if (a_start_.empty()) {
         throw std::logic_error("RankRevealingLU: build() before setup()");
     }
@@ -162,14 +162,20 @@ Index RankRevealingLU::build() {
     row_with_no_pivot_.clear();
     col_with_no_pivot_.clear();
     var_with_no_pivot_.clear();
+    // An interrupted pivot may have left its row marks set.
+    std::fill(mwz_column_mark_.begin(), mwz_column_mark_.end(), 0);
+    min_time_bound_ = kHighsInf;
+    max_time_bound_ = 0;
 
-    buildSimple();
-    const Index build_kernel_return = buildKernel();
+    if (deadline.passed() || !buildSimple(deadline)) {
+        return kBuildKernelReturnTimeout;
+    }
+    const Index build_kernel_return = buildKernel(deadline);
     // kBuildKernelReturnTimeout: the time limit is reached. Otherwise the
     // rank deficiency of the columns; with num_basic < num_row the rows they
     // leave uncovered are found by continuing as if a full set of columns
     // were rank deficient.
-    if (build_kernel_return == kBuildKernelReturnTimeout) {
+    if (build_kernel_return == kBuildKernelReturnTimeout || deadline.passed()) {
         return kBuildKernelReturnTimeout;
     }
     rank_deficiency_ = build_kernel_return;
@@ -188,7 +194,7 @@ Index RankRevealingLU::build() {
 // kernel's set-up) kept in one function, as HiGHS has them, so the port reads
 // against its reference stage by stage.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void RankRevealingLU::buildSimple() {
+bool RankRevealingLU::buildSimple(const Deadline& deadline) {
     // Unpermuted (rank deficient) columns keep -1.
     permute_.assign(num_basic_, -1);
 
@@ -202,6 +208,9 @@ void RankRevealingLU::buildSimple() {
     b_index_.resize(static_cast<std::size_t>(a_start_[num_basic_] - a_start_[0]));
     b_value_.resize(b_index_.size());
     for (Index i_col = 0; i_col < num_basic_; ++i_col) {
+        if (i_col % 256 == 0 && deadline.passed()) {
+            return false;
+        }
         Index i_row = -1;
         const Index start = a_start_[i_col];
         const Index count = a_start_[i_col + 1] - start;
@@ -235,6 +244,9 @@ void RankRevealingLU::buildSimple() {
         const Index nwork_last = nwork_;
         nwork_ = 0;
         for (Index i = 0; i < nwork_last; ++i) {
+            if (i % 256 == 0 && deadline.passed()) {
+                return false;
+            }
             const Index i_col = iwork_[i];
             const Index start = b_start_[i_col];
             const Index end = b_start_[i_col + 1];
@@ -292,6 +304,9 @@ void RankRevealingLU::buildSimple() {
     // cancellation occur.
     num_active_nz_ = 0;
     for (Index i_row = 0; i_row < num_row_; ++i_row) {
+        if (i_row % 256 == 0 && deadline.passed()) {
+            return false;
+        }
         const Index count = mr_count_before_[i_row];
         if (count > 0) {
             mr_start_[i_row] = mr_count_x;
@@ -313,6 +328,9 @@ void RankRevealingLU::buildSimple() {
     std::fill(mc_count_n_.begin(), mc_count_n_.end(), 0);
     Index mc_count_x = 0;
     for (Index i = 0; i < nwork_; ++i) {
+        if (i % 256 == 0 && deadline.passed()) {
+            return false;
+        }
         const Index i_col = iwork_[i];
         mc_start_[i_col] = mc_count_x;
         mc_space_[i_col] = (b_start_[i_col + 1] - b_start_[i_col]) * 2;
@@ -335,15 +353,14 @@ void RankRevealingLU::buildSimple() {
         clinkAdd(i_col, mc_count_a_[i_col]);
     }
     kernel_dim_ = nwork_;
-    min_time_bound_ = kHighsInf;
-    max_time_bound_ = 0;
+    return true;
 }
 
 // HFactor::buildKernel, 'n-work' pivoting on the kernel. One long function,
 // as HiGHS's: the timeout model, the pivot search and the elimination share
 // its running state, and splitting them would obscure the correspondence.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-Index RankRevealingLU::buildKernel() {
+Index RankRevealingLU::buildKernel(const Deadline& deadline) {
     Index search_k = 0;
 
     // With a finite time limit the kernel can bail out (HiGHS uses one only
@@ -392,6 +409,9 @@ Index RankRevealingLU::buildKernel() {
 
     running_average_mu();
     while (nwork_-- > 0) {
+        if (deadline.passed()) {
+            return kBuildKernelReturnTimeout;
+        }
         // Return if the current or expected time exceeds the limit.
         if (check_for_timeout && search_k > 0 && search_k % timer_frequency == 0) {
             // The current iteration time, into the running average unless a
@@ -463,6 +483,9 @@ Index RankRevealingLU::buildKernel() {
             if (count <= num_row_) {
                 // 1.3.1 Columns.
                 for (Index j = col_link_first_[count]; j != -1; j = col_link_next_[j]) {
+                    if (deadline.passed()) {
+                        return kBuildKernelReturnTimeout;
+                    }
                     const Real min_pivot = mc_min_pivot_[j];
                     const Index start = mc_start_[j];
                     const Index end = start + mc_count_a_[j];
@@ -492,6 +515,9 @@ Index RankRevealingLU::buildKernel() {
             if (count <= num_basic_) {
                 // 1.3.2 Rows.
                 for (Index i = row_link_first_[count]; i != -1; i = row_link_next_[i]) {
+                    if (deadline.passed()) {
+                        return kBuildKernelReturnTimeout;
+                    }
                     const Index start = mr_start_[i];
                     const Index end = start + mr_count_[i];
                     for (Index k = start; k < end; ++k) {
@@ -577,6 +603,9 @@ Index RankRevealingLU::buildKernel() {
         const Index row_start = mr_start_[i_row_pivot];
         const Index row_end = row_start + mr_count_[i_row_pivot];
         for (Index row_k = row_start; row_k < row_end; ++row_k) {
+            if ((row_k - row_start) % 256 == 0 && deadline.passed()) {
+                return kBuildKernelReturnTimeout;
+            }
             // 2.4.1 This column.
             const Index i_col = mr_index_[row_k];
             const Index my_count = mc_count_a_[i_col];

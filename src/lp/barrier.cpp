@@ -2,6 +2,7 @@
 
 #include "mipx/dual_simplex.h"
 #include "newton_solver.h"
+#include "rank_revealing_lu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -1376,6 +1378,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     scaled_obj_ = 0.0;
     iterations_ = 0;
     crossover_iters_ = 0;
+    crossover_stats_ = {};
     last_error_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
     dual_eq_.clear();
@@ -2109,176 +2112,132 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 }
 
 // ============================================================================
-// runCrossover() — extract a basic feasible solution from the IPM iterate
+// Crossover — extract a basic feasible solution from the IPM iterate
 // ============================================================================
+
+namespace {
+
+struct CrossoverBound {
+    BasisStatus status;
+    Real distance;
+};
+
+CrossoverBound nearestCrossoverBound(Real value, Real lower, Real upper) {
+    if (lower == upper) {
+        return {BasisStatus::Fixed, 0.0};
+    }
+    if (!isFinite(lower) && !isFinite(upper)) {
+        return {BasisStatus::Free, kInf};
+    }
+    const Real from_lower = value - lower;
+    const Real from_upper = upper - value;
+    if (from_lower <= from_upper) {
+        return {BasisStatus::AtLower, from_lower / std::max(1.0, std::abs(lower))};
+    }
+    return {BasisStatus::AtUpper, from_upper / std::max(1.0, std::abs(upper))};
+}
+
+std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
+                                                       std::span<const Real> primal,
+                                                       const Deadline& deadline) {
+    constexpr Real kBoundTol = 1e-6;
+    const Index n = lp.num_cols;
+    const Index m = lp.num_rows;
+    std::vector<BasisStatus> basis(static_cast<size_t>(n + m));
+    std::vector<Real> activity(static_cast<size_t>(m));
+    lp.matrix.multiply(primal, activity);
+
+    // Candidate columns in CSC, with a map back to [A | -I]. Use +1 for
+    // logicals here: the pivot rows and column rank are invariant to sign.
+    std::vector<Index> starts{0}, rows, vars;
+    std::vector<Real> values;
+    const auto finishColumn = [&](Index var) {
+        vars.push_back(var);
+        starts.push_back(static_cast<Index>(rows.size()));
+    };
+    for (Index i = 0; i < m; ++i) {
+        if (i % 256 == 0 && deadline.passed()) {
+            return std::nullopt;
+        }
+        const auto bound = nearestCrossoverBound(activity[i], lp.row_lower[i], lp.row_upper[i]);
+        basis[n + i] = bound.status;
+        // Slack on an inactive row should stay basic. Unit pivots reserve
+        // those rows before elimination of the structural columns.
+        if (bound.distance > kBoundTol) {
+            rows.push_back(i);
+            values.push_back(1.0);
+            finishColumn(n + i);
+        }
+    }
+    for (Index j = 0; j < n; ++j) {
+        if (deadline.passed()) {
+            return std::nullopt;
+        }
+        const auto bound = nearestCrossoverBound(primal[j], lp.col_lower[j], lp.col_upper[j]);
+        basis[j] = bound.status;
+        if (bound.distance <= kBoundTol) {
+            continue;
+        }
+        const auto col = lp.matrix.col(j);
+        // Raw CSR can contain repeated entries or zeros. The CSC view
+        // groups each row's entries, so sum them as the simplex does.
+        for (Index k = 0; k < col.size();) {
+            const Index row = col.indices[k];
+            Real value = 0.0;
+            do {
+                value += col.values[k++];
+            } while (k < col.size() && col.indices[k] == row);
+            if (value != 0.0) {
+                rows.push_back(row);
+                values.push_back(value);
+            }
+        }
+        finishColumn(j);
+    }
+
+    if (deadline.passed()) {
+        return std::nullopt;
+    }
+    RankRevealingLU rank;
+    rank.setup(m, starts, rows, values);
+    if (rank.build(deadline) == RankRevealingLU::kBuildKernelReturnTimeout) {
+        return std::nullopt;
+    }
+    const auto rejected = rank.colWithNoPivot();
+    auto next_rejected = rejected.begin();
+    for (Index j = 0; j < static_cast<Index>(vars.size()); ++j) {
+        if (next_rejected != rejected.end() && *next_rejected == j) {
+            ++next_rejected;
+        } else {
+            basis[vars[j]] = BasisStatus::Basic;
+        }
+    }
+    // The pivoted columns are independent on the pivot rows. The logical
+    // of each unmatched real row completes that submatrix to a square basis.
+    for (Index i : rank.rowWithNoPivot()) {
+        if (i < m) {
+            basis[n + i] = BasisStatus::Basic;
+        }
+    }
+    return basis;
+}
+
+}  // namespace
 
 bool BarrierSolver::runCrossover() {
     crossover_status_ = Status::Error;
-    const Index ncols = original_.num_cols;
-    const Index nrows = original_.num_rows;
-    const Real tol = 1e-6;
-
-    // Phase 1: Variable pushing — classify each original variable.
-    std::vector<BasisStatus> basis(static_cast<size_t>(ncols + nrows));
-
-    for (Index j = 0; j < ncols; ++j) {
-        Real x = primal_orig_[j];
-        Real lb = original_.col_lower[j];
-        Real ub = original_.col_upper[j];
-        bool lb_finite = isFinite(lb);
-        bool ub_finite = isFinite(ub);
-
-        if (lb_finite && ub_finite && std::abs(ub - lb) < tol) {
-            basis[j] = BasisStatus::Fixed;
-        } else if (lb_finite && std::abs(x - lb) < tol) {
-            basis[j] = BasisStatus::AtLower;
-        } else if (ub_finite && std::abs(x - ub) < tol) {
-            basis[j] = BasisStatus::AtUpper;
-        } else if (!lb_finite && !ub_finite) {
-            // Free variable — must be basic.
-            basis[j] = BasisStatus::Basic;
-        } else {
-            // Interior point — candidate for basic.
-            basis[j] = BasisStatus::Basic;
-        }
-    }
-
-    // Compute row activities: ax[i] = sum_j A[i,j] * x[j].
-    std::vector<Real> ax(static_cast<size_t>(nrows), 0.0);
-    original_.matrix.multiply(primal_orig_, ax);
-
-    // Phase 1 (continued): Classify row slacks.
-    // Dual simplex basis has structural vars [0..ncols) then slacks [ncols..ncols+nrows).
-    for (Index i = 0; i < nrows; ++i) {
-        Real rl = original_.row_lower[i];
-        Real ru = original_.row_upper[i];
-        bool rl_finite = isFinite(rl);
-        bool ru_finite = isFinite(ru);
-
-        if (rl_finite && ru_finite && std::abs(ru - rl) < tol) {
-            // Equality row — slack is fixed at zero.
-            basis[ncols + i] = BasisStatus::Fixed;
-        } else if (ru_finite && std::abs(ax[i] - ru) < tol) {
-            // Row active at its upper bound: slack value = activity = row_upper,
-            // so the slack is nonbasic at its upper bound. (mipx slack convention:
-            // s_i = a_i^T x with row_lower_i <= s_i <= row_upper_i.)
-            basis[ncols + i] = BasisStatus::AtUpper;
-        } else if (rl_finite && std::abs(ax[i] - rl) < tol) {
-            // Row active at its lower bound: slack value = activity = row_lower.
-            basis[ncols + i] = BasisStatus::AtLower;
-        } else {
-            // Slack is interior — basic candidate.
-            basis[ncols + i] = BasisStatus::Basic;
-        }
-    }
-
-    // Count basics. We need exactly nrows basic variables.
-    Index n_basic = 0;
-    for (auto s : basis) {
-        if (s == BasisStatus::Basic) {
-            ++n_basic;
-        }
-    }
-
-    // If too many basics, push some to bounds using reduced cost indicators.
-    // Variables with larger |reduced_cost| are less likely to be basic.
-    if (n_basic > nrows) {
-        auto rc = getReducedCosts();
-        // Build list of basic structural variables with their |rc| values.
-        std::vector<std::pair<Real, Index>> basic_vars;
-        for (Index j = 0; j < ncols; ++j) {
-            if (basis[j] == BasisStatus::Basic) {
-                basic_vars.push_back({std::abs(rc[j]), j});
-            }
-        }
-        // Sort by |rc| descending — push the ones with largest |rc| first.
-        std::sort(basic_vars.begin(), basic_vars.end(),
-                  [](const auto& a, const auto& b) { return a.first > b.first; });
-
-        for (const auto& [rc_val, j] : basic_vars) {
-            if (n_basic <= nrows) {
-                break;
-            }
-            Real lb = original_.col_lower[j];
-            Real ub = original_.col_upper[j];
-            Real x = primal_orig_[j];
-            bool lb_finite = isFinite(lb);
-            bool ub_finite = isFinite(ub);
-
-            if (lb_finite && ub_finite) {
-                // Push to nearer bound.
-                basis[j] = (x - lb <= ub - x) ? BasisStatus::AtLower : BasisStatus::AtUpper;
-                --n_basic;
-            } else if (lb_finite) {
-                basis[j] = BasisStatus::AtLower;
-                --n_basic;
-            } else if (ub_finite) {
-                basis[j] = BasisStatus::AtUpper;
-                --n_basic;
-            }
-            // Free variables cannot be pushed to a bound.
-        }
-
-        // If still too many basics, push basic slacks.
-        if (n_basic > nrows) {
-            for (Index i = 0; i < nrows; ++i) {
-                if (n_basic <= nrows) {
-                    break;
-                }
-                if (basis[ncols + i] != BasisStatus::Basic) {
-                    continue;
-                }
-                Real rl = original_.row_lower[i];
-                Real ru = original_.row_upper[i];
-                if (isFinite(ru)) {
-                    basis[ncols + i] = BasisStatus::AtLower;
-                    --n_basic;
-                } else if (isFinite(rl)) {
-                    basis[ncols + i] = BasisStatus::AtUpper;
-                    --n_basic;
-                }
-            }
-        }
-    }
-
-    // If too few basics, promote nonbasic variables that are interior.
-    if (n_basic < nrows) {
-        // First try slacks.
-        for (Index i = 0; i < nrows; ++i) {
-            if (n_basic >= nrows) {
-                break;
-            }
-            if (basis[ncols + i] == BasisStatus::Basic) {
-                continue;
-            }
-            Real rl = original_.row_lower[i];
-            Real ru = original_.row_upper[i];
-            bool can_promote = isFinite(rl) || isFinite(ru);
-            if (can_promote && basis[ncols + i] != BasisStatus::Fixed) {
-                basis[ncols + i] = BasisStatus::Basic;
-                ++n_basic;
-            }
-        }
-        // Then try structural variables.
-        for (Index j = 0; j < ncols; ++j) {
-            if (n_basic >= nrows) {
-                break;
-            }
-            if (basis[j] == BasisStatus::Basic) {
-                continue;
-            }
-            if (basis[j] != BasisStatus::Fixed) {
-                basis[j] = BasisStatus::Basic;
-                ++n_basic;
-            }
-        }
+    const auto deadline = deadline_.orStop(options_.stop_flag);
+    const auto basis = crossoverBasis(original_, primal_orig_, deadline);
+    if (!basis || deadline.passed()) {
+        crossover_status_ = deadline_.passed() ? Status::TimeLimit : Status::IterLimit;
+        return false;
     }
 
     // Phase 2: Basis cleanup using dual simplex.
     DualSimplexSolver ds;
     ds.load(original_);
     ds.setVerbose(false);
-    ds.setBasis(basis);
+    ds.setBasis(*basis);
 
     DualSimplexOptions ds_opts;
     ds_opts.stop_flag = options_.stop_flag;
@@ -2286,7 +2245,11 @@ bool BarrierSolver::runCrossover() {
     ds_opts.max_solve_seconds = deadline_.remainingSeconds();  // -1: none (#275)
     ds.setOptions(ds_opts);
 
+    crossover_stats_.attempted = true;
     auto result = ds.solve();
+    const auto starts = ds.basisStartStats();
+    crossover_stats_.singular_recovery = starts.singular_recovery;
+    crossover_stats_.cold_fallback = starts.cold_start;
     crossover_iters_ = result.iterations;
     crossover_status_ = result.status;
 
@@ -2298,13 +2261,19 @@ bool BarrierSolver::runCrossover() {
     }
     // No time left for a cold run. A warm proof of infeasibility or
     // unboundedness stands, even when the deadline passed as it ended.
-    if (result.status != Status::Infeasible && result.status != Status::Unbounded &&
-        (result.status == Status::TimeLimit || deadline_.passed())) {
-        crossover_status_ = Status::TimeLimit;
-        return false;
+    if (result.status != Status::Infeasible && result.status != Status::Unbounded) {
+        if (result.status == Status::TimeLimit || deadline_.passed()) {
+            crossover_status_ = Status::TimeLimit;
+            return false;
+        }
+        if (deadline.stopped()) {
+            crossover_status_ = Status::IterLimit;
+            return false;
+        }
     }
 
     // Crossover failed — fall back to cold dual simplex.
+    crossover_stats_.cold_fallback = true;
     if (options_.verbose) {
         std::printf(
             "Crossover cleanup failed (status %d, %d iters), "
@@ -2326,6 +2295,7 @@ bool BarrierSolver::runCrossover() {
     ds_cold.setOptions(cold_opts);
 
     auto cold_result = ds_cold.solve();
+    crossover_stats_.singular_recovery |= ds_cold.basisStartStats().singular_recovery;
     crossover_iters_ += cold_result.iterations;
     // Keep a warm run's proof of infeasibility or unboundedness: a cold run
     // that only hits its iteration limit must not hide the contradiction.
@@ -2351,6 +2321,7 @@ LpResult BarrierSolver::solve() {
     last_error_.clear();
     gondzio_corrections_ = 0;
     crossover_iters_ = 0;
+    crossover_stats_ = {};
     used_homogeneous_ = false;
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
@@ -2372,22 +2343,22 @@ LpResult BarrierSolver::solve() {
 
     const BarrierIpmOutcome outcome = solveStandardForm(z, y, s, iters);
 
-    auto timeLimit = [&](Int iterations) {
+    auto limitReached = [&](Status limit, Int iterations) {
         dual_eq_.clear();
         reduced_costs_std_.clear();
         primal_orig_.clear();
         basis_orig_.clear();
-        status_ = Status::TimeLimit;
+        status_ = limit;
         objective_ = 0.0;
         iterations_ = iterations;
         last_error_.clear();
-        if (options_.verbose) {
+        if (options_.verbose && limit == Status::TimeLimit) {
             std::printf("Barrier: time limit of %g s reached.\n", options_.max_solve_seconds);
         }
         return LpResult{status_, objective_, iterations_, 0.0};
     };
     if (outcome == BarrierIpmOutcome::TimeLimit) {
-        return timeLimit(iters);
+        return limitReached(Status::TimeLimit, iters);
     }
 
     // The HSD loop's certificates (#371): no point to postsolve or cross
@@ -2408,7 +2379,7 @@ LpResult BarrierSolver::solve() {
         if (outcome == BarrierIpmOutcome::DualInfeasible) {
             const double left = deadline_.remainingSeconds();
             if (left == 0.0) {
-                return timeLimit(iters);
+                return limitReached(Status::TimeLimit, iters);
             }
             LpProblem feasibility = original_;
             std::fill(feasibility.obj.begin(), feasibility.obj.end(), 0.0);
@@ -2427,7 +2398,7 @@ LpResult BarrierSolver::solve() {
                                                              : "neither");
             }
             if (f.status == Status::TimeLimit) {
-                return timeLimit(iterations_);
+                return limitReached(Status::TimeLimit, iterations_);
             }
             if (f.status == Status::Optimal) {
                 status_ = Status::Unbounded;
@@ -2442,17 +2413,7 @@ LpResult BarrierSolver::solve() {
 
     if (outcome == BarrierIpmOutcome::Failed) {
         if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
-            // Clear as the other early ends do, so a reused solver does not
-            // hand out the previous solve's results.
-            dual_eq_.clear();
-            reduced_costs_std_.clear();
-            primal_orig_.clear();
-            basis_orig_.clear();
-            status_ = Status::IterLimit;
-            objective_ = 0.0;
-            iterations_ = iters;
-            last_error_.clear();
-            return {status_, objective_, iterations_, 0.0};
+            return limitReached(Status::IterLimit, iters);
         }
         dual_eq_.clear();
         reduced_costs_std_.clear();
@@ -2500,14 +2461,26 @@ LpResult BarrierSolver::solve() {
 
     // Run crossover to extract a basic feasible solution.
     if (options_.crossover) {
-        if (!runCrossover()) {
+        const bool crossed = runCrossover();
+        if (options_.verbose && crossover_stats_.attempted) {
+            std::printf(
+                "Crossover: %d simplex iterations, singular-basis recovery %s, "
+                "cold fallback %s.\n",
+                crossover_iters_, crossover_stats_.singular_recovery ? "yes" : "no",
+                crossover_stats_.cold_fallback ? "yes" : "no");
+        } else if (options_.verbose) {
+            std::printf("Crossover: stopped before simplex cleanup.\n");
+        }
+        if (!crossed) {
             if (crossover_status_ == Status::Infeasible || crossover_status_ == Status::Unbounded) {
                 // Simplex on the same LP contradicts the barrier's optimum,
                 // so neither verdict is reported.
                 return fail("Barrier optimum contradicted by crossover's simplex.");
             }
-            if (needs_crossover && crossover_status_ == Status::TimeLimit) {
-                return timeLimit(iters + crossover_iters_);
+            const bool stopped = crossover_status_ == Status::IterLimit &&
+                                 deadline_.orStop(options_.stop_flag).stopped();
+            if (needs_crossover && (crossover_status_ == Status::TimeLimit || stopped)) {
+                return limitReached(crossover_status_, iters + crossover_iters_);
             }
             if (needs_crossover) {
                 return fail(near_optimal
