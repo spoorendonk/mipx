@@ -1068,6 +1068,8 @@ LpResult PdlpSolver::solve() {
     const Real step_initial = step;
     const Real step_lb = step_initial * options_.adaptive_step_min;
     const Real step_ub = step_initial * options_.adaptive_step_max;
+    Real fpe_step_cap =
+        pdlpPreconditionedNormStepCap(scaled_a_, tau_base_, sigma_base_, step_initial);
 
     // Primal weight initialization.
     Real primal_weight = options_.primal_weight;
@@ -1269,8 +1271,8 @@ LpResult PdlpSolver::solve() {
 
         // --- Fixed-point residual ‖z − T(z)‖_P for the restart decision ---
         Real fpe = pdlpFixedPointResidual(scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y,
-                                          primal_weight, std::min(step, step_initial), delta_y_vec,
-                                          at_delta_y);
+                                          tau_base_, sigma_base_, primal_weight,
+                                          std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
 
         if (initial_fpe < 0.0)
             initial_fpe = fpe;
@@ -1493,6 +1495,8 @@ LpResult PdlpSolver::solve() {
                 if (drift > options_.preconditioner_refresh_ratio ||
                     drift < 1.0 / options_.preconditioner_refresh_ratio) {
                     refreshPreconditioner(primal_weight);
+                    fpe_step_cap = pdlpPreconditionedNormStepCap(scaled_a_, tau_base_, sigma_base_,
+                                                                 step_initial);
                     if (options_.verbose) {
                         std::printf(
                             "PDLP preconditioner refresh at iter %d "
@@ -1697,8 +1701,8 @@ LpResult PdlpSolver::solve() {
 
                 // Fixed-point residual ‖z − T(z)‖_P, as in the main loop.
                 Real fpe = pdlpFixedPointResidual(
-                    scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y, primal_weight,
-                    std::min(step, step_initial), delta_y_vec, at_delta_y);
+                    scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y, tau_base_, sigma_base_,
+                    primal_weight, std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
                 if (initial_fpe < 0.0)
                     initial_fpe = fpe;
 
@@ -2228,6 +2232,8 @@ LpResult PdlpSolver::solveGpu() {
     const Real step_initial = step;
     const Real step_lb = step_initial * options_.adaptive_step_min;
     const Real step_ub = step_initial * options_.adaptive_step_max;
+    Real fpe_step_cap =
+        pdlpPreconditionedNormStepCap(scaled_a_, tau_base_, sigma_base_, step_initial);
     cudaMemcpy(d_step, &step, sizeof(Real), cudaMemcpyHostToDevice);
     cudaMemcpy(d_primal_weight, &primal_weight, sizeof(Real), cudaMemcpyHostToDevice);
     const Int N = options_.termination_eval_frequency;
@@ -2401,10 +2407,11 @@ LpResult PdlpSolver::solveGpu() {
         launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
                                     d_col_lower, d_col_upper, d_finite_col_lower,
                                     d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    primal_weight, d_metrics, stream);
+                                    d_tau_base, primal_weight, d_metrics, stream);
         launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
                                     d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, primal_weight, d_metrics, stream);
+                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
+                                    stream);
 
         // Transfer metrics to host.
         cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
@@ -2433,7 +2440,7 @@ LpResult PdlpSolver::solveGpu() {
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
         Real fpe =
-            pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross, std::min(step, step_initial));
+            pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross, std::min(step, fpe_step_cap));
 
         if (initial_fpe < 0.0)
             initial_fpe = fpe;
@@ -2587,6 +2594,8 @@ LpResult PdlpSolver::solveGpu() {
                 if (drift > options_.preconditioner_refresh_ratio ||
                     drift < 1.0 / options_.preconditioner_refresh_ratio) {
                     refreshPreconditioner(primal_weight);
+                    fpe_step_cap = pdlpPreconditionedNormStepCap(scaled_a_, tau_base_, sigma_base_,
+                                                                 step_initial);
                     // Re-upload updated preconditioner to device.
                     cudaMemcpyAsync(d_tau_base, tau_base_.data(), sn * sizeof(Real),
                                     cudaMemcpyHostToDevice, stream);
@@ -2681,10 +2690,11 @@ LpResult PdlpSolver::solveGpu() {
         launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
                                     d_col_lower, d_col_upper, d_finite_col_lower,
                                     d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    primal_weight, d_metrics, stream);
+                                    d_tau_base, primal_weight, d_metrics, stream);
         launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
                                     d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, primal_weight, d_metrics, stream);
+                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
+                                    stream);
         cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics), cudaMemcpyDeviceToHost,
                         stream);
         cudaStreamSynchronize(stream);
@@ -2772,11 +2782,11 @@ LpResult PdlpSolver::solveGpu() {
                 launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled,
                                             d_at_y, d_col_lower, d_col_upper, d_finite_col_lower,
                                             d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                            primal_weight, d_metrics, stream);
+                                            d_tau_base, primal_weight, d_metrics, stream);
                 launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax,
                                             d_row_lower, d_row_upper, d_finite_row_lower,
-                                            d_finite_row_upper, d_primal_resid_scale, primal_weight,
-                                            d_metrics, stream);
+                                            d_finite_row_upper, d_primal_resid_scale, d_sigma_base,
+                                            primal_weight, d_metrics, stream);
                 cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
                                 cudaMemcpyDeviceToHost, stream);
                 cudaStreamSynchronize(stream);
@@ -2793,7 +2803,7 @@ LpResult PdlpSolver::solveGpu() {
                 Real rel_dual_resid_pol = std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
 
                 Real fpe = pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross,
-                                     std::min(step, step_initial));
+                                     std::min(step, fpe_step_cap));
                 if (initial_fpe < 0.0)
                     initial_fpe = fpe;
 

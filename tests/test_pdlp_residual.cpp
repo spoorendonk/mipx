@@ -24,22 +24,36 @@ TEST_CASE("PDLP fixed-point residual matches a hand-computed PDHG step", "[pdlp]
     const std::vector<Real> reflected_y{-0.25};
     std::vector<Real> delta_y;
     std::vector<Real> at_delta_y;
-    const Real r = pdlpFixedPointResidual(a, pdhg_x, reflected_x, pdhg_y, reflected_y, 1.0, 0.25,
-                                          delta_y, at_delta_y);
+    const Real r = pdlpFixedPointResidual(a, pdhg_x, reflected_x, pdhg_y, reflected_y,
+                                          std::vector<Real>{1.0, 1.0}, std::vector<Real>{1.0}, 1.0,
+                                          0.25, delta_y, at_delta_y);
     CHECK(r == Catch::Approx(std::sqrt(0.09375)).epsilon(1e-15));
 }
 
-// The same step with ω = 2: movement = 2 · 0.125 + 0.015625 / 2 = 0.2578125,
-// the cross term does not depend on ω, so ‖·‖²_P = 0.2578125 − 0.046875.
-TEST_CASE("PDLP fixed-point residual weighs primal and dual by the primal weight",
+// With ω = 2 and nonuniform bases, movement is
+// 2 · (0.0625 / 0.5 + 0.0625 / 0.25) + 0.015625 / (2 · 2) = 0.75390625.
+// The cross term stays 0.09375, so the step subtracts 0.046875.
+TEST_CASE("PDLP fixed-point residual uses the primal weight and diagonal step bases",
           "[pdlp][pdlp_residual]") {
     const SparseMatrix a(1, 2, {{0, 0, 1.0}, {0, 1, 2.0}});
     std::vector<Real> delta_y;
     std::vector<Real> at_delta_y;
     const Real r = pdlpFixedPointResidual(a, std::vector<Real>{0.75, 0.75},
                                           std::vector<Real>{0.5, 0.5}, std::vector<Real>{-0.125},
-                                          std::vector<Real>{-0.25}, 2.0, 0.25, delta_y, at_delta_y);
-    CHECK(r == Catch::Approx(std::sqrt(0.2578125 - 0.046875)).epsilon(1e-15));
+                                          std::vector<Real>{-0.25}, std::vector<Real>{0.5, 0.25},
+                                          std::vector<Real>{2.0}, 2.0, 0.25, delta_y, at_delta_y);
+    CHECK(r == Catch::Approx(std::sqrt(0.75390625 - 0.046875)).epsilon(1e-15));
+}
+
+TEST_CASE("PDLP caps the P-norm step when diagonal scaling amplifies the matrix",
+          "[pdlp][pdlp_residual]") {
+    const SparseMatrix a(1, 1, {{0, 0, -0.25}});
+    const std::vector<Real> base{4.0};
+    // The unscaled norm is 0.25, but the preconditioned norm is 1.
+    CHECK(pdlpPreconditionedNormStepCap(a, base, base, 0.998 / 0.25) == Catch::Approx(0.998));
+    CHECK(pdlpPreconditionedNormStepCap(a, base, base, 0.25) == 0.25);
+    const std::vector<Real> unit{1.0};
+    CHECK(pdlpPreconditionedNormStepCap(a, unit, unit, 5.0) == 5.0);
 }
 
 // The cross term enters with a minus sign: mipx's step is Chambolle-Pock with

@@ -169,6 +169,7 @@ __global__ void convergenceMetricsColKernel(
     const Real* __restrict__ finite_col_lower, const Real* __restrict__ finite_col_upper,
     const Real* __restrict__ dual_resid_scale,
     const Real* __restrict__ at_delta_y,
+    const Real* __restrict__ tau_base,
     Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
 {
@@ -219,7 +220,7 @@ __global__ void convergenceMetricsColKernel(
         Real pg_neg = fmin(grad, 0.0);
         dobj_col = pg_pos * finite_col_lower[j] + pg_neg * finite_col_upper[j];
 
-        mov = fx * fx * primal_weight;
+        mov = fx * fx / tau_base[j] * primal_weight;
         cross = at_delta_y[j] * fx;
         dist = dx * dx;
     }
@@ -266,6 +267,7 @@ void launchConvergenceMetricsCol(
     const Real* finite_col_lower, const Real* finite_col_upper,
     const Real* dual_resid_scale,
     const Real* at_delta_y,
+    const Real* tau_base,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream)
@@ -274,7 +276,7 @@ void launchConvergenceMetricsCol(
     convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
         n, pdhg_x, initial_x, reflected_x, cscaled, at_y, col_lower, col_upper,
         finite_col_lower, finite_col_upper, dual_resid_scale,
-        at_delta_y, primal_weight, d_metrics);
+        at_delta_y, tau_base, primal_weight, d_metrics);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +291,7 @@ __global__ void convergenceMetricsRowKernel(
     const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
     const Real* __restrict__ finite_row_lower, const Real* __restrict__ finite_row_upper,
     const Real* __restrict__ primal_resid_scale,
+    const Real* __restrict__ sigma_base,
     Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
 {
@@ -326,7 +329,7 @@ __global__ void convergenceMetricsRowKernel(
 
         // Fixed-point residual movement, dual part: reflected − pdhg (#251).
         Real fy = reflected_y[i] - yi;
-        mov = fy * fy / primal_weight;
+        mov = fy * fy / sigma_base[i] / primal_weight;
         // Distance since the last restart, for the primal weight.
         Real dy = yi - initial_y[i];
         dist = dy * dy;
@@ -367,6 +370,7 @@ void launchConvergenceMetricsRow(
     const Real* row_lower, const Real* row_upper,
     const Real* finite_row_lower, const Real* finite_row_upper,
     const Real* primal_resid_scale,
+    const Real* sigma_base,
     Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream)
@@ -375,7 +379,7 @@ void launchConvergenceMetricsRow(
     convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
         m, pdhg_y, initial_y, reflected_y, ax, row_lower, row_upper,
         finite_row_lower, finite_row_upper, primal_resid_scale,
-        primal_weight, d_metrics);
+        sigma_base, primal_weight, d_metrics);
 }
 
 // ---------------------------------------------------------------------------

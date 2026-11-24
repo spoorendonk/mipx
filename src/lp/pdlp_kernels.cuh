@@ -51,15 +51,15 @@ void launchConvergenceMetricsCol(Index n, const Real* pdhg_x, const Real* initia
                                  const Real* col_lower, const Real* col_upper,
                                  const Real* finite_col_lower, const Real* finite_col_upper,
                                  const Real* dual_resid_scale, const Real* at_delta_y,
-                                 Real primal_weight, GpuConvergenceMetrics* d_metrics,
-                                 cudaStream_t stream);
+                                 const Real* tau_base, Real primal_weight,
+                                 GpuConvergenceMetrics* d_metrics, cudaStream_t stream);
 
 void launchConvergenceMetricsRow(Index m, const Real* pdhg_y, const Real* initial_y,
                                  const Real* reflected_y, const Real* ax, const Real* row_lower,
                                  const Real* row_upper, const Real* finite_row_lower,
                                  const Real* finite_row_upper, const Real* primal_resid_scale,
-                                 Real primal_weight, GpuConvergenceMetrics* d_metrics,
-                                 cudaStream_t stream);
+                                 const Real* sigma_base, Real primal_weight,
+                                 GpuConvergenceMetrics* d_metrics, cudaStream_t stream);
 
 // Utility kernels.
 void launchRestartCopy(Index n, Index m, const Real* pdhg_x, const Real* pdhg_y, Real* initial_x,
