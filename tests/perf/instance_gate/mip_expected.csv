@@ -4,5 +4,5 @@
 instance,backend,expected,time_limit
 flugpl,mip,match_1e-6,
 gen,mip,match_1e-6,
-gt2,mip,dnf,10
+gt2,mip,match_1e-6,
 p0201,mip,match_1e-6,

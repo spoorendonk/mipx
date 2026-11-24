@@ -55,15 +55,10 @@ converging on one fails the gate (#256). Those rows were observed on the CPU
 barrier: the `lp` suite passes no `--no-gpu`, so a CUDA build runs the GPU
 barrier there, which no run has checked against them yet. PDLP also runs forplan, greenbeb and
 bnl2, which it once reported Optimal up to 7.7% from the optimum (#205): `dnf`
-is expected there, and the gate fails if they disagree again. The MIP list covers flugpl, gen, gt2
-and p0201. gt2 is `dnf`: the tree search has not finished it since #278
-changed the LP vertices it lands on (#341, #350). Its 10 s per-row limit
-keeps the gate from spending 60 s on a known stop. The row fails only if gt2
-claims Optimal, Infeasible or Unbounded wrongly within 10 s; a crash, error,
-hang or a wrong incumbent at the limit is `dnf` and passes. It reports
-`BETTER` once gt2 solves within 10 s (0.3 s before #278; #350 asks for well
-inside 10 s); then set the row to `match_1e-6` and drop its limit by hand
-(`--write-expected` keeps it).
+is expected there, and the gate fails if they disagree again. The MIP list
+expects `match_1e-6` for flugpl, gen, gt2 and p0201. That includes gt2 after
+current main proved its optimum in under one second on one thread across
+seeds 1–8 (#350), superseding the temporary `dnf` expectation from #341.
 A gate with no instance files exits 77 and names the listed instances it did
 not run; ctest shows only `Skipped` for it unless run with `-V`. Widening the
 lists to the full sets is a benchmark-scale run, tracked in #223. The gate
