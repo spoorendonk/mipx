@@ -536,7 +536,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(const RootHeuristicConte
             callback_->onHeartbeat(ctx.node_count, stats_);
     }
 
-    // Proximity search (needs incumbent).
+    // LP-based proximity rounding (needs incumbent).
     if (run_root_lp_heuristics && hasIncumbent(incumbent) && !best_solution.empty() &&
         allowRootCall(ctx.total_work_units + out.work_units)) {
         ++out.calls;

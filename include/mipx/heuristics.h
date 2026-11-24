@@ -400,19 +400,25 @@ private:
 ///   sub-MIP with a black-box solver. Here the current LP (its cuts and
 ///   bounds) gets the Hamming objective and the cutoff row, and dual simplex
 ///   runs for at most setSubproblemIterLimit() iterations (40 at the root,
-///   from MipSolver).
+///   from MipSolver), or until the LP's time deadline.
 /// - No recentering. The paper makes each improved solution the new
 ///   reference and solves again. Here a run ends after that one LP, and
-///   MipSolver runs it once, in the root heuristic portfolio.
+///   MipSolver runs it at most once, in the root heuristic portfolio, when
+///   an incumbent exists and the root LP heuristics and work budget allow it.
 /// - Rounding instead of search. Only an LP solved to optimality is used:
-///   one the iteration cap stops yields nothing. An integral optimum that
-///   improves on the incumbent is returned as is.
-///   Otherwise, with setEnableRoundingRepair() on, every integer column is
-///   rounded to the nearest value within its bounds, the continuous columns
-///   keep their LP values, and the point is kept only if every row holds.
+///   one the iteration cap or the deadline stops yields nothing. An integral
+///   optimum that improves on the incumbent is returned as is. Otherwise,
+///   with setEnableRoundingRepair() on (the default), every integer column
+///   is rounded to the nearest value within its bounds, the continuous
+///   columns keep their LP values, and the point is kept only if every row
+///   holds and it still improves on the incumbent.
+/// - No refinement. The paper re-optimizes the continuous columns under the
+///   original objective with the binaries fixed; here they keep their values
+///   from the Hamming LP, which never looked at that objective.
 /// - theta is fixed at 1e-6 (heuristic_detail::kObjectiveTol). A fixed theta
 ///   is the paper's basic scheme, but on an integral objective the natural
-///   choice is 1, so this cutoff barely excludes the incumbent's value there.
+///   choice is 1. With 1e-6 the cutoff sits at about the feasibility
+///   tolerance and leaves the LP relaxation weaker than theta = 1 would.
 /// - General integer columns are not in the distance; only the 0-1 columns
 ///   (isBinaryColumn) are, as in the paper's 0-1 setting.
 class ProximitySearchHeuristic : public Heuristic {
