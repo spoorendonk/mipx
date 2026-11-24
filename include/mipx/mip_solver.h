@@ -15,6 +15,7 @@
 #include "mipx/implication_graph.h"
 #include "mipx/logger.h"
 #include "mipx/lp_problem.h"
+#include "mipx/objective_integrality.h"
 #include "mipx/objective_propagator.h"
 #include "mipx/presolve.h"
 #include "mipx/probing.h"
@@ -442,6 +443,15 @@ public:
     /// node propagation, and re-propagate the root domain against it whenever
     /// a new incumbent lowers the cutoff. Off by default until benchmarked.
     void setObjectivePropagationEnabled(bool enabled) { objective_propagation_enabled_ = enabled; }
+    /// Objective integrality (#261): before the tree search, detect whether
+    /// every solution's objective lies on a lattice offset + k s (see
+    /// ObjectiveLattice), and if so prune nodes, and cut off in objective
+    /// propagation, at incumbent - s (plus a margin) instead of incumbent -
+    /// 1e-6. Off by default until benchmarked.
+    void setObjectiveIntegralityEnabled(bool enabled) { objective_integrality_enabled_ = enabled; }
+    /// The lattice the last solve detected; undetected when the option is off
+    /// or the objective is not integral.
+    [[nodiscard]] const ObjectiveLattice& getObjectiveLattice() const { return objective_lattice_; }
     /// Called with every solution submitted as an incumbent (from a
     /// heuristic, an integral node LP or the root), whether or not it improves
     /// on the pool's best, and with the solution presolve finds when it
@@ -664,8 +674,24 @@ private:
     /// propagation is on and there is an incumbent to cut off against.
     void attachObjectiveCutoff(DomainPropagator& dp, Real incumbent) const {
         if (objective_propagator_.loaded() && incumbent < kInf) {
-            dp.setObjectiveCutoff(&objective_propagator_, incumbent);
+            dp.setObjectiveCutoff(&objective_propagator_, objectivePropagationCutoff(incumbent));
         }
+    }
+
+    /// A node whose LP bound reaches this holds nothing better than the
+    /// incumbent: incumbent - 1e-6, or tighter on an objective lattice (#261).
+    [[nodiscard]] Real pruneBound(Real incumbent) const {
+        return objective_lattice_.pruneBound(incumbent);
+    }
+
+    /// The cutoff handed to the objective propagator, which prunes at
+    /// cutoff - ObjectivePropagator::kPruneTol: the incumbent itself without
+    /// a lattice, so that it prunes where pruneBound does.
+    [[nodiscard]] Real objectivePropagationCutoff(Real incumbent) const {
+        if (!objective_lattice_.detected()) {
+            return incumbent;
+        }
+        return pruneBound(incumbent) + ObjectivePropagator::kPruneTol;
     }
 
     /// dp.propagate(), counting what the objective row did in it.
@@ -778,6 +804,8 @@ private:
     RcFixingStats rc_fixing_stats_{};
     ReducedCostFixer rc_fixer_;
     bool objective_propagation_enabled_ = false;
+    bool objective_integrality_enabled_ = false;
+    ObjectiveLattice objective_lattice_;
     IncumbentObserver incumbent_observer_;
     ObjectivePropagator objective_propagator_;
     ObjectiveCutoffBounds objective_cutoff_bounds_;

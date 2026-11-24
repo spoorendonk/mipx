@@ -28,6 +28,7 @@ add_library(mipx STATIC
     mip/automorphism.cpp
     mip/branching.cpp
     mip/reduced_cost_fixer.cpp
+    mip/objective_integrality.cpp
     mip/objective_propagator.cpp
     mip/mip_solver.cpp
     mip/orbital_fixing.cpp

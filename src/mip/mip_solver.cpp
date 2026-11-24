@@ -2093,7 +2093,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     // Skip if pruned by bound (might have changed since pop).
-    if (incumbent_snapshot < kInf && node.lp_bound >= incumbent_snapshot - 1e-6) {
+    if (incumbent_snapshot < kInf && node.lp_bound >= pruneBound(incumbent_snapshot)) {
         return false;
     }
 
@@ -2226,7 +2226,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // incumbent cutoff, recomputed here the first time a node sees a lower
     // incumbent and replayed on every node like the global RC fixings.
     if (objective_propagator_.loaded()) {
-        if (objective_cutoff_bounds_.refresh(incumbent_snapshot)) {
+        if (objective_cutoff_bounds_.refresh(objectivePropagationCutoff(incumbent_snapshot))) {
             obj_prop_repropagations_.fetch_add(1, std::memory_order_relaxed);
         }
         auto& obj_tightened = node_scratch.rc_tightened;
@@ -2309,7 +2309,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // deterministic collects the sample instead and applies it in batch order.
     if (tree_pseudocosts_enabled_) {
         const bool cutoff = node_result.status == Status::Optimal && incumbent_snapshot < kInf &&
-                            node_result.objective >= incumbent_snapshot - 1e-6;
+                            node_result.objective >= pruneBound(incumbent_snapshot);
         const auto sample = TreePseudocostSample::fromChild(node, node_result.status,
                                                             node_result.objective, cutoff);
         if (deferred_pseudocost != nullptr) {
@@ -2334,7 +2334,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     // Pruned by bound (check again with current incumbent).
-    if (incumbent_snapshot < kInf && node_result.objective >= incumbent_snapshot - 1e-6) {
+    if (incumbent_snapshot < kInf && node_result.objective >= pruneBound(incumbent_snapshot)) {
         return false;
     }
 
@@ -2515,7 +2515,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             // the tree-presolve counter below records the subset produced while
             // inside this block, which is what the benefit heuristic reads.
             if (rc_fixer_.loaded() && incumbent_snapshot < kInf &&
-                node_obj_out < incumbent_snapshot - 1e-6) {
+                node_obj_out < pruneBound(incumbent_snapshot)) {
                 node_rc_pass_ran = true;
                 auto& rc_tightened = node_scratch.rc_tightened;
                 rc_tightened.clear();
@@ -2612,7 +2612,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
                 tree_presolve_delta.lp_delta += std::abs(prev_obj - node_obj_out);
-                if (incumbent_snapshot < kInf && node_obj_out >= incumbent_snapshot - 1e-6) {
+                if (incumbent_snapshot < kInf && node_obj_out >= pruneBound(incumbent_snapshot)) {
                     flushTreePresolveStats();
                     return false;
                 }
@@ -2640,7 +2640,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // LP solution the tree-presolve block already ran the very same engine over.
     // Statistics go into the stack-local rc_delta and are flushed exactly once.
     if (!node_rc_pass_ran && rc_fixer_.loaded() && incumbent_snapshot < kInf &&
-        node_obj_out < incumbent_snapshot - 1e-6) {
+        node_obj_out < pruneBound(incumbent_snapshot)) {
         auto node_rc = lp.getReducedCosts();
         auto& rc_local_tightened = node_scratch.rc_tightened;
         rc_local_tightened.clear();
@@ -2721,7 +2721,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (refresh.status == Status::Optimal) {
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
-                if (incumbent_snapshot < kInf && node_obj_out >= incumbent_snapshot - 1e-6) {
+                if (incumbent_snapshot < kInf && node_obj_out >= pruneBound(incumbent_snapshot)) {
                     return false;
                 }
                 frac_count = 0;
@@ -3090,7 +3090,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
 
         if (incumbent < kInf) {
-            queue.prune(incumbent - 1e-6);
+            queue.prune(pruneBound(incumbent));
             if (queue.empty()) {
                 break;
             }
@@ -3212,7 +3212,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                         queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                         node_int_inf);
-            queue.prune(incumbent - 1e-6);
+            queue.prune(pruneBound(incumbent));
             nodes_since_incumbent = 0;
             improved_this_node = true;
         }
@@ -3253,7 +3253,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                         : elapsed();
                 logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true, 0);
-                queue.prune(incumbent - 1e-6);
+                queue.prune(pruneBound(incumbent));
                 nodes_since_incumbent = 0;
                 improved_this_node = true;
             }
@@ -3319,7 +3319,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                             node_int_inf);
-                queue.prune(incumbent - 1e-6);
+                queue.prune(pruneBound(incumbent));
                 nodes_since_incumbent = 0;
                 improved_this_node = true;
             }
@@ -3459,7 +3459,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             }
 
             if (incumbent < kInf) {
-                queue.prune(incumbent - 1e-6);
+                queue.prune(pruneBound(incumbent));
                 if (queue.empty()) {
                     break;
                 }
@@ -3740,7 +3740,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
 
                 if (inc < kInf) {
-                    queue.prune(inc - 1e-6);
+                    queue.prune(pruneBound(inc));
                     if (queue.empty()) {
                         break;
                     }
@@ -5955,6 +5955,21 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     }
 
+    // Objective integrality (#261) on the problem the tree searches: after
+    // presolve, with the root's global fixings, which hold for every solution
+    // better than the incumbent and so for every one the tree can still find.
+    if (objective_integrality_enabled_) {
+        objective_lattice_ = detectObjectiveLattice(problem_);
+        if (verbose_) {
+            if (objective_lattice_.detected()) {
+                log_.log("Objective integral: improvements by multiples of %g\n",
+                         objective_lattice_.scale);
+            } else {
+                log_.log("Objective not integral\n");
+            }
+        }
+    }
+
     // Objective propagation works on the root domain as the tree sees it,
     // global reduced-cost fixings included. The global cutoff bounds are
     // first computed by the first node that sees an incumbent.
@@ -6049,7 +6064,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     // proves the search complete (#283). One the final incumbent would have
     // pruned by bound anyway leaves the search complete.
     const Real dropped_bound = lp_stats_.dropped_node_bound;
-    const bool dropped_open = dropped_bound < kInf && dropped_bound < incumbent - 1e-6;
+    const bool dropped_open = dropped_bound < kInf && dropped_bound < pruneBound(incumbent);
     if (dropped_open && verbose_) {
         log_.log(
             "Search incomplete: %d node(s) dropped without an LP verdict, %d at the time "
