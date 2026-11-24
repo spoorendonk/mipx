@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-push base=0c881ff21f17
+# wcp: pre-push base=854596d13285
 # Linear history on the trunk, then the review receipt.
 #
 # A real file in this repository, not a shim — see the note in `commit-msg` for
@@ -37,8 +37,6 @@ TRUNKS='main master'
 #: machine that has neither — the same reason these hooks are shell files that
 #: need no wcp.
 RECEIPTS='refs/reviews'
-#: Where reviews were recorded before #40; looked at only to say they moved.
-LEGACY_STAMP='.last-review'
 #: Where gate receipts live (#296): `refs/gates/<sha>`, written when the local
 #: CI below passes on that commit. See "The gate receipt" there.
 GATES='refs/gates'
@@ -364,12 +362,6 @@ refuse_review() {
 	err "The receipt names the commit reviewed, so committing again needs a new review."
 	err "Reviewed in another clone? Receipts are not fetched by default:"
 	err "      git fetch $remote_name '$RECEIPTS/*:$RECEIPTS/*'"
-	# A clone set up before #40 records reviews in a file, which nothing reads
-	# any more. Said here rather than read: two receipts are two to keep agreed.
-	legacy="$(git rev-parse --absolute-git-dir 2>/dev/null)/$LEGACY_STAMP"
-	if [ -r "$legacy" ]; then
-		err "($LEGACY_STAMP is no longer read: a review is recorded as $RECEIPTS/<sha> now.)"
-	fi
 	exit 1
 }
 
