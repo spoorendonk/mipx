@@ -163,12 +163,13 @@ void launchDualHalpernStep(
 __global__ void convergenceMetricsColKernel(
     Index n,
     const Real* __restrict__ pdhg_x, const Real* __restrict__ initial_x,
+    const Real* __restrict__ reflected_x,
     const Real* __restrict__ cscaled, const Real* __restrict__ at_y,
     const Real* __restrict__ col_lower, const Real* __restrict__ col_upper,
     const Real* __restrict__ finite_col_lower, const Real* __restrict__ finite_col_upper,
     const Real* __restrict__ dual_resid_scale,
     const Real* __restrict__ at_delta_y,
-    Real primal_weight, Real step,
+    Real primal_weight,
     GpuConvergenceMetrics* __restrict__ metrics)
 {
     __shared__ Real s_pobj[kBlockSize];
@@ -176,18 +177,20 @@ __global__ void convergenceMetricsColKernel(
     __shared__ Real s_dual_resid_sq[kBlockSize];
     __shared__ Real s_dual_resid_max[kBlockSize];
     __shared__ Real s_movement[kBlockSize];
-    __shared__ Real s_interaction[kBlockSize];
+    __shared__ Real s_cross[kBlockSize];
     __shared__ Real s_dist_sq[kBlockSize];
 
     int tid = threadIdx.x;
     int j = blockIdx.x * blockDim.x + tid;
 
     Real pobj = 0.0, dobj_col = 0.0, drsq = 0.0, drmax = 0.0;
-    Real mov = 0.0, interact = 0.0, dist = 0.0;
+    Real mov = 0.0, cross = 0.0, dist = 0.0;
 
     if (j < n) {
         Real xj = pdhg_x[j];
         Real dx = xj - initial_x[j];
+        // z − T(z), primal part: reflected − pdhg = pdhg − z (#251).
+        Real fx = reflected_x[j] - xj;
         Real lb = col_lower[j];
         Real ub = col_upper[j];
 
@@ -216,8 +219,8 @@ __global__ void convergenceMetricsColKernel(
         Real pg_neg = fmin(grad, 0.0);
         dobj_col = pg_pos * finite_col_lower[j] + pg_neg * finite_col_upper[j];
 
-        mov = dx * dx * primal_weight;
-        interact = at_delta_y[j] * dx * 2.0 * step;
+        mov = fx * fx * primal_weight;
+        cross = at_delta_y[j] * fx;
         dist = dx * dx;
     }
 
@@ -226,7 +229,7 @@ __global__ void convergenceMetricsColKernel(
     s_dual_resid_sq[tid] = drsq;
     s_dual_resid_max[tid] = drmax;
     s_movement[tid] = mov;
-    s_interaction[tid] = interact;
+    s_cross[tid] = cross;
     s_dist_sq[tid] = dist;
     __syncthreads();
 
@@ -237,7 +240,7 @@ __global__ void convergenceMetricsColKernel(
             s_dual_resid_sq[tid] += s_dual_resid_sq[tid + s];
             s_dual_resid_max[tid] = fmax(s_dual_resid_max[tid], s_dual_resid_max[tid + s]);
             s_movement[tid] += s_movement[tid + s];
-            s_interaction[tid] += s_interaction[tid + s];
+            s_cross[tid] += s_cross[tid + s];
             s_dist_sq[tid] += s_dist_sq[tid + s];
         }
         __syncthreads();
@@ -249,7 +252,7 @@ __global__ void convergenceMetricsColKernel(
         atomicAdd(&metrics->dual_resid_sq, s_dual_resid_sq[0]);
         atomicMaxReal(&metrics->dual_resid_max, s_dual_resid_max[0]);
         atomicAdd(&metrics->fpe_movement, s_movement[0]);
-        atomicAdd(&metrics->fpe_interaction, s_interaction[0]);
+        atomicAdd(&metrics->fpe_cross, s_cross[0]);
         atomicAdd(&metrics->primal_dist_sq, s_dist_sq[0]);
     }
 }
@@ -257,20 +260,21 @@ __global__ void convergenceMetricsColKernel(
 void launchConvergenceMetricsCol(
     Index n,
     const Real* pdhg_x, const Real* initial_x,
+    const Real* reflected_x,
     const Real* cscaled, const Real* at_y,
     const Real* col_lower, const Real* col_upper,
     const Real* finite_col_lower, const Real* finite_col_upper,
     const Real* dual_resid_scale,
     const Real* at_delta_y,
-    Real primal_weight, Real step,
+    Real primal_weight,
     GpuConvergenceMetrics* d_metrics,
     cudaStream_t stream)
 {
     if (n <= 0) return;
     convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
-        n, pdhg_x, initial_x, cscaled, at_y, col_lower, col_upper,
+        n, pdhg_x, initial_x, reflected_x, cscaled, at_y, col_lower, col_upper,
         finite_col_lower, finite_col_upper, dual_resid_scale,
-        at_delta_y, primal_weight, step, d_metrics);
+        at_delta_y, primal_weight, d_metrics);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +284,7 @@ void launchConvergenceMetricsCol(
 __global__ void convergenceMetricsRowKernel(
     Index m,
     const Real* __restrict__ pdhg_y, const Real* __restrict__ initial_y,
+    const Real* __restrict__ reflected_y,
     const Real* __restrict__ ax,
     const Real* __restrict__ row_lower, const Real* __restrict__ row_upper,
     const Real* __restrict__ finite_row_lower, const Real* __restrict__ finite_row_upper,
@@ -319,9 +324,11 @@ __global__ void convergenceMetricsRowKernel(
         Real pyi_neg = fmin(yi, 0.0);
         dobj_row = -pyi_pos * finite_row_upper[i] - pyi_neg * finite_row_lower[i];
 
-        // FPE movement (dual part).
+        // Fixed-point residual movement, dual part: reflected − pdhg (#251).
+        Real fy = reflected_y[i] - yi;
+        mov = fy * fy / primal_weight;
+        // Distance since the last restart, for the primal weight.
         Real dy = yi - initial_y[i];
-        mov = dy * dy / primal_weight;
         dist = dy * dy;
     }
 
@@ -355,6 +362,7 @@ __global__ void convergenceMetricsRowKernel(
 void launchConvergenceMetricsRow(
     Index m,
     const Real* pdhg_y, const Real* initial_y,
+    const Real* reflected_y,
     const Real* ax,
     const Real* row_lower, const Real* row_upper,
     const Real* finite_row_lower, const Real* finite_row_upper,
@@ -365,7 +373,7 @@ void launchConvergenceMetricsRow(
 {
     if (m <= 0) return;
     convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
-        m, pdhg_y, initial_y, ax, row_lower, row_upper,
+        m, pdhg_y, initial_y, reflected_y, ax, row_lower, row_upper,
         finite_row_lower, finite_row_upper, primal_resid_scale,
         primal_weight, d_metrics);
 }

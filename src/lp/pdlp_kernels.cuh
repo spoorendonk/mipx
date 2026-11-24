@@ -18,8 +18,12 @@ struct GpuConvergenceMetrics {
     Real primal_obj;
     Real dual_obj_col;
     Real dual_obj_row;
+    // Parts of the fixed-point residual ‖z − T(z)‖_P (pdlp_residual.h), with
+    // z − T(z) read as reflected − pdhg: ω‖dx‖² + ‖dy‖²/ω, and dxᵀAᵀdy.
     Real fpe_movement;
-    Real fpe_interaction;
+    Real fpe_cross;
+    // ‖pdhg − initial‖² per side: the distance moved since the last restart,
+    // for the primal weight update.
     Real primal_dist_sq;
     Real dual_dist_sq;
 };
@@ -41,19 +45,21 @@ void launchDualHalpernStep(Index m, const Real* d_lambda, const Real* d_step,
                            const Real* sigma_base, const Real* row_lower, const Real* row_upper,
                            const Int* row_constraint_type, cudaStream_t stream);
 
-// Convergence metric reduction.
+// Convergence metric reduction. at_delta_y is Aᵀ(reflected_y − pdhg_y).
 void launchConvergenceMetricsCol(Index n, const Real* pdhg_x, const Real* initial_x,
-                                 const Real* cscaled, const Real* at_y, const Real* col_lower,
-                                 const Real* col_upper, const Real* finite_col_lower,
-                                 const Real* finite_col_upper, const Real* dual_resid_scale,
-                                 const Real* at_delta_y, Real primal_weight, Real step,
-                                 GpuConvergenceMetrics* d_metrics, cudaStream_t stream);
+                                 const Real* reflected_x, const Real* cscaled, const Real* at_y,
+                                 const Real* col_lower, const Real* col_upper,
+                                 const Real* finite_col_lower, const Real* finite_col_upper,
+                                 const Real* dual_resid_scale, const Real* at_delta_y,
+                                 Real primal_weight, GpuConvergenceMetrics* d_metrics,
+                                 cudaStream_t stream);
 
-void launchConvergenceMetricsRow(Index m, const Real* pdhg_y, const Real* initial_y, const Real* ax,
-                                 const Real* row_lower, const Real* row_upper,
-                                 const Real* finite_row_lower, const Real* finite_row_upper,
-                                 const Real* primal_resid_scale, Real primal_weight,
-                                 GpuConvergenceMetrics* d_metrics, cudaStream_t stream);
+void launchConvergenceMetricsRow(Index m, const Real* pdhg_y, const Real* initial_y,
+                                 const Real* reflected_y, const Real* ax, const Real* row_lower,
+                                 const Real* row_upper, const Real* finite_row_lower,
+                                 const Real* finite_row_upper, const Real* primal_resid_scale,
+                                 Real primal_weight, GpuConvergenceMetrics* d_metrics,
+                                 cudaStream_t stream);
 
 // Utility kernels.
 void launchRestartCopy(Index n, Index m, const Real* pdhg_x, const Real* pdhg_y, Real* initial_x,

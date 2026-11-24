@@ -7,6 +7,7 @@ add_executable(mipx-tests
     test_lp_solver.cpp
     test_lu.cpp
     test_rank_revealing_lu.cpp
+    test_pdlp_residual.cpp
     test_dual_simplex.cpp
     test_incremental.cpp
     test_column_changes.cpp
@@ -72,8 +73,10 @@ set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
     ${PROJECT_SOURCE_DIR}/src
 )
 # Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326),
-# and the rank-revealing LU presolve will use (src/lp/rank_revealing_lu.h, #392).
+# and the rank-revealing LU presolve will use (src/lp/rank_revealing_lu.h, #392),
+# and PDLP's fixed-point residual (src/lp/pdlp_residual.h, #251).
 set_property(SOURCE test_presolve_matrix.cpp test_dual_bounds.cpp test_rank_revealing_lu.cpp
+    test_pdlp_residual.cpp
     APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
