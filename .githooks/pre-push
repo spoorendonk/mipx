@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-push base=8aa900b9b655
+# wcp: pre-push base=0c881ff21f17
 # Linear history on the trunk, then the review receipt.
 #
 # A real file in this repository, not a shim — see the note in `commit-msg` for
@@ -350,7 +350,15 @@ refuse_review() {
 	# reviewer and no way to record one. A review and two lines of git that
 	# work on any machine with git and nothing else installed.
 	err "Push blocked. Have this commit reviewed, then record it and push it with its receipt:"
-	err "      1. run your code reviewer (in Claude Code: /code-review)"
+	err "      1. draw each round with equal odds between an Opus 5.5 subagent and read-only Codex gpt-6.2-sol"
+	err "         one fresh agent runs /code-review or the Codex review directly and does the review itself"
+	err "         for cross-CLI review, use read-only access and the selected provider's signed-in seat"
+	err "         use the other if the selected reviewer cannot run, including at its usage limit"
+	err "         wait for review if neither can run"
+	err "         use medium effort for docs-only diffs and high otherwise"
+	err "         check every changed path for prose documentation, including both paths of renames"
+	err "         agent instructions, rules, templates and program or build inputs count as code"
+	err "         one cold reviewer at a time, at most two rounds with fixes between"
 	err "      2. git update-ref \"$RECEIPTS/\$(git rev-parse HEAD)\" HEAD"
 	err "      3. git push --atomic $remote_name HEAD \"$RECEIPTS/\$(git rev-parse HEAD)\""
 	err "The receipt names the commit reviewed, so committing again needs a new review."
