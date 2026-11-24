@@ -13,6 +13,8 @@
 #include "test_paths.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -76,7 +78,113 @@ Separated separateAtRoot(const LpProblem& problem, CutFamily family) {
     return out;
 }
 
+// max sum x  s.t.  sum_j w_j x_j <= rhs, x Integer over [0, 1], as MIPLIB
+// writes its knapsack rows.
+LpProblem knapsackRow(const std::vector<Real>& weights, Real rhs) {
+    LpProblem lp;
+    lp.num_cols = static_cast<Index>(weights.size());
+    lp.sense = Sense::Maximize;
+    lp.obj.assign(weights.size(), 1.0);
+    lp.col_lower.assign(weights.size(), 0.0);
+    lp.col_upper.assign(weights.size(), 1.0);
+    lp.col_type.assign(weights.size(), VarType::Integer);
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {rhs};
+    std::vector<Triplet> trips;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        trips.push_back({0, j, weights[static_cast<std::size_t>(j)]});
+    }
+    lp.matrix = SparseMatrix(1, lp.num_cols, std::move(trips));
+    return lp;
+}
+
+std::vector<Cut> liftedCoversAt(const LpProblem& problem, const std::vector<Real>& primals) {
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(problem);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    SeparatorManager manager;
+    manager.setConfig(onlyFamily(CutFamily::LiftedCover));
+    manager.setMaxCutsPerFamily(10);
+    CutPool pool;
+    CutSeparationStats stats;
+    manager.separate(lp, problem, primals, pool, stats);
+    std::vector<Cut> cuts;
+    for (Index i = 0; i < pool.size(); ++i) {
+        cuts.push_back(pool[i]);
+    }
+    return cuts;
+}
+
+// Every 0/1 point the row admits satisfies @p cut.
+void requireValidOnEveryPoint(const LpProblem& problem, const Cut& cut) {
+    const Index n = problem.num_cols;
+    for (unsigned mask = 0; mask < (1U << n); ++mask) {
+        Real weight = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            if ((mask >> j) & 1U) {
+                weight += problem.matrix.row(0).values[static_cast<std::size_t>(j)];
+            }
+        }
+        if (weight > problem.row_upper[0] + 1e-9) {
+            continue;
+        }
+        Real lhs = 0.0;
+        for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+            if ((mask >> cut.indices[k]) & 1U) {
+                lhs += cut.values[k];
+            }
+        }
+        CAPTURE(mask, lhs, cut.upper);
+        REQUIRE(lhs <= cut.upper + 1e-9);
+    }
+}
+
 }  // namespace
+
+TEST_CASE("Binary columns: lifted covers are valid when several variables are lifted",
+          "[binary_columns][cuts][validity]") {
+    // Cover {x1, x2, x3}; lifting x4 and x5 each as if first gave both
+    // coefficient 1, and x1 + ... + x5 <= 2 cut off (1, 0, 0, 1, 1).
+    const auto problem = knapsackRow({5.0, 5.0, 5.0, 1.0, 1.0}, 10.0);
+    const auto cuts = liftedCoversAt(problem, {1.0, 0.4, 0.2, 1.0, 1.0});
+    REQUIRE_FALSE(cuts.empty());
+    for (const auto& cut : cuts) {
+        requireValidOnEveryPoint(problem, cut);
+    }
+    // Sequential lifting still lifts x4 (lifted first), and the cut stays
+    // violated at the LP point: 1 + 0.4 + 0.2 + 1 > 2.
+    CHECK(cuts[0].indices == std::vector<Index>{0, 1, 2, 3});
+    CHECK(cuts[0].upper == 2.0);
+}
+
+TEST_CASE("Binary columns: lifted covers on random knapsacks cut off no feasible point",
+          "[binary_columns][cuts][validity]") {
+    std::mt19937 rng(259);
+    std::uniform_int_distribution<int> weight(1, 12);
+    std::uniform_real_distribution<Real> value(0.0, 1.0);
+    Int cuts_checked = 0;
+    for (int trial = 0; trial < 300; ++trial) {
+        const Index n = 4 + trial % 6;
+        std::vector<Real> weights;
+        Real total = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            weights.push_back(static_cast<Real>(weight(rng)));
+            total += weights.back();
+        }
+        const auto problem = knapsackRow(weights, std::floor(total * (0.3 + 0.4 * value(rng))));
+        std::vector<Real> primals;
+        for (Index j = 0; j < n; ++j) {
+            primals.push_back(value(rng) < 0.3 ? 1.0 : value(rng));
+        }
+        for (const auto& cut : liftedCoversAt(problem, primals)) {
+            requireValidOnEveryPoint(problem, cut);
+            ++cuts_checked;
+        }
+    }
+    CHECK(cuts_checked > 50);
+}
 
 TEST_CASE("Binary columns: the MARKER knapsack reads as Integer over [0, 1]", "[binary_columns]") {
     const auto marker = readKnapsack("knapsack4_marker.mps");

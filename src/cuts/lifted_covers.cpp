@@ -3,44 +3,72 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <vector>
 
 namespace mipx {
 
 namespace {
 
-constexpr Real kCoeffTol = 1e-10;
-
-/// Sequence-independent lifting (Gu-Nemhauser-Savelsbergh).
-/// Given a minimal cover C with sum_{j in C} a_j > b (knapsack capacity),
-/// for each variable j NOT in C, compute the lifting coefficient alpha_j
-/// such that: sum_{j in C} x_j + sum_{j not in C} alpha_j x_j <= |C| - 1
+/// Sequential up-lifting of a cover inequality sum_{j in C} x_j <= |C| - 1
+/// for a knapsack row sum_j a_j x_j <= b over 0/1 columns (Padberg 1975;
+/// Wolsey, Integer Programming, 1998, section 9.4). Variables are lifted one
+/// at a time, and each alpha_j is |C| - 1 minus the largest value of the
+/// inequality built so far over the points that still fit with x_j = 1:
+///   alpha_j = |C| - 1 - max{ sum_i v_i x_i : sum_i a_i x_i <= b - a_j },
+/// the sum over C (value 1 each) and the variables lifted before j (value
+/// alpha_i). Giving every variable the coefficient it would get if lifted
+/// first, as this file did before #259, is not valid: it cut off feasible
+/// points.
 ///
-/// The lifting coefficient for variable j is:
-///   alpha_j = |C| - 1 - max{ sum_{i in C} x_i : sum_{i in C} a_i x_i <= b - a_j, x binary }
-/// which equals |C| - 1 minus the optimal value of a small binary knapsack.
-///
-/// For efficiency, we solve the knapsack greedily (good enough for most instances).
-Int solveSmallKnapsack(const std::vector<Real>& weights, Real capacity) {
-    if (capacity < 0.0)
-        return 0;
-    // Greedy: take items in order of increasing weight.
-    std::vector<std::size_t> order(weights.size());
-    std::iota(order.begin(), order.end(), std::size_t{0});
-    std::sort(order.begin(), order.end(),
-              [&](std::size_t a, std::size_t b) { return weights[a] < weights[b]; });
+/// Values are integers in [0, |C| - 1] on every feasible point, so the max is
+/// a 0/1 knapsack over values: min_weight_[v] is the least weight of a subset
+/// worth at least v, updated as each lifted variable joins.
+class SequentialLifter {
+public:
+    explicit SequentialLifter(Int base_rhs)
+        : base_rhs_(base_rhs), min_weight_(static_cast<std::size_t>(base_rhs) + 1, kInf) {
+        min_weight_[0] = 0.0;
+    }
 
-    Int count = 0;
-    Real remaining = capacity;
-    for (std::size_t idx : order) {
-        if (weights[idx] <= remaining + 1e-9) {
-            remaining -= weights[idx];
-            ++count;
+    /// Add an item of integer value @p value and weight @p weight.
+    void add(Int value, Real weight) {
+        if (value <= 0) {
+            return;
+        }
+        // Descending, so each item is used at most once.
+        for (Int v = base_rhs_; v >= 0; --v) {
+            if (at(v) >= kInf) {
+                continue;
+            }
+            const Int target = std::min(base_rhs_, v + value);
+            at(target) = std::min(at(target), at(v) + weight);
+        }
+        // Worth at least v is also worth at least v - 1.
+        for (Int v = base_rhs_; v > 0; --v) {
+            at(v - 1) = std::min(at(v - 1), at(v));
         }
     }
-    return count;
-}
+
+    /// The largest value of a subset of the items added so far whose weight
+    /// fits in @p capacity; -1 when not even the empty set fits.
+    [[nodiscard]] Int maxValue(Real capacity) const {
+        // The tolerance admits more subsets, so it can only lower a
+        // coefficient, never make the cut invalid.
+        for (Int v = base_rhs_; v >= 0; --v) {
+            if (at(v) <= capacity + 1e-9) {
+                return v;
+            }
+        }
+        return -1;
+    }
+
+private:
+    [[nodiscard]] Real& at(Int v) { return min_weight_[static_cast<std::size_t>(v)]; }
+    [[nodiscard]] Real at(Int v) const { return min_weight_[static_cast<std::size_t>(v)]; }
+
+    Int base_rhs_;
+    std::vector<Real> min_weight_;
+};
 
 }  // namespace
 
@@ -139,34 +167,31 @@ Int SeparatorManager::separateLiftedCover(const LpProblem& problem, std::span<co
             }
         }
 
-        // Sequence-independent lifting.
-        // Base cover inequality: sum_{j in C} x_j <= |C| - 1.
+        // Base cover inequality: sum_{j in C} x_j <= |C| - 1, lifted in the
+        // order of non_cover_items (largest LP value times coefficient first,
+        // so the variables that can make the cut violated are lifted while
+        // their coefficients can still be large).
         const Int cover_size = static_cast<Int>(cover.size());
         const Real base_rhs = static_cast<Real>(cover_size) - 1.0;
 
-        // Compute lifting coefficients for non-cover variables.
-        std::vector<Real> cover_weights;
-        cover_weights.reserve(cover.size());
-        for (const auto& ci : cover) {
-            cover_weights.push_back(ci.coeff);
-        }
-
-        // Build the cut.
+        SequentialLifter lifter(cover_size - 1);
         std::vector<std::pair<Index, Real>> cut_entries;
         cut_entries.reserve(items.size());
-
-        // Cover variables get coefficient 1.
         for (const auto& ci : cover) {
+            lifter.add(1, ci.coeff);
             cut_entries.emplace_back(ci.var, 1.0);
         }
-
-        // Lift non-cover variables.
         for (const auto& nc : non_cover_items) {
-            const Real residual_cap = rhs - nc.coeff;
-            const Int knapsack_opt = solveSmallKnapsack(cover_weights, residual_cap);
-            const Real alpha = base_rhs - static_cast<Real>(knapsack_opt);
-            if (alpha > kCoeffTol) {
-                cut_entries.emplace_back(nc.var, alpha);
+            const Int best = lifter.maxValue(rhs - nc.coeff);
+            // best < 0: x_j = 1 alone overfills the row, so any coefficient
+            // would be valid; leave it at 0 rather than lean on that.
+            if (best < 0) {
+                continue;
+            }
+            const Int alpha = (cover_size - 1) - best;
+            if (alpha > 0) {
+                lifter.add(alpha, nc.coeff);
+                cut_entries.emplace_back(nc.var, static_cast<Real>(alpha));
             }
         }
 
