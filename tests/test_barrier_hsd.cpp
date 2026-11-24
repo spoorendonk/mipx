@@ -407,17 +407,58 @@ TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hs
           BarrierIpmOutcome::Failed);
 }
 
-TEST_CASE("Barrier HSD: implicit upper bounds or Gondzio fall back to Mehrotra's loop",
-          "[barrier][hsd]") {
-    const bool implicit = GENERATE(false, true);
-    INFO("implicit " << implicit);
+TEST_CASE("Barrier HSD: implicit upper bounds fall back to Mehrotra's loop", "[barrier][hsd]") {
     auto opts = quietOptions(true, BarrierAlgorithm::CpuCholesky);
-    opts.implicit_upper_bounds = implicit;
-    opts.gondzio_correctors = implicit ? 0 : 4;
+    opts.implicit_upper_bounds = true;
     const auto [result, primals, homogeneous] = solveWith(smallLp(), opts);
     CHECK_FALSE(homogeneous);
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - (-3.5)) <= 1e-6);
+}
+
+// Gondzio's correctors in the homogeneous loop (#335): the same optimum
+// as without them, with correctors taken.
+TEST_CASE("Barrier HSD: Gondzio correctors run in the homogeneous loop", "[barrier][hsd]") {
+    const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
+    INFO("algo " << static_cast<int>(algo));
+    auto opts = quietOptions(true, algo);
+    opts.gondzio_correctors = 4;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(smallLp());
+    const auto result = solver.solve();
+    CHECK(solver.usedHomogeneous());
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - (-3.5)) <= 1e-6);
+    CHECK(solver.gondzioCorrections() > 0);
+    // An infeasible LP still ends on its certificate.
+    CHECK(solveWith(infeasibleLp(), opts).result.status == Status::Infeasible);
+    CHECK(solveWith(unboundedLp(), opts).result.status == Status::Unbounded);
+}
+
+// stair and scfxm2 fail with Gondzio's correctors in Mehrotra's loop, from
+// a primal drift that predates them (#293, decision #397); the homogeneous
+// loop with them reaches the optimum (#335).
+TEST_CASE("Barrier HSD: Gondzio correctors solve stair and scfxm2", "[barrier][hsd][netlib]") {
+    using Case = std::pair<const char*, Real>;
+    auto [name, expected] =
+        GENERATE(Case{"stair", -2.5126695119e+02}, Case{"scfxm2", 3.6660261565e+04});
+    INFO(name);
+    const std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
+    if (!std::filesystem::exists(path)) {
+        SKIP("Netlib instance " + std::string(name) + " not downloaded");
+    }
+    auto opts = quietOptions(true, BarrierAlgorithm::CpuSparseCholesky);
+    opts.presolve = true;
+    opts.gondzio_correctors = 4;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(readMps(path));
+    const auto result = solver.solve();
+    CHECK(solver.usedHomogeneous());
+    CHECK(solver.gondzioCorrections() > 0);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - expected) <= 1e-6 * std::abs(expected));
 }
 
 TEST_CASE("Barrier HSD: Netlib LPs reach the same objectives", "[barrier][hsd][netlib]") {
@@ -431,7 +472,8 @@ TEST_CASE("Barrier HSD: Netlib LPs reach the same objectives", "[barrier][hsd][n
                  Case{"stocfor1", -4.1131976219e+04}, Case{"bore3d", 1.3730803942e+03},
                  Case{"recipe", -2.6661600000e+02});
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
-    INFO(name << " algo " << static_cast<int>(algo));
+    const Int gondzio = GENERATE(0, 4);  // correctors off and on (#335)
+    INFO(name << " algo " << static_cast<int>(algo) << " gondzio " << gondzio);
     const std::string path = mipx::test::testDataDir() + "/netlib/" + name + ".mps.gz";
     if (!std::filesystem::exists(path)) {
         SKIP("Netlib instance " + std::string(name) + " not downloaded");
@@ -439,6 +481,7 @@ TEST_CASE("Barrier HSD: Netlib LPs reach the same objectives", "[barrier][hsd][n
     const auto lp = readMps(path);
     auto opts = quietOptions(true, algo);
     opts.presolve = true;
+    opts.gondzio_correctors = gondzio;
     const auto [result, primals, homogeneous] = solveWith(lp, opts);
     CHECK(homogeneous);
     REQUIRE(result.status == Status::Optimal);

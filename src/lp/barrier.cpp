@@ -494,6 +494,79 @@ Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
     return static_cast<Int>(std::clamp(k, 1.0, static_cast<double>(cap)));
 }
 
+// Gondzio's correctors in the homogeneous self-dual loop (#335): those of
+// GondzioCorrectors, with the same constants and targets, on the HSD
+// model's pairs (z, s) and (tau, kappa) and its one step length for every
+// variable. A corrector is the HSD direction for the residuals
+// (0, 0, 0, t_c, t_k), eta = 0: its solve reuses the iteration's
+// factorization and u, d_m = p_m + dtau_m u. d + d_m is then the Newton
+// direction for the same eta and complementarity residuals rc + t_c,
+// rk + t_k, so it keeps the reduction of rp, rd and rg that d has, and is
+// taken when its step grows by kAcceptFraction of the increase aimed at.
+struct HsdGondzioCorrectors {
+    std::vector<Real> t_c{}, mz{}, my{}, ms{}, tz{}, ts{};
+
+    // solve(t_c, t_k, mz, my, ms, dtau_m, dkappa_m): the corrector's solve;
+    // step(dz, ds, dtau, dkappa): the largest step in [0, 1] keeping z, s,
+    // tau and kappa nonnegative. d = (dz, dy, ds, dtau, dkappa) is updated
+    // in place; returns the correctors taken.
+    template <class Solve, class Step>
+    Int correct(Int k_max, Real sigma_mu, std::span<const Real> z, std::span<const Real> s,
+                Real tau, Real kappa, std::span<Real> dz, std::span<Real> dy, std::span<Real> ds,
+                Real& dtau, Real& dkappa, const Solve& solve, const Step& step) {
+        // As in GondzioCorrectors: no neighbourhood to aim at.
+        if (!(sigma_mu > 0.0)) {
+            return 0;
+        }
+        const auto n = dz.size();
+        const auto m = dy.size();
+        if (t_c.size() != n || my.size() != m) {
+            for (auto* vec : {&t_c, &mz, &ms, &tz, &ts}) {
+                vec->assign(n, 0.0);
+            }
+            my.assign(m, 0.0);
+        }
+        const Real lo = GondzioCorrectors::kBetaMin * sigma_mu;
+        const Real hi = GondzioCorrectors::kBetaMax * sigma_mu;
+        Real a = step(dz, ds, dtau, dkappa);
+        Int used = 0;
+        while (used < k_max && a < 1.0) {
+            const Real aim = std::min(a + GondzioCorrectors::kAspiration, 1.0);
+            for (std::size_t j = 0; j < n; ++j) {
+                t_c[j] =
+                    GondzioCorrectors::target((z[j] + aim * dz[j]) * (s[j] + aim * ds[j]), lo, hi);
+            }
+            const Real t_k =
+                GondzioCorrectors::target((tau + aim * dtau) * (kappa + aim * dkappa), lo, hi);
+            Real dtau_m = 0.0;
+            Real dkappa_m = 0.0;
+            if (!solve(t_c, t_k, mz, my, ms, dtau_m, dkappa_m)) {
+                break;
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                tz[j] = dz[j] + mz[j];
+                ts[j] = ds[j] + ms[j];
+            }
+            const Real ttau = dtau + dtau_m;
+            const Real tkappa = dkappa + dkappa_m;
+            const Real new_a = step(tz, ts, ttau, tkappa);
+            if (!(new_a >= a + GondzioCorrectors::kAcceptFraction * (aim - a))) {
+                break;
+            }
+            std::copy(tz.begin(), tz.end(), dz.begin());
+            std::copy(ts.begin(), ts.end(), ds.begin());
+            for (std::size_t i = 0; i < m; ++i) {
+                dy[i] += my[i];
+            }
+            dtau = ttau;
+            dkappa = tkappa;
+            a = new_a;
+            ++used;
+        }
+        return used;
+    }
+};
+
 // A run that stops short of primal_dual_tol (stall, iteration limit, failed
 // factorization) still hands its best iterate on when every measure is within
 // this tolerance. Such a point is only ever used as a crossover start, which
@@ -854,14 +927,16 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
 //   dtau = (eta rg + c'p_z - b'p_y + rk / tau) / (b'u_y - c'u_z + kappa / tau),
 // whose denominator is positive for an exact solve: from A u_z = b, A'u_y + u_s = c and
 // S u_z + Z u_s = 0, b'u_y - c'u_z = -u_z'u_s = u_z' S Z^-1 u_z. One step
-// length for every variable, as in the paper. Plain standard form only: no
-// implicit upper bounds, no Gondzio correctors. An infeasible LP or dual
-// ends on hsdInfeasibility's certificate (#371); a run that reaches neither
-// that nor optimality ends Failed, by the stall test or the iteration limit.
+// length for every variable, as in the paper. Gondzio's correctors follow
+// Mehrotra's when opts.gondzio_correctors > 0 (HsdGondzioCorrectors, #335).
+// Plain standard form only: no implicit upper bounds. An infeasible LP or
+// dual ends on hsdInfeasibility's certificate (#371); a run that reaches
+// neither that nor optimality ends Failed, by the stall test or the
+// iteration limit.
 BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
                             std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
                             std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
-                            Int& iters) {
+                            Int& iters, Int& corrections) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const auto mm = static_cast<size_t>(m);
@@ -875,6 +950,7 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     std::vector<Real> rc(nn);
     std::vector<Real> rp_eta(mm);
     std::vector<Real> rd_eta(nn);
+    const std::vector<Real> zero_m(mm, 0.0);
     const std::vector<Real> zero_n(nn, 0.0);
     // u: the solve for (b, c, 0); p: the one for the direction's residuals.
     std::vector<Real> uz(nn);
@@ -903,6 +979,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     Real kappa = 1.0;
     // The product of the rescalings applied so far (see the end of the loop).
     Real scale_total = 1.0;
+    HsdGondzioCorrectors gondzio;
+    Int gondzio_k = -1;  // set once the backend has factorized
 
     // out = in / t, the LP point of a homogeneous iterate.
     auto unscale = [](std::vector<Real>& out, std::span<const Real> in, Real t) {
@@ -1057,6 +1135,9 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
                 return stopShort(iter);
             }
         }
+        if (gondzio_k < 0) {
+            gondzio_k = gondzioCorrectorCount(opts.gondzio_correctors, solver.factorStats());
+        }
         if (!solver.solveNewton(b, c, zero_n, uz, uy, us)) {
             return stopShort(iter);
         }
@@ -1133,6 +1214,34 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         const Real rk = sigma * mu - tau * kappa - dtau_aff * dkappa_aff;
         if (!direction(1.0 - sigma, rk, dz, dy, ds)) {
             return stopShort(iter);
+        }
+        if (gondzio_k > 0) {
+            // The corrector for (0, 0, 0, t_c, t_k), as direction() at eta = 0.
+            auto corrector = [&](std::span<const Real> t_c, Real t_k, std::span<Real> mz,
+                                 std::span<Real> my, std::span<Real> ms, Real& dtau_m,
+                                 Real& dkappa_m) {
+                if (!solver.solveNewton(zero_m, zero_n, t_c, pz, py, ps)) {
+                    return false;
+                }
+                dtau_m = (dot(c, pz) - dot(b, py) + t_k / tau) / denom;
+                dkappa_m = (t_k - kappa * dtau_m) / tau;
+                for (Index j = 0; j < n; ++j) {
+                    mz[j] = pz[j] + dtau_m * uz[j];
+                    ms[j] = ps[j] + dtau_m * us[j];
+                }
+                for (Index i = 0; i < m; ++i) {
+                    my[i] = py[i] + dtau_m * uy[i];
+                }
+                return std::isfinite(dtau_m) && std::isfinite(dkappa_m);
+            };
+            auto fullStep = [&](std::span<const Real> dz_in, std::span<const Real> ds_in, Real dt,
+                                Real dk) { return stepFor(dz_in, ds_in, dt, dk, 1.0); };
+            const Int used = gondzio.correct(gondzio_k, sigma * mu, z, s, tau, kappa, dz, dy, ds,
+                                             dtau, dkappa, corrector, fullStep);
+            corrections += used;
+            if (opts.verbose) {
+                std::printf("        gondzio correctors: %d of %d\n", used, gondzio_k);
+            }
         }
         const Real alpha = stepFor(dz, ds, dtau, dkappa, opts.step_fraction);
 
@@ -1801,15 +1910,14 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
     // The CPU backend is the one a build without CUDA picks under Auto; the
     // CPU default itself (dense or sparse NE) is #295's.
-    // The homogeneous self-dual loop (#370) runs the plain standard form;
-    // with upper bounds in the IPM or Gondzio correctors (#335) the solve
-    // keeps Mehrotra's loop.
-    const bool hsd = options_.homogeneous && !has_upper && options_.gondzio_correctors <= 0;
+    // The homogeneous self-dual loop (#370) runs the plain standard form,
+    // Gondzio's correctors included (#335); with upper bounds in the IPM the
+    // solve keeps Mehrotra's loop.
+    const bool hsd = options_.homogeneous && !has_upper;
     if (options_.homogeneous && !hsd && options_.verbose) {
         std::printf(
-            "Barrier: the homogeneous self-dual loop does not yet take %s; using Mehrotra's "
-            "loop.\n",
-            has_upper ? "implicit upper bounds" : "Gondzio correctors");
+            "Barrier: the homogeneous self-dual loop does not yet take implicit upper bounds; "
+            "using Mehrotra's loop.\n");
     }
     const bool cpu_only = has_upper || options_.gondzio_correctors > 0 || options_.homogeneous;
     if (cpu_only &&
@@ -1941,7 +2049,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             }
             used_homogeneous_ = hsd;
             outcome = hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y,
-                                      s, iters)
+                                      s, iters, gondzio_corrections_)
                           : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_,
                                            std_obj_offset_, z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {

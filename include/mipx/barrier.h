@@ -87,10 +87,10 @@ struct BarrierOptions {
     Int gondzio_correctors = 0;
     // The CPU IPM on the homogeneous self-dual model (#292; Xu, Hung & Ye
     // 1996, as in Andersen & Andersen 2000) instead of Mehrotra's loop on the
-    // LP itself. Opt-in, CPU backends only: on, the GPU path is skipped. Not
-    // yet combined with implicit_upper_bounds on a model with upper bounds,
-    // or with gondzio_correctors (#335): the solve then runs Mehrotra's loop
-    // and says so when verbose.
+    // LP itself, with gondzio_correctors too (#335). Opt-in, CPU backends
+    // only: on, the GPU path is skipped. Not yet combined with
+    // implicit_upper_bounds on a model with upper bounds: the solve then runs
+    // Mehrotra's loop and says so when verbose.
     bool homogeneous = false;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its
