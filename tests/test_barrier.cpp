@@ -12,6 +12,12 @@
 #include <string>
 #include <utility>
 
+#ifdef MIPX_HAS_CUDSS
+#include "lp/newton_solver.h"
+
+#include <cuda_runtime_api.h>
+#endif
+
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
 
@@ -482,6 +488,50 @@ TEST_CASE("BarrierSolver GPU Cholesky: triangle LP", "[barrier][gpu-cholesky]") 
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+TEST_CASE("BarrierSolver GPU: dense-column Schur solve and augmented route",
+          "[barrier][gpu-cholesky][gpu-augmented]") {
+    int devices = 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+        SKIP("No CUDA device");
+    }
+    constexpr Index m = 48;
+    constexpr Index n = m + 2;
+    std::vector<Triplet> entries;
+    std::vector<Real> b(m), c(n, 1.0);
+    // Two overlapping dense columns make the full lower NE pattern dense.
+    // At the optimum both are zero and each private column equals its RHS.
+    c[0] = 2.0 * m;
+    c[1] = 3.0 * m;
+    for (Index i = 0; i < m; ++i) {
+        entries.push_back({i, 0, 1.0});
+        entries.push_back({i, 1, 1.0 + i % 2});
+        entries.push_back({i, i + 2, 1.0});
+        b[i] = 2.0 + i % 3;
+    }
+    const SparseMatrix a(m, n, std::move(entries));
+    const bool prefer_augmented = GENERATE(false, true);
+    const Int cap = GENERATE(0, 1, 2);
+
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ir_steps = 0;  // Exercise the correction directly.
+    opts.gpu_ne_max_dense_cols = cap;
+    std::vector<Real> z, y, s;
+    Int iters = 0;
+    Index eliminated = -1;
+    std::string error;
+    const bool ok = solveBarrierGpuWithStats(a, m, n, b, c, opts, 0.0, prefer_augmented, z, y, s,
+                                             iters, &error, 0.0, &eliminated);
+    INFO(error);
+    REQUIRE(ok);
+    CHECK(eliminated == (!prefer_augmented && cap == 2 ? 2 : 0));
+    CHECK_THAT(z[0], WithinAbs(0.0, 1e-6));
+    CHECK_THAT(z[1], WithinAbs(0.0, 1e-6));
+    for (Index i = 0; i < m; ++i) {
+        CHECK_THAT(z[i + 2], WithinAbs(b[i], 1e-6));
+    }
 }
 
 // ============================================================================

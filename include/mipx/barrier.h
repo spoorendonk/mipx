@@ -113,6 +113,9 @@ struct BarrierOptions {
     // Status::IterLimit. The CPU IPM checks it every iteration and inside its
     // factorizations, as it does max_solve_seconds.
     const std::atomic<bool>* stop_flag = nullptr;
+    // Opt-in cap on columns left out of the GPU normal-equations factor.
+    // Among columns above the GPU density threshold, the densest go first.
+    Int gpu_ne_max_dense_cols = 0;
 };
 
 class BarrierSolver : public LpSolver {

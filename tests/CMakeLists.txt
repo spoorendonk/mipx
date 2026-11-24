@@ -75,6 +75,11 @@ set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
     APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
+if(MIPX_HAS_CUDSS)
+    set_property(SOURCE test_barrier.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
+        ${PROJECT_SOURCE_DIR}/src
+    )
+endif()
 # Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326),
 # and the rank-revealing LU presolve will use (src/lp/rank_revealing_lu.h, #392),
 # and PDLP's restart policy and fixed-point residual.

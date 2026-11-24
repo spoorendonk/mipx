@@ -73,6 +73,7 @@ void printUsage(FILE* out) {
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
                  "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
+                 "[--barrier-gpu-dense-cols N] "
                  "[--barrier-hsd] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
@@ -116,6 +117,7 @@ int main(int argc, char* argv[]) {
     mipx::BarrierDualize barrier_dualize = mipx::BarrierDualize::Off;
     bool barrier_sparse_ne = false;
     mipx::Int barrier_dense_cols = mipx::BarrierOptions{}.ne_max_dense_cols;
+    mipx::Int barrier_gpu_dense_cols = mipx::BarrierOptions{}.gpu_ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
     bool barrier_hsd = false;
     mipx::Int barrier_gondzio = 0;
@@ -481,6 +483,9 @@ int main(int argc, char* argv[]) {
             // Schur complement (#314); 0 keeps every column in the factor.
             barrier_dense_cols =
                 std::max<mipx::Int>(0, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--barrier-gpu-dense-cols" && i + 1 < argc) {
+            barrier_gpu_dense_cols = static_cast<mipx::Int>(std::clamp<long long>(
+                std::atoll(argv[++i]), 0, std::numeric_limits<mipx::Int>::max()));
         } else if (arg == "--barrier-implicit-bounds") {
             // Upper bounds inside the CPU IPM instead of as rows (#299).
             barrier_implicit_bounds = true;
@@ -803,6 +808,7 @@ int main(int argc, char* argv[]) {
                     bopts.ordering = barrier_ordering;
                     bopts.dualize = barrier_dualize;
                     bopts.ne_max_dense_cols = barrier_dense_cols;
+                    bopts.gpu_ne_max_dense_cols = barrier_gpu_dense_cols;
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
                     bopts.gondzio_correctors = barrier_gondzio;
                     bopts.homogeneous = barrier_hsd;

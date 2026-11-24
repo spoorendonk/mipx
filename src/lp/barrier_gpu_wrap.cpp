@@ -2,8 +2,8 @@
 // This file is compiled by g++ (not nvcc).  It delegates to the single
 // gpuSolveBarrier() bridge function defined in barrier_gpu.cu.
 
-#include "mipx/barrier.h"
 #include "mipx/sparse_matrix.h"
+#include "newton_solver.h"
 
 #include <vector>
 
@@ -16,8 +16,9 @@ bool gpuSolveBarrier(int m, int n, int nnz, const int* rows, const int* cols, co
                      const double* b, const double* c, int max_iter, double tol,
                      double step_fraction, double reg, int ir_steps, bool verbose,
                      const void* stop_flag, bool prefer_augmented, double dense_col_fraction,
-                     double obj_offset, double dualized_obj_sign, double* out_z, double* out_y,
-                     double* out_s, double* out_obj, int* out_status, int* out_iters);
+                     int max_dense_cols, double obj_offset, double dualized_obj_sign, double* out_z,
+                     double* out_y, double* out_s, double* out_obj, int* out_status, int* out_iters,
+                     int* out_eliminated_columns);
 }
 const char* gpuLastBarrierError();
 }  // namespace gpu_detail
@@ -27,6 +28,15 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n, std::span<const Re
                      bool prefer_augmented, std::vector<Real>& z, std::vector<Real>& y,
                      std::vector<Real>& s, Int& iters, std::string* error_msg,
                      Real dualized_obj_sign) {
+    return solveBarrierGpuWithStats(A, m, n, b, c, opts, obj_offset, prefer_augmented, z, y, s,
+                                    iters, error_msg, dualized_obj_sign, nullptr);
+}
+
+bool solveBarrierGpuWithStats(const SparseMatrix& A, Index m, Index n, std::span<const Real> b,
+                              std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
+                              bool prefer_augmented, std::vector<Real>& z, std::vector<Real>& y,
+                              std::vector<Real>& s, Int& iters, std::string* error_msg,
+                              Real dualized_obj_sign, Index* eliminated_columns) {
     auto rows = A.csr_row_starts();
     auto cols = A.csr_col_indices();
     auto vals = A.csr_values();
@@ -47,8 +57,8 @@ bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n, std::span<const Re
         b.data(), c.data(), opts.max_iter, opts.primal_dual_tol, opts.step_fraction,
         std::max(opts.regularization, 1e-12), opts.ir_steps, opts.verbose,
         static_cast<const void*>(opts.stop_flag), prefer_augmented, opts.dense_col_fraction,
-        obj_offset, dualized_obj_sign, z.data(), y.data(), s.data(), &out_obj, &out_status,
-        &out_iters);
+        opts.gpu_ne_max_dense_cols, obj_offset, dualized_obj_sign, z.data(), y.data(), s.data(),
+        &out_obj, &out_status, &out_iters, eliminated_columns);
 
     iters = out_iters;
     if (!ok && out_status != 0 && error_msg != nullptr && error_msg->empty()) {

@@ -10,13 +10,18 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <cudss.h>
+#include <cusolverDn.h>
 #include <cusparse.h>
+#include <math_constants.h>
 
 // Use mipx core types directly (avoid including headers with std::span).
 using Real = double;
@@ -40,6 +45,14 @@ static bool cudaOk(cudaError_t e) { return e == cudaSuccess; }
 static bool cusparseOk(cusparseStatus_t e) { return e == CUSPARSE_STATUS_SUCCESS; }
 
 static bool cudssOk(cudssStatus_t e) { return e == CUDSS_STATUS_SUCCESS; }
+
+// Call after all cuDSS work on the stream has completed.
+static bool cudssDeviceOk(cudssHandle_t handle, cudssData_t data) {
+    int info = -1;
+    size_t written = 0;
+    return cudssOk(cudssDataGet(handle, data, CUDSS_DATA_INFO, &info, sizeof(info), &written)) &&
+           info == 0;
+}
 
 // ---------------------------------------------------------------------------
 // CUDA kernels — block size 256, grid-stride loops
@@ -238,7 +251,7 @@ __global__ void kernelFormNEValues(int ne_nnz, const int* ne_row_starts,
                                    const int* a_row_starts,
                                    const int* a_col_indices,
                                    const double* a_values,
-                                   const double* theta, double reg,
+                                   const double* theta, const int* dense_rank, double reg,
                                    int m, double* ne_values) {
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < ne_nnz;
          idx += gridDim.x * blockDim.x) {
@@ -260,7 +273,9 @@ __global__ void kernelFormNEValues(int ne_nnz, const int* ne_row_starts,
             int ci = a_col_indices[pi];
             int cj = a_col_indices[pj];
             if (ci == cj) {
-                val += a_values[pi] * theta[ci] * a_values[pj];
+                if (dense_rank == nullptr || dense_rank[ci] < 0) {
+                    val += a_values[pi] * theta[ci] * a_values[pj];
+                }
                 ++pi;
                 ++pj;
             } else if (ci < cj) {
@@ -271,6 +286,27 @@ __global__ void kernelFormNEValues(int ne_nnz, const int* ne_row_starts,
         }
         if (i == j) val += reg;
         ne_values[idx] = val;
+    }
+}
+
+// U = A_d diag(sqrt(theta_d)), with dense columns stored column-major.
+__global__ void kernelPackDenseColumns(int m, const int* row_starts, const int* col_indices,
+                                       const double* values, const double* theta,
+                                       const int* dense_rank, double* panel) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < m; i += gridDim.x * blockDim.x) {
+        for (int p = row_starts[i]; p < row_starts[i + 1]; ++p) {
+            const int j = col_indices[p];
+            const int rank = dense_rank[j];
+            if (rank >= 0) {
+                panel[static_cast<size_t>(rank) * m + i] = values[p] * sqrt(theta[j]);
+            }
+        }
+    }
+}
+
+__global__ void kernelAddSchurIdentity(int order, double* schur) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < order; i += gridDim.x * blockDim.x) {
+        schur[static_cast<size_t>(i) * order + i] += 1.0;
     }
 }
 
@@ -381,12 +417,13 @@ __global__ void kernelDot(int n, const double* a, const double* b,
     }
 }
 
-__global__ void kernelInfNorm(int n, const double* v, double* result) {
+__global__ void kernelInfNorm(int n, const double* v, double* result, bool check_finite) {
     __shared__ double sdata[kBlockSize];
     double mx = 0.0;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
          i += gridDim.x * blockDim.x) {
-        mx = fmax(mx, fabs(v[i]));
+        const double magnitude = fabs(v[i]);
+        mx = fmax(mx, check_finite && !isfinite(magnitude) ? CUDART_INF : magnitude);
     }
     sdata[threadIdx.x] = mx;
     __syncthreads();
@@ -769,10 +806,10 @@ struct GpuContext {
     }
 
     bool multiplyA(double* d_x_in, double* d_y_out) {
-        cusparseDnVecSetValues(vec_n1, d_x_in);
-        cusparseDnVecSetValues(vec_m1, d_y_out);
         double alpha = 1.0, beta = 0.0;
-        return cusparseOk(cusparseSpMV(cusparse_handle,
+        return cusparseOk(cusparseDnVecSetValues(vec_n1, d_x_in)) &&
+               cusparseOk(cusparseDnVecSetValues(vec_m1, d_y_out)) &&
+               cusparseOk(cusparseSpMV(cusparse_handle,
                                         CUSPARSE_OPERATION_NON_TRANSPOSE,
                                         &alpha, a_mat, vec_n1, &beta, vec_m1,
                                         CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
@@ -780,10 +817,10 @@ struct GpuContext {
     }
 
     bool multiplyAT(double* d_x_in, double* d_y_out) {
-        cusparseDnVecSetValues(vec_m2, d_x_in);
-        cusparseDnVecSetValues(vec_n2, d_y_out);
         double alpha = 1.0, beta = 0.0;
-        return cusparseOk(cusparseSpMV(cusparse_handle,
+        return cusparseOk(cusparseDnVecSetValues(vec_m2, d_x_in)) &&
+               cusparseOk(cusparseDnVecSetValues(vec_n2, d_y_out)) &&
+               cusparseOk(cusparseSpMV(cusparse_handle,
                                         CUSPARSE_OPERATION_TRANSPOSE,
                                         &alpha, a_mat, vec_m2, &beta, vec_n2,
                                         CUDA_R_64F, CUSPARSE_SPMV_ALG_DEFAULT,
@@ -801,10 +838,10 @@ struct GpuContext {
 
     // Download count scalars in a single memcpy + sync.
     double h_scalars[16] = {};
-    void downloadScalars(int count) {
-        cudaMemcpyAsync(h_scalars, d_scalar, sizeof(double) * count,
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+    bool downloadScalars(int count) {
+        return cudaOk(cudaMemcpyAsync(h_scalars, d_scalar, sizeof(double) * count,
+                                       cudaMemcpyDeviceToHost, stream)) &&
+               cudaOk(cudaStreamSynchronize(stream));
     }
 
     // Zero all scalar slots in one memset (call before a batch of async reductions).
@@ -825,8 +862,9 @@ struct GpuContext {
         kernelDot<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_a, d_b, d_scalar + slot);
     }
 
-    void gpuInfNormAsync(double* d_v, int sz, int slot) {
-        kernelInfNorm<<<gridSize(sz), kBlockSize, 0, stream>>>(sz, d_v, d_scalar + slot);
+    void gpuInfNormAsync(double* d_v, int sz, int slot, bool check_finite = false) {
+        kernelInfNorm<<<gridSize(sz), kBlockSize, 0, stream>>>(
+            sz, d_v, d_scalar + slot, check_finite);
     }
 
     void gpuMaxStepAsync(double* d_x, double* d_dx, int sz, double fraction, int slot) {
@@ -906,6 +944,116 @@ struct GpuContext {
 };
 
 // ---------------------------------------------------------------------------
+// Dense border of the normal equations, in FP64.
+// ---------------------------------------------------------------------------
+
+struct DenseColumnSchur {
+    int order = 0;
+    int* d_rank = nullptr;
+    double* d_panel = nullptr;
+    double* d_solved_panel = nullptr;
+    double* d_chol = nullptr;
+    double* d_work = nullptr;
+    double* d_rhs = nullptr;
+    int* d_info = nullptr;
+    int work_size = 0;
+    cublasHandle_t blas = nullptr;
+    cusolverDnHandle_t dense_solver = nullptr;
+    cudssMatrix_t panel_rhs = nullptr;
+    cudssMatrix_t panel_sol = nullptr;
+
+    ~DenseColumnSchur() {
+        if (panel_rhs) cudssMatrixDestroy(panel_rhs);
+        if (panel_sol) cudssMatrixDestroy(panel_sol);
+        if (dense_solver) cusolverDnDestroy(dense_solver);
+        if (blas) cublasDestroy(blas);
+        cudaFree(d_rank);
+        cudaFree(d_panel);
+        cudaFree(d_solved_panel);
+        cudaFree(d_chol);
+        cudaFree(d_work);
+        cudaFree(d_rhs);
+        cudaFree(d_info);
+    }
+
+    bool init(int m, const std::vector<int>& rank, cudaStream_t stream) {
+        const size_t column_bytes = sizeof(double) * static_cast<size_t>(order);
+        if (static_cast<size_t>(std::max(m, order)) >
+            std::numeric_limits<size_t>::max() / column_bytes) {
+            return false;
+        }
+        const size_t panel_bytes = column_bytes * m;
+        const size_t chol_bytes = column_bytes * order;
+        if (!cudaOk(cudaMalloc(&d_rank, sizeof(int) * rank.size())) ||
+            !cudaOk(cudaMalloc(&d_panel, panel_bytes)) ||
+            !cudaOk(cudaMalloc(&d_solved_panel, panel_bytes)) ||
+            !cudaOk(cudaMalloc(&d_chol, chol_bytes)) ||
+            !cudaOk(cudaMalloc(&d_rhs, column_bytes)) ||
+            !cudaOk(cudaMalloc(&d_info, sizeof(int)))) {
+            return false;
+        }
+        return cublasCreate(&blas) == CUBLAS_STATUS_SUCCESS &&
+               cublasSetStream(blas, stream) == CUBLAS_STATUS_SUCCESS &&
+               cusolverDnCreate(&dense_solver) == CUSOLVER_STATUS_SUCCESS &&
+               cusolverDnSetStream(dense_solver, stream) == CUSOLVER_STATUS_SUCCESS &&
+               cusolverDnDpotrf_bufferSize(dense_solver, CUBLAS_FILL_MODE_LOWER, order, d_chol,
+                                           order, &work_size) == CUSOLVER_STATUS_SUCCESS &&
+               cudaOk(cudaMalloc(&d_work, sizeof(double) * work_size)) &&
+               cudssOk(cudssMatrixCreateDn(&panel_rhs, m, order, m, d_panel, CUDA_R_64F,
+                                           CUDSS_LAYOUT_COL_MAJOR)) &&
+               cudssOk(cudssMatrixCreateDn(&panel_sol, m, order, m, d_solved_panel, CUDA_R_64F,
+                                           CUDSS_LAYOUT_COL_MAJOR)) &&
+               cudaOk(cudaMemcpyAsync(d_rank, rank.data(), sizeof(int) * rank.size(),
+                                       cudaMemcpyHostToDevice, stream)) &&
+               cudaOk(cudaStreamSynchronize(stream));
+    }
+
+    bool factorize(const GpuContext& ctx, cudssHandle_t handle, cudssConfig_t config,
+                   cudssData_t data, cudssMatrix_t matrix) {
+        const int m = ctx.m;
+        if (!cudaOk(cudaMemsetAsync(d_panel, 0, sizeof(double) * static_cast<size_t>(m) * order,
+                                    ctx.stream))) {
+            return false;
+        }
+        kernelPackDenseColumns<<<gridSize(m), kBlockSize, 0, ctx.stream>>>(
+            m, ctx.d_a_row_starts, ctx.d_a_col_indices, ctx.d_a_values, ctx.d_theta, d_rank, d_panel);
+
+        // The same sparse factor serves every column of W = M_s^{-1} U.
+        // The dense Schur factor is S = I + U' W; theta_d never needs inverting.
+        const double one = 1.0, zero = 0.0;
+        if (!cudaOk(cudaGetLastError()) ||
+            !cudssOk(cudssExecute(handle, CUDSS_PHASE_SOLVE, config, data, matrix, panel_sol,
+                                  panel_rhs)) ||
+            !cudaOk(cudaStreamSynchronize(ctx.stream)) || !cudssDeviceOk(handle, data) ||
+            cublasDgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, order, order, m, &one, d_panel, m,
+                        d_solved_panel, m, &zero, d_chol, order) != CUBLAS_STATUS_SUCCESS) {
+            return false;
+        }
+        kernelAddSchurIdentity<<<gridSize(order), kBlockSize, 0, ctx.stream>>>(order, d_chol);
+        int info = 0;
+        return cudaOk(cudaGetLastError()) &&
+               cusolverDnDpotrf(dense_solver, CUBLAS_FILL_MODE_LOWER, order, d_chol, order, d_work,
+                                work_size, d_info) == CUSOLVER_STATUS_SUCCESS &&
+               cudaOk(cudaMemcpyAsync(&info, d_info, sizeof(info), cudaMemcpyDeviceToHost,
+                                      ctx.stream)) &&
+               cudaOk(cudaStreamSynchronize(ctx.stream)) && info == 0;
+    }
+
+    bool correct(int m, double* sol) const {
+        // sol enters as M_s^{-1} rhs and leaves as sol - W S^{-1} U' sol.
+        const double one = 1.0, zero = 0.0, minus_one = -1.0;
+        return cublasDgemv(blas, CUBLAS_OP_T, m, order, &one, d_panel, m, sol, 1, &zero, d_rhs, 1) ==
+                   CUBLAS_STATUS_SUCCESS &&
+               cublasDtrsv(blas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
+                           order, d_chol, order, d_rhs, 1) == CUBLAS_STATUS_SUCCESS &&
+               cublasDtrsv(blas, CUBLAS_FILL_MODE_LOWER, CUBLAS_OP_T, CUBLAS_DIAG_NON_UNIT,
+                           order, d_chol, order, d_rhs, 1) == CUBLAS_STATUS_SUCCESS &&
+               cublasDgemv(blas, CUBLAS_OP_N, m, order, &minus_one, d_solved_panel, m, d_rhs, 1,
+                           &one, sol, 1) == CUBLAS_STATUS_SUCCESS;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // NormalEqSolver: cuDSS SPD Cholesky with mixed precision support
 // ---------------------------------------------------------------------------
 
@@ -916,6 +1064,7 @@ struct NormalEqSolver {
     int* d_ne_row_starts = nullptr;
     int* d_ne_col_indices = nullptr;
     double* d_ne_values = nullptr;
+    DenseColumnSchur schur;
 
     // FP32 mixed precision support.
     float* d_ne_values_f32 = nullptr;
@@ -930,7 +1079,7 @@ struct NormalEqSolver {
     cudssMatrix_t cudss_mat = nullptr;
     cudssMatrix_t cudss_rhs_mat = nullptr;
     cudssMatrix_t cudss_sol_mat = nullptr;
-    bool analyzed = false;
+    bool fp64_refactor_ready = false;
 
     // FP32 cuDSS handles.
     cudssHandle_t cudss_handle_f32 = nullptr;
@@ -968,89 +1117,105 @@ struct NormalEqSolver {
         cudaFree(d_sol_f32);
     }
 
-    // Build NE sparsity pattern, upload, cuDSS analysis.
-    // Returns false if NE is too dense.
-    bool analyze(int a_m, int a_n,
-                 const int* h_row_starts, const int* h_col_indices,
-                 double dense_col_fraction,
-                 GpuContext* context) {
+    static bool buildPattern(int m, const int* rows, const int* cols,
+                             const std::vector<int>& counts, const std::vector<int>& dense_rank,
+                             std::vector<int>& ne_rows, std::vector<int>& ne_cols) {
+        std::vector<std::vector<int>> col_rows(counts.size());
+        for (size_t j = 0; j < counts.size(); ++j) {
+            if (dense_rank[j] < 0) col_rows[j].reserve(counts[j]);
+        }
+        for (int i = 0; i < m; ++i) {
+            for (int p = rows[i]; p < rows[i + 1]; ++p) {
+                const int j = cols[p];
+                if (dense_rank[j] < 0) col_rows[j].push_back(i);
+            }
+        }
+
+        // Enumerate distinct entries directly, so the density guard also
+        // bounds storage for a pattern that will be rejected.
+        const size_t max_nnz = std::min(20 * static_cast<size_t>(m),
+                                        static_cast<size_t>(std::numeric_limits<int>::max()));
+        std::vector<int> seen(m, -1);
+        for (int i = 0; i < m; ++i) {
+            ne_rows[i] = static_cast<int>(ne_cols.size());
+            if (ne_cols.size() == max_nnz) return false;
+            ne_cols.push_back(i);
+            for (int p = rows[i]; p < rows[i + 1]; ++p) {
+                for (int j : col_rows[cols[p]]) {
+                    if (j >= i) break;
+                    if (seen[j] == i) continue;
+                    if (ne_cols.size() == max_nnz) return false;
+                    ne_cols.push_back(j);
+                    seen[j] = i;
+                }
+            }
+            std::sort(ne_cols.begin() + ne_rows[i], ne_cols.end());
+        }
+        ne_rows[m] = static_cast<int>(ne_cols.size());
+        return true;
+    }
+
+    // Select columns before forming the pattern, then analyze M_s with cuDSS.
+    bool analyze(int a_m, int a_n, const int* h_row_starts, const int* h_col_indices,
+                 double dense_col_fraction, int max_dense_cols, GpuContext* context) {
         ctx = context;
         ne_m = a_m;
-
-        // Build NE pattern on CPU.
-        std::vector<std::vector<int>> ne_cols(a_m);
-        for (int i = 0; i < a_m; ++i) ne_cols[i].push_back(i);
 
         const int dense_threshold =
             std::max(1, static_cast<int>(dense_col_fraction * std::max(a_m, 1)));
         std::vector<int> col_counts(a_n, 0);
-        for (int i = 0; i < a_m; ++i) {
-            for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p) {
-                ++col_counts[h_col_indices[p]];
-            }
-        }
+        for (int p = 0; p < h_row_starts[a_m]; ++p) ++col_counts[h_col_indices[p]];
+
+        std::vector<int> candidates;
         for (int k = 0; k < a_n; ++k) {
             if (col_counts[k] > dense_threshold) {
-                g_last_barrier_error =
-                    "Barrier GPU normal-equation pattern has dense column " +
-                    std::to_string(k) + " with " + std::to_string(col_counts[k]) +
-                    " entries (threshold " + std::to_string(dense_threshold) + ").";
-                return false;
+                if (max_dense_cols <= 0) {
+                    g_last_barrier_error =
+                        "Barrier GPU normal-equation pattern has dense column " +
+                        std::to_string(k) + " with " + std::to_string(col_counts[k]) +
+                        " entries (threshold " + std::to_string(dense_threshold) + ").";
+                    return false;
+                }
+                candidates.push_back(k);
             }
         }
 
-        std::vector<std::vector<int>> col_rows(a_n);
-        for (int k = 0; k < a_n; ++k) {
-            col_rows[k].reserve(static_cast<size_t>(col_counts[k]));
-        }
-        for (int i = 0; i < a_m; ++i) {
-            for (int p = h_row_starts[i]; p < h_row_starts[i + 1]; ++p)
-                col_rows[h_col_indices[p]].push_back(i);
-        }
-
-        for (int k = 0; k < a_n; ++k) {
-            auto& rows = col_rows[k];
-            for (size_t a_idx = 0; a_idx < rows.size(); ++a_idx)
-                for (size_t b_idx = 0; b_idx <= a_idx; ++b_idx)
-                    ne_cols[rows[a_idx]].push_back(rows[b_idx]);
-        }
-
-        for (int i = 0; i < a_m; ++i) {
-            auto& row = ne_cols[i];
-            std::sort(row.begin(), row.end());
-            row.erase(std::unique(row.begin(), row.end()), row.end());
-        }
-
+        // A column with k entries can contribute k*(k-1)/2 off-diagonals.
+        // Rank by that bound, using column order to break ties.
+        schur.order = std::min(std::max(0, max_dense_cols), static_cast<int>(candidates.size()));
+        std::partial_sort(candidates.begin(), candidates.begin() + schur.order, candidates.end(),
+                          [&](int a, int b) {
+                              return col_counts[a] == col_counts[b] ? a < b
+                                                                   : col_counts[a] > col_counts[b];
+                          });
+        std::vector<int> dense_rank(a_n, -1);
+        for (int i = 0; i < schur.order; ++i) dense_rank[candidates[i]] = i;
         std::vector<int> h_ne_row_starts(a_m + 1);
-        ne_nnz = 0;
-        for (int i = 0; i < a_m; ++i) {
-            h_ne_row_starts[i] = ne_nnz;
-            ne_nnz += static_cast<int>(ne_cols[i].size());
-        }
-        h_ne_row_starts[a_m] = ne_nnz;
-
-        double avg_density = static_cast<double>(ne_nnz) / std::max(a_m, 1);
-        if (avg_density > 20.0) {
+        std::vector<int> h_ne_col_indices;
+        if (!buildPattern(a_m, h_row_starts, h_col_indices, col_counts, dense_rank,
+                          h_ne_row_starts, h_ne_col_indices)) {
             g_last_barrier_error =
                 "Barrier GPU normal-equation pattern is too dense for the NE backend.";
             return false;
         }
-
-        std::vector<int> h_ne_col_indices(ne_nnz);
-        int pos = 0;
-        for (int i = 0; i < a_m; ++i)
-            for (int j : ne_cols[i]) h_ne_col_indices[pos++] = j;
+        ne_nnz = static_cast<int>(h_ne_col_indices.size());
 
         // Upload.
         if (!cudaOk(cudaMalloc(&d_ne_row_starts, sizeof(int) * (a_m + 1)))) return false;
         if (!cudaOk(cudaMalloc(&d_ne_col_indices, sizeof(int) * ne_nnz))) return false;
         if (!cudaOk(cudaMalloc(&d_ne_values, sizeof(double) * ne_nnz))) return false;
 
-        cudaMemcpyAsync(d_ne_row_starts, h_ne_row_starts.data(),
-                        sizeof(int) * (a_m + 1), cudaMemcpyHostToDevice, ctx->stream);
-        cudaMemcpyAsync(d_ne_col_indices, h_ne_col_indices.data(),
-                        sizeof(int) * ne_nnz, cudaMemcpyHostToDevice, ctx->stream);
-        cudaMemsetAsync(d_ne_values, 0, sizeof(double) * ne_nnz, ctx->stream);
+        const bool uploaded =
+            cudaOk(cudaMemcpyAsync(d_ne_row_starts, h_ne_row_starts.data(),
+                                    sizeof(int) * (a_m + 1), cudaMemcpyHostToDevice, ctx->stream)) &&
+            cudaOk(cudaMemcpyAsync(d_ne_col_indices, h_ne_col_indices.data(),
+                                    sizeof(int) * ne_nnz, cudaMemcpyHostToDevice, ctx->stream)) &&
+            cudaOk(cudaMemsetAsync(d_ne_values, 0, sizeof(double) * ne_nnz, ctx->stream));
+        // The temporary host pattern must outlive both copies, even if a
+        // later enqueue fails and we fall back to the augmented solver.
+        if (!cudaOk(cudaStreamSynchronize(ctx->stream)) || !uploaded) {
+            return false;
+        }
 
         // FP64 cuDSS setup.
         if (!cudssOk(cudssCreate(&cudss_handle))) return false;
@@ -1074,10 +1239,20 @@ struct NormalEqSolver {
                 CUDSS_LAYOUT_COL_MAJOR)))
             return false;
 
+        if (schur.order > 0 && !schur.init(a_m, dense_rank, ctx->stream)) return false;
+        // Analyze with the largest RHS shape used by this factor.
+        const auto analysis_rhs = schur.order > 0 ? schur.panel_rhs : cudss_rhs_mat;
+        const auto analysis_sol = schur.order > 0 ? schur.panel_sol : cudss_sol_mat;
         if (!cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_ANALYSIS,
                                    cudss_config, cudss_data, cudss_mat,
-                                   cudss_sol_mat, cudss_rhs_mat)))
+                                   analysis_sol, analysis_rhs)))
             return false;
+
+        // A Schur correction is sensitive to the accuracy of the sparse solve.
+        if (schur.order > 0) {
+            ok = cudaOk(cudaStreamSynchronize(ctx->stream));
+            return ok;
+        }
 
         // FP32 cuDSS setup for mixed precision.
         if (!cudaOk(cudaMalloc(&d_ne_values_f32, sizeof(float) * ne_nnz))) return false;
@@ -1112,7 +1287,7 @@ struct NormalEqSolver {
             return false;
 
         cudaStreamSynchronize(ctx->stream);
-        analyzed = true;
+        fp64_refactor_ready = true;
         analyzed_f32 = true;
         use_fp32 = false;  // Prefer FP64 stability; re-enable FP32 selectively later.
         ok = true;
@@ -1127,9 +1302,9 @@ struct NormalEqSolver {
         kernelFormNEValues<<<gridSize(ne_nnz), kBlockSize, 0, ctx->stream>>>(
             ne_nnz, d_ne_row_starts, d_ne_col_indices,
             ctx->d_a_row_starts, ctx->d_a_col_indices, ctx->d_a_values,
-            ctx->d_theta, reg, ne_m, d_ne_values);
+            ctx->d_theta, schur.d_rank, reg, ne_m, d_ne_values);
 
-        if (use_fp32) {
+        if (use_fp32 && schur.order == 0) {
             // Cast to FP32 and factorize.
             kernelCastF64toF32<<<gridSize(ne_nnz), kBlockSize, 0, ctx->stream>>>(
                 ne_nnz, d_ne_values, d_ne_values_f32);
@@ -1154,19 +1329,29 @@ struct NormalEqSolver {
             return true;
         }
 
-        return factorizeFp64();
+        if (schur.order == 0) return factorizeFp64();
+
+        // Clear any device-side error before retrying with a different reg.
+        int info = 0;
+        if (!cudaOk(cudaGetLastError()) ||
+            !cudssOk(cudssDataSet(cudss_handle, cudss_data, CUDSS_DATA_INFO, &info, sizeof(info)))) {
+            return false;
+        }
+        fp64_refactor_ready = factorizeFp64() && cudaOk(cudaStreamSynchronize(ctx->stream)) &&
+                                cudssDeviceOk(cudss_handle, cudss_data);
+        return fp64_refactor_ready &&
+               schur.factorize(*ctx, cudss_handle, cudss_config, cudss_data, cudss_mat);
     }
 
     bool factorizeFp64() {
-        auto phase = analyzed ? CUDSS_PHASE_REFACTORIZATION
-                              : CUDSS_PHASE_FACTORIZATION;
+        auto phase = fp64_refactor_ready ? CUDSS_PHASE_REFACTORIZATION : CUDSS_PHASE_FACTORIZATION;
+        const auto factor_rhs = schur.order > 0 ? schur.panel_rhs : cudss_rhs_mat;
+        const auto factor_sol = schur.order > 0 ? schur.panel_sol : cudss_sol_mat;
         auto status = cudssExecute(cudss_handle, phase, cudss_config,
-                                    cudss_data, cudss_mat, cudss_sol_mat,
-                                    cudss_rhs_mat);
+                                    cudss_data, cudss_mat, factor_sol, factor_rhs);
         if (!cudssOk(status)) {
             status = cudssExecute(cudss_handle, CUDSS_PHASE_FACTORIZATION,
-                                   cudss_config, cudss_data, cudss_mat,
-                                   cudss_sol_mat, cudss_rhs_mat);
+                                   cudss_config, cudss_data, cudss_mat, factor_sol, factor_rhs);
             if (!cudssOk(status)) return false;
         }
         return true;
@@ -1198,17 +1383,16 @@ struct NormalEqSolver {
     // Raw cuDSS solve (FP64 path).
     bool solveFp64(double* d_rhs_in, double* d_sol_out) {
         // Rebind data pointers without recreating descriptors.
-        cudssMatrixSetValues(cudss_rhs_mat, d_rhs_in);
-        cudssMatrixSetValues(cudss_sol_mat, d_sol_out);
-
-        return cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE,
-                                     cudss_config, cudss_data, cudss_mat,
-                                     cudss_sol_mat, cudss_rhs_mat));
+        return cudssOk(cudssMatrixSetValues(cudss_rhs_mat, d_rhs_in)) &&
+               cudssOk(cudssMatrixSetValues(cudss_sol_mat, d_sol_out)) &&
+               cudssOk(cudssExecute(cudss_handle, CUDSS_PHASE_SOLVE, cudss_config, cudss_data,
+                                    cudss_mat, cudss_sol_mat, cudss_rhs_mat));
     }
 
     // Dispatch to FP32 or FP64 solve.
     bool solveOnce(double* rhs, double* sol) {
-        return use_fp32 ? solveFp32(rhs, sol) : solveFp64(rhs, sol);
+        if (use_fp32 && schur.order == 0) return solveFp32(rhs, sol);
+        return solveFp64(rhs, sol) && (schur.order == 0 || schur.correct(ne_m, sol));
     }
 
     // Solve with iterative refinement.
@@ -1216,32 +1400,46 @@ struct NormalEqSolver {
     // FP64 path: solve in FP64 with standard IR.
     bool solveRefined(double* d_rhs_in, double* d_sol_out, int ir_steps) {
         if (!solveOnce(d_rhs_in, d_sol_out)) return false;
-        if (ir_steps <= 0) return true;
-
-        int m = ne_m;
-        int n = ctx->n;
-
         for (int step = 0; step < ir_steps; ++step) {
-            // Compute M * sol where M = A*diag(theta)*A' + reg*I.
-            ctx->multiplyAT(d_sol_out, ctx->d_tmp);
-            kernelElemMul<<<gridSize(n), kBlockSize, 0, ctx->stream>>>(
-                n, ctx->d_tmp, ctx->d_theta, ctx->d_tmp);
-            ctx->multiplyA(ctx->d_tmp, ctx->d_ir_residual);
-
-            double reg = last_reg_;
-            kernelAxpy<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
-                m, reg, d_sol_out, ctx->d_ir_residual);
-
-            // residual = rhs - M*sol
-            kernelResidualIR<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
-                m, d_rhs_in, ctx->d_ir_residual, ctx->d_ir_residual);
-
+            if (!formResidual(d_rhs_in, d_sol_out)) return false;
             if (!solveOnce(ctx->d_ir_residual, ctx->d_ir_correction)) return false;
 
-            kernelAddCorrection<<<gridSize(m), kBlockSize, 0, ctx->stream>>>(
-                m, ctx->d_ir_correction, d_sol_out);
+            kernelAddCorrection<<<gridSize(ne_m), kBlockSize, 0, ctx->stream>>>(
+                ne_m, ctx->d_ir_correction, d_sol_out);
         }
-        return true;
+        if (schur.order == 0) return true;
+
+        // The subtraction in the Schur solve can lose accuracy when M_s
+        // poorly represents the full matrix. Detect this even with IR off.
+        if (!formResidual(d_rhs_in, d_sol_out)) return false;
+        if (!cudaOk(cudaMemsetAsync(ctx->d_scalar, 0, 2 * sizeof(double), ctx->stream))) {
+            return false;
+        }
+        ctx->gpuInfNormAsync(d_rhs_in, ne_m, 0, true);
+        ctx->gpuInfNormAsync(ctx->d_ir_residual, ne_m, 1, true);
+        if (!cudaOk(cudaGetLastError()) || !ctx->downloadScalars(2) ||
+            !cudssDeviceOk(cudss_handle, cudss_data)) {
+            return false;
+        }
+        const double rhs_norm = ctx->h_scalars[0];
+        const double residual_norm = ctx->h_scalars[1];
+        return std::isfinite(rhs_norm) && residual_norm <= 1e-7 * std::max(1.0, rhs_norm);
+    }
+
+    bool formResidual(double* rhs, double* sol) {
+        // Refinement uses the full A, including the eliminated columns.
+        const int n = ctx->n;
+        if (!ctx->multiplyAT(sol, ctx->d_tmp)) return false;
+        kernelElemMul<<<gridSize(n), kBlockSize, 0, ctx->stream>>>(
+            n, ctx->d_tmp, ctx->d_theta, ctx->d_tmp);
+        if (schur.order > 0 && !cudaOk(cudaGetLastError())) return false;
+        if (!ctx->multiplyA(ctx->d_tmp, ctx->d_ir_residual)) return false;
+        kernelAxpy<<<gridSize(ne_m), kBlockSize, 0, ctx->stream>>>(
+            ne_m, last_reg_, sol, ctx->d_ir_residual);
+        if (schur.order > 0 && !cudaOk(cudaGetLastError())) return false;
+        kernelResidualIR<<<gridSize(ne_m), kBlockSize, 0, ctx->stream>>>(
+            ne_m, rhs, ctx->d_ir_residual, ctx->d_ir_residual);
+        return schur.order == 0 || cudaOk(cudaGetLastError());
     }
 };
 
@@ -1434,12 +1632,11 @@ struct AugmentedSolver {
 
 struct GpuBarrierImpl {
     GpuContext ctx;
-    NormalEqSolver ne_solver;
+    std::optional<NormalEqSolver> ne_solver;
     AugmentedSolver aug_solver;
 
     enum class Backend { NE, Augmented };
     Backend active_backend = Backend::NE;
-    bool ne_available = false;
     bool aug_available = false;
 
     int ne_fail_count = 0;
@@ -1454,7 +1651,7 @@ struct GpuBarrierImpl {
               const int* rows, const int* cols, const double* vals,
               const double* b, const double* c,
               bool prefer_augmented,
-              double dense_col_fraction) {
+              double dense_col_fraction, int max_dense_cols) {
         h_row_starts.assign(rows, rows + m + 1);
         h_col_indices.assign(cols, cols + nnz);
         stored_nnz = nnz;
@@ -1466,15 +1663,17 @@ struct GpuBarrierImpl {
 
         if (!prefer_augmented) {
             // Try NE first.
-            ne_available = ne_solver.analyze(m, n, rows, cols, dense_col_fraction, &ctx);
-            if (ne_available) {
+            ne_solver.emplace();
+            if (ne_solver->analyze(m, n, rows, cols, dense_col_fraction, max_dense_cols, &ctx)) {
                 active_backend = Backend::NE;
             } else {
                 g_last_barrier_error =
                     g_last_barrier_error.empty()
                         ? "Barrier GPU normal-equations analysis unavailable; trying augmented backend."
                         : g_last_barrier_error + " Trying augmented backend.";
-                // NE too dense, use Augmented.
+                // Return any partial NE allocations before trying augmented.
+                cudaStreamSynchronize(ctx.stream);
+                ne_solver.reset();
                 aug_available = aug_solver.analyze(m, n, rows, cols, nnz, &ctx);
                 if (!aug_available) {
                     g_last_barrier_error =
@@ -1509,6 +1708,8 @@ struct GpuBarrierImpl {
 
     // Switch from NE to Augmented mid-solve.
     bool switchToAugmented() {
+        cudaStreamSynchronize(ctx.stream);
+        ne_solver.reset();
         if (aug_available) {
             active_backend = Backend::Augmented;
             if (!ctx.allocAugIRBuffers()) {
@@ -1589,20 +1790,21 @@ struct GpuBarrierImpl {
         bool factor_ok = false;
 
         if (active_backend == Backend::NE) {
-            factor_ok = ne_solver.factorize(reg);
-            if (factor_ok) {
-                if (!ne_solver.solveRefined(ctx.d_b, ctx.d_y, ir_steps_)) {
+            factor_ok = ne_solver->factorize(reg);
+            if (factor_ok && !ne_solver->solveRefined(ctx.d_b, ctx.d_y, ir_steps_)) {
+                if (ne_solver->schur.order == 0) {
                     g_last_barrier_error =
                         "Barrier GPU normal-equation starting-point solve failed.";
                     return false;
                 }
+                factor_ok = false;
             }
         }
 
         if (!factor_ok && active_backend == Backend::NE) {
             // Try augmented for starting point.
             g_last_barrier_error =
-                "Barrier GPU normal-equation starting-point factorization failed; switching to augmented.";
+                "Barrier GPU normal-equation starting point failed; switching to augmented.";
             if (!switchToAugmented()) return false;
         }
 
@@ -1649,13 +1851,13 @@ struct GpuBarrierImpl {
 
         kernelScaledRhsH<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
             n, d_rc, ctx.d_s, ctx.d_theta, d_rd, ctx.d_h);
-        ctx.multiplyA(ctx.d_h, ctx.d_ah);
+        if (!ctx.multiplyA(ctx.d_h, ctx.d_ah)) return false;
         kernelNormalEqRhs<<<gridSize(m), kBlockSize, 0, ctx.stream>>>(
             m, d_rp, ctx.d_ah, ctx.d_rhs);
 
-        if (!ne_solver.solveRefined(ctx.d_rhs, d_dy_out, ir_steps_)) return false;
+        if (!ne_solver->solveRefined(ctx.d_rhs, d_dy_out, ir_steps_)) return false;
 
-        ctx.multiplyAT(d_dy_out, ctx.d_atdy);
+        if (!ctx.multiplyAT(d_dy_out, ctx.d_atdy)) return false;
         kernelSearchDirectionZ<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
             n, ctx.d_h, ctx.d_theta, ctx.d_atdy, d_dz_out);
         kernelSearchDirectionS<<<gridSize(n), kBlockSize, 0, ctx.stream>>>(
@@ -1694,6 +1896,30 @@ struct GpuBarrierImpl {
             return solveNewtonNE(d_rp, d_rd, d_rc, d_dz_out, d_dy_out, d_ds_out);
         else
             return solveNewtonAug(d_rp, d_rd, d_rc, d_dz_out, d_dy_out, d_ds_out);
+    }
+
+    bool factorizeAugmented(double& reg_primal, double& reg_dual, double gap_mu) {
+        double primal = reg_primal;
+        double dual = reg_dual;
+        // Boost regularization near convergence for LDL' stability.
+        if (gap_mu < 1e-4) {
+            primal = std::max(primal, 1e-8) * 10.0;
+            dual = std::max(dual, 1e-6) * 10.0;
+        }
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (aug_solver.factorize(primal, dual)) return true;
+            primal *= 10.0;
+            dual *= 10.0;
+            reg_primal = std::min(primal, 1e-4);
+            reg_dual = std::min(dual, 1e-3);
+        }
+        return false;
+    }
+
+    const char* backendTag() const {
+        if (active_backend == Backend::Augmented) return "[gpu-aug]";
+        if (ne_solver->schur.order > 0) return "[gpu-chol-schur]";
+        return ne_solver->use_fp32 ? "[gpu-chol-fp32]" : "[gpu-chol]";
     }
 
     void downloadSolution(std::vector<Real>& z, std::vector<Real>& y,
@@ -1746,10 +1972,6 @@ struct GpuBarrierImpl {
         double prev_pinf = 1e30, prev_dinf = 1e30, prev_gap = 1e30;
         int stagnant_iters = 0;
 
-        const char* backend_tag = (active_backend == Backend::NE)
-            ? (ne_solver.use_fp32 ? "[gpu-chol-fp32]" : "[gpu-chol]")
-            : "[gpu-aug]";
-
         for (int iter = 0; iter < max_iter; ++iter) {
             if (stop_flag != nullptr &&
                 __atomic_load_n(stop_flag, __ATOMIC_RELAXED)) {
@@ -1782,9 +2004,7 @@ struct GpuBarrierImpl {
             double gap = std::abs(ctx.h_scalars[0]) / (1.0 + std::abs(pobj));
 
             // Update backend tag when switching.
-            backend_tag = (active_backend == Backend::NE)
-                ? (ne_solver.use_fp32 ? "[gpu-chol-fp32]" : "[gpu-chol]")
-                : "[gpu-aug]";
+            const char* backend_tag = backendTag();
 
             if (verbose) {
                 const bool dualized = dualized_obj_sign != 0.0;
@@ -1934,7 +2154,7 @@ struct GpuBarrierImpl {
 
             if (active_backend == Backend::NE) {
                 for (int attempt = 0; attempt < 3; ++attempt) {
-                    if (ne_solver.factorize(cur_reg)) {
+                    if (ne_solver->factorize(cur_reg)) {
                         factorized = true;
                         ne_fail_count = 0;
                         break;
@@ -1956,38 +2176,29 @@ struct GpuBarrierImpl {
                 }
             }
 
-            if (active_backend == Backend::Augmented && !factorized) {
-                cur_reg = reg_primal;
-                // Boost regularization near convergence for LDL' stability.
-                double cur_reg_dual = reg_dual;
-                if (gap_mu < 1e-4) {
-                    cur_reg = std::max(cur_reg, 1e-8) * 10.0;
-                    cur_reg_dual = std::max(cur_reg_dual, 1e-6) * 10.0;
-                }
-                for (int attempt = 0; attempt < 3; ++attempt) {
-                    if (aug_solver.factorize(cur_reg, cur_reg_dual)) {
-                        factorized = true;
-                        break;
-                    }
-                    cur_reg *= 10.0;
-                    cur_reg_dual *= 10.0;
-                    reg_primal = std::min(cur_reg, 1e-4);
-                    reg_dual = std::min(cur_reg_dual, 1e-3);
-                }
-                if (!factorized) {
-                    *out_iters = iter;
-                    *out_status = 1;
-                    return false;
-                }
+            if (active_backend == Backend::Augmented && !factorized &&
+                !factorizeAugmented(reg_primal, reg_dual, gap_mu)) {
+                *out_iters = iter;
+                *out_status = 1;
+                return false;
             }
+
+            const auto solve_step = [&](double* dz, double* dy, double* ds) {
+                if (solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc, dz, dy, ds)) return true;
+                if (active_backend != Backend::NE || ne_solver->schur.order == 0) return false;
+                if (verbose) {
+                    std::printf("IPM iter %d: NE Schur solve failed, switching to augmented\n", iter);
+                }
+                return switchToAugmented() && factorizeAugmented(reg_primal, reg_dual, gap_mu) &&
+                       solveNewtonAug(ctx.d_rp, ctx.d_rd, ctx.d_rc, dz, dy, ds);
+            };
 
             // Predictor step.
             kernelComplementarityAffine<<<gridSize(n), kBlockSize, 0,
                                           ctx.stream>>>(n, ctx.d_z, ctx.d_s,
                                                          ctx.d_rc);
 
-            if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc,
-                                 ctx.d_dz_aff, ctx.d_dy_aff, ctx.d_ds_aff)) {
+            if (!solve_step(ctx.d_dz_aff, ctx.d_dy_aff, ctx.d_ds_aff)) {
                 *out_iters = iter;
                 *out_status = 1;
                 return false;
@@ -2021,8 +2232,7 @@ struct GpuBarrierImpl {
                 n, sigma_mu, ctx.d_z, ctx.d_s, ctx.d_dz_aff, ctx.d_ds_aff,
                 ctx.d_rc);
 
-            if (!solveNewtonStep(ctx.d_rp, ctx.d_rd, ctx.d_rc,
-                                 ctx.d_dz, ctx.d_dy, ctx.d_ds)) {
+            if (!solve_step(ctx.d_dz, ctx.d_dy, ctx.d_ds)) {
                 *out_iters = iter;
                 *out_status = 1;
                 return false;
@@ -2072,18 +2282,25 @@ bool gpuSolveBarrier(
     const void* stop_flag,
     bool prefer_augmented,
     double dense_col_fraction,
+    int max_dense_cols,
     double obj_offset, double dualized_obj_sign,
     double* out_z, double* out_y, double* out_s,
-    double* out_obj, int* out_status, int* out_iters) {
+    double* out_obj, int* out_status, int* out_iters, int* out_eliminated_columns) {
     g_last_barrier_error.clear();
+    if (out_eliminated_columns) *out_eliminated_columns = 0;
 
     GpuBarrierImpl impl;
     if (!impl.init(m, n, nnz, rows, cols, vals, b, c, prefer_augmented,
-                   dense_col_fraction)) {
+                   dense_col_fraction, max_dense_cols)) {
         if (g_last_barrier_error.empty()) {
             g_last_barrier_error = "Barrier GPU initialization failed.";
         }
         return false;
+    }
+
+    if (verbose && impl.ne_solver && impl.ne_solver->schur.order > 0) {
+        std::printf("  GPU NE Schur: order=%d nnz(M_s lower)=%d\n", impl.ne_solver->schur.order,
+                    impl.ne_solver->ne_nnz);
     }
 
     std::vector<Real> z_vec, y_vec, s_vec;
@@ -2103,6 +2320,9 @@ bool gpuSolveBarrier(
         std::copy(z_vec.begin(), z_vec.end(), out_z);
         std::copy(y_vec.begin(), y_vec.end(), out_y);
         std::copy(s_vec.begin(), s_vec.end(), out_s);
+        if (out_eliminated_columns && impl.active_backend == GpuBarrierImpl::Backend::NE) {
+            *out_eliminated_columns = impl.ne_solver->schur.order;
+        }
     }
 
     return ok;

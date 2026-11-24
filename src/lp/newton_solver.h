@@ -114,6 +114,13 @@ BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real
                                    bool verbose = false);
 
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
-// No NewtonSolver GPU factories needed.
+#ifdef MIPX_HAS_CUDSS
+// Also report the eliminated column count of the backend that finished.
+bool solveBarrierGpuWithStats(const SparseMatrix& a, Index m, Index n, std::span<const Real> b,
+                              std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
+                              bool prefer_augmented, std::vector<Real>& z, std::vector<Real>& y,
+                              std::vector<Real>& s, Int& iters, std::string* error_msg,
+                              Real dualized_obj_sign, Index* eliminated_columns);
+#endif
 
 }  // namespace mipx

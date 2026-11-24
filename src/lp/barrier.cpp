@@ -2084,6 +2084,17 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     [[maybe_unused]] const auto requested_algo = options_.algorithm;
     const Real dualized_obj_sign =
         dualized_ ? (original_.sense == Sense::Minimize ? -1.0 : 1.0) : 0.0;
+#ifdef MIPX_HAS_CUDSS
+    // Under the opt-in cap (#141), Auto keeps the GPU normal equations and
+    // takes the dense columns out of the factor instead of switching to the
+    // augmented system.
+    const bool try_gpu_dense_cols = options_.gpu_ne_max_dense_cols > 0 &&
+                                    detectDensity(aeq_, options_.dense_col_fraction).dense_cols > 0;
+    if (requested_algo == BarrierAlgorithm::Auto && algo == BarrierAlgorithm::GpuAugmented &&
+        try_gpu_dense_cols) {
+        algo = BarrierAlgorithm::GpuCholesky;
+    }
+#endif
 
     // The GPU path solves the standard form without upper bounds; implicit
     // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
@@ -2114,7 +2125,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 #ifdef MIPX_HAS_CUDSS
     // GPU device-resident path: handles NE/Augmented internally with auto-switching.
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
-        bool prefer_aug = (algo == BarrierAlgorithm::GpuAugmented) || use_augmented;
+        const bool prefer_aug =
+            algo == BarrierAlgorithm::GpuAugmented || (use_augmented && !try_gpu_dense_cols);
         std::string gpu_error;
         // The GPU loop checks only a stop flag, so under a time limit (#275)
         // it gets one of its own, raised by a watcher at the deadline or when
