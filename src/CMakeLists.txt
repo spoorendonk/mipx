@@ -8,6 +8,7 @@ add_library(mipx STATIC
     lp/dual_simplex.cpp
     lp/exact_refinement.cpp
     lp/barrier.cpp
+    lp/barrier_dual.cpp
     lp/barrier_cpu.cpp
     lp/barrier_presolve.cpp
     lp/amd_ordering.cpp

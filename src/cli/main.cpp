@@ -70,6 +70,7 @@ void printUsage(FILE* out) {
                  "[--pdlp-opt-norm l2|linf] [--pdlp-restart-gap-decay F] "
                  "[--pdlp-restart-kkt-decay F] [--pdlp-adaptive-eval-frequency] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
+                 "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--barrier-hsd] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
@@ -111,6 +112,7 @@ int main(int argc, char* argv[]) {
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
     mipx::BarrierOrdering barrier_ordering = mipx::BarrierOrdering::Auto;
+    mipx::BarrierDualize barrier_dualize = mipx::BarrierDualize::Off;
     bool barrier_sparse_ne = false;
     mipx::Int barrier_dense_cols = mipx::BarrierOptions{}.ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
@@ -447,6 +449,18 @@ int main(int argc, char* argv[]) {
                 std::fprintf(stderr, "Unknown barrier ordering: %s\n", mode.c_str());
                 return 1;
             }
+        } else if (arg == "--barrier-dualize" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "off") {
+                barrier_dualize = mipx::BarrierDualize::Off;
+            } else if (mode == "on") {
+                barrier_dualize = mipx::BarrierDualize::On;
+            } else if (mode == "auto") {
+                barrier_dualize = mipx::BarrierDualize::Auto;
+            } else {
+                std::fprintf(stderr, "Unknown barrier dualization mode: %s\n", mode.c_str());
+                return 1;
+            }
         } else if (arg == "--barrier-ne" && i + 1 < argc) {
             // Normal-equations factor of the CPU barrier: dense LL' (the
             // default) or the opt-in sparse supernodal LL' of #290.
@@ -585,6 +599,7 @@ int main(int argc, char* argv[]) {
             }
             solver.setBarrierUseGpu(barrier_gpu);
             solver.setBarrierOrdering(barrier_ordering);
+            solver.setBarrierDualize(barrier_dualize);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
             solver.setHeuristicSeed(heuristic_seed);
@@ -783,6 +798,7 @@ int main(int argc, char* argv[]) {
                                       : barrier_gpu     ? mipx::BarrierAlgorithm::Auto
                                                         : mipx::BarrierAlgorithm::CpuCholesky;
                     bopts.ordering = barrier_ordering;
+                    bopts.dualize = barrier_dualize;
                     bopts.ne_max_dense_cols = barrier_dense_cols;
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
                     bopts.gondzio_correctors = barrier_gondzio;

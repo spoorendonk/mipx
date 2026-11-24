@@ -1714,7 +1714,7 @@ struct GpuBarrierImpl {
     // Device-resident Mehrotra IPM loop.
     bool solve(int max_iter, double tol, double step_fraction, double base_reg,
                int ir_steps, bool verbose, const void* stop_flag_ptr,
-               double obj_offset,
+               double obj_offset, double dualized_obj_sign,
                const double* h_b, const double* h_c, int h_n, int h_m,
                std::vector<Real>& z_out, std::vector<Real>& y_out,
                std::vector<Real>& s_out, double* out_obj,
@@ -1787,10 +1787,13 @@ struct GpuBarrierImpl {
                 : "[gpu-aug]";
 
             if (verbose) {
+                const bool dualized = dualized_obj_sign != 0.0;
                 std::printf(
                     "IPM %4d  pobj=% .10e  dobj=% .10e  pinf=% .2e  dinf=% .2e  "
                     "gap=% .2e  reg=% .1e %s\n",
-                    iter, pobj, dobj, pinf, dinf, gap, reg_primal, backend_tag);
+                    iter, dualized ? dualized_obj_sign * dobj : pobj,
+                    dualized ? dualized_obj_sign * pobj : dobj, dualized ? dinf : pinf,
+                    dualized ? pinf : dinf, gap, reg_primal, backend_tag);
             }
 
             if (pinf < tol && dinf < tol && gap < tol) {
@@ -2069,7 +2072,7 @@ bool gpuSolveBarrier(
     const void* stop_flag,
     bool prefer_augmented,
     double dense_col_fraction,
-    double obj_offset,
+    double obj_offset, double dualized_obj_sign,
     double* out_z, double* out_y, double* out_s,
     double* out_obj, int* out_status, int* out_iters) {
     g_last_barrier_error.clear();
@@ -2085,7 +2088,7 @@ bool gpuSolveBarrier(
 
     std::vector<Real> z_vec, y_vec, s_vec;
     bool ok = impl.solve(max_iter, tol, step_fraction, reg, ir_steps, verbose,
-                          stop_flag, obj_offset, b, c, n, m,
+                          stop_flag, obj_offset, dualized_obj_sign, b, c, n, m,
                           z_vec, y_vec, s_vec, out_obj, out_status, out_iters);
 
     if (!ok && g_last_barrier_error.empty()) {

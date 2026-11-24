@@ -74,6 +74,7 @@ Key options:
 | `--presolve` / `--no-presolve` | on | Presolve reductions |
 | `--cuts` / `--no-cuts` | on | Cutting planes |
 | `--barrier` | off | Use barrier for root LP |
+| `--barrier-dualize off\|on\|auto` | off | With barrier, force the compact dual with `on` or compare estimated Newton-factor work in both orientations with `auto` |
 | `--pdlp` | off | Use PDLP for root LP |
 | `--concurrent-root` | off | Race LP solvers at root |
 | `--quiet` | off | Suppress progress output |
@@ -91,6 +92,10 @@ Key options:
 Run `./build/mipx-solve --help` for the full list. The probing, clique-table,
 plunging and primal-Devex switches are off by default until benchmarks decide otherwise;
 leaving a flag out keeps the solver's own default.
+
+Barrier dualization can shrink the normal equations on LPs with many more
+rows than columns. Returned solutions and objectives use the input model's
+coordinates. The C++ option is `BarrierOptions::dualize`.
 
 ## Python API
 

@@ -31,6 +31,8 @@ struct BpSingletonRow {
     Real coeff;      // The single coefficient a_{row,col}.
     Real row_lower;  // Original row bounds.
     Real row_upper;
+    bool tightened_lower = false;
+    bool tightened_upper = false;
 };
 
 /// A singleton column (appears in one row) was substituted out.
@@ -179,6 +181,7 @@ private:
     std::vector<Index> row_mapping_;
     Index orig_num_cols_ = 0;
     Index orig_num_rows_ = 0;
+    Sense sense_ = Sense::Minimize;
     Real obj_offset_delta_ = 0.0;
     BarrierPresolveStats stats_{};
     bool infeasible_ = false;

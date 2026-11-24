@@ -355,6 +355,7 @@ public:
     void setDualRowPriceActualWork(bool enabled) { dual_row_price_actual_work_ = enabled; }
     void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
     void setBarrierOrdering(BarrierOrdering ord) { barrier_ordering_ = ord; }
+    void setBarrierDualize(BarrierDualize mode) { barrier_dualize_ = mode; }
     void setBarrierUseGpu(bool use_gpu) {
         barrier_algorithm_ = use_gpu ? BarrierAlgorithm::Auto : BarrierAlgorithm::CpuCholesky;
     }
@@ -761,6 +762,7 @@ private:
     bool dual_row_price_actual_work_ = false;
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
+    BarrierDualize barrier_dualize_ = BarrierDualize::Off;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;

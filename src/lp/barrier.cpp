@@ -167,7 +167,7 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
     }
 
     // Estimate NE row density.
-    if (m > 0) {
+    if (m > 0 && n > 0) {
         double total_nnz = 0.0;
         // Quick estimate: for each row, NE row nnz ≈ sum of intersections.
         // Approximate: nnz(NE) ≈ nnz(A)^2 / n for random structure.
@@ -178,6 +178,90 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
     }
 
     return info;
+}
+
+bool preferAugmented(const SparseMatrix& matrix, const BarrierOptions& options) {
+    const auto density = detectDensity(matrix, options.dense_col_fraction);
+    return density.dense_cols > 50 || density.dense_rows > 10 || density.avg_ne_row_density > 20.0;
+}
+
+bool gpuAlgorithm(BarrierAlgorithm algorithm) {
+    return algorithm == BarrierAlgorithm::GpuCholesky ||
+           algorithm == BarrierAlgorithm::GpuAugmented;
+}
+
+BarrierAlgorithm barrierAlgorithm(const BarrierOptions& options, bool prefer_augmented,
+                                  bool has_upper) {
+    const auto cpu =
+        prefer_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
+    auto algorithm = options.algorithm;
+#ifdef MIPX_HAS_CUDSS
+    if (algorithm == BarrierAlgorithm::Auto) {
+        algorithm =
+            prefer_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
+    }
+    if (gpuAlgorithm(algorithm) &&
+        (has_upper || options.gondzio_correctors > 0 || options.homogeneous)) {
+        return cpu;
+    }
+#else
+    (void)has_upper;
+    if (algorithm == BarrierAlgorithm::Auto || gpuAlgorithm(algorithm)) {
+        return cpu;
+    }
+#endif
+    return algorithm;
+}
+
+// Estimate the work per Newton factorization without materializing A*A'.
+// A column of degree d contributes d*d assembly work and up to d-1
+// neighbors to each row it touches. The square of each estimated factor
+// column length models the work of eliminating it. For the augmented
+// system, use the bipartite row/column graph directly.
+double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& options,
+                           bool has_upper) {
+    const Index m = matrix.numRows();
+    const Index n = matrix.numCols();
+    if (m == 0 || n == 0) {
+        return 0.0;
+    }
+    const bool prefer_augmented = preferAugmented(matrix, options);
+    const auto algorithm = barrierAlgorithm(options, prefer_augmented, has_upper);
+    const bool augmented = algorithm == BarrierAlgorithm::CpuAugmented ||
+                           algorithm == BarrierAlgorithm::GpuAugmented ||
+                           (algorithm == BarrierAlgorithm::GpuCholesky && prefer_augmented);
+    const auto square = [](double value) { return value * value; };
+    double work = matrix.numNonzeros();
+    if (augmented) {
+        for (Index i = 0; i < m; ++i) {
+            work += square(1.0 + matrix.row(i).size());
+        }
+        for (Index j = 0; j < n; ++j) {
+            work += square(1.0 + matrix.col(j).size());
+        }
+        return work;
+    }
+
+    if (algorithm == BarrierAlgorithm::CpuCholesky) {
+        const double rows = m;
+        work += rows * rows * rows / 3.0;
+        for (Index j = 0; j < n; ++j) {
+            work += square(matrix.col(j).size());
+        }
+        return work;
+    }
+    std::vector<double> neighbors(static_cast<size_t>(m), 1.0);
+    for (Index j = 0; j < n; ++j) {
+        const auto column = matrix.col(j);
+        work += square(column.size());
+        for (const Index row : column.indices) {
+            neighbors[row] += column.size() - 1;
+        }
+    }
+    for (const double degree : neighbors) {
+        work += square(std::min(degree, static_cast<double>(m)));
+    }
+    return work;
 }
 
 // ============================================================================
@@ -581,8 +665,9 @@ constexpr Real kNearOptimalTol = 1e-6;
 BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                                  std::span<const Real> b, std::span<const Real> c,
                                  std::span<const Real> u, const BarrierOptions& opts,
-                                 Real obj_offset, std::vector<Real>& z, std::vector<Real>& y,
-                                 std::vector<Real>& s, Int& iters, Int& corrections) {
+                                 Real obj_offset, Real dualized_obj_sign, std::vector<Real>& z,
+                                 std::vector<Real>& y, std::vector<Real>& s, Int& iters,
+                                 Int& corrections) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const Real reg = std::max(opts.regularization, 1e-12);
@@ -711,11 +796,15 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
         // Relative duality gap: z's (bound pairs included) is the gap of a
         // feasible pair, not mu = z's / n, which would stop n times early
         // (#253).
-        Real gap = std::abs(zs_sum) / (1.0 + std::abs(obj_offset + dot(c, z)));
+        const Real pobj = obj_offset + dot(c, z);
+        Real gap = std::abs(zs_sum) / (1.0 + std::abs(pobj));
 
         if (opts.verbose) {
+            const bool dualized = dualized_obj_sign != 0.0;
+            const Real reported_obj =
+                dualized ? dualized_obj_sign * (obj_offset + dot(b, y)) : pobj;
             std::printf("IPM %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e  mu=% .2e\n", iter,
-                        obj_offset + dot(c, z), pinf, dinf, gap, mu);
+                        reported_obj, dualized ? dinf : pinf, dualized ? pinf : dinf, gap, mu);
         }
 
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
@@ -939,8 +1028,8 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
 // iteration limit.
 BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
                             std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
-                            std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
-                            Int& iters, Int& corrections) {
+                            Real dualized_obj_sign, std::vector<Real>& z, std::vector<Real>& y,
+                            std::vector<Real>& s, Int& iters, Int& corrections) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const auto mm = static_cast<size_t>(m);
@@ -1059,10 +1148,14 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         const Real gap = zs / (tau * tau) / (1.0 + std::abs(pobj));
 
         if (opts.verbose) {
+            const bool dualized = dualized_obj_sign != 0.0;
+            const Real reported_obj =
+                dualized ? dualized_obj_sign * (obj_offset + bty / tau) : pobj;
             std::printf(
                 "HSD %4d  pobj=% .10e  pinf=% .2e  dinf=% .2e  gap=% .2e  mu=% .2e  tau=% .2e  "
                 "kappa=% .2e\n",
-                iter, pobj, pinf, dinf, gap, mu, tau, kappa);
+                iter, reported_obj, dualized ? dinf : pinf, dualized ? pinf : dinf, gap, mu, tau,
+                kappa);
         }
 
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
@@ -1397,7 +1490,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     crossover_stats_ = {};
     last_error_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
-    dual_eq_.clear();
+    dual_orig_.clear();
     reduced_costs_std_.clear();
     basis_orig_.clear();
     used_gpu_ = false;
@@ -1405,7 +1498,15 @@ void BarrierSolver::load(const LpProblem& problem) {
 }
 
 void BarrierSolver::setOptions(const BarrierOptions& options) {
-    const bool reshape = options.implicit_upper_bounds != options_.implicit_upper_bounds;
+    const bool reselect = options.dualize == BarrierDualize::Auto &&
+                          (options.algorithm != options_.algorithm ||
+                           options.dense_col_fraction != options_.dense_col_fraction ||
+                           options.gondzio_correctors != options_.gondzio_correctors ||
+                           options.homogeneous != options_.homogeneous);
+    const bool reshape = options.dualize != options_.dualize ||
+                         options.presolve != options_.presolve ||
+                         options.implicit_upper_bounds != options_.implicit_upper_bounds ||
+                         options.ruiz_iterations != options_.ruiz_iterations || reselect;
     options_ = options;
     if (loaded_ && reshape) {
         rebuildTransform();
@@ -1555,13 +1656,18 @@ bool BarrierSolver::buildStandardForm() {
     aeq_ = SparseMatrix(static_cast<Index>(beq_.size()), static_cast<Index>(cstd_.size()),
                         std::move(trips));
 
-    dual_eq_.assign(beq_.size(), 0.0);
     reduced_costs_std_.assign(cstd_.size(), 0.0);
     return true;
 }
 
 void BarrierSolver::rebuildTransform() {
     presolve_active_ = false;
+    dualized_ = false;
+    dual_row_expr_.clear();
+    dual_orig_.clear();
+    dualized_reduced_costs_.clear();
+    row_scale_.clear();
+    col_scale_.clear();
     // Column changes resize the model; the solution vector, which postsolve
     // and the feasibility checks index by column, follows it.
     if (static_cast<Index>(primal_orig_.size()) != original_.num_cols) {
@@ -1586,7 +1692,25 @@ void BarrierSolver::rebuildTransform() {
             }
         }
     }
-    transformed_ok_ = buildStandardForm();
+    const auto rebuildDual = [&] {
+        const auto& problem = presolve_active_ ? presolved_ : original_;
+        auto dual = buildDualForm(problem);
+        if (!dual) {
+            transformed_infeasible_ = true;
+            return false;
+        }
+        if (options_.dualize == BarrierDualize::On ||
+            estimatedFactorWork(dual->matrix, options_, false) <
+                estimatedFactorWork(aeq_, options_, std::ranges::any_of(ustd_, isFinite))) {
+            useDualForm(std::move(*dual));
+        }
+        return true;
+    };
+    transformed_infeasible_ = false;
+    transformed_ok_ = options_.dualize == BarrierDualize::On ? rebuildDual() : buildStandardForm();
+    if (transformed_ok_ && options_.dualize == BarrierDualize::Auto) {
+        transformed_ok_ = rebuildDual();
+    }
     if (!transformed_ok_) {
         clearTransformedSolution();
     }
@@ -1596,7 +1720,8 @@ void BarrierSolver::rebuildTransform() {
 // from the previous model may be read back against this one.
 void BarrierSolver::clearTransformedSolution() {
     col_expr_.clear();
-    dual_eq_.clear();
+    dual_orig_.clear();
+    dualized_reduced_costs_.clear();
     reduced_costs_std_.clear();
     basis_orig_.clear();
     primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
@@ -1607,10 +1732,19 @@ std::vector<Real> BarrierSolver::getPrimalValues() const {
 }
 
 std::vector<Real> BarrierSolver::getDualValues() const {
+    if (!dual_orig_.empty()) {
+        return dual_orig_;
+    }
     return std::vector<Real>(static_cast<size_t>(original_.num_rows), 0.0);
 }
 
 std::vector<Real> BarrierSolver::getReducedCosts() const {
+    if (dualized_) {
+        if (!dualized_reduced_costs_.empty()) {
+            return dualized_reduced_costs_;
+        }
+        return std::vector<Real>(static_cast<size_t>(original_.num_cols), 0.0);
+    }
     const auto& prob = presolve_active_ ? presolved_ : original_;
     const Real sense_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
     // No transform for this model (presolve proved a changed model
@@ -1783,19 +1917,21 @@ void BarrierSolver::setColObjective(Index col, Real cost) {
     rebuildTransform();
 }
 
-void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
+void BarrierSolver::reconstructOriginalSolution(const std::vector<Real>& z,
+                                                const std::vector<Real>& y) {
     const auto& prob = presolve_active_ ? presolved_ : original_;
+    const auto& values = dualized_ ? y : z;
 
     // Reconstruct primals in the (possibly presolved) problem space.
     std::vector<Real> primal_prob(static_cast<size_t>(prob.num_cols), 0.0);
     for (Index j = 0; j < prob.num_cols; ++j) {
         const auto& e = col_expr_[j];
         Real x = e.offset;
-        if (e.col_a >= 0 && e.col_a < static_cast<Index>(z.size())) {
-            x += e.coeff_a * z[e.col_a];
+        if (e.col_a >= 0 && e.col_a < static_cast<Index>(values.size())) {
+            x += e.coeff_a * values[e.col_a];
         }
-        if (e.col_b >= 0 && e.col_b < static_cast<Index>(z.size())) {
-            x += e.coeff_b * z[e.col_b];
+        if (e.col_b >= 0 && e.col_b < static_cast<Index>(values.size())) {
+            x += e.coeff_b * values[e.col_b];
         }
         if (isFinite(prob.col_lower[j])) {
             x = std::max(x, prob.col_lower[j]);
@@ -1806,13 +1942,37 @@ void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
         primal_prob[j] = x;
     }
 
+    std::vector<Real> dual_prob;
+    std::vector<Real> rc_prob;
+    auto reducedCosts = [](const LpProblem& model, const std::vector<Real>& prices) {
+        std::vector<Real> costs(static_cast<size_t>(model.num_cols));
+        model.matrix.multiplyTranspose(prices, costs);
+        for (Index j = 0; j < model.num_cols; ++j) {
+            costs[j] = model.obj[j] - costs[j];
+        }
+        return costs;
+    };
+    if (dualized_) {
+        dual_prob.resize(dual_row_expr_.size());
+        for (Index i = 0; i < prob.num_rows; ++i) {
+            const auto& price = dual_row_expr_[i];
+            if (price.col_a >= 0) {
+                dual_prob[i] += price.coeff_a * z[price.col_a];
+            }
+            if (price.col_b >= 0) {
+                dual_prob[i] += price.coeff_b * z[price.col_b];
+            }
+        }
+        rc_prob = reducedCosts(prob, dual_prob);
+    }
     if (presolve_active_) {
-        // Postsolve to recover original-space primals.
-        std::vector<Real> dual_prob;  // Not used for primal reconstruction.
-        std::vector<Real> rc_prob;
-        std::vector<Real> dual_orig;
         std::vector<Real> rc_orig;
-        presolver_.postsolve(primal_prob, dual_prob, rc_prob, primal_orig_, dual_orig, rc_orig);
+        presolver_.postsolve(primal_prob, dual_prob, rc_prob, primal_orig_, dual_orig_, rc_orig);
+        if (dualized_) {
+            dualized_reduced_costs_ = reducedCosts(original_, dual_orig_);
+        } else {
+            dual_orig_.clear();
+        }
 
         // Clamp to original bounds.
         for (Index j = 0; j < original_.num_cols; ++j) {
@@ -1825,12 +1985,17 @@ void BarrierSolver::reconstructOriginalPrimals(const std::vector<Real>& z) {
         }
     } else {
         primal_orig_ = std::move(primal_prob);
+        dual_orig_ = std::move(dual_prob);
+        dualized_reduced_costs_ = std::move(rc_prob);
     }
 }
 
 bool BarrierSolver::checkOriginalPrimalFeasibility(std::span<const Real> x) const {
     const Real tol = 1e-5;
     for (Index j = 0; j < original_.num_cols; ++j) {
+        if (!isFinite(x[j])) {
+            return false;
+        }
         if (isFinite(original_.col_lower[j]) && x[j] < original_.col_lower[j] - tol) {
             return false;
         }
@@ -1875,6 +2040,23 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     const Index n = aeq_.numCols();
     gondzio_corrections_ = 0;
     used_homogeneous_ = false;
+    scaled_obj_ = std_obj_offset_;
+    if (dualized_) {
+        if (deadline_.orStop(options_.stop_flag).stopped()) {
+            return BarrierIpmOutcome::Failed;
+        }
+        if (deadline_.passed()) {
+            return BarrierIpmOutcome::TimeLimit;
+        }
+        for (Index i = 0; i < m; ++i) {
+            if (aeq_.row(i).size() == 0 && beq_[i] != 0.0) {
+                return BarrierIpmOutcome::PrimalInfeasible;
+            }
+        }
+        if (options_.verbose) {
+            std::printf("Barrier: solving dual standard form (%d rows, %d columns).\n", m, n);
+        }
+    }
     if (n == 0) {
         z.clear();
         y.assign(static_cast<size_t>(m), 0.0);
@@ -1899,37 +2081,32 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             }
         }
         iters = 0;
+        scaled_obj_ += dot(cstd_, z);
         return BarrierIpmOutcome::Optimal;
     }
 
-    // Ruiz equilibration.
-    computeRuizScaling(aeq_, beq_, cstd_, row_scale_, col_scale_, options_.ruiz_iterations);
-    // Column scaling x = C x_s moves an upper bound to u / C.
-    bool has_upper = false;
-    for (Index j = 0; j < n; ++j) {
-        if (isFinite(ustd_[j])) {
-            ustd_[j] /= col_scale_[j];
-            has_upper = true;
+    // Scale each transform once. A repeated solve uses the stored factors
+    // to unscale the iterate back to the same model.
+    if (row_scale_.empty()) {
+        computeRuizScaling(aeq_, beq_, cstd_, row_scale_, col_scale_, options_.ruiz_iterations);
+        // Column scaling x = C x_s moves an upper bound to u / C.
+        for (Index j = 0; j < n; ++j) {
+            if (isFinite(ustd_[j])) {
+                ustd_[j] /= col_scale_[j];
+            }
         }
     }
+    const bool has_upper = std::ranges::any_of(ustd_, isFinite);
 
     // Density detection for backend selection.
-    auto density = detectDensity(aeq_, options_.dense_col_fraction);
-    bool use_augmented =
-        (density.dense_cols > 50 || density.dense_rows > 10 || density.avg_ne_row_density > 20.0);
+    const bool use_augmented = preferAugmented(aeq_, options_);
 
     // Select backend.
     std::unique_ptr<NewtonSolver> solver;
-    auto algo = options_.algorithm;
-
+    auto algo = barrierAlgorithm(options_, use_augmented, has_upper);
     [[maybe_unused]] const auto requested_algo = options_.algorithm;
-    if (algo == BarrierAlgorithm::Auto) {
-#ifdef MIPX_HAS_CUDSS
-        algo = use_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
-#else
-        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
-#endif
-    }
+    const Real dualized_obj_sign =
+        dualized_ ? (original_.sense == Sense::Minimize ? -1.0 : 1.0) : 0.0;
 
     // The GPU path solves the standard form without upper bounds; implicit
     // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
@@ -1944,16 +2121,14 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             "Barrier: the homogeneous self-dual loop does not yet take implicit upper bounds; "
             "using Mehrotra's loop.\n");
     }
-    const bool cpu_only = has_upper || options_.gondzio_correctors > 0 || options_.homogeneous;
-    if (cpu_only &&
-        (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented)) {
-        if (options_.verbose) {
-            std::printf(
-                "Barrier: implicit upper bounds, Gondzio correctors and the homogeneous loop are "
-                "CPU-only; using the CPU backend.\n");
-        }
-        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
+#ifdef MIPX_HAS_CUDSS
+    if (options_.verbose && !gpuAlgorithm(algo) &&
+        (requested_algo == BarrierAlgorithm::Auto || gpuAlgorithm(requested_algo))) {
+        std::printf(
+            "Barrier: implicit upper bounds, Gondzio correctors and the homogeneous loop are "
+            "CPU-only; using the CPU backend.\n");
     }
+#endif
 
     bool ok = false;
     BarrierIpmOutcome outcome = BarrierIpmOutcome::Failed;
@@ -1985,7 +2160,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             });
         }
         ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, gpu_opts, std_obj_offset_, prefer_aug, z, y,
-                             s, iters, &gpu_error);
+                             s, iters, &gpu_error, dualized_obj_sign);
         watcher = std::jthread();  // stops and joins it
         // No CPU fallback after a stop or at the time limit. A stop reads as
         // one (Failed, then IterLimit in solve()), as on the CPU path.
@@ -2017,11 +2192,6 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 return BarrierIpmOutcome::Failed;
             }
         }
-    }
-#else
-    if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
-        // No CUDA — use CPU.
-        algo = use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
     }
 #endif
 
@@ -2073,10 +2243,11 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 return BarrierIpmOutcome::Failed;
             }
             used_homogeneous_ = hsd;
-            outcome = hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_, z, y,
-                                      s, iters, gondzio_corrections_)
-                          : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_,
-                                           std_obj_offset_, z, y, s, iters, gondzio_corrections_);
+            outcome =
+                hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_,
+                                dualized_obj_sign, z, y, s, iters, gondzio_corrections_)
+                    : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
+                                     dualized_obj_sign, z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
@@ -2106,11 +2277,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
         }
     }
 
-    // Compute objective while z is still in scaled space.
-    // In scaled space: c_s'*z_s = (C*c)'*z_s = c'*(C*z_s) = c'*z_orig,
-    // so dot(cstd_, z) gives the correct original objective.
-    // After unscaling, cstd_ remains scaled but z is unscaled, which would
-    // give c'*C^2*z_s — wrong.
+    // The scaled costs and iterate give the unscaled formulation objective:
+    // c_s'*z_s = (C*c)'*z_s = c'*(C*z_s).
     scaled_obj_ = std_obj_offset_ + dot(cstd_, z);
 
     // Unscale solution.
@@ -2290,6 +2458,15 @@ bool BarrierSolver::runCrossover() {
     ds_opts.max_solve_seconds = deadline_.remainingSeconds();  // -1: none (#275)
     ds.setOptions(ds_opts);
 
+    const auto acceptBasis = [&](const DualSimplexSolver& simplex, const LpResult& result) {
+        primal_orig_ = simplex.getPrimalValues();
+        basis_orig_ = simplex.getBasis();
+        objective_ = result.objective;
+        if (dualized_) {
+            dual_orig_ = simplex.getDualValues();
+            dualized_reduced_costs_ = simplex.getReducedCosts();
+        }
+    };
     crossover_stats_.attempted = true;
     auto result = ds.solve();
     const auto starts = ds.basisStartStats();
@@ -2299,9 +2476,7 @@ bool BarrierSolver::runCrossover() {
     crossover_status_ = result.status;
 
     if (result.status == Status::Optimal) {
-        primal_orig_ = ds.getPrimalValues();
-        basis_orig_ = ds.getBasis();
-        objective_ = result.objective;
+        acceptBasis(ds, result);
         return true;
     }
     // No time left for a cold run. A warm proof of infeasibility or
@@ -2349,9 +2524,7 @@ bool BarrierSolver::runCrossover() {
     }
 
     if (cold_result.status == Status::Optimal) {
-        primal_orig_ = ds_cold.getPrimalValues();
-        basis_orig_ = ds_cold.getBasis();
-        objective_ = cold_result.objective;
+        acceptBasis(ds_cold, cold_result);
         return true;
     }
 
@@ -2367,6 +2540,7 @@ LpResult BarrierSolver::solve() {
     gondzio_corrections_ = 0;
     crossover_iters_ = 0;
     crossover_stats_ = {};
+    used_gpu_ = false;
     used_homogeneous_ = false;
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
@@ -2388,13 +2562,17 @@ LpResult BarrierSolver::solve() {
 
     const BarrierIpmOutcome outcome = solveStandardForm(z, y, s, iters);
 
-    auto limitReached = [&](Status limit, Int iterations) {
-        dual_eq_.clear();
+    auto clearSolution = [&] {
+        dual_orig_.clear();
+        dualized_reduced_costs_.clear();
         reduced_costs_std_.clear();
         primal_orig_.clear();
         basis_orig_.clear();
-        status_ = limit;
         objective_ = 0.0;
+    };
+    auto limitReached = [&](Status limit, Int iterations) {
+        clearSolution();
+        status_ = limit;
         iterations_ = iterations;
         last_error_.clear();
         if (options_.verbose && limit == Status::TimeLimit) {
@@ -2406,22 +2584,20 @@ LpResult BarrierSolver::solve() {
         return limitReached(Status::TimeLimit, iters);
     }
 
-    // The HSD loop's certificates (#371): no point to postsolve or cross
-    // over. A dual ray means infeasible or unbounded, so the LP's own
+    // Interpret any certificate in the original orientation. A certificate
+    // of dual infeasibility means infeasible or unbounded, so the LP's own
     // feasibility settles it: the same solve with a zero objective, which
     // cannot meet a dual ray (c'z = 0), ends Optimal on a feasible LP, so
     // this one is Unbounded, or Infeasible on its Farkas ray.
     if (outcome == BarrierIpmOutcome::PrimalInfeasible ||
         outcome == BarrierIpmOutcome::DualInfeasible) {
-        dual_eq_.clear();
-        reduced_costs_std_.clear();
-        primal_orig_.clear();
-        basis_orig_.clear();
-        objective_ = 0.0;
+        clearSolution();
         iterations_ = iters;
         last_error_.clear();
         status_ = Status::Infeasible;
-        if (outcome == BarrierIpmOutcome::DualInfeasible) {
+        const bool original_dual_infeasible =
+            (outcome == BarrierIpmOutcome::DualInfeasible) != dualized_;
+        if (original_dual_infeasible) {
             const double left = deadline_.remainingSeconds();
             if (left == 0.0) {
                 return limitReached(Status::TimeLimit, iters);
@@ -2431,6 +2607,11 @@ LpResult BarrierSolver::solve() {
             BarrierOptions fopts = options_;
             fopts.crossover = false;
             fopts.max_solve_seconds = left;
+            if (dualized_) {
+                fopts.dualize = BarrierDualize::Off;
+                fopts.homogeneous = true;
+                fopts.implicit_upper_bounds = false;
+            }
             BarrierSolver check;
             check.setOptions(fopts);
             check.load(feasibility);
@@ -2444,6 +2625,9 @@ LpResult BarrierSolver::solve() {
             }
             if (f.status == Status::TimeLimit) {
                 return limitReached(Status::TimeLimit, iterations_);
+            }
+            if (f.status == Status::IterLimit) {
+                return limitReached(Status::IterLimit, iterations_);
             }
             if (f.status == Status::Optimal) {
                 status_ = Status::Unbounded;
@@ -2460,10 +2644,7 @@ LpResult BarrierSolver::solve() {
         if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
             return limitReached(Status::IterLimit, iters);
         }
-        dual_eq_.clear();
-        reduced_costs_std_.clear();
-        primal_orig_.clear();
-        basis_orig_.clear();
+        clearSolution();
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
@@ -2473,18 +2654,22 @@ LpResult BarrierSolver::solve() {
         return {status_, objective_, iterations_, 0.0};
     }
 
-    reconstructOriginalPrimals(z);
+    reconstructOriginalSolution(z, y);
     const bool near_optimal = outcome == BarrierIpmOutcome::NearOptimal;
     const bool feasible = checkOriginalPrimalFeasibility(primal_orig_);
+    objective_ = computeOriginalObjective(original_, primal_orig_);
+    const Real dual_objective = (original_.sense == Sense::Minimize ? -1.0 : 1.0) * scaled_obj_;
+    const Real objective_tol = std::max(1e-6, options_.primal_dual_tol) *
+                               std::max({1.0, std::abs(objective_), std::abs(dual_objective)});
+    const bool objectives_match =
+        !dualized_ || (isFinite(objective_) && isFinite(dual_objective) &&
+                       std::abs(objective_ - dual_objective) <= objective_tol);
     // A point short of tolerance, or one that misses an original row once
     // unscaled, can still start crossover, which then proves optimality by
     // simplex. Without crossover it is an error.
-    const bool needs_crossover = near_optimal || !feasible;
+    const bool needs_crossover = near_optimal || !feasible || !objectives_match;
     auto fail = [&](const char* reason) {
-        dual_eq_.clear();
-        reduced_costs_std_.clear();
-        primal_orig_.clear();
-        basis_orig_.clear();
+        clearSolution();
         status_ = Status::Error;
         objective_ = 0.0;
         iterations_ = iters;
@@ -2493,13 +2678,14 @@ LpResult BarrierSolver::solve() {
     };
     if (needs_crossover && !options_.crossover) {
         return fail(near_optimal ? "Barrier stopped short of tolerance and crossover is disabled."
-                                 : "Barrier produced a primal-infeasible solution.");
+                    : !feasible  ? "Barrier produced a primal-infeasible solution."
+                                 : "Barrier primal and dual objectives disagree.");
     }
 
-    dual_eq_ = y;
-    reduced_costs_std_ = s;
+    if (!dualized_) {
+        reduced_costs_std_ = std::move(s);
+    }
 
-    objective_ = computeOriginalObjective(original_, primal_orig_);
     status_ = Status::Optimal;
     iterations_ = iters;
     last_error_.clear();
@@ -2528,10 +2714,11 @@ LpResult BarrierSolver::solve() {
                 return limitReached(crossover_status_, iters + crossover_iters_);
             }
             if (needs_crossover) {
-                return fail(near_optimal
-                                ? "Barrier stopped short of tolerance and crossover failed."
-                                : "Barrier produced a primal-infeasible solution and crossover "
-                                  "failed.");
+                return fail(
+                    near_optimal ? "Barrier stopped short of tolerance and crossover failed."
+                    : !feasible
+                        ? "Barrier produced a primal-infeasible solution and crossover failed."
+                        : "Barrier primal and dual objectives disagree and crossover failed.");
             }
             // Crossover failed but barrier itself converged.
             // Keep barrier solution with empty basis.

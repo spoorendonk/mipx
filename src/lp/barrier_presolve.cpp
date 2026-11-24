@@ -213,6 +213,8 @@ Index BarrierPresolver::removeSingletonRows(LpProblem& lp, std::vector<bool>& co
         op.coeff = coeff;
         op.row_lower = lp.row_lower[i];
         op.row_upper = lp.row_upper[i];
+        op.tightened_lower = new_lb > lp.col_lower[col];
+        op.tightened_upper = new_ub < lp.col_upper[col];
         ops_.push_back(std::move(op));
 
         lp.col_lower[col] = new_lb;
@@ -695,6 +697,7 @@ LpProblem BarrierPresolver::presolve(const LpProblem& problem) {
     orig_num_cols_ = problem.num_cols;
     orig_num_rows_ = problem.num_rows;
     stats_.orig_rows = problem.num_rows;
+    sense_ = problem.sense;
     stats_.orig_cols = problem.num_cols;
     stats_.orig_nnz = problem.matrix.numNonzeros();
 
@@ -823,11 +826,16 @@ void BarrierPresolver::postsolve(const std::vector<Real>& primal_reduced,
                     rc_orig[op.orig_col] = rc;
 
                 } else if constexpr (std::is_same_v<T, BpSingletonRow>) {
-                    // The row had a single nonzero: a * x_col = rhs (roughly).
-                    // The dual for this row can be inferred from reduced cost balance.
-                    // y_row = (c_col - rc_col - sum_{other rows touching col} a_{row,col} * y_row)
-                    // / a Since this is barrier (approximate), set dual to 0.
-                    dual_orig[op.orig_row] = 0.0;
+                    // Move a price on an introduced bound back to its row.
+                    // Undoing the tightenings in reverse order lets the last
+                    // row that installed the active bound carry the price.
+                    Real& rc = rc_orig[op.orig_col];
+                    const Real min_rc = sense_ == Sense::Minimize ? rc : -rc;
+                    if ((min_rc > 0.0 && op.tightened_lower) ||
+                        (min_rc < 0.0 && op.tightened_upper)) {
+                        dual_orig[op.orig_row] = rc / op.coeff;
+                        rc = 0.0;
+                    }
 
                 } else if constexpr (std::is_same_v<T, BpSingletonCol>) {
                     // x_j had zero cost and was in a single row, which was kept
@@ -873,7 +881,7 @@ void BarrierPresolver::postsolve(const std::vector<Real>& primal_reduced,
                         val = 0.5 * (lo + hi);
                     }
                     primal_orig[op.orig_col] = val;
-                    rc_orig[op.orig_col] = 0.0;
+                    rc_orig[op.orig_col] = op.obj_coeff - op.coeff * dual_orig[op.orig_row];
 
                 } else if constexpr (std::is_same_v<T, BpFreeColSingleton>) {
                     // Free variable was used to make a constraint feasible.

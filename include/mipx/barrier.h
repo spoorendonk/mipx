@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -29,6 +30,8 @@ enum class BarrierOrdering {
     Nd,     // Nested dissection.
     CuDSS,  // cuDSS internal ordering (GPU only).
 };
+
+enum class BarrierDualize { Off, On, Auto };
 
 // How an interior-point run ended. NearOptimal is a run that stopped short of
 // primal_dual_tol but whose best iterate is close enough to start crossover.
@@ -103,6 +106,9 @@ struct BarrierOptions {
     bool verbose = true;
     bool crossover = true;
     bool presolve = true;
+    // Solve the compact dual of the presolved LP. Auto compares the estimated
+    // Newton-system costs of both standard forms.
+    BarrierDualize dualize = BarrierDualize::Off;
     // Raised by the caller to stop the solve, which then returns
     // Status::IterLimit. The CPU IPM checks it every iteration and inside its
     // factorizations, as it does max_solve_seconds.
@@ -140,14 +146,15 @@ public:
     void setObjective(std::span<const Real> obj) override;
     void setColObjective(Index col, Real cost) override;
 
-    // Rebuilds the standard form of a loaded model when the options change
-    // its shape (implicit_upper_bounds).
+    // Rebuilds the transform of a loaded model when its construction or
+    // equilibration settings change.
     void setOptions(const BarrierOptions& options);
     [[nodiscard]] const BarrierOptions& options() const { return options_; }
     // Size of the standard form the IPM solves (rows = normal-equations
     // dimension), for tests and diagnostics.
     [[nodiscard]] Index standardFormRows() const { return aeq_.numRows(); }
     [[nodiscard]] Index standardFormCols() const { return aeq_.numCols(); }
+    [[nodiscard]] bool usedDualization() const { return dualized_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
     // Gondzio correctors accepted over the last IPM run, for tests.
     [[nodiscard]] Int gondzioCorrections() const { return gondzio_corrections_; }
@@ -174,12 +181,23 @@ private:
         Real coeff_b = 0.0;
     };
 
+    struct DualForm {
+        SparseMatrix matrix{0, 0};
+        std::vector<Real> rhs;
+        std::vector<Real> cost;
+        Real offset = 0.0;
+        std::vector<OriginalColExpr> primals;
+        std::vector<OriginalColExpr> row_prices;
+    };
+
+    static std::optional<DualForm> buildDualForm(const LpProblem& problem);
+    void useDualForm(DualForm form);
     bool buildStandardForm();
     void rebuildTransform();
     void clearTransformedSolution();
     BarrierIpmOutcome solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
                                         std::vector<Real>& s, Int& iters);
-    void reconstructOriginalPrimals(const std::vector<Real>& z);
+    void reconstructOriginalSolution(const std::vector<Real>& z, const std::vector<Real>& y);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
     bool runCrossover();
 
@@ -191,6 +209,7 @@ private:
     bool loaded_ = false;
     bool transformed_ok_ = false;
     bool transformed_infeasible_ = false;
+    bool dualized_ = false;
 
     SparseMatrix aeq_{0, 0};
     std::vector<Real> beq_;
@@ -199,6 +218,7 @@ private:
     // under implicit_upper_bounds; otherwise the bounds are rows of aeq_.
     std::vector<Real> ustd_;
     std::vector<OriginalColExpr> col_expr_;
+    std::vector<OriginalColExpr> dual_row_expr_;
     Real std_obj_offset_ = 0.0;
     Real scaled_obj_ = 0.0;  // objective computed before Ruiz unscaling
 
@@ -207,7 +227,8 @@ private:
     std::vector<Real> col_scale_;
 
     std::vector<Real> primal_orig_;
-    std::vector<Real> dual_eq_;
+    std::vector<Real> dual_orig_;
+    std::vector<Real> dualized_reduced_costs_;
     std::vector<Real> reduced_costs_std_;
     std::vector<BasisStatus> basis_orig_;
     Status status_ = Status::Error;
@@ -229,7 +250,8 @@ private:
 bool solveBarrierGpu(const SparseMatrix& A, Index m, Index n, std::span<const Real> b,
                      std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
                      bool prefer_augmented, std::vector<Real>& z, std::vector<Real>& y,
-                     std::vector<Real>& s, Int& iters, std::string* error_msg = nullptr);
+                     std::vector<Real>& s, Int& iters, std::string* error_msg = nullptr,
+                     Real dualized_obj_sign = 0.0);
 #endif
 
 }  // namespace mipx
