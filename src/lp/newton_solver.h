@@ -104,9 +104,9 @@ bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<co
 // PrimalInfeasible or DualInfeasible on a Farkas ray within tol, else
 // Failed. No verdict unless tau <= tol kappa and mu_rel <= tol.
 BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
-                                   std::span<const Real> az, std::span<const Real> at_y,
-                                   std::span<const Real> s, Real tau, Real kappa, Real mu_rel,
-                                   Real ctz, Real bty, Real tol);
+                                   std::span<const Real> az, std::span<const Real> at_y, Real tau,
+                                   Real kappa, Real mu_rel, Real ctz, Real bty, Real tol,
+                                   bool verbose = false);
 
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
 // No NewtonSolver GPU factories needed.

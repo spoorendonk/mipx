@@ -452,46 +452,52 @@ TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hs
     const Real tol = 1e-8;
     const Real tau = 1e-9;  // <= tol kappa at kappa = 1
     const Real mu = 1e-9;   // <= tol mu0
-    // A'y + s = (1e-12, 0): a primal ray for b'y > 0.
+    // A'y <= 0: a primal ray for b'y > 0 with slack chosen from A'y.
     const std::vector<Real> at_y{-1.0, -2.0};
-    const std::vector<Real> s{1.0 + 1e-12, 2.0};
     const std::vector<Real> az_far{1e-3};
     const std::vector<Real> az_ray{0.0};
-    // b'y = 1 > 0 and |A'y + s| = 1e-12 <= 1e-8: primal infeasible.
-    CHECK(hsdInfeasibility(b, c, az_far, at_y, s, tau, 1.0, mu, 0.0, 1.0, tol) ==
+    // The scaled bound is 1e-17, below the IPM's 1e-12 slack floor.
+    const std::vector<Real> b_big{1e9};
+    const std::vector<Real> at_y_on_boundary{-1.0, 0.0};
+    CHECK(hsdInfeasibility(b_big, c, az_far, at_y_on_boundary, tau, 1.0, mu, 0.0, 1.0, tol) ==
+          BarrierIpmOutcome::PrimalInfeasible);
+    const std::vector<Real> at_y_violated{-1.0, 1e-12};
+    CHECK(hsdInfeasibility(b_big, c, az_far, at_y_violated, tau, 1.0, mu, 0.0, 1.0, tol) ==
+          BarrierIpmOutcome::Failed);
+    CHECK(hsdInfeasibility(b, c, az_far, at_y_violated, tau, 1.0, mu, 0.0, 1.0, tol) ==
           BarrierIpmOutcome::PrimalInfeasible);
     // No verdict before the run gets there: tau above tol kappa, or mu above
     // tol mu0, whatever the rays.
-    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, 1e-3, 1.0, mu, -1.0, 1.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, 1e-3, 1.0, mu, -1.0, 1.0, tol) ==
           BarrierIpmOutcome::Failed);
-    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, 1e-3, -1.0, 1.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, 1e-3, -1.0, 1.0, tol) ==
           BarrierIpmOutcome::Failed);
     // b'y <= 0: no primal ray; c'z = -1 < 0 but |A z| = 1e-3 > 1e-8: none.
-    CHECK(hsdInfeasibility(b, c, az_far, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_far, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::Failed);
     // A z = 0: a dual ray.
-    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::DualInfeasible);
     // |A z| = 1e-12 meets tol (-c'z) with |c| = 1, not tol (-c'z) / |c| with
     // |c| = 1e9: the bound is relative to the data.
     const std::vector<Real> az_near{1e-12};
-    CHECK(hsdInfeasibility(b, c, az_near, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_near, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::DualInfeasible);
     const std::vector<Real> c_big{1e9, 1e9};
-    CHECK(hsdInfeasibility(b, c_big, az_near, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+    CHECK(hsdInfeasibility(b, c_big, az_near, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::Failed);
     // Both: primal first.
-    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, 1.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, 1.0, tol) ==
           BarrierIpmOutcome::PrimalInfeasible);
     // A NaN gives no verdict: in the ray, or in b'y.
     const Real nan = std::numeric_limits<Real>::quiet_NaN();
-    const std::vector<Real> s_nan{nan, 2.0};
-    CHECK(hsdInfeasibility(b, c, az_far, at_y, s_nan, tau, 1.0, mu, 0.0, 1.0, tol) ==
+    const std::vector<Real> at_y_nan{nan, -2.0};
+    CHECK(hsdInfeasibility(b, c, az_far, at_y_nan, tau, 1.0, mu, 0.0, 1.0, tol) ==
           BarrierIpmOutcome::Failed);
     const std::vector<Real> az_nan{nan};
-    CHECK(hsdInfeasibility(b, c, az_nan, at_y, s, tau, 1.0, mu, -1.0, 0.0, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_nan, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::Failed);
-    CHECK(hsdInfeasibility(b, c, az_ray, at_y, s, tau, 1.0, mu, -1.0, nan, tol) ==
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, nan, tol) ==
           BarrierIpmOutcome::Failed);
 }
 

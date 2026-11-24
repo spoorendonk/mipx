@@ -1082,8 +1082,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         // start's mu of 1 (z = s = 1, tau = kappa = 1).
         const Real big = std::max(tau, kappa);
         const Real mu_rel = mu / (big * big);
-        if (const auto cert = hsdInfeasibility(b, c, az, at_y, s, tau, kappa, mu_rel, ctz, bty,
-                                               opts.primal_dual_tol);
+        if (const auto cert = hsdInfeasibility(b, c, az, at_y, tau, kappa, mu_rel, ctz, bty,
+                                               opts.primal_dual_tol, opts.verbose);
             cert != BarrierIpmOutcome::Failed) {
             iters = iter;
             if (opts.verbose) {
@@ -1319,10 +1319,12 @@ bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<co
 // kappa)^2 against the start's mu (tau = kappa = 1). Without that gate the
 // rays alone read feasible LPs whose solutions are far larger than the data
 // (2^30 against |b| = 3) as infeasible mid-run. Then:
-// - b'y > 0 and |A'y + s|_inf <= tol b'y / max(1, |b|_inf): (y, s) is a
-//   Farkas ray. For any x >= 0 with A x = b, b'y = x'(A'y + s) - x's <=
-//   |x|_1 |A'y + s|_inf, so no feasible x has |x|_1 < max(1, |b|_inf) / tol:
-//   primal infeasible.
+// - b'y > 0 and |(A'y)_+|_inf <= tol b'y / max(1, |b|_inf): y is a
+//   Farkas ray to tolerance. The certificate can choose s = max(0, -A'y)
+//   componentwise, independently of the IPM's strictly positive s, whose
+//   floor can dominate the residual (#389). For any x >= 0 with A x = b,
+//   b'y = x'A'y <= |x|_1 |(A'y)_+|_inf, so no feasible x has
+//   |x|_1 < max(1, |b|_inf) / tol.
 // - c'z < 0 and |A z|_inf <= -tol c'z / max(1, |c|_inf): z is a ray of the
 //   dual. For any A'y + s = c, s >= 0, c'z = y'A z + s'z >= -|y|_1 |A z|_inf,
 //   so no dual feasible y has |y|_1 < max(1, |c|_inf) / tol: dual infeasible.
@@ -1331,37 +1333,51 @@ bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<co
 // and one with c ~ 1e9 as unbounded. Both ratios are invariant under scaling
 // the iterate. Primal is checked first. A dual ray proves the dual
 // infeasible, so the LP is infeasible or unbounded: solve() settles which.
-// A NaN anywhere gives no verdict. Failed means neither.
+// A nonfinite ray residual cannot certify its verdict. Failed means neither.
 BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
-                                   std::span<const Real> az, std::span<const Real> at_y,
-                                   std::span<const Real> s, Real tau, Real kappa, Real mu_rel,
-                                   Real ctz, Real bty, Real tol) {
-    if (!(tau <= tol * kappa) || !(mu_rel <= tol) || !std::isfinite(ctz) || !std::isfinite(bty)) {
+                                   std::span<const Real> az, std::span<const Real> at_y, Real tau,
+                                   Real kappa, Real mu_rel, Real ctz, Real bty, Real tol,
+                                   bool verbose) {
+    if (!(tau <= tol * kappa) || !(mu_rel <= tol)) {
         return BarrierIpmOutcome::Failed;
     }
-    // |v|_inf, NaN when an entry is: std::max would drop it.
-    auto rayNorm = [](auto&& entry, size_t len) {
+    if (!std::isfinite(ctz) || !std::isfinite(bty)) {
+        if (verbose) {
+            std::printf("HSD rays: nonfinite objective dot product (b'y=% .3e, c'z=% .3e)\n", bty,
+                        ctz);
+        }
+        return BarrierIpmOutcome::Failed;
+    }
+    auto rayNorm = [](std::span<const Real> ray, auto violation) {
         Real out = 0.0;
-        for (size_t k = 0; k < len; ++k) {
-            const Real v = std::abs(entry(k));
-            if (std::isnan(v)) {
-                return v;
+        for (Real v : ray) {
+            if (!std::isfinite(v)) {
+                return std::numeric_limits<Real>::quiet_NaN();
             }
-            out = std::max(out, v);
+            out = std::max(out, violation(v));
         }
         return out;
     };
-    if (bty > 0.0) {
-        const Real ray = rayNorm([&](size_t j) { return at_y[j] + s[j]; }, c.size());
-        if (ray <= tol * bty / std::max(1.0, infNorm(b))) {
-            return BarrierIpmOutcome::PrimalInfeasible;
-        }
+    const Real primal_bound = tol * bty / std::max(1.0, infNorm(b));
+    const Real primal_res = bty > 0.0 || verbose ? rayNorm(at_y, [](Real v) { return v; }) : 0.0;
+    const bool primal = bty > 0.0 && primal_res <= primal_bound;
+    if (primal && !verbose) {
+        return BarrierIpmOutcome::PrimalInfeasible;
     }
-    if (ctz < 0.0) {
-        const Real ray = rayNorm([&](size_t i) { return az[i]; }, b.size());
-        if (ray <= -tol * ctz / std::max(1.0, infNorm(c))) {
-            return BarrierIpmOutcome::DualInfeasible;
-        }
+    const Real dual_bound = -tol * ctz / std::max(1.0, infNorm(c));
+    const Real dual_res =
+        ctz < 0.0 || verbose ? rayNorm(az, [](Real v) { return std::abs(v); }) : 0.0;
+    if (verbose) {
+        std::printf(
+            "HSD rays: b'y=% .3e, max(0, max A'y)=%.3e, limit=% .3e; "
+            "c'z=% .3e, |Az|=%.3e, limit=% .3e\n",
+            bty, primal_res, primal_bound, ctz, dual_res, dual_bound);
+    }
+    if (primal) {
+        return BarrierIpmOutcome::PrimalInfeasible;
+    }
+    if (ctz < 0.0 && dual_res <= dual_bound) {
+        return BarrierIpmOutcome::DualInfeasible;
     }
     return BarrierIpmOutcome::Failed;
 }
