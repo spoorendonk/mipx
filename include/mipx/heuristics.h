@@ -393,18 +393,21 @@ private:
 /// for 0-1 mixed-integer convex programming", J. Heuristics 20 (2014). It
 /// takes the paper's model and none of its search: minimize the Hamming
 /// distance to the incumbent x~ over the binary columns, subject to the cutoff
-/// row c'x <= f(x~) - theta (>= f(x~) + theta when maximizing).
+/// row c'x <= f(x~) - theta (>= f(x~) + theta when maximizing). As in the
+/// paper's 0-1 setting, only the 0-1 columns (isBinaryColumn) are in the
+/// distance; general integer columns are left out of it, though rounded.
 ///
 /// Where it departs from the paper:
 /// - One LP, not a MIP. The paper solves the proximity model as a truncated
 ///   sub-MIP with a black-box solver. Here the current LP (its cuts and
-///   bounds) gets the Hamming objective and the cutoff row, and dual simplex
-///   runs for at most setSubproblemIterLimit() iterations (40 at the root,
-///   from MipSolver), or until the LP's time deadline.
+///   bounds) gets the Hamming objective and the cutoff row, and the
+///   DualSimplexSolver runs for at most setSubproblemIterLimit() pivots (40
+///   at the root, from MipSolver), or until the LP's time deadline.
 /// - No recentering. The paper makes each improved solution the new
 ///   reference and solves again. Here a run ends after that one LP, and
 ///   MipSolver runs it at most once, in the root heuristic portfolio, when
-///   an incumbent exists and the root LP heuristics and work budget allow it.
+///   an incumbent exists, the root LP heuristics are on, the root deadline
+///   has not passed and, in deterministic mode, the work budget allows it.
 /// - Rounding instead of search. Only an LP solved to optimality is used:
 ///   one the iteration cap or the deadline stops yields nothing. An integral
 ///   optimum that improves on the incumbent is returned as is. Otherwise,
@@ -419,8 +422,10 @@ private:
 ///   is the paper's basic scheme, but on an integral objective the natural
 ///   choice is 1. With 1e-6 the cutoff sits at about the feasibility
 ///   tolerance and leaves the LP relaxation weaker than theta = 1 would.
-/// - General integer columns are not in the distance; only the 0-1 columns
-///   (isBinaryColumn) are, as in the paper's 0-1 setting.
+///   theta also equals the acceptance margin (betterObjective), and the
+///   Hamming LP tends to put its optimum on the cutoff row, so a point there
+///   is accepted or rejected on rounding noise. Refinement is what would
+///   move it off the row.
 class ProximitySearchHeuristic : public Heuristic {
 public:
     void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
