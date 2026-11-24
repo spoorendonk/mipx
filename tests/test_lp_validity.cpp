@@ -905,15 +905,26 @@ void auditWarm(std::uint32_t seed, int variant, Audit& audit) {
         }
         // Bounds cut at arbitrary points leave models that are feasible, or
         // infeasible, only to within the solver's scaled tolerance. A ray
-        // valid up to tolerance on one side then makes a point from the
-        // other side a tolerance call rather than a wrong answer.
+        // valid up to tolerance on one side and a point valid to tolerance
+        // on the other make a tolerance call rather than a wrong answer;
+        // the point must still hold, or a wrong Optimal would pass (#250).
         const bool split = (cr.status == Status::Optimal && wr.status == Status::Infeasible) ||
                            (cr.status == Status::Infeasible && wr.status == Status::Optimal);
         if (split) {
-            const auto& inf = wr.status == Status::Infeasible ? warm : cold;
+            const bool warm_inf = wr.status == Status::Infeasible;
+            const auto& inf = warm_inf ? warm : cold;
+            const auto& opt = warm_inf ? cold : warm;
             if (checkFarkas(g.lp, inf.getDualRay(), true).empty()) {
+                const std::string err = checkOptimal(
+                    g.lp, opt.getPrimalValues(), opt.getDualValues(), opt.getObjective(), kWarmRel);
+                if (!err.empty()) {
+                    audit.fail(rtag + (warm_inf ? ": cold" : ": warm") +
+                                   " optimal certificate against the other's Farkas ray: " + err,
+                               g.lp);
+                    return;
+                }
                 ++audit.tolerance_calls;
-                return;
+                continue;
             }
         }
         if (cr.status != wr.status) {
