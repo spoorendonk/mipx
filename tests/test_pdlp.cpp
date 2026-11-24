@@ -7,7 +7,10 @@
 #include "test_paths.hpp"
 
 #ifdef MIPX_HAS_CUDA
+#include "lp/pdlp_kernels.cuh"
+
 #include <cuda_runtime_api.h>
+#include <memory>
 #endif
 
 #include <catch2/catch_test_macros.hpp>
@@ -845,6 +848,85 @@ TEST_CASE("PdlpSolver: GPU and CPU produce matching objectives", "[pdlp][gpu]") 
     CHECK(gpu_solver.usedGpu());
     CHECK_THAT(gpu_result.objective, WithinAbs(cpu_result.objective, 1e-4));
 }
+
+#ifdef MIPX_HAS_CUDA
+TEST_CASE("PDLP: GPU convergence totals retain small block contributions", "[pdlp][gpu]") {
+    if (!PdlpSolver::gpuAvailable())
+        SKIP("No usable CUDA device.");
+
+    constexpr Index blocks = 1025;
+    constexpr Real large = 0x1p54;
+    std::vector<GpuConvergenceMetrics> partials(blocks);
+    for (auto& partial : partials) {
+        partial.primal_obj = 1.0;
+        partial.primal_resid_sq = 1.0;
+    }
+    partials.front().primal_obj = large;
+    // The first pair in the block tree cancels the large terms.
+    partials[128].primal_obj = -large;
+    partials.front().primal_resid_sq = large;
+    // The leftover block also contributes to sums and maxima.
+    partials.back().dual_obj_row = 3.0;
+    partials.back().dual_resid_max = 7.0;
+
+    const size_t entries = 1 + blocks + convergenceMetricBlocks(blocks);
+    GpuConvergenceMetrics* device = nullptr;
+    REQUIRE(cudaMalloc(reinterpret_cast<void**>(&device), entries * sizeof(*device)) ==
+            cudaSuccess);
+    const std::unique_ptr<GpuConvergenceMetrics, decltype(&cudaFree)> allocation(device, cudaFree);
+    REQUIRE(cudaMemcpy(device + 1, partials.data(), partials.size() * sizeof(*device),
+                       cudaMemcpyHostToDevice) == cudaSuccess);
+    launchReduceConvergenceMetrics(blocks, device + 1, device, nullptr);
+    REQUIRE(cudaGetLastError() == cudaSuccess);
+    GpuConvergenceMetrics result{};
+    REQUIRE(cudaMemcpy(&result, device, sizeof(result), cudaMemcpyDeviceToHost) == cudaSuccess);
+
+    CHECK(result.primal_obj == blocks - 2);
+    CHECK_THAT(result.primal_resid_sq, WithinAbs(large + (blocks - 1), 4.0));
+    CHECK(result.dual_obj_row == 3.0);
+    CHECK(result.dual_resid_max == 7.0);
+}
+
+TEST_CASE("PdlpSolver: GPU convergence includes partial row and column blocks", "[pdlp][gpu]") {
+    if (!PdlpSolver::gpuAvailable())
+        SKIP("No usable CUDA device.");
+
+    constexpr Index rows = 269;
+    constexpr Index cols = 517;
+    LpProblem lp;
+    lp.num_rows = rows;
+    lp.num_cols = cols;
+    lp.obj.assign(cols, -1.0);
+    lp.col_lower.assign(cols, 0.0);
+    lp.col_upper.assign(cols, 1.0);
+    lp.col_type.assign(cols, VarType::Continuous);
+    lp.row_lower.assign(rows, -kInf);
+    lp.row_upper.resize(rows);
+    std::vector<Triplet> coefficients;
+    Real objective = -(cols - rows);
+    for (Index i = 0; i < rows; ++i) {
+        lp.col_upper[i] = kInf;
+        lp.row_upper[i] = 1.0 + (i % 8);
+        coefficients.push_back({i, i, 1.0});
+        objective -= lp.row_upper[i];
+    }
+    lp.matrix = SparseMatrix(rows, cols, std::move(coefficients));
+
+    PdlpOptions options;
+    options.verbose = false;
+    options.use_gpu = true;
+    options.gpu_min_rows = 0;
+    options.gpu_min_nnz = 0;
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(solver.usedGpu());
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(objective, 1e-3));
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Bound-objective rescaling tests

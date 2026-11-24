@@ -11,17 +11,8 @@ static inline int gridSize(int n) {
     return (n + kBlockSize - 1) / kBlockSize;
 }
 
-__device__ inline void atomicMaxReal(Real* addr, Real value) {
-    auto* addr_ull = reinterpret_cast<unsigned long long*>(addr);
-    unsigned long long old = *addr_ull;
-    while (value > __longlong_as_double(static_cast<long long>(old))) {
-        unsigned long long assumed = old;
-        old = atomicCAS(
-            addr_ull,
-            assumed,
-            static_cast<unsigned long long>(__double_as_longlong(value)));
-        if (old == assumed) break;
-    }
+Index convergenceMetricBlocks(Index count) {
+    return count / kBlockSize + (count % kBlockSize != 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +162,7 @@ __global__ void convergenceMetricsColKernel(
     const Real* __restrict__ at_delta_y,
     const Real* __restrict__ tau_base,
     Real primal_weight,
-    GpuConvergenceMetrics* __restrict__ metrics)
+    GpuConvergenceMetrics* __restrict__ partials)
 {
     __shared__ Real s_pobj[kBlockSize];
     __shared__ Real s_dobj_col[kBlockSize];
@@ -248,13 +239,15 @@ __global__ void convergenceMetricsColKernel(
     }
 
     if (tid == 0) {
-        atomicAdd(&metrics->primal_obj, s_pobj[0]);
-        atomicAdd(&metrics->dual_obj_col, s_dobj_col[0]);
-        atomicAdd(&metrics->dual_resid_sq, s_dual_resid_sq[0]);
-        atomicMaxReal(&metrics->dual_resid_max, s_dual_resid_max[0]);
-        atomicAdd(&metrics->fpe_movement, s_movement[0]);
-        atomicAdd(&metrics->fpe_cross, s_cross[0]);
-        atomicAdd(&metrics->primal_dist_sq, s_dist_sq[0]);
+        GpuConvergenceMetrics result{};
+        result.primal_obj = s_pobj[0];
+        result.dual_obj_col = s_dobj_col[0];
+        result.dual_resid_sq = s_dual_resid_sq[0];
+        result.dual_resid_max = s_dual_resid_max[0];
+        result.fpe_movement = s_movement[0];
+        result.fpe_cross = s_cross[0];
+        result.primal_dist_sq = s_dist_sq[0];
+        partials[blockIdx.x] = result;
     }
 }
 
@@ -269,14 +262,14 @@ void launchConvergenceMetricsCol(
     const Real* at_delta_y,
     const Real* tau_base,
     Real primal_weight,
-    GpuConvergenceMetrics* d_metrics,
+    GpuConvergenceMetrics* d_partials,
     cudaStream_t stream)
 {
     if (n <= 0) return;
-    convergenceMetricsColKernel<<<gridSize(n), kBlockSize, 0, stream>>>(
+    convergenceMetricsColKernel<<<convergenceMetricBlocks(n), kBlockSize, 0, stream>>>(
         n, pdhg_x, initial_x, reflected_x, cscaled, at_y, col_lower, col_upper,
         finite_col_lower, finite_col_upper, dual_resid_scale,
-        at_delta_y, tau_base, primal_weight, d_metrics);
+        at_delta_y, tau_base, primal_weight, d_partials);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +286,7 @@ __global__ void convergenceMetricsRowKernel(
     const Real* __restrict__ primal_resid_scale,
     const Real* __restrict__ sigma_base,
     Real primal_weight,
-    GpuConvergenceMetrics* __restrict__ metrics)
+    GpuConvergenceMetrics* __restrict__ partials)
 {
     __shared__ Real s_presid_sq[kBlockSize];
     __shared__ Real s_presid_max[kBlockSize];
@@ -354,11 +347,13 @@ __global__ void convergenceMetricsRowKernel(
     }
 
     if (tid == 0) {
-        atomicAdd(&metrics->primal_resid_sq, s_presid_sq[0]);
-        atomicMaxReal(&metrics->primal_resid_max, s_presid_max[0]);
-        atomicAdd(&metrics->dual_obj_row, s_dobj_row[0]);
-        atomicAdd(&metrics->fpe_movement, s_movement[0]);
-        atomicAdd(&metrics->dual_dist_sq, s_dist_sq[0]);
+        GpuConvergenceMetrics result{};
+        result.primal_resid_sq = s_presid_sq[0];
+        result.primal_resid_max = s_presid_max[0];
+        result.dual_obj_row = s_dobj_row[0];
+        result.fpe_movement = s_movement[0];
+        result.dual_dist_sq = s_dist_sq[0];
+        partials[blockIdx.x] = result;
     }
 }
 
@@ -372,14 +367,62 @@ void launchConvergenceMetricsRow(
     const Real* primal_resid_scale,
     const Real* sigma_base,
     Real primal_weight,
-    GpuConvergenceMetrics* d_metrics,
+    GpuConvergenceMetrics* d_partials,
     cudaStream_t stream)
 {
     if (m <= 0) return;
-    convergenceMetricsRowKernel<<<gridSize(m), kBlockSize, 0, stream>>>(
+    convergenceMetricsRowKernel<<<convergenceMetricBlocks(m), kBlockSize, 0, stream>>>(
         m, pdhg_y, initial_y, reflected_y, ax, row_lower, row_upper,
         finite_row_lower, finite_row_upper, primal_resid_scale,
-        sigma_base, primal_weight, d_metrics);
+        sigma_base, primal_weight, d_partials);
+}
+
+// Reduce the partials in fixed pairs at every level, including across blocks.
+__global__ void convergenceMetricsReduceKernel(Index count,
+                                               const GpuConvergenceMetrics* __restrict__ input,
+                                               GpuConvergenceMetrics* __restrict__ output) {
+    __shared__ GpuConvergenceMetrics partials[kBlockSize];
+    const int tid = threadIdx.x;
+    const Index i = blockIdx.x * blockDim.x + tid;
+    partials[tid] = i < count ? input[i] : GpuConvergenceMetrics{};
+    __syncthreads();
+
+    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            auto& left = partials[tid];
+            const auto& right = partials[tid + stride];
+            left.primal_resid_sq += right.primal_resid_sq;
+            left.dual_resid_sq += right.dual_resid_sq;
+            left.primal_resid_max = fmax(left.primal_resid_max, right.primal_resid_max);
+            left.dual_resid_max = fmax(left.dual_resid_max, right.dual_resid_max);
+            left.primal_obj += right.primal_obj;
+            left.dual_obj_col += right.dual_obj_col;
+            left.dual_obj_row += right.dual_obj_row;
+            left.fpe_movement += right.fpe_movement;
+            left.fpe_cross += right.fpe_cross;
+            left.primal_dist_sq += right.primal_dist_sq;
+            left.dual_dist_sq += right.dual_dist_sq;
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+        output[blockIdx.x] = partials[0];
+}
+
+void launchReduceConvergenceMetrics(Index block_count, GpuConvergenceMetrics* d_partials,
+                                    GpuConvergenceMetrics* d_result, cudaStream_t stream) {
+    auto* input = d_partials;
+    auto* scratch = d_partials + block_count;
+    while (block_count > kBlockSize) {
+        const Index groups = convergenceMetricBlocks(block_count);
+        convergenceMetricsReduceKernel<<<groups, kBlockSize, 0, stream>>>(block_count, input,
+                                                                         scratch);
+        auto* previous = input;
+        input = scratch;
+        scratch = previous;
+        block_count = groups;
+    }
+    convergenceMetricsReduceKernel<<<1, kBlockSize, 0, stream>>>(block_count, input, d_result);
 }
 
 // ---------------------------------------------------------------------------
@@ -435,14 +478,6 @@ void launchSubtract(
     if (count <= 0) return;
     subtractKernelImpl<<<gridSize(count), kBlockSize, 0, stream>>>(
         count, a, b, result);
-}
-
-// ---------------------------------------------------------------------------
-// Zero metrics
-// ---------------------------------------------------------------------------
-
-void launchZeroMetrics(GpuConvergenceMetrics* d_metrics, cudaStream_t stream) {
-    cudaMemsetAsync(d_metrics, 0, sizeof(GpuConvergenceMetrics), stream);
 }
 
 // ---------------------------------------------------------------------------

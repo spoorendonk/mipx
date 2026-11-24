@@ -2154,10 +2154,16 @@ LpResult PdlpSolver::solveGpu() {
         cudaMalloc(&d_buf_at, buf_at_size);
 
     // Convergence metrics.
+    const Index col_metric_blocks = convergenceMetricBlocks(n);
+    const Index metric_blocks = col_metric_blocks + convergenceMetricBlocks(m);
+    const auto metric_entries =
+        static_cast<size_t>(1) + metric_blocks + convergenceMetricBlocks(metric_blocks);
     GpuConvergenceMetrics* d_metrics = nullptr;
     GpuConvergenceMetrics* h_metrics = nullptr;
-    cudaMalloc(reinterpret_cast<void**>(&d_metrics), sizeof(GpuConvergenceMetrics));
-    cudaMallocHost(reinterpret_cast<void**>(&h_metrics), sizeof(GpuConvergenceMetrics));
+    const bool metrics_ready =
+        cudaOk(cudaMalloc(reinterpret_cast<void**>(&d_metrics),
+                          metric_entries * sizeof(GpuConvergenceMetrics))) &&
+        cudaOk(cudaMallocHost(reinterpret_cast<void**>(&h_metrics), sizeof(GpuConvergenceMetrics)));
 
     used_gpu_ = true;
 
@@ -2183,7 +2189,7 @@ LpResult PdlpSolver::solveGpu() {
     // -----------------------------------------------------------------------
     bool power_iter_spmv_failed = false;
     Real step = 1.0;
-    {
+    if (metrics_ready) {
         std::mt19937 rng(42);
         std::normal_distribution<Real> dist(0.0, 1.0);
         std::vector<Real> x_host(sn);
@@ -2339,16 +2345,19 @@ LpResult PdlpSolver::solveGpu() {
         if (!spmv_at(desc_delta_y, desc_at_delta_y) || !spmv_at(desc_pdhg_y, desc_at_y))
             return false;
 
-        launchZeroMetrics(d_metrics, stream);
+        // Each block writes its partial; the device then sums them pairwise.
+        auto* d_partials = d_metrics + 1;
         launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
                                     d_col_lower, d_col_upper, d_finite_col_lower,
                                     d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    d_tau_base, primal_weight, d_metrics, stream);
+                                    d_tau_base, primal_weight, d_partials, stream);
         launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
                                     d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
-                                    stream);
-        return cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                                    d_primal_resid_scale, d_sigma_base, primal_weight,
+                                    d_partials + col_metric_blocks, stream);
+        launchReduceConvergenceMetrics(metric_blocks, d_partials, d_metrics, stream);
+        return cudaPeekAtLastError() == cudaSuccess &&
+               cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
                                cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
                cudaStreamSynchronize(stream) == cudaSuccess;
     };
@@ -2416,7 +2425,7 @@ LpResult PdlpSolver::solveGpu() {
         return std::pair{pobj, dobj};
     };
 
-    if (power_iter_spmv_failed) {
+    if (!metrics_ready || power_iter_spmv_failed) {
         failGpuSolve(0);
         goto cleanup;
     }
