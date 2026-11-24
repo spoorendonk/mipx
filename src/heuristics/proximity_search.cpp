@@ -41,8 +41,11 @@ std::optional<HeuristicSolution> ProximitySearchHeuristic::run(
         return std::nullopt;
     }
 
-    // Proximity search: replace objective with Hamming distance to incumbent,
-    // add cutoff constraint on original objective.
+    // LP-based proximity rounding: replace the objective with the Hamming
+    // distance to the incumbent and add a cutoff row on the original
+    // objective, then solve one iteration-capped LP and round. Fischetti &
+    // Monaci solve this model as a sub-MIP and recenter; the header lists
+    // where this departs from them.
     // min sum_{j binary} |x_j - x*_j|
     //   = sum_{j: x*_j=1} (1 - x_j) + sum_{j: x*_j=0} x_j
     //   = sum_{j: x*_j=1} (-x_j) + sum_{j: x*_j=0} (x_j) + constant

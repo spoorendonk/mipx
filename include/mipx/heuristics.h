@@ -386,11 +386,35 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Proximity Search (Fischetti & Monaci): minimize Hamming distance.
+// LP-based proximity rounding (after Fischetti & Monaci 2014).
 // ---------------------------------------------------------------------------
 
-/// Proximity search: minimize Hamming distance to incumbent subject to
-/// an improving objective cutoff constraint.
+/// LP-based proximity rounding, after Fischetti & Monaci, "Proximity search
+/// for 0-1 mixed-integer convex programming", J. Heuristics 20 (2014). It
+/// takes the paper's model and none of its search: minimize the Hamming
+/// distance to the incumbent x~ over the binary columns, subject to the cutoff
+/// row c'x <= f(x~) - theta (>= f(x~) + theta when maximizing).
+///
+/// Where it departs from the paper:
+/// - One LP, not a MIP. The paper solves the proximity model as a truncated
+///   sub-MIP with a black-box solver. Here the current LP (its cuts and
+///   bounds) gets the Hamming objective and the cutoff row, and dual simplex
+///   runs for at most setSubproblemIterLimit() iterations (40 at the root,
+///   from MipSolver).
+/// - No recentering. The paper makes each improved solution the new
+///   reference and solves again. Here a run ends after that one LP, and
+///   MipSolver runs it once, in the root heuristic portfolio.
+/// - Rounding instead of search. Only an LP solved to optimality is used:
+///   one the iteration cap stops yields nothing. An integral optimum that
+///   improves on the incumbent is returned as is.
+///   Otherwise, with setEnableRoundingRepair() on, every integer column is
+///   rounded to the nearest value within its bounds, the continuous columns
+///   keep their LP values, and the point is kept only if every row holds.
+/// - theta is fixed at 1e-6 (heuristic_detail::kObjectiveTol). A fixed theta
+///   is the paper's basic scheme, but on an integral objective the natural
+///   choice is 1, so this cutoff barely excludes the incumbent's value there.
+/// - General integer columns are not in the distance; only the 0-1 columns
+///   (isBinaryColumn) are, as in the paper's 0-1 setting.
 class ProximitySearchHeuristic : public Heuristic {
 public:
     void setSubproblemIterLimit(Int limit) { subproblem_iter_limit_ = limit; }
