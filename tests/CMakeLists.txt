@@ -209,8 +209,8 @@ if(TARGET mipx-solve AND Python3_Interpreter_FOUND)
         )
     endforeach()
 
-    # CPU barrier gate (#296): every Netlib LP (#330) and the first 15
-    # column-generation masters (#331) on both normal-equations backends,
+    # CPU barrier gate (#296): every Netlib LP (#330) and 15 later
+    # column-generation masters with coupled rows (#358) on both backends,
     # against tests/perf/instance_gate/barrier{,_cg}_expected.csv. Minutes,
     # not seconds, so it has a label of its own and stays out of instance-gate:
     #

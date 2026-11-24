@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""Generate the column-generation masters of the CPU barrier gate (#331).
+"""Generate the later column-generation masters of the CPU barrier gate (#358).
 
 Writes, for each of the 15 public CommaLab instances of the cold LP panel
-(#272: grid1-9, planar30/50/80/100/150/300), the first master LP of mcf's
-column generation as `<name>.mps`, and `cg_masters.solu` with the objective
+(#272: grid1-9, planar30/50/80/100/150/300), the first later master LP with
+a path column linking demand and capacity rows as `<name>.mps`, and
+`cg_masters.solu` with the corresponding objective
 HiGHS reported for it (simplex, presolve off, as mcf records it), in `.solu`
 format for run_instance_gate.py's `barrier-cg` suite.
 
-mcf is https://github.com/tinnet-ai/mcf; its `--cg-set lp_dump=DIR` writes the
-master as `lp_0000/master_0000.mps` with the solves in `ops.txt` (format in
-tests/perf/README.md, "LP Sequence Replay"). One cg iteration is enough: the
-first master is built and solved before any pricing. The masters of #272 came
-from mcf 220af3c; at that commit the first masters of grid9 and planar300 come
-out byte for byte as the full-run dumps.
-
-A first master holds only the initial columns, one nonzero each, so its
-normal equations are diagonal: the suite checks the barrier's answers on
-these LPs, not its sparse factorization's fill.
+mcf is https://github.com/tinnet-ai/mcf (used at 220af3c). With `lp_dump_every=1`,
+its recorder applies changes to its mirror LP and writes `master_NNNN.mps`
+immediately before solve NNNN, whose result appears in `ops.txt` (format in
+tests/perf/README.md, "LP Sequence Replay").
 
     generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab \\
-        [--out tests/data/cg_masters]
+        [--out tests/data/cg_masters_later]
 
 `--instances` is mcf's `data/commalab` directory (`grid/gridN.gz`,
 `planar/planarN.gz`). Exit status: 0 when every master and the `.solu` were
@@ -31,6 +26,7 @@ barrier regression.
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import subprocess
 import sys
@@ -38,7 +34,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = REPO / "tests" / "data" / "cg_masters"
+DEFAULT_OUT = REPO / "tests" / "data" / "cg_masters_later"
 SOLU = "cg_masters.solu"
 
 INSTANCES = [f"grid{i}" for i in range(1, 10)] + [f"planar{n}" for n in (30, 50, 80, 100, 150, 300)]
@@ -61,58 +57,83 @@ def read_manifest(path: Path) -> dict[str, str]:
 MPS_SECTIONS = {"NAME", "ROWS", "COLUMNS", "RHS", "RANGES", "BOUNDS", "OBJSENSE", "ENDATA"}
 
 
-def objective_rows(mps: Path) -> int:
-    """Number of N rows in ROWS: the recorder writes a free row as one.
-
-    The recorder starts data lines in column 1 too, so a section is told by
-    its keyword, not by indentation.
-    """
-    count = 0
-    in_rows = False
+def has_capacity_path(mps: Path) -> bool:
+    """Find a path column touching both a demand (G) and a capacity (L) row."""
+    row_types: dict[str, str] = {}
+    path_sides: dict[str, set[str]] = {}
+    section = ""
     for line in mps.read_text(encoding="utf-8").splitlines():
         fields = line.split()
         if not fields:
             continue
         if fields[0] in MPS_SECTIONS:
-            in_rows = fields[0] == "ROWS"
-        elif in_rows and fields[0] == "N":
-            count += 1
-    return count
+            section = fields[0]
+        elif section == "ROWS":
+            sense, row = fields
+            row_types[row] = sense
+        elif section == "COLUMNS":
+            # The recorder writes one row/value pair on each line.
+            col, row, value = fields
+            side = row_types.get(row)
+            if side is None:
+                raise ValueError(f"{mps.name}: column {col} references unknown row {row}")
+            if side in {"G", "L"} and float(value) != 0.0:
+                path_sides.setdefault(col, set()).add(side)
+    # The recorder writes free rows as N, which the MPS reader drops.
+    if (n_rows := list(row_types.values()).count("N")) != 1:
+        raise ValueError(f"{mps.name}: master has {n_rows} N rows, not just the objective")
+    # CG's constraint coefficients are nonnegative, so the shared column
+    # contributes a nonzero off-diagonal entry to A D A^T.
+    return any(sides == {"G", "L"} for sides in path_sides.values())
 
 
-def first_solve(ops: Path) -> tuple[str, float]:
-    """Status and objective of the dump's first op, its solve (`solve <seq> <status> <obj> ...`).
-
-    Only a solve before any change op is a solve of the MPS itself.
-    """
-    for line in ops.read_text(encoding="utf-8").splitlines():
+def later_master(lp: Path) -> tuple[Path, float]:
+    """Choose the earliest coupled later snapshot and its recorded objective."""
+    next_seq = 0
+    for line in (lp / "ops.txt").read_text(encoding="utf-8").splitlines():
         parts = line.split()
-        if not parts:
+        if not parts or parts[0] != "solve":
+            # A snapshot already includes all preceding edits.
             continue
-        if parts[0] != "solve" or len(parts) < 4:
-            raise ValueError(f"{ops}: first op is not a solve: {line!r}")
-        return parts[2], float(parts[3])
-    raise ValueError(f"{ops}: no solve line")
+        if len(parts) != 6 or int(parts[1]) != next_seq:
+            raise ValueError(f"ops.txt: expected solve {next_seq}, got {line!r}")
+        seq = next_seq
+        next_seq += 1
+        if seq == 0:
+            continue
+        mps = lp / f"master_{seq:04d}.mps"
+        if not has_capacity_path(mps):
+            continue
+        status, objective = parts[2], float(parts[3])
+        if status != "optimal" or not math.isfinite(objective):
+            raise ValueError(f"solve {seq}: expected a finite optimal objective, got {line!r}")
+        return mps, objective
+    raise ValueError("no later master with a path linking demand and capacity rows")
 
 
 def dump_master(mcf: Path, source: Path, dump: Path) -> Path:
-    """Run one cg iteration of mcf with lp_dump; return the dump's lp_0000 directory."""
+    """Run a few cg iterations of mcf; return the first LP's snapshot directory."""
     cmd = [
         str(mcf),
         str(source),
         "--method",
         "cg",
+        "--backend",
+        "highs",
+        "--highs-method",
+        "simplex",
         "--threads",
         "1",
         "--no-sidecar",
         "--cg-set",
         f"lp_dump={dump}",
         "--cg-set",
-        "max_iterations=1",
+        "lp_dump_every=1",
+        "--cg-set",
+        "max_iterations=5",
     ]
-    # One iteration ends at mcf's iteration limit, which it reports as a
-    # failed exact check (exit status not 0): the dump is what is checked.
-    # A first master takes seconds; the timeout only ends a hung run.
+    # mcf can report a failed exact check at the iteration limit. The dump's
+    # individual LP solve records determine whether it contains a usable master.
     try:
         run = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=600)
     except subprocess.TimeoutExpired as err:
@@ -127,7 +148,7 @@ def dump_master(mcf: Path, source: Path, dump: Path) -> Path:
 
 
 def checked_master(mcf: Path, source: Path, dump: Path) -> tuple[Path, float]:
-    """Dump one instance's first master; return its MPS and reference objective.
+    """Dump one instance's later master and return its MPS and reference objective.
 
     Raises RuntimeError, ValueError or OSError (no mcf at that path, a dump
     file missing) when the master cannot serve as a gate instance.
@@ -142,14 +163,7 @@ def checked_master(mcf: Path, source: Path, dump: Path) -> tuple[Path, float]:
     # would read differently from what HiGHS solved.
     if manifest.get("sense") != "min" or float(manifest.get("obj_offset", "0")) != 0.0:
         raise RuntimeError(f"sense or offset not min/0: {manifest}")
-    mps = lp / "master_0000.mps"
-    # The recorder writes a free row as a second N row, which the reader drops.
-    if (n_rows := objective_rows(mps)) != 1:
-        raise RuntimeError(f"master has {n_rows} N rows, not just the objective")
-    status, objective = first_solve(lp / "ops.txt")
-    if status != "optimal":
-        raise RuntimeError(f"first solve is {status}, not optimal")
-    return mps, objective
+    return later_master(lp)
 
 
 def generate(mcf: Path, instances: Path, out: Path, workdir: Path) -> tuple[list[str], list[str]]:
@@ -175,6 +189,8 @@ def generate(mcf: Path, instances: Path, out: Path, workdir: Path) -> tuple[list
             shutil.copyfile(mps, out / f"{name}.mps")
         except OSError as err:
             failures.append(f"{name}: {err}")
+        else:
+            print(f"{name}: {mps.name}")
     return solu, failures
 
 

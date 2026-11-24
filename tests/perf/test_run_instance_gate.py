@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -112,6 +113,37 @@ def test_barrier_backends_are_selectable_only_on_the_barrier_suite() -> None:
     assert pick("barrier", "") == list(gate.SUITES["barrier"].backends)
     with pytest.raises(SystemExit, match="barrier-dense"):
         pick("lp", "barrier-dense")
+
+
+def test_cg_gate_runs_both_barrier_backends_without_cli_presolve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "grid1.mps").touch()
+    (tmp_path / "cg_masters.solu").write_text("=opt= grid1 10\n")
+    expected = tmp_path / "expected.csv"
+    expected.write_text(
+        "instance,backend,expected\ngrid1,barrier-dense,match_1e-6\n"
+        "grid1,barrier-sparse,match_1e-6\n"
+    )
+    factors: list[str] = []
+
+    def solve(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert "--no-presolve" in cmd
+        factors.append(cmd[cmd.index("--barrier-ne") + 1])
+        return subprocess.CompletedProcess(cmd, 0, "Status: Optimal\nObjective: 10\n", "")
+
+    monkeypatch.setattr(gate.subprocess, "run", solve)
+    argv = [
+        "barrier-cg",
+        "--binary",
+        sys.executable,
+        "--data-dir",
+        str(tmp_path),
+        "--expected-file",
+        str(expected),
+    ]
+    assert gate.main(argv) == 0
+    assert factors == ["dense", "sparse"]
 
 
 def test_read_solu_keeps_only_usable_references(tmp_path: Path) -> None:

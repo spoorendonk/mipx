@@ -32,7 +32,7 @@ incumbent is possible; doing so is follow-up work on #223.
     run_instance_gate.py lp  [--backends dual,barrier,pdlp]   # Netlib, per LP backend
     run_instance_gate.py mip                                   # curated MIPLIB subset
     run_instance_gate.py barrier [--backends barrier-dense,barrier-sparse]  # CPU barrier, Netlib
-    run_instance_gate.py barrier-cg [--backends ...]   # CPU barrier, first cg masters
+    run_instance_gate.py barrier-cg [--backends ...]   # CPU barrier, later cg masters
 
 By default only the instances in the expected list run. `--all` runs every
 instance in the data directory that has a reference, and `--write-expected`
@@ -90,6 +90,7 @@ class Suite:
     time_limit: float  # default per-instance limit, seconds
     backends: tuple[str, ...]
     download: str
+    extra_solver_args: tuple[str, ...] = ()
 
     def references(self) -> dict[str, Reference]:
         path = self.data_dir / self.solu
@@ -142,14 +143,16 @@ SUITES: dict[str, Suite] = {
         ("barrier-dense", "barrier-sparse"),
         "tests/data/download_netlib.sh",
     ),
-    # The same on the first column-generation masters of #272 (#331).
+    # The same on later column-generation masters of #272 with coupled rows (#358).
     "barrier-cg": Suite(
-        REPO / "tests" / "data" / "cg_masters",
+        REPO / "tests" / "data" / "cg_masters_later",
         "cg_masters.solu",
         GATE_DIR / "barrier_cg_expected.csv",
         10.0,
         ("barrier-dense", "barrier-sparse"),
         "tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab",
+        # CLI presolve can solve these small masters before barrier starts.
+        extra_solver_args=("--no-presolve",),
     ),
 }
 
@@ -235,8 +238,10 @@ def solver_args(backend: str, time_limit: float) -> list[str]:
     return args
 
 
-def run_one(binary: Path, instance: Path, backend: str, time_limit: float) -> Outcome:
-    cmd = [str(binary), str(instance), *solver_args(backend, time_limit)]
+def run_one(
+    binary: Path, instance: Path, backend: str, time_limit: float, extra_args: tuple[str, ...]
+) -> Outcome:
+    cmd = [str(binary), str(instance), *solver_args(backend, time_limit), *extra_args]
     # The solver's own limit is the real one; the wall-clock guard only
     # catches a hang, so it is generous.
     try:
@@ -347,7 +352,7 @@ def execute(args: argparse.Namespace, suite: Suite, plan: Plan) -> dict[tuple[st
         ref = refs.get(name)
         if ref is None:  # build_plan only schedules instances with a reference
             continue
-        outcome = run_one(binary, instances[name], backend, limit)
+        outcome = run_one(binary, instances[name], backend, limit, suite.extra_solver_args)
         cls = classify(outcome, ref)
         results[(name, backend)] = cls
         tag = verdict(plan.expected.get((name, backend)), cls)
