@@ -72,8 +72,8 @@ struct PdlpOptions {
     // feasibility polishing, which solves separate zero-objective primal and
     // dual feasibility problems.
     bool enable_polishing = true;
-    Real polish_primal_tol = 1e-6;
-    Real polish_dual_tol = 1e-6;
+    Real polish_primal_tol = 1e-8;
+    Real polish_dual_tol = 1e-8;
     Int polish_max_iter = 500000;
 
     // Scaling.
