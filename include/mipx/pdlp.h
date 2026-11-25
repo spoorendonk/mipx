@@ -107,6 +107,9 @@ struct PdlpOptions {
     Real restart_kkt_decay = 0.0;
     // Adapt termination_eval_frequency within [50, 1000] using KKT progress.
     bool adaptive_eval_frequency = false;
+    // Measure the restart FPE baseline at the epoch's first projected PDHG
+    // step. By default the first convergence check supplies the baseline.
+    bool restart_first_step_anchor = false;
 };
 
 struct PdlpRestartStats {

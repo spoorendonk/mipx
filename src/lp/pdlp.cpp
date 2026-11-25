@@ -1119,6 +1119,11 @@ LpResult PdlpSolver::solve() {
     std::vector<Real> ax(static_cast<size_t>(m), 0.0);
     std::vector<Real> delta_y_vec(static_cast<size_t>(m), 0.0);
     std::vector<Real> at_delta_y(static_cast<size_t>(n), 0.0);
+    auto fixedPointError = [&] {
+        return pdlpFixedPointResidual(scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y,
+                                      tau_base_, sigma_base_, primal_weight,
+                                      std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
+    };
 
     // Previous A*reflected_x for the adaptive step size.
     std::vector<Real> prev_a_xrefl;
@@ -1342,14 +1347,15 @@ LpResult PdlpSolver::solve() {
                 reflected_y[i] = 2.0 * pdhg_yi - current_y[i];
                 current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
             }
+            // Use the projected and reflected points before the next step replaces them.
+            if (options_.restart_first_step_anchor && initial_fpe < 0.0)
+                initial_fpe = fixedPointError();
         }
         inner_count += batch;
         total_count += batch;
 
         // --- Fixed-point residual ‖z − T(z)‖_P for the restart decision ---
-        Real fpe = pdlpFixedPointResidual(scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y,
-                                          tau_base_, sigma_base_, primal_weight,
-                                          std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
+        const Real fpe = fixedPointError();
 
         if (initial_fpe < 0.0)
             initial_fpe = fpe;
@@ -1573,7 +1579,7 @@ LpResult PdlpSolver::solve() {
                 }
             }
             inner_count = 0;
-            initial_fpe = -1.0;  // Will be set on next batch.
+            initial_fpe = -1.0;
             last_trial_fpe = std::numeric_limits<Real>::infinity();
             have_prev_iterate = false;  // Reset adaptive state on restart.
         }
@@ -1714,6 +1720,8 @@ LpResult PdlpSolver::solve() {
                         reflected_y[i] = 2.0 * pdhg_yi - current_y[i];
                         current_y[i] = lambda * reflected_y[i] + (1.0 - lambda) * initial_y[i];
                     }
+                    if (options_.restart_first_step_anchor && initial_fpe < 0.0)
+                        initial_fpe = fixedPointError();
                 }
                 const Int completed = k_offset - 1;
                 polish_count += completed;
@@ -1723,9 +1731,7 @@ LpResult PdlpSolver::solve() {
                 inner_count += batch;
 
                 // Fixed-point residual ‖z − T(z)‖_P, as in the main loop.
-                Real fpe = pdlpFixedPointResidual(
-                    scaled_a_, pdhg_x, reflected_x, pdhg_y, reflected_y, tau_base_, sigma_base_,
-                    primal_weight, std::min(step, fpe_step_cap), delta_y_vec, at_delta_y);
+                const Real fpe = fixedPointError();
                 if (initial_fpe < 0.0)
                     initial_fpe = fpe;
 
@@ -2308,8 +2314,8 @@ LpResult PdlpSolver::solveGpu() {
         }
     };
 
-    auto launchBatch = [&](Int batch) {
-        for (Int k_offset = 1; k_offset <= batch; ++k_offset) {
+    auto launchSteps = [&](Int first_offset, Int last_offset) {
+        for (Int k_offset = first_offset; k_offset <= last_offset; ++k_offset) {
             launchComputeLambda(d_lambda, d_inner_count, k_offset, stream);
             if (!spmv_at(desc_current_y, desc_at_y))
                 return false;
@@ -2325,12 +2331,59 @@ LpResult PdlpSolver::solveGpu() {
         return true;
     };
 
-    auto launchMainBatch = [&](Int batch) {
+    auto computeProjectedMetrics = [&] {
+        if (!spmv_a(desc_pdhg_x, desc_ax))
+            return false;
+        // The reflected point minus the projected point is the PDHG residual.
+        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
+        if (!spmv_at(desc_delta_y, desc_at_delta_y) || !spmv_at(desc_pdhg_y, desc_at_y))
+            return false;
+
+        launchZeroMetrics(d_metrics, stream);
+        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
+                                    d_col_lower, d_col_upper, d_finite_col_lower,
+                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
+                                    d_tau_base, primal_weight, d_metrics, stream);
+        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
+                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
+                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
+                                    stream);
+        return cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
+                               cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
+               cudaStreamSynchronize(stream) == cudaSuccess;
+    };
+
+    auto fixedPointError = [&] {
+        return pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross,
+                         std::min(step, fpe_step_cap));
+    };
+
+    // With first-step anchoring, keep step one outside the graph so the same
+    // graph tail can follow it whether or not this batch starts a new epoch.
+    const Int tail_offset = options_.restart_first_step_anchor ? 2 : 1;
+    auto beginBatch = [&] {
         if (cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int), cudaMemcpyHostToDevice,
                             stream) != cudaSuccess)
             return false;
+        if (!options_.restart_first_step_anchor)
+            return true;
+        if (!launchSteps(1, 1))
+            return false;
+        if (initial_fpe < 0.0) {
+            if (!computeProjectedMetrics())
+                return false;
+            initial_fpe = fixedPointError();
+        }
+        return true;
+    };
+
+    auto launchMainBatch = [&](Int batch) {
+        if (!beginBatch())
+            return false;
+        if (batch < tail_offset)
+            return true;
         if (batch != cadence.interval() || graphCaptureFailed)
-            return launchBatch(batch);
+            return launchSteps(tail_offset, batch);
         if (graphExec && batch == graph_batch_size)
             return cudaGraphLaunch(graphExec, stream) == cudaSuccess;
 
@@ -2339,7 +2392,7 @@ LpResult PdlpSolver::solveGpu() {
             return false;
         destroyBatchGraph();
         if (cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal) == cudaSuccess) {
-            const bool captured_steps = launchBatch(batch);
+            const bool captured_steps = launchSteps(tail_offset, batch);
             const auto result = cudaStreamEndCapture(stream, &graph);
             if (captured_steps && result == cudaSuccess && graph &&
                 cudaGraphInstantiate(&graphExec, graph, 0) == cudaSuccess) {
@@ -2348,10 +2401,10 @@ LpResult PdlpSolver::solveGpu() {
             }
         }
 
-        // Capture never executed the batch. Submit its steps directly once.
+        // Capture never executed these steps. Submit them directly once.
         graphCaptureFailed = true;
         cudaGetLastError();
-        return launchBatch(batch);
+        return launchSteps(tail_offset, batch);
     };
 
     auto projectedObjectives = [&] {
@@ -2361,12 +2414,6 @@ LpResult PdlpSolver::solveGpu() {
             original_.obj_offset +
             obj_sign_ * (h_metrics->dual_obj_col + h_metrics->dual_obj_row) * obj_unscale;
         return std::pair{pobj, dobj};
-    };
-
-    auto downloadMetrics = [&] {
-        return cudaMemcpyAsync(h_metrics, d_metrics, sizeof(GpuConvergenceMetrics),
-                               cudaMemcpyDeviceToHost, stream) == cudaSuccess &&
-               cudaStreamSynchronize(stream) == cudaSuccess;
     };
 
     if (power_iter_spmv_failed) {
@@ -2402,36 +2449,7 @@ LpResult PdlpSolver::solveGpu() {
         }
 
         // --- Convergence check ---
-        // Compute A * pdhg_x, delta_y = reflected_y - pdhg_y (the dual part of
-        // z - T(z), #251), A^T * delta_y, then refresh A^T * pdhg_y.
-        if (!spmv_a(desc_pdhg_x, desc_ax)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        // Refresh A^T * pdhg_y immediately before convergence reduction.
-        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-
-        // Fused reduction.
-        launchZeroMetrics(d_metrics, stream);
-        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
-                                    d_col_lower, d_col_upper, d_finite_col_lower,
-                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    d_tau_base, primal_weight, d_metrics, stream);
-        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
-                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
-                                    stream);
-
-        // Transfer metrics to host.
-        if (!downloadMetrics()) {
+        if (!computeProjectedMetrics()) {
             failGpuSolve(total_count);
             goto cleanup;
         }
@@ -2453,8 +2471,7 @@ LpResult PdlpSolver::solveGpu() {
         const auto [pobj, dobj] = projectedObjectives();
         Real rel_gap = std::abs(pobj - dobj) / (1.0 + std::abs(pobj) + std::abs(dobj));
 
-        Real fpe =
-            pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross, std::min(step, fpe_step_cap));
+        const Real fpe = fixedPointError();
 
         if (initial_fpe < 0.0)
             initial_fpe = fpe;
@@ -2681,30 +2698,7 @@ LpResult PdlpSolver::solveGpu() {
     if (converged && options_.enable_polishing &&
         !timeLimitReached(t0, options_.max_solve_seconds)) {
         // Evaluate current residuals on host via the metrics struct.
-        if (!spmv_a(desc_pdhg_x, desc_ax)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-        launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-        if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-            failGpuSolve(total_count);
-            goto cleanup;
-        }
-
-        launchZeroMetrics(d_metrics, stream);
-        launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled, d_at_y,
-                                    d_col_lower, d_col_upper, d_finite_col_lower,
-                                    d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                    d_tau_base, primal_weight, d_metrics, stream);
-        launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax, d_row_lower,
-                                    d_row_upper, d_finite_row_lower, d_finite_row_upper,
-                                    d_primal_resid_scale, d_sigma_base, primal_weight, d_metrics,
-                                    stream);
-        if (!downloadMetrics()) {
+        if (!computeProjectedMetrics()) {
             failGpuSolve(total_count);
             goto cleanup;
         }
@@ -2756,9 +2750,7 @@ LpResult PdlpSolver::solveGpu() {
                 const Int batch =
                     std::min(polish_cadence.interval(), options_.polish_max_iter - polish_count);
 
-                if (cudaMemcpyAsync(d_inner_count, &inner_count, sizeof(Int),
-                                    cudaMemcpyHostToDevice, stream) != cudaSuccess ||
-                    !launchBatch(batch)) {
+                if (!beginBatch() || !launchSteps(tail_offset, batch)) {
                     failGpuSolve(total_count);
                     goto cleanup;
                 }
@@ -2768,30 +2760,7 @@ LpResult PdlpSolver::solveGpu() {
                 total_count += batch;
 
                 // Convergence check.
-                if (!spmv_a(desc_pdhg_x, desc_ax)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
-                launchSubtract(m, d_reflected_y, d_pdhg_y, d_delta_y, stream);
-                if (!spmv_at(desc_delta_y, desc_at_delta_y)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
-                if (!spmv_at(desc_pdhg_y, desc_at_y)) {
-                    failGpuSolve(total_count);
-                    goto cleanup;
-                }
-
-                launchZeroMetrics(d_metrics, stream);
-                launchConvergenceMetricsCol(n, d_pdhg_x, d_initial_x, d_reflected_x, d_cscaled,
-                                            d_at_y, d_col_lower, d_col_upper, d_finite_col_lower,
-                                            d_finite_col_upper, d_dual_resid_scale, d_at_delta_y,
-                                            d_tau_base, primal_weight, d_metrics, stream);
-                launchConvergenceMetricsRow(m, d_pdhg_y, d_initial_y, d_reflected_y, d_ax,
-                                            d_row_lower, d_row_upper, d_finite_row_lower,
-                                            d_finite_row_upper, d_primal_resid_scale, d_sigma_base,
-                                            primal_weight, d_metrics, stream);
-                if (!downloadMetrics()) {
+                if (!computeProjectedMetrics()) {
                     failGpuSolve(total_count);
                     goto cleanup;
                 }
@@ -2807,8 +2776,7 @@ LpResult PdlpSolver::solveGpu() {
                     std::sqrt(h_metrics->primal_resid_sq) / (1.0 + bound_norm);
                 Real rel_dual_resid_pol = std::sqrt(h_metrics->dual_resid_sq) / (1.0 + c_norm);
 
-                Real fpe = pdlpPNorm(h_metrics->fpe_movement, h_metrics->fpe_cross,
-                                     std::min(step, fpe_step_cap));
+                const Real fpe = fixedPointError();
                 if (initial_fpe < 0.0)
                     initial_fpe = fpe;
 

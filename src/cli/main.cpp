@@ -69,6 +69,7 @@ void printUsage(FILE* out) {
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
                  "[--pdlp-opt-norm l2|linf] [--pdlp-restart-gap-decay F] "
                  "[--pdlp-restart-kkt-decay F] [--pdlp-adaptive-eval-frequency] "
+                 "[--pdlp-restart-first-step-anchor] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
                  "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
@@ -425,6 +426,8 @@ int main(int argc, char* argv[]) {
                 pdlp_options.restart_kkt_decay = fraction;
         } else if (arg == "--pdlp-adaptive-eval-frequency") {
             pdlp_options.adaptive_eval_frequency = true;
+        } else if (arg == "--pdlp-restart-first-step-anchor") {
+            pdlp_options.restart_first_step_anchor = true;
         } else if (arg == "--gpu") {
             barrier_gpu = true;
         } else if (arg == "--no-gpu") {

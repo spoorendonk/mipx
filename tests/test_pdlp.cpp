@@ -173,6 +173,53 @@ TEST_CASE("PDLP: adaptive evaluations start at the requested interval and stay b
 
 namespace {
 
+void checkFirstStepRestart(bool use_gpu) {
+    LpProblem lp;
+    lp.num_rows = 2;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {-10.0, -10.0};
+    lp.col_upper = {10.0, 10.0};
+    lp.row_lower = {0.0, 1.0};
+    lp.row_upper = lp.row_lower;
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {1, 1, 0.4}});
+
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = use_gpu;
+    opts.gpu_min_rows = 0;
+    opts.gpu_min_nnz = 0;
+    opts.do_ruiz_scaling = false;
+    opts.do_pock_chambolle_scaling = false;
+    opts.do_bound_obj_rescaling = false;
+    opts.update_primal_weight = false;
+    opts.enable_polishing = false;
+    opts.restart_necessary_decay = 0.0;
+    opts.restart_artificial_fraction = 1.0;
+    opts.termination_eval_frequency = 7;
+    opts.max_iter = 21;
+    opts.primal_tol = opts.dual_tol = opts.optimality_tol = 0.015;
+
+    Status expected_status = Status::IterLimit;
+    SECTION("default periodic anchor") {}
+    SECTION("first-step anchor") {
+        // The residual at step 14 is about 9.4% of the one at step 8. A
+        // baseline taken at step 14 misses the restart at that check.
+        opts.restart_first_step_anchor = true;
+        expected_status = Status::Optimal;
+    }
+
+    PdlpSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    CHECK(solver.restartStats().first_batch == 1);
+    CHECK(solver.restartStats().sufficient_fpe == (opts.restart_first_step_anchor ? 1 : 0));
+    CHECK(result.status == expected_status);
+    CHECK(solver.usedGpu() == use_gpu);
+    CHECK(result.iterations == 21);
+}
+
 void checkOptionalRestartRules(bool use_gpu) {
     PdlpOptions options;
     options.verbose = false;
@@ -236,6 +283,17 @@ void checkOptionalRestartRules(bool use_gpu) {
 }
 
 }  // namespace
+
+TEST_CASE("PdlpSolver: restart decay can use the first step of the epoch", "[pdlp]") {
+    checkFirstStepRestart(false);
+}
+
+TEST_CASE("PdlpSolver: GPU restart decay can use the first step of the epoch", "[pdlp][gpu]") {
+    if (!PdlpSolver::gpuAvailable()) {
+        SKIP("No usable CUDA device: none found, or no device code for it (#192).");
+    }
+    checkFirstStepRestart(true);
+}
 
 TEST_CASE("PdlpSolver: optional restart rules fire independently and stats reset", "[pdlp]") {
     checkOptionalRestartRules(false);
