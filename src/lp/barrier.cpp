@@ -180,9 +180,15 @@ DensityInfo detectDensity(const SparseMatrix& A, Real dense_fraction) {
     return info;
 }
 
+// Dense rows or an NE dense throughout favour the augmented system whatever
+// is done with the dense columns.
+bool denseBeyondColumns(const DensityInfo& density) {
+    return density.dense_rows > 10 || density.avg_ne_row_density > 20.0;
+}
+
 bool preferAugmented(const SparseMatrix& matrix, const BarrierOptions& options) {
     const auto density = detectDensity(matrix, options.dense_col_fraction);
-    return density.dense_cols > 50 || density.dense_rows > 10 || density.avg_ne_row_density > 20.0;
+    return density.dense_cols > 50 || denseBeyondColumns(density);
 }
 
 bool gpuAlgorithm(BarrierAlgorithm algorithm) {
@@ -2087,9 +2093,11 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 #ifdef MIPX_HAS_CUDSS
     // Under the opt-in cap (#141), Auto keeps the GPU normal equations and
     // takes the dense columns out of the factor instead of switching to the
-    // augmented system.
-    const bool try_gpu_dense_cols = options_.gpu_ne_max_dense_cols > 0 &&
-                                    detectDensity(aeq_, options_.dense_col_fraction).dense_cols > 0;
+    // augmented system. Only when the dense columns are the reason: dense
+    // rows still choose augmented.
+    const auto density = detectDensity(aeq_, options_.dense_col_fraction);
+    const bool try_gpu_dense_cols = options_.gpu_ne_max_dense_cols > 0 && density.dense_cols > 0 &&
+                                    !denseBeyondColumns(density);
     if (requested_algo == BarrierAlgorithm::Auto && algo == BarrierAlgorithm::GpuAugmented &&
         try_gpu_dense_cols) {
         algo = BarrierAlgorithm::GpuCholesky;
