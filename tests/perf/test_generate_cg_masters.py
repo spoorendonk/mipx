@@ -83,26 +83,30 @@ def test_read_manifest_splits_on_the_first_equals(tmp_path: Path) -> None:
     assert gen.read_manifest(manifest) == {"sense": "min", "obj_offset": "0", "note": "a=b"}
 
 
-# A stand-in for mcf: writes the dump that the instance's name asks for, or a
-# good one for every instance when FAKE_MCF_GOOD is set.
-FAKE_MCF = """#!/usr/bin/env python3
+# The fake CG tool writes the dump that the instance's name asks for, or a
+# good one for every instance when FAKE_CG_GOOD is set.
+FAKE_CG_TOOL = """#!/usr/bin/env python3
 import os
 import sys
 from pathlib import Path
 
 source = Path(sys.argv[1]).name
-if os.environ.get("FAKE_MCF_GOOD"):
+if os.environ.get("FAKE_CG_GOOD"):
     source = "good"
 dump = Path(next(a for a in sys.argv if a.startswith("lp_dump=")).split("=", 1)[1])
 if source.startswith("grid2"):
     sys.exit(3)  # no dump at all
 lp = dump / "lp_0000"
 lp.mkdir(parents=True)
-fmt = "mcf-lpseq 2" if source.startswith("grid8") else "mcf-lpseq 1"
+fmt = "lpseq 2" if source.startswith("grid8") else os.getenv("FAKE_CG_FORMAT", "lpseq 1")
 sense = "max" if source.startswith("grid3") else "min"
 offset = "1.5" if source.startswith("grid4") else "0"
+presolve = "on" if source.startswith("planar50.gz") else "off"
 if not source.startswith("grid9"):
-    (lp / "manifest.txt").write_text(f"format = {fmt}\\nsense={sense}\\nobj_offset={offset}\\n")
+    (lp / "manifest.txt").write_text(
+        f"format = {fmt}\\nsense={sense}\\nobj_offset={offset}\\n"
+        f"backend = highs simplex presolve={presolve}\\n"
+    )
 assert "lp_dump_every=1" in sys.argv
 (lp / "master_0000.mps").write_text(@MPS_DIAGONAL@)
 mps = @MPS_FREE_ROW@ if source.startswith("grid5") else @MPS_COUPLED@
@@ -124,19 +128,20 @@ REFUSED = {
     "grid8": "unsupported dump format",
     "grid9": "manifest.txt",
     "planar30": "no later master",
+    "planar50": "unsupported backend",
 }
 
 
-def fake_mcf(tmp_path: Path) -> tuple[Path, Path]:
-    """The fake mcf and an instance directory without grid7's file."""
-    mcf = tmp_path / "mcf"
+def fake_cg_tool(tmp_path: Path) -> tuple[Path, Path]:
+    """The fake tool and an instance directory without grid7's file."""
+    cg_tool = tmp_path / "cg-tool"
     script = (
-        FAKE_MCF.replace("@MPS_DIAGONAL@", repr(MPS_DIAGONAL))
+        FAKE_CG_TOOL.replace("@MPS_DIAGONAL@", repr(MPS_DIAGONAL))
         .replace("@MPS_COUPLED@", repr(MPS_COUPLED))
         .replace("@MPS_FREE_ROW@", repr(MPS_FREE_ROW))
     )
-    mcf.write_text(script, encoding="utf-8")
-    mcf.chmod(mcf.stat().st_mode | stat.S_IXUSR)
+    cg_tool.write_text(script, encoding="utf-8")
+    cg_tool.chmod(cg_tool.stat().st_mode | stat.S_IXUSR)
     instances = tmp_path / "commalab"
     for name in gen.INSTANCES:
         if name == "grid7":
@@ -144,17 +149,17 @@ def fake_mcf(tmp_path: Path) -> tuple[Path, Path]:
         path = gen.instance_file(instances, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"")
-    return mcf, instances
+    return cg_tool, instances
 
 
 def test_generate_refuses_each_bad_master_and_then_copies_none(tmp_path: Path) -> None:
-    mcf, instances = fake_mcf(tmp_path)
+    cg_tool, instances = fake_cg_tool(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
     work = tmp_path / "work"
     work.mkdir()
 
-    solu, failures = gen.generate(mcf, instances, out, work)
+    solu, failures = gen.generate(cg_tool, instances, out, work)
 
     checked = [n for n in gen.INSTANCES if n not in REFUSED]
     assert solu == [f"=opt= {n} 42.25" for n in checked]
@@ -165,23 +170,30 @@ def test_generate_refuses_each_bad_master_and_then_copies_none(tmp_path: Path) -
         assert any(f.startswith(f"{name}: ") and needle in f for f in failures), (name, failures)
 
 
-def test_generate_reports_a_missing_mcf(tmp_path: Path) -> None:
-    _, instances = fake_mcf(tmp_path)
-    missing = tmp_path / "no-mcf"
+def test_generate_reports_a_missing_tool(tmp_path: Path) -> None:
+    _, instances = fake_cg_tool(tmp_path)
+    missing = tmp_path / "no-cg-tool"
     solu, failures = gen.generate(missing, instances, tmp_path, tmp_path)
     assert solu == []
-    # Every instance but grid7, which has no file, fails on the missing mcf.
-    on_mcf = [f for f in failures if str(missing) in f]
-    assert len(on_mcf) == len(gen.INSTANCES) - 1
+    # Grid7 fails earlier because its instance file is missing.
+    tool_failures = [f for f in failures if str(missing) in f]
+    assert len(tool_failures) == len(gen.INSTANCES) - 1
     assert len(failures) == len(gen.INSTANCES)
 
 
-def test_main_writes_a_solu_the_gate_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    mcf, instances = fake_mcf(tmp_path)
+@pytest.mark.parametrize("dump_format", [None, "older-dump 1"])
+def test_main_writes_a_solu_the_gate_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dump_format: str | None
+) -> None:
+    cg_tool, instances = fake_cg_tool(tmp_path)
     gen.instance_file(instances, "grid7").write_bytes(b"")
-    monkeypatch.setenv("FAKE_MCF_GOOD", "1")
+    monkeypatch.setenv("FAKE_CG_GOOD", "1")
     out = tmp_path / "out"
-    assert gen.main(["--mcf", str(mcf), "--instances", str(instances), "--out", str(out)]) == 0
+    args = ["--cg-tool", str(cg_tool), "--instances", str(instances), "--out", str(out)]
+    if dump_format is not None:
+        monkeypatch.setenv("FAKE_CG_FORMAT", dump_format)
+        args.extend(["--dump-format", dump_format])
+    assert gen.main(args) == 0
     refs = load_gate().read_solu(out / gen.SOLU)
     assert sorted(refs) == sorted(gen.INSTANCES)
     assert all(ref.kind == "opt" and ref.value == 42.25 for ref in refs.values())
@@ -191,12 +203,13 @@ def test_main_writes_a_solu_the_gate_reads(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_main_changes_nothing_when_a_master_fails(tmp_path: Path) -> None:
-    mcf, instances = fake_mcf(tmp_path)
+    cg_tool, instances = fake_cg_tool(tmp_path)
     out = tmp_path / "out"
     out.mkdir()
     (out / gen.SOLU).write_text("=opt= grid1 1.0\n", encoding="utf-8")
     (out / "grid1.mps").write_text("old\n", encoding="utf-8")
-    assert gen.main(["--mcf", str(mcf), "--instances", str(instances), "--out", str(out)]) == 1
+    args = ["--cg-tool", str(cg_tool), "--instances", str(instances), "--out", str(out)]
+    assert gen.main(args) == 1
     assert (out / gen.SOLU).read_text(encoding="utf-8") == "=opt= grid1 1.0\n"
     assert (out / "grid1.mps").read_text(encoding="utf-8") == "old\n"
     assert sorted(p.name for p in out.iterdir()) == ["cg_masters.solu", "grid1.mps"]

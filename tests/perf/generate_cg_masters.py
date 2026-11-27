@@ -4,23 +4,22 @@
 Writes, for each of the 15 public CommaLab instances of the cold LP panel
 (#272: grid1-9, planar30/50/80/100/150/300), the first later master LP with
 a path column linking demand and capacity rows as `<name>.mps`, and
-`cg_masters.solu` with the corresponding objective
-HiGHS reported for it (simplex, presolve off, as mcf records it), in `.solu`
-format for run_instance_gate.py's `barrier-cg` suite.
+`cg_masters.solu` with the corresponding objective HiGHS reported for it
+(simplex, presolve off), in `.solu` format for run_instance_gate.py's
+`barrier-cg` suite.
 
-mcf is https://github.com/tinnet-ai/mcf (used at 220af3c). With `lp_dump_every=1`,
-its recorder applies changes to its mirror LP and writes `master_NNNN.mps`
-immediately before solve NNNN, whose result appears in `ops.txt` (format in
-tests/perf/README.md, "LP Sequence Replay").
+The external column-generation tool must support the arguments in
+`dump_master`. With `lp_dump_every=1`, it writes `master_NNNN.mps` with
+all edits applied immediately before solve NNNN, whose result appears in
+`ops.txt`. See "LP Sequence Replay" in tests/perf/README.md for the format.
 
-    generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab \\
+    generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab \\
         [--out tests/data/cg_masters_later]
 
-`--instances` is mcf's `data/commalab` directory (`grid/gridN.gz`,
-`planar/planarN.gz`). Exit status: 0 when every master and the `.solu` were
-written; 1 when an mcf run or its dump failed, and then nothing in `--out` is
-changed: new masters beside an old `.solu`, or the reverse, would read as a
-barrier regression.
+`--instances` is the public CommaLab directory (`grid/gridN.gz`,
+`planar/planarN.gz`). Exit status is 0 when every master and the `.solu`
+were written. If a run or its dump fails, the script returns 1 without
+publishing a new panel.
 """
 
 from __future__ import annotations
@@ -36,6 +35,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO / "tests" / "data" / "cg_masters_later"
 SOLU = "cg_masters.solu"
+LPSEQ_FORMAT = "lpseq 1"
+REFERENCE_BACKEND = "highs simplex presolve=off"
 
 INSTANCES = [f"grid{i}" for i in range(1, 10)] + [f"planar{n}" for n in (30, 50, 80, 100, 150, 300)]
 
@@ -111,10 +112,10 @@ def later_master(lp: Path) -> tuple[Path, float]:
     raise ValueError("no later master with a path linking demand and capacity rows")
 
 
-def dump_master(mcf: Path, source: Path, dump: Path) -> Path:
-    """Run a few cg iterations of mcf; return the first LP's snapshot directory."""
+def dump_master(cg_tool: Path, source: Path, dump: Path) -> Path:
+    """Run a few CG iterations and return the first LP's snapshot directory."""
     cmd = [
-        str(mcf),
+        str(cg_tool),
         str(source),
         "--method",
         "cg",
@@ -132,33 +133,40 @@ def dump_master(mcf: Path, source: Path, dump: Path) -> Path:
         "--cg-set",
         "max_iterations=5",
     ]
-    # mcf can report a failed exact check at the iteration limit. The dump's
+    # The tool can report a failed exact check at the iteration limit. The dump's
     # individual LP solve records determine whether it contains a usable master.
     try:
         run = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=600)
     except subprocess.TimeoutExpired as err:
-        raise RuntimeError(f"mcf ran past {err.timeout} s on {source}") from err
+        raise RuntimeError(f"CG tool ran past {err.timeout} s on {source}") from err
     lp = dump / "lp_0000"
     if not (lp / "master_0000.mps").is_file() or not (lp / "ops.txt").is_file():
         tail = (run.stderr or run.stdout).strip()[-500:]
         raise RuntimeError(
-            f"mcf wrote no master for {source} (exit {run.returncode}: {tail}; {' '.join(cmd)})"
+            f"CG tool wrote no master for {source} (exit {run.returncode}: {tail}; {' '.join(cmd)})"
         )
     return lp
 
 
-def checked_master(mcf: Path, source: Path, dump: Path) -> tuple[Path, float]:
+def checked_master(cg_tool: Path, source: Path, dump: Path, dump_format: str) -> tuple[Path, float]:
     """Dump one instance's later master and return its MPS and reference objective.
 
-    Raises RuntimeError, ValueError or OSError (no mcf at that path, a dump
-    file missing) when the master cannot serve as a gate instance.
+    Raises RuntimeError, ValueError or OSError when the master cannot serve
+    as a gate instance (for example, the tool or a dump file is missing).
     """
     if not source.is_file():
         raise RuntimeError(f"no instance file {source}")
-    lp = dump_master(mcf, source, dump)
+    lp = dump_master(cg_tool, source, dump)
     manifest = read_manifest(lp / "manifest.txt")
-    if manifest.get("format") != "mcf-lpseq 1":
-        raise RuntimeError(f"unsupported dump format: {manifest.get('format')}")
+    actual_format = manifest.get("format")
+    if actual_format != dump_format:
+        raise RuntimeError(
+            f"unsupported dump format: {actual_format!r} (expected {dump_format!r}). "
+            "Pass --dump-format for a compatible producer with a different marker."
+        )
+    backend = manifest.get("backend")
+    if backend != REFERENCE_BACKEND:
+        raise RuntimeError(f"unsupported backend: {backend!r} (expected {REFERENCE_BACKEND!r})")
     # The reference must be the MPS's own objective: refuse what mipx-solve
     # would read differently from what HiGHS solved.
     if manifest.get("sense") != "min" or float(manifest.get("obj_offset", "0")) != 0.0:
@@ -166,7 +174,9 @@ def checked_master(mcf: Path, source: Path, dump: Path) -> tuple[Path, float]:
     return later_master(lp)
 
 
-def generate(mcf: Path, instances: Path, out: Path, workdir: Path) -> tuple[list[str], list[str]]:
+def generate(
+    cg_tool: Path, instances: Path, out: Path, workdir: Path, *, dump_format: str = LPSEQ_FORMAT
+) -> tuple[list[str], list[str]]:
     """Dump and check every master; copy them all to out only if none failed.
 
     Returns (.solu lines, failures); the caller writes the .solu.
@@ -176,7 +186,9 @@ def generate(mcf: Path, instances: Path, out: Path, workdir: Path) -> tuple[list
     masters: list[tuple[Path, str]] = []
     for name in INSTANCES:
         try:
-            mps, objective = checked_master(mcf, instance_file(instances, name), workdir / name)
+            mps, objective = checked_master(
+                cg_tool, instance_file(instances, name), workdir / name, dump_format
+            )
         except (RuntimeError, ValueError, OSError) as err:
             failures.append(f"{name}: {err}")
             continue
@@ -196,14 +208,23 @@ def generate(mcf: Path, instances: Path, out: Path, workdir: Path) -> tuple[list
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--mcf", required=True, type=Path, help="mcf executable")
-    p.add_argument("--instances", required=True, type=Path, help="mcf's data/commalab")
+    p.add_argument("--cg-tool", required=True, type=Path, help="column-generation executable")
+    p.add_argument(
+        "--instances", required=True, type=Path, help="public CommaLab instance directory"
+    )
+    p.add_argument(
+        "--dump-format",
+        default=LPSEQ_FORMAT,
+        help="expected manifest format value for a compatible producer (default: %(default)s)",
+    )
     p.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = p.parse_args(argv)
 
     args.out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".dump_", dir=args.out) as tmp:
-        solu, failures = generate(args.mcf, args.instances, args.out, Path(tmp))
+        solu, failures = generate(
+            args.cg_tool, args.instances, args.out, Path(tmp), dump_format=args.dump_format
+        )
     for failure in failures:
         print(f"FAILED: {failure}", file=sys.stderr)
     if failures:

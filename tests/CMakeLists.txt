@@ -121,9 +121,9 @@ if(TARGET mipx-presolve-check-highs)
     add_dependencies(mipx-tests mipx-presolve-check-highs)
 endif()
 
-# LP sequence replay (#267): column generation's masters on the public
-# CommaLab grid1, as mcf's LP recorder wrote them, replayed on every LP solver
-# warm and cold; each solve must reach the recorded objective. Seconds.
+# LP sequence replay (#267): column-generation masters from the public
+# CommaLab grid1 replayed on every LP solver. Each solve must reach the
+# recorded objective. The tests take seconds.
 if(TARGET mipx-lpseq-replay)
     foreach(devex off on)
         set(_args "${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
@@ -157,6 +157,13 @@ if(TARGET mipx-lpseq-replay)
         COMMAND mipx-lpseq-replay "${PROJECT_SOURCE_DIR}/tests/data/lpseq/malformed")
     set_tests_properties("LP sequence replay: an out-of-range index is a format error"
         PROPERTIES PASS_REGULAR_EXPRESSION "col_costs: index 5 out of range")
+
+    set(_bad_manifest_dir "${CMAKE_CURRENT_BINARY_DIR}/lpseq_bad_format")
+    file(GENERATE OUTPUT "${_bad_manifest_dir}/manifest.txt" CONTENT "format = example-lpseq 1\n")
+    add_test(NAME "LP sequence replay: an unsupported manifest marker is a format error"
+        COMMAND mipx-lpseq-replay "${_bad_manifest_dir}")
+    set_tests_properties("LP sequence replay: an unsupported manifest marker is a format error"
+        PROPERTIES PASS_REGULAR_EXPRESSION "unsupported format: example-lpseq 1 \\(expected lpseq 1\\)")
 endif()
 # The same sequences on HiGHS, in bench builds only (MIPX_BENCH_HIGHS).
 if(TARGET mipx-lpseq-replay-highs)

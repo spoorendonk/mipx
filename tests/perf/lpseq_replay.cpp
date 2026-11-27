@@ -1,7 +1,6 @@
-// mipx-lpseq-replay: replay an LP sequence in mcf's "mcf-lpseq 1" format
-// (tinnet-ai/mcf#205, mcf's recording LP backend; see lpseq_format.h and
-// tests/perf/README.md) on mipx's LP solvers, and check every solve's
-// objective against the recorded one (#267).
+// mipx-lpseq-replay: replay an LP sequence on mipx's LP solvers and check
+// each solve against its recorded objective (#267). See lpseq_format.h and
+// tests/perf/README.md for the format.
 //
 // Arms: dual-warm keeps one DualSimplexSolver and applies the ops to it (its
 // basis carries over); dual-cold, barrier, barrier-hsd and pdlp load the LP

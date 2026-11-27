@@ -1,9 +1,8 @@
 #pragma once
 
-// Reading an LP sequence in mcf's "mcf-lpseq 1" format (tinnet-ai/mcf#205;
-// specified in mcf's include/mcf/lp/lp_recorder.h, summarised in
-// tests/perf/README.md), shared by mipx-lpseq-replay and the opt-in
-// mipx-lpseq-replay-highs (#267, #268), so both replay exactly the same ops.
+// Reference parser for "lpseq 1". See tests/perf/README.md for the wire format.
+// Shared by mipx-lpseq-replay and the opt-in mipx-lpseq-replay-highs (#267,
+// #268), so both replay exactly the same ops.
 //
 // A sequence directory holds manifest.txt, master_0000.mps and ops.txt.
 // readOp() parses one op of ops.txt and checks every index against the LP
@@ -77,7 +76,7 @@ inline std::string trim(std::string_view s) {
     return std::string(s.substr(b, e - b + 1));
 }
 
-// key = value lines; the format must be exactly "mcf-lpseq 1", and a replay
+// key = value lines; the format must be exactly "lpseq 1", and a replay
 // compares objectives of a minimised LP without a constant.
 inline void checkManifest(const std::string& dir) {
     std::ifstream in(dir + "/manifest.txt");
@@ -95,8 +94,8 @@ inline void checkManifest(const std::string& dir) {
         const std::string key = trim(whole.substr(0, eq));
         const std::string value = trim(whole.substr(eq + 1));
         if (key == "format") {
-            if (value != "mcf-lpseq 1") {
-                fail("unsupported format: " + value);
+            if (value != "lpseq 1") {
+                fail("unsupported format: " + value + " (expected lpseq 1)");
             }
             format = true;
         } else if (key == "sense" && value != "min") {

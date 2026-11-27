@@ -494,9 +494,9 @@ bool isNumber(std::string_view s) {
 }
 
 // The section a line opens, or nullopt for a data line. A header starts in
-// column 1. Free MPS also lets data lines start there (mcf's LP recorder
-// writes them so, as HiGHS reads them), so a column-1 line is a header only
-// when it is a section keyword with at most one more token, not a number:
+// column 1. Free MPS also lets data lines start there, as in LP sequence
+// snapshots. A column-1 line opens a section only if it starts with a
+// section keyword and has at most one more token, which cannot be a number:
 // "RHS", "OBJSENSE MAX", "OBJNAME obj". A data line has more tokens, or a
 // value second (a row named BOUNDS in an RHS without a set name), so an RHS
 // set named RHS or a column named BOUNDS stays data. NAME is a header only

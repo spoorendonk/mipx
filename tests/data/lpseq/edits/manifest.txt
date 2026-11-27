@@ -1,4 +1,4 @@
-format = mcf-lpseq 1
+format = lpseq 1
 backend = hand-written (min x + y, x + y >= 2, x, y >= 0; optima worked out by hand)
 sense = min
 snapshot_every = 0

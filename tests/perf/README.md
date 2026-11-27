@@ -93,18 +93,44 @@ so the CLI cannot solve a master before entering the barrier. The barrier's
 own presolve still runs. All 15 sparse factorizations show fill on the pinned
 panel, and the two backends together take about 12 s on the test host.
 
-Generate the MPS files with [mcf](https://github.com/tinnet-ai/mcf) at
-`220af3c`, built with `MCF_WITH_HIGHS=ON`, and its `data/commalab` instances:
+Download [`grid.tgz`](https://commalab.di.unipi.it/files/Data/MMCF/grid.tgz)
+and [`planar.tgz`](https://commalab.di.unipi.it/files/Data/MMCF/planar.tgz)
+from [CommaLAB's multicommodity flow collection](https://commalab.di.unipi.it/datasets/mmcf/).
+The external column-generation tool needs HiGHS support and must read the
+gzip-compressed instance files in the original format described by each
+archive's `format.doc`. From the directory containing the two archives,
+prepare the inputs as follows.
 
 ```bash
-python3 tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab
+mkdir -p commalab/{grid,planar}
+tar -xzf grid.tgz -C commalab/grid
+tar -xzf planar.tgz -C commalab/planar
+gzip commalab/grid/grid{1..9} commalab/planar/planar{30,50,80,100,150,300}
 ```
 
-The generator runs up to five iterations per instance on HiGHS simplex
-with presolve off and requests `lp_dump_every=1`. The recorder writes the
-full master just before each solve. The generator picks the first coupled
-snapshot after solve 0, looks up its matching `solve` record in `ops.txt`,
-and writes `<name>.mps` and the `.solu` in `tests/data/cg_masters_later/`.
+Run the generator from the mipx checkout.
+
+```bash
+python3 tests/perf/generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab
+```
+
+The executable must run HiGHS with presolve disabled and accept an
+instance path followed by `--method cg
+--backend highs --highs-method simplex --threads 1 --no-sidecar
+--cg-set lp_dump=DIR --cg-set lp_dump_every=1 --cg-set max_iterations=5`.
+The generator checks for `backend = highs simplex presolve=off` in the
+dump's manifest. The tool writes `DIR/lp_0000/` with a full master just
+before each solve, with one row/value pair per `COLUMNS` line and
+consecutive solve numbers starting at 0. If the dump uses a different
+manifest format value with the same version 1 layout, pass `--dump-format`
+with that exact value.
+
+The generator picks the first coupled snapshot after solve 0, looks up
+its matching `solve` record in `ops.txt`, and writes `<name>.mps` and the
+`.solu` in `tests/data/cg_masters_later/`.
+Reproducing the reference masters requires the same starting columns and
+pricing strategy. A change to the generator's model or pricing can
+produce different intermediate LPs for the same inputs.
 It requires a finite optimal objective for a minimisation LP with zero
 objective offset and no free rows. A failed dump leaves the published
 panel untouched. The suite reports `Skipped` until the later masters are
@@ -504,11 +530,10 @@ Artifacts:
 
 ## LP Sequence Replay (column-generation masters, #267)
 
-`mipx-lpseq-replay` (built with the CLI) replays a sequence of LPs written by
-mcf's LP recorder ([tinnet-ai/mcf#205](https://github.com/tinnet-ai/mcf/issues/205);
-`mcf <instance> --method cg --cg-set lp_dump=DIR`, one `DIR/lp_NNNN/` per
-master) on mipx's LP solvers, and checks every solve against the objective
-mcf recorded.
+`mipx-lpseq-replay` (built with the CLI) replays a recorded LP and its
+incremental edits on mipx's LP solvers. It checks every solve against the
+recorded status and objective. The [CPU Barrier Gate](#cpu-barrier-gate-296)
+uses this format to capture column-generation masters.
 
 ```bash
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
@@ -516,15 +541,49 @@ mcf recorded.
     [--barrier-ne dense|sparse] [--primal-devex] [--csv out.csv]
 ```
 
-Format (`format = mcf-lpseq 1` in `manifest.txt`; specified in mcf's
-`include/mcf/lp/lp_recorder.h`): `master_0000.mps`, the LP at its first solve
-in free MPS with rows `r<i>` and columns `c<j>` by index and data lines from
-column 1; and `ops.txt`, one change or solve per line with indices as of the
-LP it applies to (`add_cols`, `del_cols`, `add_rows`, `del_rows`,
-`col_bounds`, `row_bounds`, `col_costs`, `coeffs`, `solve <seq> <status>
-<obj> <iters> <secs>`), numbers in `%.17g`.
-With `lp_dump_every=K`, the recorder also writes `master_NNNN.mps` for
-every solve number that is a multiple of K, with its preceding edits applied.
+The version 1 format is implemented in [`lpseq_format.h`](lpseq_format.h).
+Each sequence directory requires three files.
+
+- `manifest.txt` contains `key = value` lines and requires
+  `format = lpseq 1`. If present, `sense` must be `min` and `obj_offset`
+  must be zero. The replayers ignore other keys. `backend` identifies the
+  recording solver and settings, and `tol_primal` and `tol_dual` give its
+  feasibility tolerances. `snapshot_every` gives the optional snapshot
+  interval in solves, with 0 indicating no extra snapshots.
+  For an existing version 1 recording with a different
+  format value, replace that line with `format = lpseq 1` before replay.
+- `master_0000.mps` holds the LP at its first solve in free MPS, with rows
+  `r<i>` and columns `c<j>` named by zero-based index. Data lines can
+  start in column 1. The only `N` row is the objective. Free constraint
+  rows would be dropped by the MPS reader and shift subsequent indices.
+- `ops.txt` has whitespace-separated records with zero-based indices into
+  the current LP. Real numbers are written with `%.17g` precision. Each
+  edit starts with an operation and a count `k`.
+
+  | Operation | Data after `k` |
+  | --- | --- |
+  | `add_cols` | `k` following lines of `cost lower upper nnz` and `nnz` `(row value)` pairs |
+  | `add_rows` | `k` following lines of `lower upper nnz` and `nnz` `(column value)` pairs |
+  | `del_cols`, `del_rows` | `k` indices on the same line |
+  | `col_bounds`, `row_bounds` | `k` `(index lower upper)` triples on the same line |
+  | `col_costs` | `k` `(column cost)` pairs on the same line |
+  | `coeffs` | `k` `(row column value)` triples on the same line |
+
+  Adds append rows or columns in order. Within one item, each nonzero
+  position must appear only once. Deletes compact the remaining indices in
+  order and merge repeated delete indices. `coeffs` replaces each listed
+  value and requires distinct positions. Bounds can use `-inf` for a
+  missing lower bound or `inf` for a missing upper bound.
+
+  Start with the solve for `master_0000.mps`, then record edits before the
+  solves they affect. The record `solve <seq> <status> <obj> <iters> <secs>`
+  uses status `optimal`, `infeasible`, `unbounded` or `error`. Iteration
+  count and seconds describe the recording run.
+
+With a positive `snapshot_every = K`, optional `master_NNNN.mps` files
+capture the LP just before each later solve whose number is a multiple of
+K, with all preceding edits applied. Replayers use the initial snapshot
+and `ops.txt`.
 
 Arms: `dual-warm` keeps one dual simplex and applies each change to it, so its
 basis carries over (a `coeffs` change, which `LpSolver` has no call for,
@@ -539,8 +598,7 @@ One CSV line per solve and arm:
 `seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded`.
 Exit 0 when every solve matches the recorded status and objective (relative
 to max(1, |recorded|), `--rel-tol` 1e-6, `--pdlp-rel-tol` 1e-4), 1 when one
-does not, 2 on a format error. A master with a free row (written as an `N`
-row, which the MPS reader drops) is refused rather than replayed shifted.
+does not, 2 on a format error.
 
 `tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
 HiGHS simplex, 9 masters); ctest replays it on `dual-warm`, `dual-cold`,
@@ -559,10 +617,10 @@ through its API, one thread unless `--threads N`:
     [--presolve] [--threads N] [--csv out.csv]
 ```
 
-`simplex-warm` (dual) and `primal-warm` keep one `Highs` across the changes,
-as mcf's HiGHS backend does; the `-cold` arms solve each LP on a fresh one
-(IPX and HiPO without crossover, held to `--ipm-rel-tol` 1e-5). Presolve is
-off unless `--presolve`, as mcf runs it. The mipx library never links HiGHS.
+`simplex-warm` (dual) and `primal-warm` keep one `Highs` across the changes.
+The `-cold` arms solve each LP on a fresh one (IPX and HiPO without
+crossover, held to `--ipm-rel-tol` 1e-5). Presolve is off unless `--presolve`.
+The mipx library never links HiGHS.
 
 `--threads N` sets HiGHS's `threads` option for every arm; it speeds up HiPO
 and `pami-warm`, which is `simplex-warm` on HiGHS's parallel dual simplex

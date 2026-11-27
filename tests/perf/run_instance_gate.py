@@ -150,7 +150,7 @@ SUITES: dict[str, Suite] = {
         GATE_DIR / "barrier_cg_expected.csv",
         10.0,
         ("barrier-dense", "barrier-sparse"),
-        "tests/perf/generate_cg_masters.py --mcf PATH/mcf --instances PATH/data/commalab",
+        "tests/perf/generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab",
         # CLI presolve can solve these small masters before barrier starts.
         extra_solver_args=("--no-presolve",),
     ),

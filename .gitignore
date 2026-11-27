@@ -27,10 +27,9 @@ tests/data/*_roundtrip.mps
 !tests/data/malformed.mps
 # The MPS extension-section fixtures of #254, one per section.
 !tests/data/mps_*.mps
-# A column-generation LP sequence of the public CommaLab grid1, written by
-# mcf's LP recorder (#267's tier-0 replay).
+# LP sequences for replay tests, including the public CommaLab grid1 (#267).
 !tests/data/lpseq/**/*.mps
-# The second cg master of the public CommaLab grid2, from the same recorder:
+# The second column-generation master of the public CommaLab grid2 is
 # CpuAugmented's regression LP (#270).
 !tests/data/grid2_master_0001.mps
 # Legacy first-master downloads (#331).

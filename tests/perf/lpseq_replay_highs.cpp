@@ -1,4 +1,4 @@
-// mipx-lpseq-replay-highs: replay an LP sequence in mcf's "mcf-lpseq 1"
+// mipx-lpseq-replay-highs: replay an LP sequence in the "lpseq 1"
 // format on HiGHS, through its API, so it can run warm (#268). An opt-in
 // bench target (MIPX_BENCH_HIGHS, OFF by default); the mipx library never
 // links HiGHS. It reads the ops with the same parser as mipx-lpseq-replay
@@ -6,8 +6,8 @@
 //   seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded
 //
 // Arms: simplex-warm (dual simplex) and primal-warm (primal simplex) keep
-// one Highs object across the changes, as mcf's HiGHS backend does;
-// simplex-cold, ipx-cold and hipo-cold solve each LP on a fresh Highs
+// one Highs object across the changes.
+// Arms simplex-cold, ipx-cold and hipo-cold solve each LP on a fresh Highs
 // (interior points without crossover); pami-warm is simplex-warm on HiGHS's
 // parallel dual simplex (PAMI, simplex_strategy 3), for use with --threads
 // (parallel=on alone does not select it in HiGHS 1.16; its width stays at

@@ -405,9 +405,9 @@ TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]"
 
 TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
           "[barrier][cpu-augmented]") {
-    // The second master of mcf's column generation on grid2 (public grid
-    // instance, recorded with lp_dump, #270). CpuAugmented, which Auto picks on
-    // a CPU-only build, diverged from its first step until the fixes above.
+    // The second column-generation master of the public CommaLab grid2
+    // instance (#270). CpuAugmented, which Auto picks on a CPU-only build,
+    // diverged from its first step until the fixes above.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     const bool presolve = GENERATE(false, true);
@@ -423,7 +423,7 @@ TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
     solver.load(lp);
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    // mipx dual simplex, and HiGHS when mcf recorded it: 2039020.
+    // Both mipx dual simplex and HiGHS reach this objective.
     constexpr Real kOptimum = 2039020.0;
     CHECK(std::abs(result.objective - kOptimum) <= 1e-6 * kOptimum);
 }

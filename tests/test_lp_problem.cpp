@@ -177,9 +177,8 @@ TEST_CASE("MPS reader: an objective-row RHS is the negated constant", "[io][mps]
 }
 
 TEST_CASE("MPS reader: free MPS data lines may start in column 1", "[io][mps]") {
-    // As mcf's LP recorder writes it (and HiGHS reads it): only a line whose
-    // first token is a section keyword is a header. Read as headers, these
-    // lines left a 0 x 0 model that solved to 0 (#267). A column named
+    // Free MPS allows data lines to start in column 1. Reading them as
+    // section headers left a 0 x 0 model that solved to 0 (#267). A column named
     // BOUNDS, an RHS set named RHS and a bound set named BOUNDS are data
     // (more tokens than a header). The SOS section's lines are read as SOS
     // (#254), not taken for bounds, and a member alone on its line is data.
