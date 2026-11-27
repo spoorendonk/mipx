@@ -1,5 +1,5 @@
 #!/bin/sh
-# wcp: pre-push base=f4447156fe9a
+# wcp: pre-push base=5bb1c58af34c
 # Linear history on the trunk, then the review receipt.
 #
 # A real file in this repository, not a shim — see the note in `commit-msg` for
@@ -3970,7 +3970,9 @@ admit() {
 	admit_ran=$(cat "$admit_mark" 2>/dev/null) || admit_ran=''
 	rm -f "$admit_mark"
 	admit_mark=''
-	if [ -n "$admit_ran" ] || [ "$admit_code" -ge 128 ]; then
+	# wcp build exits 75 when it cannot place a gate off a benchmark reservation.
+	# Running the gate unadmitted would bypass the reservation.
+	if [ -n "$admit_ran" ] || [ "$admit_code" -eq 75 ] || [ "$admit_code" -ge 128 ]; then
 		exit "$admit_code"
 	fi
 	err "pre-push: \`wcp build\` ended (exit $admit_code) without running the local CI, so it runs here without it."
