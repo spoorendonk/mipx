@@ -28,7 +28,7 @@ bool rangedAsGreater(Real lo, Real up) {
 void writeMps(const std::string& filename, const LpProblem& input) {
     LpProblem linearized;
     const LpProblem* problem = &input;
-    if (hasAdvancedModelFeatures(input)) {
+    if (hasAdvancedModelFeatures(input) || !input.native_sos2.empty()) {
         linearized = linearizeModelFeatures(input);
         problem = &linearized;
     }

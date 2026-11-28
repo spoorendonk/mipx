@@ -71,7 +71,7 @@ struct LpProblem {
 /// Throws std::runtime_error if advanced feature declarations are invalid.
 void validateModelFeatures(const LpProblem& problem);
 
-/// Returns true when SOS / indicator / semi-variable features are present.
+/// Returns true when unlowered SOS, indicator or semi-variable declarations are present.
 [[nodiscard]] bool hasAdvancedModelFeatures(const LpProblem& problem);
 
 /// Linearize SOS/indicator/semi features into core row/bound form.
@@ -83,12 +83,10 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_in
 enum class Sos2Formulation { Pairwise, AdjacentIntervals, Native };
 LpProblem linearizeModelFeatures(const LpProblem& problem, Sos2Formulation sos2_formulation);
 
-inline constexpr Real kSos2ZeroTolerance = 1e-7;
-
 /// First and last active positions in a weight-ordered set, or size() for no support.
 std::pair<std::size_t, std::size_t> sos2Support(const LpProblem& problem,
                                                 std::span<const Index> members,
-                                                std::span<const Real> values);
+                                                std::span<const Real> values, Real tolerance = 0.0);
 
 /// Round the bounds of each Integer and Binary column in to the nearest
 /// integers inside them (within @p tol), so no reduction or search step ever

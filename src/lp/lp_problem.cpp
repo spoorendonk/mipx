@@ -211,6 +211,18 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_in
 }
 
 LpProblem linearizeModelFeatures(const LpProblem& problem, Sos2Formulation sos2_formulation) {
+    if (sos2_formulation != Sos2Formulation::Native && !problem.native_sos2.empty()) {
+        LpProblem unlowered = problem;
+        for (auto& members : unlowered.native_sos2) {
+            unlowered.sos_constraints.push_back(
+                {LpProblem::SosConstraint::Type::Sos2,
+                 std::move(members),
+                 {},
+                 "native_sos2_" + std::to_string(unlowered.sos_constraints.size())});
+        }
+        unlowered.native_sos2.clear();
+        return linearizeModelFeatures(unlowered, sos2_formulation);
+    }
     validateModelFeatures(problem);
 
     if (!hasAdvancedModelFeatures(problem)) {
@@ -360,12 +372,13 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, Sos2Formulation sos2_
 
 std::pair<std::size_t, std::size_t> sos2Support(const LpProblem& problem,
                                                 std::span<const Index> members,
-                                                std::span<const Real> values) {
+                                                std::span<const Real> values, Real tolerance) {
     std::size_t first = members.size();
     std::size_t last = first;
     for (std::size_t p = 0; p < members.size(); ++p) {
         const Index j = members[p];
-        if (std::abs(values[j]) > kSos2ZeroTolerance || problem.col_lower[j] > 0.0 ||
+        // A small nonzero can still matter to the objective or a scaled row.
+        if (std::abs(values[j]) > tolerance || problem.col_lower[j] > 0.0 ||
             problem.col_upper[j] < 0.0) {
             first = std::min(first, p);
             last = p;

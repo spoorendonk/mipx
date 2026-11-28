@@ -4124,7 +4124,10 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     std::vector<uint8_t> dirty_cols(lp.num_cols, 1);
 
     // Run one reduction, adding its wall time to `seconds`.
-    const auto timed = [](Real& seconds, auto&& reduce) {
+    const auto timed = [this](Real& seconds, auto&& reduce) {
+        if (deadline_.passed()) {
+            return Index{0};
+        }
         const auto start = std::chrono::steady_clock::now();
         const Index changes = reduce();
         seconds += std::chrono::duration<Real>(std::chrono::steady_clock::now() - start).count();
@@ -4138,7 +4141,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     bool dependent_equations_done = false;
 
     // Iterative reduction loop.
-    for (Index round = 0; round < max_rounds_ && !infeasible_; ++round) {
+    for (Index round = 0; round < max_rounds_ && !infeasible_ && !deadline_.passed(); ++round) {
         Index total_changes = 0;
         std::vector<Index> dirty_row_list;
         std::vector<Index> dirty_col_list;
@@ -4455,7 +4458,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     stats_.time_seconds =
         std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count();
 
-    return buildReducedProblem(lp, col_removed, row_removed);
+    return deadline_.passed() ? problem : buildReducedProblem(lp, col_removed, row_removed);
 }
 
 // Activity bound tightening and singleton rows write the bounds they derive

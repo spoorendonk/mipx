@@ -1147,6 +1147,46 @@ TEST_CASE("An unbounded SOS2 relaxation must have SOS2-feasible support",
     CHECK(solver.solve().status == Status::NodeLimit);
     solver.setNodeLimit(100);
     CHECK(solver.solve().status == expected);
+    solver.setTimeLimit(0.0);
+    const auto stopped = solver.solve();
+    CHECK(stopped.status == Status::TimeLimit);
+    CHECK(stopped.nodes == 0);
+    CHECK(stopped.solution.empty());
+}
+
+TEST_CASE("Small nonzero SOS2 members can change the optimum", "[lp_problem][features]") {
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {-2e7, 0.0, -2e7};
+    lp.col_lower.assign(3, 0.0);
+    lp.col_upper = {5e-8, 0.0, 5e-8};
+    lp.col_type.assign(3, VarType::Continuous);
+    lp.matrix = SparseMatrix(0, lp.num_cols);
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2}, {}, "sos2"}};
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setSos2NativeBranching(true);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    REQUIRE(result.solution.size() == 3);
+    CHECK_THAT(result.objective, WithinAbs(-1.0, 1e-8));
+    CHECK((result.solution.front() == 0.0 || result.solution.back() == 0.0));
+}
+
+TEST_CASE("MPS export preserves SOS2 constraints in a lowered native model",
+          "[lp_problem][features][io]") {
+    const auto lp = readMps(testDataDir() + "/mps_sos.mps");
+    const auto native = linearizeModelFeatures(lp, Sos2Formulation::Native);
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("mipx_native_sos2_" + std::to_string(::getpid()) + ".mps");
+    writeMps(path.string(), native);
+    const auto reread = readMps(path.string());
+    std::filesystem::remove(path);
+    const auto result = solveFeatureModel(reread);
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-7));
 }
 
 // ---------------------------------------------------------------------------

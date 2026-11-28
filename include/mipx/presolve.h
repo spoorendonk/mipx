@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 #include "mipx/lp_problem.h"
 
 #include <cstdint>
@@ -423,6 +424,7 @@ public:
     void setMaxRounds(Index rounds) { max_rounds_ = rounds; }
 
     void setOptions(const PresolveOptions& options) { options_ = options; }
+    void setDeadline(Deadline deadline) { deadline_ = deadline; }
     [[nodiscard]] const PresolveOptions& options() const { return options_; }
 
 private:
@@ -573,6 +575,7 @@ private:
     Index orig_num_cols_ = 0;
     PresolveStats stats_;
     PresolveOptions options_{};
+    Deadline deadline_;
     Index max_rounds_ = 20;
     bool infeasible_ = false;
     bool probing_done_ = false;

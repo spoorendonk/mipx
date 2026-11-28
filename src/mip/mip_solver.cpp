@@ -1376,15 +1376,37 @@ struct Sos2Split {
 std::optional<Sos2Split> selectSos2Split(const LpProblem& problem, std::span<const Real> values) {
     std::optional<Sos2Split> split;
     std::size_t widest_span = 1;
-    for (const auto& members : problem.native_sos2) {
-        const auto [first, last] = sos2Support(problem, members, values);
-        const std::size_t span = last - first;
-        if (span > widest_span) {
-            widest_span = span;
-            split = Sos2Split{members, first + span / 2};
+    // Prefer a disjunction that separates clear LP activity. Small values
+    // still require a branch when no such disjunction exists.
+    for (Real tolerance : {1e-7, 0.0}) {
+        for (const auto& members : problem.native_sos2) {
+            const auto [first, last] = sos2Support(problem, members, values, tolerance);
+            const std::size_t span = last - first;
+            if (span > widest_span) {
+                widest_span = span;
+                split = Sos2Split{members, first + span / 2};
+            }
+        }
+        if (split) {
+            break;
         }
     }
     return split;
+}
+
+bool normalizeSos2FixedZeros(const LpProblem& problem, std::span<const Real> lower,
+                             std::span<const Real> upper, std::span<Real> values) {
+    bool changed = false;
+    for (const auto& members : problem.native_sos2) {
+        for (Index j : members) {
+            if (lower[j] == 0.0 && upper[j] == 0.0 && values[j] != 0.0 &&
+                std::abs(values[j]) <= heuristic_detail::kFeasTol) {
+                values[j] = 0.0;
+                changed = true;
+            }
+        }
+    }
+    return changed;
 }
 
 }  // namespace
@@ -1916,6 +1938,12 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
     if (static_cast<Index>(x.size()) != model.num_cols) {
         return std::nullopt;
     }
+    if (deadline.passed()) {
+        if (completion_status != nullptr) {
+            *completion_status = Status::TimeLimit;
+        }
+        return std::nullopt;
+    }
     LpProblem fixed = model;
     std::vector<Real> point(x.begin(), x.end());
     bool any_continuous = false;
@@ -1927,6 +1955,17 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
         point[j] = std::round(x[j]);
         fixed.col_lower[j] = point[j];
         fixed.col_upper[j] = point[j];
+    }
+    for (const auto& members : model.native_sos2) {
+        const auto [first, last] = sos2Support(model, members, point);
+        if (last - first > 1) {
+            return std::nullopt;
+        }
+        for (std::size_t p = 0; p < members.size(); ++p) {
+            if (p < first || p > last) {
+                fixed.col_lower[members[p]] = fixed.col_upper[members[p]] = 0.0;
+            }
+        }
     }
     if (any_continuous) {
         DualSimplexSolver completion;
@@ -1943,7 +1982,8 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
         if (result.status != Status::Optimal) {
             return std::nullopt;
         }
-        const auto values = completion.getPrimalValues();
+        auto values = completion.getPrimalValues();
+        normalizeSos2FixedZeros(fixed, fixed.col_lower, fixed.col_upper, values);
         for (Index j = 0; j < model.num_cols; ++j) {
             if (!heuristic_detail::isIntegerVar(model.col_type[j])) {
                 point[j] = values[j];
@@ -2972,6 +3012,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         ++cut_stats_.tree_nodes_with_cuts;
     }
 
+    const bool normalized =
+        normalizeSos2FixedZeros(problem_, current_lower, current_upper, node_primals_out);
     const auto solvedNode = [&]() {
         BnbNode solved_node = std::move(node);
         solved_node.lp_bound = node_obj_out;
@@ -3001,6 +3043,13 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     if (isFeasibleMip(node_primals_out)) {
         int_inf_out = 0;
         if (node_obj_out >= incumbent_snapshot || isAcceptableIncumbent(node_primals_out)) {
+            if (normalized) {
+                const Real obj = heuristic_detail::computeObjective(problem_, node_primals_out);
+                if (node_obj_out < pruneBound(obj)) {
+                    recordNodeDroppedWithoutVerdict(node_obj_out, Status::Error);
+                }
+                node_obj_out = obj;
+            }
             return false;  // Caller handles incumbent update.
         }
         // An integral point the incumbent gate rejects (#240). Its LP
@@ -3013,9 +3062,23 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         // completion: that is no answer, and the node is dropped with its
         // bound kept (#351).
         Status completion_status = Status::Optimal;
-        auto repaired = integralNodeIncumbent(node_primals_out, node_obj_out, node_work_out,
-                                              Deadline::after(timeLeft()), &completion_status);
+        const auto repair = [&]() {
+            const auto deadline = Deadline::after(timeLeft());
+            if (problem_.native_sos2.empty()) {
+                return integralNodeIncumbent(node_primals_out, node_obj_out, node_work_out,
+                                             deadline, &completion_status);
+            }
+            LpProblem local = problem_;
+            local.col_lower = current_lower;
+            local.col_upper = current_upper;
+            return completeIncumbent(local, node_primals_out, node_obj_out, node_work_out, deadline,
+                                     &completion_status);
+        };
+        auto repaired = repair();
         if (repaired.has_value()) {
+            if (!problem_.native_sos2.empty() && node_obj_out < pruneBound(repaired->objective)) {
+                recordNodeDroppedWithoutVerdict(node_obj_out, Status::Error);
+            }
             node_primals_out = std::move(repaired->values);
             node_obj_out = repaired->objective;
             return false;
@@ -3033,6 +3096,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if (branch_var < 0) {
             if (completion_status == Status::TimeLimit) {
                 recordNodeDroppedWithoutVerdict(node_obj_out, completion_status);
+            } else if (!problem_.native_sos2.empty()) {
+                recordNodeDroppedWithoutVerdict(node_obj_out, Status::Error);
             }
             return false;
         }
@@ -4167,14 +4232,17 @@ MipResult MipSolver::solve() {
 // optimum off its bound, the model is solved again without presolve in the
 // limits left, and that answer stands as it would with presolve off.
 MipResult MipSolver::solveMinimization() {
-    if (!problem_.native_sos2.empty() && node_limit_ <= 0) {
+    const bool native_sos2 = !problem_.native_sos2.empty();
+    if (native_sos2 && (node_limit_ <= 0 || time_limit_ <= 0.0)) {
         MipResult stopped;
-        stopped.status = Status::NodeLimit;
+        stopped.status = time_limit_ <= 0.0 ? Status::TimeLimit : Status::NodeLimit;
+        stopped.best_bound = -kInf;
         return stopped;
     }
     const auto t0 = std::chrono::steady_clock::now();
+    const auto repair_deadline = native_sos2 ? Deadline::after(time_limit_) : Deadline{};
     MipResult result = solveMinimizationOnce();
-    if (result.status == Status::Unbounded && !problem_.native_sos2.empty()) {
+    if (result.status == Status::Unbounded && native_sos2) {
         return confirmNativeSos2Unbounded(std::move(result));
     }
     // Without presolve the answer was never postsolved: every incumbent
@@ -4183,10 +4251,10 @@ MipResult MipSolver::solveMinimization() {
         return result;
     }
     double repair_work = 0.0;
-    // No deadline: the incumbent is already found, and a run the limit
-    // stopped has no time left to repair it in (#351).
-    auto repaired =
-        integralNodeIncumbent(result.solution, result.objective, repair_work, Deadline{}, nullptr);
+    // Existing formulations finish checking a point already found (#351).
+    // Native SOS2 repair can run another LP, inside the original deadline.
+    auto repaired = integralNodeIncumbent(result.solution, result.objective, repair_work,
+                                          repair_deadline, nullptr);
     result.work_units += repair_work;
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -4488,6 +4556,10 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     // Presolve.
     Presolver presolver;
+    const bool native_sos2 = !problem_.native_sos2.empty();
+    if (native_sos2) {
+        presolver.setDeadline(Deadline::after(timeLeft()));
+    }
     {
         // Presolve probing runs against the solve's deadline too (#336).
         auto presolve_options = presolve_options_;
@@ -4502,6 +4574,13 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     if (presolve_) {
         working_problem = presolver.presolve(problem_);
+        if (native_sos2 && timeLeft() <= 0.0) {
+            MipResult stopped;
+            stopped.status = Status::TimeLimit;
+            stopped.best_bound = -kInf;
+            stopped.time_seconds = elapsed();
+            return stopped;
+        }
         const auto& stats = presolver.stats();
         if (stats.vars_removed > 0 || stats.rows_removed > 0 ||
             (!problem_.native_sos2.empty() && stats.bounds_tightened > 0)) {
@@ -4657,7 +4736,9 @@ MipResult MipSolver::solveMinimizationOnce() {
             std::vector<Real> x =
                 did_presolve ? presolver.postsolve(solution.values) : solution.values;
             double observer_work = 0.0;
-            auto checked = completeIncumbent(loaded, x, solution.objective, observer_work);
+            const auto deadline = native_sos2 ? Deadline::after(timeLeft()) : Deadline{};
+            auto checked =
+                completeIncumbent(loaded, x, solution.objective, observer_work, deadline);
             if (checked.has_value()) {
                 incumbent_observer_(checked->values, source);
             }
@@ -6015,13 +6096,19 @@ MipResult MipSolver::solveMinimizationOnce() {
         solution_pool.submit({best_solution, incumbent}, "pre_root_stage", 0);
     }
 
+    const bool normalized =
+        normalizeSos2FixedZeros(problem_, problem_.col_lower, problem_.col_upper, root_primals);
+    const Real root_candidate_objective =
+        normalized ? heuristic_detail::computeObjective(problem_, root_primals) : root_bound;
     const bool root_feasible = problem_.native_sos2.empty()
                                    ? isFeasibleLp(root_primals) && isFeasibleMip(root_primals)
                                    : isAcceptableIncumbent(root_primals);
-    if (root_feasible) {
-        incumbent = root_bound;
+    if (root_feasible && (!native_sos2 || root_candidate_objective < incumbent)) {
+        incumbent = root_candidate_objective;
         best_solution = root_primals;
         solution_pool.submit({best_solution, incumbent}, "root_lp", 0);
+    }
+    if (root_feasible && (!normalized || root_bound >= pruneBound(incumbent))) {
         if (verbose_) {
             log_.log(problem_.native_sos2.empty() ? "Root solution is integer feasible!\n"
                                                   : "Root solution is MIP feasible!\n");
