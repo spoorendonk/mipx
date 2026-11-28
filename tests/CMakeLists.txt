@@ -136,6 +136,12 @@ if(TARGET mipx-lpseq-replay)
         add_test(NAME "LP sequence replay: grid1 masters, primal Devex ${devex}"
             COMMAND mipx-lpseq-replay ${_args} --csv "${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_${devex}.csv")
     endforeach()
+    add_test(NAME "LP sequence replay: grid1 primal bound perturbation and pivot counts"
+        COMMAND ${CMAKE_COMMAND}
+            -DREPLAY=$<TARGET_FILE:mipx-lpseq-replay>
+            "-DSEQUENCE=${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
+            "-DSTATS=${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_dual_stats.csv"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/check_lpseq_dual_stats.cmake")
     # A hand-written sequence with known optima for the ops grid1 has none
     # of (bounds, costs, coefficients, an infeasible solve), and one whose
     # out-of-range index must be a format error.

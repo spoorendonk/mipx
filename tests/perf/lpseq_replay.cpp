@@ -9,6 +9,7 @@
 //
 // Output: one CSV line per (solve, arm) on stdout, or to --csv FILE:
 //   seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded
+// --dual-stats-csv FILE writes pivot counts for the dual arms separately.
 // Exit 0 when every solve of every arm matches the recorded status and
 // objective (relative to max(1, |recorded|), within --rel-tol, 1e-6, or for
 // pdlp --pdlp-rel-tol, 1e-4), 1 when one does not, 2 on a usage or format
@@ -24,6 +25,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -143,17 +145,20 @@ struct Options {
     std::string dir;
     std::vector<ArmKind> arms;
     bool primal_devex = false;
+    bool primal_bound_perturbation = false;
     // CPU factor for both barrier arms (--barrier-ne); Auto, the solver's
     // default, unless set.
     BarrierAlgorithm barrier_algorithm = BarrierAlgorithm::Auto;
     Real rel_tol = 1e-6;
     Real pdlp_rel_tol = 1e-4;
     std::string csv;
+    std::string dual_stats_csv;
 };
 
 DualSimplexOptions dualOptions(const Options& o) {
     DualSimplexOptions d;
     d.enable_primal_devex = o.primal_devex;
+    d.enable_primal_bound_perturbation = o.primal_bound_perturbation;
     return d;
 }
 
@@ -303,6 +308,29 @@ int run(const Options& opt) {
         arms.push_back(std::move(a));
     }
 
+    std::ofstream dual_stats;
+    if (!opt.dual_stats_csv.empty()) {
+        namespace fs = std::filesystem;
+        const auto same_existing_file = [&]() {
+            return !opt.csv.empty() && fs::exists(opt.csv) && fs::exists(opt.dual_stats_csv) &&
+                   fs::equivalent(opt.csv, opt.dual_stats_csv);
+        };
+        constexpr auto kSameOutputFile = "--csv and --dual-stats-csv must name different files";
+        if (!opt.csv.empty() && (fs::weakly_canonical(fs::absolute(opt.csv)) ==
+                                     fs::weakly_canonical(fs::absolute(opt.dual_stats_csv)) ||
+                                 same_existing_file())) {
+            lpseq::fail(kSameOutputFile);
+        }
+        dual_stats.open(opt.dual_stats_csv);
+        if (!dual_stats) {
+            lpseq::fail(opt.dual_stats_csv + ": cannot write");
+        }
+        // A dangling symlink can start resolving to the stats file we just created.
+        if (same_existing_file()) {
+            lpseq::fail(kSameOutputFile);
+        }
+    }
+
     std::ofstream csv_file;
     std::ostream* out = &std::cout;
     if (!opt.csv.empty()) {
@@ -313,16 +341,24 @@ int run(const Options& opt) {
         out = &csv_file;
     }
     *out << lpseq::kCsvHeader;
+    if (dual_stats.is_open()) {
+        dual_stats << "seq,arm,added_columns,dual_pivots,primal_pivots,primal_degenerate_pivots,"
+                      "primal_bound_perturbation_activations\n";
+    }
 
     std::ifstream ops(opt.dir + "/ops.txt");
     if (!ops) {
         lpseq::fail(opt.dir + "/ops.txt: cannot open");
     }
     bool all_match = true;
+    std::size_t added_columns = 0;
     lpseq::Op op;
     while (lpseq::readOp(ops, lp.num_rows, lp.num_cols, op)) {
         if (op.kind != lpseq::OpKind::Solve) {
             apply(op, lp, arms);
+            if (op.kind == lpseq::OpKind::AddCols) {
+                added_columns += op.starts.size();
+            }
             continue;
         }
         for (Arm& arm : arms) {
@@ -355,6 +391,22 @@ int run(const Options& opt) {
                 lpseq::matches(op, statusName(r.status), r.objective, tol, err) && all_match;
             lpseq::writeRow(*out, op, arm.name, statusName(r.status), r.objective, err,
                             r.iterations, secs, reloaded);
+            if (dual_stats.is_open()) {
+                if (const auto* dual = dynamic_cast<const DualSimplexSolver*>(s)) {
+                    const auto& stats = dual->getDegeneracyStats();
+                    dual_stats << op.seq << ',' << arm.name << ',' << added_columns << ','
+                               << stats.dual_pivots << ',' << stats.primal_pivots << ','
+                               << stats.primal_degenerate_pivots << ','
+                               << stats.primal_bound_perturbation_activations << '\n';
+                }
+            }
+        }
+        added_columns = 0;
+    }
+    if (dual_stats.is_open()) {
+        dual_stats.close();
+        if (!dual_stats) {
+            lpseq::fail(opt.dual_stats_csv + ": write failed");
         }
     }
     return all_match ? 0 : 1;
@@ -363,8 +415,8 @@ int run(const Options& opt) {
 void usage() {
     std::cerr
         << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|barrier-hsd|pdlp]... "
-           "[--barrier-ne dense|sparse] [--primal-devex] [--rel-tol T] [--pdlp-rel-tol T] "
-           "[--csv FILE]\n";
+           "[--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] "
+           "[--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] [--dual-stats-csv FILE]\n";
 }
 
 }  // namespace
@@ -402,12 +454,16 @@ int main(int argc, char** argv) {
             }
         } else if (a == "--primal-devex") {
             opt.primal_devex = true;
+        } else if (a == "--primal-bound-perturbation") {
+            opt.primal_bound_perturbation = true;
         } else if (a == "--rel-tol" && i + 1 < argc) {
             opt.rel_tol = std::atof(argv[++i]);
         } else if (a == "--pdlp-rel-tol" && i + 1 < argc) {
             opt.pdlp_rel_tol = std::atof(argv[++i]);
         } else if (a == "--csv" && i + 1 < argc) {
             opt.csv = argv[++i];
+        } else if (a == "--dual-stats-csv" && i + 1 < argc) {
+            opt.dual_stats_csv = argv[++i];
         } else if (!a.empty() && a[0] != '-' && opt.dir.empty()) {
             opt.dir = a;
         } else {

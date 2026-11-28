@@ -538,7 +538,8 @@ uses this format to capture column-generation masters.
 ```bash
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
     --arm dual-warm --arm dual-cold --arm barrier --arm barrier-hsd --arm pdlp \
-    [--barrier-ne dense|sparse] [--primal-devex] [--csv out.csv]
+    [--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] \
+    [--csv out.csv] [--dual-stats-csv dual.csv]
 ```
 
 The version 1 format is implemented in [`lpseq_format.h`](lpseq_format.h).
@@ -600,10 +601,25 @@ Exit 0 when every solve matches the recorded status and objective (relative
 to max(1, |recorded|), `--rel-tol` 1e-6, `--pdlp-rel-tol` 1e-4), 1 when one
 does not, 2 on a format error.
 
+`--primal-devex` and `--primal-bound-perturbation` enable the corresponding
+opt-ins for both dual arms. Use separate replays to compare each option with
+the default. `--dual-stats-csv` writes one row per solve and dual arm to a
+separate file with these columns.
+
+```text
+seq,arm,added_columns,dual_pivots,primal_pivots,primal_degenerate_pivots,primal_bound_perturbation_activations
+```
+
+`added_columns` counts all `add_cols` entries since the previous solve,
+excluding columns loaded from the initial snapshot. To measure warm primal
+pivots per added column, sum `primal_pivots` and `added_columns` over
+`dual-warm` solves with added columns and divide the totals.
+
 `tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
 HiGHS simplex, 9 masters); ctest replays it on `dual-warm`, `dual-cold`,
-`barrier` and `pdlp` with primal Devex off and on, and it and the edits
-sequence on `barrier-hsd` with each `--barrier-ne` factor.
+`barrier` and `pdlp` with primal Devex off and on. It also tests bound
+perturbation and the dual stats CSV, and replays grid1 and the edits sequence
+on `barrier-hsd` with each `--barrier-ne` factor.
 
 **The HiGHS side** (#268): configure with `-DMIPX_BENCH_HIGHS=ON` (OFF by
 default; fetches HiGHS v1.16.0 with HiPO, needs a BLAS such as
