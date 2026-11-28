@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -94,6 +95,8 @@ struct MipLpStats {
     /// dropped. The search counts as complete only while this is not below
     /// the incumbent.
     Real dropped_node_bound = kInf;
+    Int pre_lp_propagation_calls = 0;
+    Int pre_lp_propagation_pruned = 0;
 };
 
 struct MipCutStats {
@@ -448,6 +451,8 @@ public:
     }
     [[nodiscard]] Int getPlungeMaxDepth() const { return plunge_max_depth_; }
     [[nodiscard]] Real getPlungeBoundQuotient() const { return plunge_bound_quotient_; }
+    /// Check child bounds for a row propagation contradiction before solving the LP.
+    void setPreLpPropagationEnabled(bool enabled) { pre_lp_propagation_enabled_ = enabled; }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
     void setTreePresolveAutoTuning(bool enabled) {
         tree_presolve_auto_tuning_enabled_ = enabled;
@@ -569,7 +574,11 @@ private:
         Int nodes_solved = 0;
         Int warm_starts = 0;
         Int cold_starts = 0;
+        Int pre_lp_propagation_calls = 0;
+        Int pre_lp_propagation_pruned = 0;
     };
+
+    void mergeNodeWorkStats(const NodeWorkStats& stats);
 
     struct NodeScratch {
         std::vector<Int> var_epoch;
@@ -585,6 +594,7 @@ private:
         std::vector<Real> row_upper;
         std::vector<Cut> kept_cuts;
         std::vector<Index> rc_tightened;
+        std::unique_ptr<DomainPropagator> pre_lp_propagator;
     };
 
     /// The solve proper, on a minimization: solve() negates a maximization
@@ -801,6 +811,7 @@ private:
     // Plunging is off by default: enabling it changes the serial node order.
     Int plunge_max_depth_ = 0;
     Real plunge_bound_quotient_ = 0.05;
+    bool pre_lp_propagation_enabled_ = false;
     // Serial in-tree presolve is enabled by default because it materially
     // improves hard MIP search on benchmark instances.
     bool tree_presolve_enabled_ = true;

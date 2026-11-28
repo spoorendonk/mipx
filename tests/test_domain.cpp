@@ -245,3 +245,19 @@ TEST_CASE("Domain: propagation stops on a row that tightens for ever", "[domain]
     dp.popCheckpoint();
     CHECK(dp.getLower(0) == 0.0);
 }
+
+TEST_CASE("Domain: exhausting a row budget does not report a contradiction", "[domain]") {
+    // The last row fixes both variables to zero and requeues itself. The
+    // conflicting first row is therefore still queued after two visits.
+    auto prob =
+        makeProblem(2, 2, {{0, 0, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}}, {0.5, -kInf}, {kInf, 0.5},
+                    {0.0, 0.0}, {1.0, 1.0}, {VarType::Binary, VarType::Binary});
+    DomainPropagator dp;
+    dp.load(prob);
+    dp.pushCheckpoint();
+    CHECK(dp.propagate(prob.num_rows));
+    CHECK(dp.getUpper(0) == 0.0);
+    CHECK_FALSE(dp.propagate(1));
+    dp.popCheckpoint();
+    CHECK(dp.getUpper(0) == 1.0);
+}

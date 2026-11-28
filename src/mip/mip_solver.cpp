@@ -1543,6 +1543,17 @@ bool MipSolver::propagateNode(DomainPropagator& dp) {
     return ok;
 }
 
+void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
+    lp_stats_.node_bound_apply_seconds += stats.bound_apply_seconds;
+    lp_stats_.node_basis_set_seconds += stats.basis_set_seconds;
+    lp_stats_.node_lp_solve_seconds += stats.lp_solve_seconds;
+    lp_stats_.nodes_solved += stats.nodes_solved;
+    lp_stats_.warm_starts += stats.warm_starts;
+    lp_stats_.cold_starts += stats.cold_starts;
+    lp_stats_.pre_lp_propagation_calls += stats.pre_lp_propagation_calls;
+    lp_stats_.pre_lp_propagation_pruned += stats.pre_lp_propagation_pruned;
+}
+
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
     if (delta.tree_local_fixings == 0 && delta.tree_local_tightenings == 0 &&
         delta.propagation_triggers == 0) {
@@ -2269,6 +2280,30 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (use_conflicts && isConflictTriggered(node_scratch)) {
         return false;
+    }
+
+    if (pre_lp_propagation_enabled_ && node.depth > 0 && problem_.num_rows > 0) {
+        auto& propagator = node_scratch.pre_lp_propagator;
+        if (!propagator) {
+            propagator = std::make_unique<DomainPropagator>();
+            propagator->load(problem_);
+        }
+        propagator->pushCheckpoint();
+        for (Index j : touched_vars) {
+            propagator->setBound(j, current_lower[j], current_upper[j]);
+        }
+        // The visit budget is the number of model rows. With no contradiction
+        // proved within that budget, continue with the original LP bounds.
+        const bool feasible = propagator->propagate(problem_.num_rows);
+        propagator->popCheckpoint();
+        ++node_stats.pre_lp_propagation_calls;
+        if (!feasible) {
+            ++node_stats.pre_lp_propagation_pruned;
+            if (use_conflicts) {
+                learnConflictFromNode(node.bound_changes, false);
+            }
+            return false;
+        }
     }
 
     // Set basis for warm-start.
@@ -3351,12 +3386,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
     }
 
-    lp_stats_.node_bound_apply_seconds += node_stats.bound_apply_seconds;
-    lp_stats_.node_basis_set_seconds += node_stats.basis_set_seconds;
-    lp_stats_.node_lp_solve_seconds += node_stats.lp_solve_seconds;
-    lp_stats_.nodes_solved += node_stats.nodes_solved;
-    lp_stats_.warm_starts += node_stats.warm_starts;
-    lp_stats_.cold_starts += node_stats.cold_starts;
+    mergeNodeWorkStats(node_stats);
 
     if (verbose_ && rins_calls > 0) {
         double avg_fixed = static_cast<double>(rins_fixed_sum) / static_cast<double>(rins_calls);
@@ -3668,12 +3698,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
 
         search_stats_.det_heur_gate_openings = det_heur_next_tick / kDetHeurGateQuantumTicks - 1;
         for (const auto& worker_ctx : workers) {
-            lp_stats_.node_bound_apply_seconds += worker_ctx.node_stats.bound_apply_seconds;
-            lp_stats_.node_basis_set_seconds += worker_ctx.node_stats.basis_set_seconds;
-            lp_stats_.node_lp_solve_seconds += worker_ctx.node_stats.lp_solve_seconds;
-            lp_stats_.nodes_solved += worker_ctx.node_stats.nodes_solved;
-            lp_stats_.warm_starts += worker_ctx.node_stats.warm_starts;
-            lp_stats_.cold_starts += worker_ctx.node_stats.cold_starts;
+            mergeNodeWorkStats(worker_ctx.node_stats);
             rins_calls += worker_ctx.rins_calls;
             rins_solves += worker_ctx.rins_solves;
             rins_found += worker_ctx.rins_found;
@@ -3986,12 +4011,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         }
 
         std::lock_guard<std::mutex> lock(stats_mutex);
-        lp_stats_.node_bound_apply_seconds += local_node_stats.bound_apply_seconds;
-        lp_stats_.node_basis_set_seconds += local_node_stats.basis_set_seconds;
-        lp_stats_.node_lp_solve_seconds += local_node_stats.lp_solve_seconds;
-        lp_stats_.nodes_solved += local_node_stats.nodes_solved;
-        lp_stats_.warm_starts += local_node_stats.warm_starts;
-        lp_stats_.cold_starts += local_node_stats.cold_starts;
+        mergeNodeWorkStats(local_node_stats);
         rins_calls += local_rins_calls;
         rins_solves += local_rins_solves;
         rins_found += local_rins_found;
@@ -6225,6 +6245,11 @@ MipResult MipSolver::solveMinimizationOnce() {
         std::lock_guard<std::mutex> rc_lock(rc_fixing_stats_mutex_);
         rc_fixing_stats_.root_global_fixings = root_rc_stats.root_global_fixings;
         rc_fixing_stats_.root_global_tightenings = root_rc_stats.root_global_tightenings;
+    }
+
+    if (verbose_ && pre_lp_propagation_enabled_) {
+        log_.log("Pre-LP propagation: calls=%d pruned=%d\n", lp_stats_.pre_lp_propagation_calls,
+                 lp_stats_.pre_lp_propagation_pruned);
     }
 
     if (verbose_ && objective_propagator_.loaded()) {

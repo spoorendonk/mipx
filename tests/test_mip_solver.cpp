@@ -1818,6 +1818,71 @@ TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conf
     CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
 }
 
+TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bounds",
+          "[mip][domain]") {
+    // The root LP takes x=0.5, y=0.75, z=0. The x=0 child has a feasible LP
+    // with y=0.5, but cannot satisfy integrality. The x=1 sibling is feasible.
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {1.0, 0.0, 1.5};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary,
+                   GENERATE(VarType::Binary, VarType::Continuous)};
+    lp.num_rows = 2;
+    const Real parity_rhs = GENERATE(1.0, 1.0 - 2e-9);
+    lp.row_lower = {parity_rhs, 0.5};
+    lp.row_upper = {parity_rhs, kInf};
+    lp.matrix = SparseMatrix(2, 3, {{0, 0, -1.0}, {0, 1, 2.0}, {1, 0, 1.0}, {1, 2, 1.0}});
+
+    auto down_child = lp;
+    down_child.col_upper[0] = 0.0;
+    DualSimplexSolver relaxation;
+    relaxation.load(down_child);
+    REQUIRE(relaxation.solve().status == Status::Optimal);
+    CHECK_THAT(relaxation.getPrimalValues()[1], WithinAbs(0.5, 1e-8));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(1);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    const auto baseline_stats = solver.getLpStats();
+    CHECK(baseline_stats.pre_lp_propagation_calls == 0);
+    CHECK(baseline_stats.pre_lp_propagation_pruned == 0);
+
+    solver.setPreLpPropagationEnabled(true);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto screened = solver.solve();
+        REQUIRE(screened.status == Status::Optimal);
+        CHECK_THAT(screened.objective, WithinAbs(1.0, 1e-8));
+        REQUIRE(screened.solution.size() == 3);
+        CHECK_THAT(screened.solution[0], WithinAbs(1.0, 1e-8));
+        CHECK_THAT(screened.solution[1], WithinAbs(1.0, 1e-8));
+        CHECK_THAT(screened.solution[2], WithinAbs(0.0, 1e-8));
+        const auto& stats = solver.getLpStats();
+        CHECK(stats.pre_lp_propagation_calls == 2);
+        CHECK(stats.pre_lp_propagation_pruned == 1);
+        CHECK(stats.warm_starts + stats.cold_starts ==
+              baseline_stats.warm_starts + baseline_stats.cold_starts - 1);
+        CHECK(solver.getConflictStats().bound_infeasible_conflicts == 1);
+    }
+
+    solver.setPreLpPropagationEnabled(false);
+    const auto explicitly_off = solver.solve();
+    CHECK(explicitly_off.status == baseline.status);
+    CHECK(explicitly_off.objective == baseline.objective);
+    CHECK(explicitly_off.nodes == baseline.nodes);
+    CHECK(explicitly_off.lp_iterations == baseline.lp_iterations);
+    CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+}
+
 // ---------------------------------------------------------------------------
 // Helper: set packing on an odd cycle (5-hole)
 // min -x0 -x1 -x2 -x3 -x4  s.t. x_i + x_{i+1 mod 5} <= 1, all binary

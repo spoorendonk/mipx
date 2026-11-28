@@ -360,6 +360,7 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
 
     CHECK(run.exit_code == 0);
     CHECK(runSolver("'" + testDataDir() + "/cli_features.mps' --help").exit_code == 0);
+    CHECK(run.mentions("--pre-lp-propagation|--no-pre-lp-propagation"));
     for (const char* flag :
          {"--probing", "--no-probing", "--probing-rounds", "--probing-probes", "--probing-time",
           "--presolve-probing", "--no-presolve-probing", "--presolve-probing-rounds",
@@ -370,6 +371,22 @@ TEST_CASE("CLI: --help lists the feature flags", "[cli]") {
         INFO(flag);
         CHECK(run.mentions(flag));
     }
+}
+
+TEST_CASE("CLI: pre-LP propagation is opt-in", "[cli]") {
+    const auto off = runFeatures("--no-cuts --no-presolve");
+    const auto on = runFeatures("--no-cuts --no-presolve --pre-lp-propagation");
+    const auto toggled =
+        runFeatures("--no-cuts --no-presolve --pre-lp-propagation --no-pre-lp-propagation");
+
+    for (const auto* result : {&off, &on, &toggled}) {
+        CHECK(result->exit_code == 0);
+        CHECK(result->mentions("Objective: -2.2000000000e+01"));
+    }
+    CHECK(on.mentions("Pre-LP propagation: calls="));
+    CHECK(on.mentions("pre_lp_propagation=on"));
+    CHECK_FALSE(off.mentions("Pre-LP propagation:"));
+    CHECK_FALSE(toggled.mentions("Pre-LP propagation:"));
 }
 
 TEST_CASE("CLI: --probing reaches the solver", "[cli]") {
