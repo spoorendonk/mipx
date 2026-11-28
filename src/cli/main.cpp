@@ -92,6 +92,7 @@ void printUsage(FILE* out) {
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--barrier-gpu-dense-cols N] "
                  "[--barrier-hsd] [--barrier-initial-point auto|mehrotra|hipo] "
+                 "[--barrier-crossover-pushes] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
                  "[--verbose|--quiet] [--print-backend] [--print-det-heur-gate]\n"
@@ -131,6 +132,7 @@ int main(int argc, char* argv[]) {
     LpMode lp_mode = LpMode::Dual;
     bool barrier_gpu = true;
     mipx::BarrierOrdering barrier_ordering = mipx::BarrierOrdering::Auto;
+    bool barrier_crossover_pushes = false;
     mipx::BarrierDualize barrier_dualize = mipx::BarrierDualize::Off;
     bool barrier_sparse_ne = false;
     bool barrier_ne_lower_updates = false;
@@ -601,6 +603,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--barrier-implicit-bounds") {
             // Upper bounds inside the CPU IPM instead of as rows (#299).
             barrier_implicit_bounds = true;
+        } else if (arg == "--barrier-crossover-pushes") {
+            barrier_crossover_pushes = true;
         } else if (arg == "--barrier-gondzio" && i + 1 < argc) {
             // At most N Gondzio centrality correctors per CPU IPM iteration
             // (#293); 0 (the default) is off.
@@ -999,6 +1003,7 @@ int main(int argc, char* argv[]) {
                     bopts.ne_lower_updates = barrier_ne_lower_updates;
                     bopts.gpu_ne_max_dense_cols = barrier_gpu_dense_cols;
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
+                    bopts.crossover_pushes = barrier_crossover_pushes;
                     bopts.gondzio_correctors = barrier_gondzio;
                     bopts.homogeneous = barrier_hsd;
                     bopts.initial_point = barrier_initial_point;

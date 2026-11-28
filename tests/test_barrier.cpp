@@ -885,12 +885,14 @@ TEST_CASE("BarrierSolver crossover: triangle LP basis is valid", "[barrier][cros
     opts.verbose = false;
     opts.algorithm = BarrierAlgorithm::CpuCholesky;
     opts.crossover = true;
+    opts.crossover_pushes = GENERATE(false, true);
     solver.setOptions(opts);
     solver.load(lp);
     auto result = solver.solve();
 
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+    CHECK(solver.crossoverStats().pushed_basis == opts.crossover_pushes);
 
     auto basis = solver.getBasis();
     REQUIRE(basis.size() == static_cast<size_t>(lp.num_cols + lp.num_rows));
@@ -932,6 +934,7 @@ TEST_CASE("BarrierSolver crossover: a presolved bound keeps its original column 
     opts.verbose = false;
     opts.presolve = true;
     opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    opts.crossover_pushes = GENERATE(false, true);
     BarrierSolver solver;
     solver.setOptions(opts);
     solver.load(lp);
@@ -942,11 +945,124 @@ TEST_CASE("BarrierSolver crossover: a presolved bound keeps its original column 
     // The singleton row's multiplier belongs to x >= 0.0005 in the
     // presolved LP. In the original LP x and y can both start basic.
     CHECK(solver.crossoverStats().attempted);
+    CHECK(solver.crossoverStats().pushed_basis == opts.crossover_pushes);
     CHECK(solver.crossoverIterations() == 0);
     const auto basis = solver.getBasis();
     REQUIRE(basis.size() == 4);
     CHECK(basis[0] == BasisStatus::Basic);
     CHECK(basis[1] == BasisStatus::Basic);
+}
+
+TEST_CASE("BarrierSolver crossover pushes preserve the maximizing row prices",
+          "[barrier][crossover]") {
+    auto lp = buildTriangleLp();
+    lp.sense = Sense::Maximize;
+    lp.obj = {1.0, 1.0, 1.0};
+    lp.row_lower[0] = 1.0;
+    lp.col_upper[1] = 4.0;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.implicit_upper_bounds = GENERATE(false, true);
+    opts.dualize = GENERATE(BarrierDualize::Off, BarrierDualize::On);
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    opts.crossover_pushes = true;
+    solver.setOptions(opts);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(7.5, 1e-8));
+    CHECK(solver.crossoverStats().pushed_basis);
+    CHECK(solver.crossoverIterations() == 0);
+}
+
+TEST_CASE("Barrier crossover pivots in both pushes on a degenerate optimum",
+          "[barrier][crossover]") {
+    LpProblem lp;
+    lp.num_cols = 4;
+    lp.num_rows = 2;
+    lp.obj = {2.0, 2.0, 2.0, 3.0};
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    lp.col_type.assign(lp.num_cols, VarType::Continuous);
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {0.0, -3.0};
+    // The first three columns are identical. At the optimum at most one of
+    // them can be basic, even though the interior point can use all three.
+    lp.matrix = SparseMatrix(2, 4,
+                             {{0, 0, -2.0},
+                              {0, 1, -2.0},
+                              {0, 2, -2.0},
+                              {0, 3, 2.0},
+                              {1, 0, -1.0},
+                              {1, 1, -1.0},
+                              {1, 2, -1.0},
+                              {1, 3, -2.0}});
+
+    BarrierOptions opts;
+    opts.presolve = false;
+    opts.crossover_pushes = true;
+    opts.verbose = false;
+    opts.implicit_upper_bounds = true;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(5.0, 1e-8));
+    const auto stats = solver.crossoverStats();
+    REQUIRE(stats.pushed_basis);
+    CHECK(stats.dual_push_pivots > 0);
+    CHECK(stats.primal_push_pivots > 0);
+    CHECK(solver.crossoverIterations() == 0);
+
+    const auto basis = solver.getBasis();
+    REQUIRE(basis.size() == 6);
+    CHECK(std::ranges::count(basis, BasisStatus::Basic) == lp.num_rows);
+    DualSimplexSolver simplex;
+    simplex.load(lp);
+    simplex.setBasis(basis);
+    const auto checked = simplex.solve();
+    REQUIRE(checked.status == Status::Optimal);
+    CHECK(checked.iterations == 0);
+    CHECK_FALSE(simplex.basisStartStats().singular_recovery);
+    CHECK_FALSE(simplex.basisStartStats().cold_start);
+    CHECK_THAT(checked.objective, WithinAbs(result.objective, 1e-8));
+}
+
+TEST_CASE("Barrier crossover falls back when snapping breaks the row equations",
+          "[barrier][crossover]") {
+    LpProblem lp;
+    lp.num_cols = 1;
+    lp.num_rows = 1;
+    lp.obj = {100.0};
+    lp.col_lower = {0.0};
+    lp.col_upper = {1.0};
+    lp.col_type = {VarType::Continuous};
+    lp.row_lower = {1.0};
+    lp.row_upper = {1.0};
+    lp.matrix = SparseMatrix(1, 1, {{0, 0, 1e9}});
+
+    BarrierOptions opts;
+    opts.presolve = false;
+    opts.crossover_pushes = true;
+    opts.verbose = false;
+    opts.implicit_upper_bounds = true;
+    opts.algorithm = BarrierAlgorithm::CpuCholesky;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1e-7, 1e-12));
+    const auto stats = solver.crossoverStats();
+    CHECK(stats.attempted);
+    CHECK_FALSE(stats.pushed_basis);
+    CHECK(stats.push_lu_factors == 0);
+    CHECK(solver.getBasis().size() == 2);
 }
 
 TEST_CASE("BarrierSolver crossover: a small interior column stays basic", "[barrier][crossover]") {

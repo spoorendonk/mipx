@@ -13,6 +13,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 #include <stop_token>
 #include <string>
 #include <thread>
@@ -1783,6 +1784,7 @@ bool BarrierSolver::buildStandardForm() {
     ustd_.clear();
     const bool implicit_ub = options_.implicit_upper_bounds;
     col_expr_.assign(static_cast<size_t>(prob.num_cols), OriginalColExpr{});
+    standard_rows_.assign(static_cast<size_t>(prob.num_rows), -1);
     // The standard form minimises obj_sign * c, so its offset carries the same sign.
     const Real obj_sign = (prob.sense == Sense::Minimize) ? 1.0 : -1.0;
     std_obj_offset_ = obj_sign * prob.obj_offset;
@@ -1860,6 +1862,10 @@ bool BarrierSolver::buildStandardForm() {
     // parameter and stalls the IPM (#204). A ranged row gets a slack bounded
     // by the range through a second row, as a bounded column does.
     std::vector<std::pair<Index, Real>> entries;
+    const auto addModelRow = [&](Index i, Real rhs) {
+        standard_rows_[i] = static_cast<Index>(beq_.size());
+        addEqRow(entries, rhs);
+    };
     for (Index i = 0; i < prob.num_rows; ++i) {
         const Real rl = prob.row_lower[i];
         const Real ru = prob.row_upper[i];
@@ -1900,13 +1906,13 @@ bool BarrierSolver::buildStandardForm() {
                 }
                 continue;
             }
-            addEqRow(entries, rhs);
+            addModelRow(i, rhs);
             continue;
         }
         const bool ranged = rl_finite && ru_finite;
         Index slack = addStdCol(0.0, implicit_ub && ranged ? ru - rl : kInf);
         entries.push_back({slack, 1.0});
-        addEqRow(entries, rhs);
+        addModelRow(i, rhs);
         if (ranged && !implicit_ub) {
             Index t = addStdCol(0.0);
             addEqRow({{slack, 1.0}, {t, 1.0}}, ru - rl);
@@ -1924,6 +1930,7 @@ void BarrierSolver::rebuildTransform() {
     presolve_active_ = false;
     dualized_ = false;
     dual_row_expr_.clear();
+    standard_rows_.clear();
     dual_orig_.clear();
     dualized_reduced_costs_.clear();
     row_scale_.clear();
@@ -2183,7 +2190,8 @@ void BarrierSolver::setColObjective(Index col, Real cost) {
 }
 
 void BarrierSolver::reconstructOriginalSolution(const std::vector<Real>& z,
-                                                const std::vector<Real>& y) {
+                                                const std::vector<Real>& y,
+                                                std::vector<Real>* crossover_prices) {
     const auto& prob = presolve_active_ ? presolved_ : original_;
     const auto& values = dualized_ ? y : z;
 
@@ -2229,12 +2237,27 @@ void BarrierSolver::reconstructOriginalSolution(const std::vector<Real>& z,
             }
         }
         rc_prob = reducedCosts(prob, dual_prob);
+    } else if (crossover_prices != nullptr) {
+        dual_prob.resize(static_cast<size_t>(prob.num_rows));
+        const Real sense = prob.sense == Sense::Minimize ? 1.0 : -1.0;
+        for (Index i = 0; i < prob.num_rows; ++i) {
+            const Index row = standard_rows_[i];
+            if (row >= 0) {
+                const Real sign = isFinite(prob.row_upper[i]) ? 1.0 : -1.0;
+                dual_prob[i] = sense * sign * y[row];
+            }
+        }
+        if (presolve_active_) {
+            rc_prob = reducedCosts(prob, dual_prob);
+        }
     }
     if (presolve_active_) {
         std::vector<Real> rc_orig;
         presolver_.postsolve(primal_prob, dual_prob, rc_prob, primal_orig_, dual_orig_, rc_orig);
         if (dualized_) {
             dualized_reduced_costs_ = reducedCosts(original_, dual_orig_);
+        } else if (crossover_prices != nullptr) {
+            *crossover_prices = std::exchange(dual_orig_, {});
         } else {
             dual_orig_.clear();
         }
@@ -2250,8 +2273,15 @@ void BarrierSolver::reconstructOriginalSolution(const std::vector<Real>& z,
         }
     } else {
         primal_orig_ = std::move(primal_prob);
-        dual_orig_ = std::move(dual_prob);
-        dualized_reduced_costs_ = std::move(rc_prob);
+        if (!dualized_ && crossover_prices != nullptr) {
+            *crossover_prices = std::move(dual_prob);
+        } else {
+            dual_orig_ = std::move(dual_prob);
+            dualized_reduced_costs_ = std::move(rc_prob);
+        }
+    }
+    if (dualized_ && crossover_prices != nullptr) {
+        *crossover_prices = dual_orig_;
     }
 }
 
@@ -2585,6 +2615,312 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     return outcome;
 }
 
+namespace {
+
+struct PushStep {
+    Index blocker = -1;
+    Real distance;
+};
+
+// Dual then primal pushes follow HiGHS's IPX crossover (highs/ipm/ipx/crossover.cc,
+// ERGO-Code/HiGHS, MIT). Here the push starts by clipping the original IPM point
+// and costs to complementary boxes. A relative pivot floor accounts for
+// tableau scale on the original model, in place of IPX's absolute floor.
+// Both pushes limit a move by a box. First allow a small bound violation,
+// then prefer the strongest pivot within that interval (Harris ratio test).
+std::optional<PushStep> crossoverPushStep(Index count, Real target, Real pivot_scale,
+                                          const auto& marginAndPivot) {
+    constexpr Real kTolerance = 1e-9;
+    const Real min_pivot = 1e-8 * std::max(1.0, pivot_scale);
+    Real limit = target;
+    for (Index i = 0; i < count; ++i) {
+        const auto [margin, pivot] = marginAndPivot(i);
+        // A weak coefficient can still restrict motion. Only apply the
+        // stability threshold when choosing a pivot.
+        if (pivot > 0.0) {
+            limit = std::min(limit, (margin + kTolerance) / pivot);
+        }
+    }
+    if (limit >= target) {
+        return PushStep{-1, target};
+    }
+    std::optional<PushStep> step;
+    Real strongest = min_pivot;
+    for (Index i = 0; i < count; ++i) {
+        const auto [margin, pivot] = marginAndPivot(i);
+        if (pivot > strongest && margin / pivot <= limit) {
+            strongest = pivot;
+            step = PushStep{i, margin / pivot};
+        }
+    }
+    return step;
+}
+
+std::optional<std::vector<BasisStatus>> pushCrossoverBasis(
+    const LpProblem& lp, const SparseMatrix& matrix, std::span<const Real> primal,
+    std::span<const Real> row_prices, std::vector<BasisStatus> basis, const Deadline& deadline,
+    BarrierSolver::CrossoverStats& stats) {
+    const Index m = lp.num_rows;
+    const Index n = lp.num_cols;
+    const Index total = n + m;
+    if (m == 0 || std::ssize(row_prices) != m || deadline.passed()) {
+        return std::nullopt;
+    }
+    std::vector<Real> lower = lp.col_lower;
+    std::vector<Real> upper = lp.col_upper;
+    lower.insert(lower.end(), lp.row_lower.begin(), lp.row_lower.end());
+    upper.insert(upper.end(), lp.row_upper.begin(), lp.row_upper.end());
+    std::vector<Real> values(static_cast<size_t>(total));
+    std::ranges::copy(primal, values.begin());
+    lp.matrix.multiply(primal, std::span<Real>(values).subspan(n));
+
+    // On [A | -I], the logical's reduced cost is its row price. Work in
+    // minimization signs for both kinds of column.
+    const Real sense = lp.sense == Sense::Minimize ? 1.0 : -1.0;
+    std::vector<Real> reduced(static_cast<size_t>(total));
+    matrix.multiplyTranspose(row_prices, reduced);
+    std::vector<Real> dual_lower(static_cast<size_t>(total));
+    std::vector<Real> dual_upper(static_cast<size_t>(total));
+    std::vector<Index> basic;
+    basic.reserve(m);
+    std::vector<std::pair<Real, Index>> dual_pushes;
+    constexpr Real kSnapTolerance = 1e-8;
+    for (Index j = 0; j < total; ++j) {
+        if (lower[j] > upper[j] || !isFinite(values[j]) || !isFinite(reduced[j])) {
+            return std::nullopt;
+        }
+        values[j] = std::clamp(values[j], lower[j], upper[j]);
+        const auto bound = nearestCrossoverBound(values[j], lower[j], upper[j]);
+        if (bound.distance <= kSnapTolerance) {
+            values[j] = bound.status == BasisStatus::AtUpper ? upper[j] : lower[j];
+        }
+        dual_lower[j] = values[j] == upper[j] ? -kInf : 0.0;
+        dual_upper[j] = values[j] == lower[j] ? kInf : 0.0;
+        const Real cost = j < n ? lp.obj[j] : 0.0;
+        // Clipping an approximate IPM point to the complementary box can
+        // change the implied objective. Cleanup will use the original one.
+        reduced[j] = std::clamp(sense * (cost - reduced[j]), dual_lower[j], dual_upper[j]);
+        if (basis[j] == BasisStatus::Basic) {
+            if (reduced[j] != 0.0) {
+                dual_pushes.emplace_back(-std::abs(reduced[j]), static_cast<Index>(basic.size()));
+            }
+            basic.push_back(j);
+        }
+    }
+    std::ranges::sort(dual_pushes);
+    std::vector<Real> work(static_cast<size_t>(m));
+    const auto equationsHold = [&] {
+        for (Index i = 0; i < m; ++i) {
+            const auto row = lp.matrix.row(i);
+            Real activity = 0.0;
+            Real magnitude = 0.0;
+            for (Index k = 0; k < row.size(); ++k) {
+                const Real term = row.values[k] * values[row.indices[k]];
+                activity += term;
+                magnitude += std::abs(term);
+            }
+            const Real residual = activity - values[n + i];
+            if (!isFinite(residual) || std::abs(residual) > 1e-6 * std::max(1.0, magnitude)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!equationsHold()) {
+        return std::nullopt;
+    }
+    SparseLU lu;
+    lu.setLowFillPivotSearch(true);
+    lu.setMaxUpdates(300);
+    const auto factor = [&] {
+        if (!lu.factorizeUntil(matrix, basic, deadline)) {
+            return false;
+        }
+        ++stats.push_lu_factors;
+        return true;
+    };
+    // Retry selection on fresh factors before changing the point or basis.
+    const auto stableMove = [&](const auto& choose) -> std::optional<PushStep> {
+        if (auto move = choose()) {
+            return move;
+        }
+        return lu.numUpdates() > 0 && factor() ? choose() : std::nullopt;
+    };
+    const auto pivotsAgree = [](Real ftran, Real btran) {
+        return isFinite(btran) && std::abs(ftran - btran) <= 1e-6 * std::abs(btran) + 1e-12;
+    };
+    std::vector<Real> tableau(static_cast<size_t>(total));
+    const auto transform = [&](Index j) {
+        std::ranges::fill(work, 0.0);
+        const auto col = matrix.col(j);
+        for (Index k = 0; k < col.size(); ++k) {
+            work[col.indices[k]] += col.values[k];
+        }
+        lu.ftran(work);
+    };
+    const auto exchange = [&](Index pos, Index entering) {
+        if (!isFinite(work[pos]) || work[pos] == 0.0 || deadline.passed()) {
+            return false;
+        }
+        lu.updateFromFtranColumn(pos, work);
+        basis[basic[pos]] = BasisStatus::Free;
+        basis[entering] = BasisStatus::Basic;
+        basic[pos] = entering;
+        return !lu.needsRefactorization() || factor();
+    };
+
+    std::vector<std::pair<Real, Index>> primal_pushes;
+    try {
+        if (std::ssize(basic) != m || !factor()) {
+            return std::nullopt;
+        }
+        // A dual push zeros a basic reduced cost or exchanges that basic
+        // column for the nonbasic column whose complementary bound blocks it.
+        for (const auto& [weight, pos] : dual_pushes) {
+            if (deadline.passed()) {
+                return std::nullopt;
+            }
+            const Index leaving = basic[pos];
+            const Real target = reduced[leaving];
+            if (target == 0.0) {
+                continue;
+            }
+            ++stats.dual_pushes;
+            const Real direction = std::copysign(1.0, target);
+            const auto move = stableMove([&]() -> std::optional<PushStep> {
+                std::ranges::fill(work, 0.0);
+                work[pos] = 1.0;
+                lu.btran(work);
+                matrix.multiplyTranspose(work, tableau);
+                const auto choice =
+                    crossoverPushStep(total, std::abs(target), infNorm(tableau), [&](Index j) {
+                        const Real slope = -direction * tableau[j];
+                        const Real margin =
+                            slope < 0.0 ? reduced[j] - dual_lower[j] : dual_upper[j] - reduced[j];
+                        const Real pivot = basis[j] == BasisStatus::Basic ? 0.0 : std::abs(slope);
+                        return std::pair{margin, pivot};
+                    });
+                if (choice && choice->blocker >= 0) {
+                    transform(choice->blocker);
+                    if (!pivotsAgree(work[pos], tableau[choice->blocker])) {
+                        return std::nullopt;
+                    }
+                }
+                return choice;
+            });
+            if (!move) {
+                return std::nullopt;
+            }
+            const Real step = direction * move->distance;
+            for (Index j = 0; j < total; ++j) {
+                if (basis[j] != BasisStatus::Basic) {
+                    reduced[j] =
+                        std::clamp(reduced[j] - step * tableau[j], dual_lower[j], dual_upper[j]);
+                }
+            }
+            reduced[leaving] -= step;
+            if (move->blocker >= 0) {
+                reduced[move->blocker] = 0.0;
+                if (!exchange(pos, move->blocker)) {
+                    return std::nullopt;
+                }
+                ++stats.dual_push_pivots;
+            }
+        }
+
+        // Basic reduced costs are now zero. Move each interior nonbasic
+        // value to a bound (or zero for a free column), pivoting if blocked.
+        for (Index j = 0; j < total; ++j) {
+            if (basis[j] != BasisStatus::Basic && values[j] != lower[j] && values[j] != upper[j]) {
+                const auto bound = nearestCrossoverBound(values[j], lower[j], upper[j]);
+                primal_pushes.emplace_back(-bound.distance, j);
+            }
+        }
+        std::ranges::sort(primal_pushes);
+        std::vector<Real> btran_work(static_cast<size_t>(m));
+        for (const auto& [weight, entering] : primal_pushes) {
+            if (deadline.passed()) {
+                return std::nullopt;
+            }
+            const auto bound =
+                nearestCrossoverBound(values[entering], lower[entering], upper[entering]);
+            Real goal = 0.0;
+            if (bound.status == BasisStatus::AtLower) {
+                goal = lower[entering];
+            } else if (bound.status == BasisStatus::AtUpper) {
+                goal = upper[entering];
+            }
+            const Real target = goal - values[entering];
+            if (target == 0.0) {
+                continue;
+            }
+            ++stats.primal_pushes;
+            const Real direction = std::copysign(1.0, target);
+            const auto move = stableMove([&]() -> std::optional<PushStep> {
+                transform(entering);
+                const auto choice =
+                    crossoverPushStep(m, std::abs(target), infNorm(work), [&](Index pos) {
+                        const Index j = basic[pos];
+                        const Real slope = -direction * work[pos];
+                        const Real margin =
+                            slope < 0.0 ? values[j] - lower[j] : upper[j] - values[j];
+                        return std::pair{margin, std::abs(slope)};
+                    });
+                if (choice && choice->blocker >= 0) {
+                    std::ranges::fill(btran_work, 0.0);
+                    btran_work[choice->blocker] = 1.0;
+                    lu.btran(btran_work);
+                    const auto col = matrix.col(entering);
+                    Real pivot = 0.0;
+                    for (Index k = 0; k < col.size(); ++k) {
+                        pivot += col.values[k] * btran_work[col.indices[k]];
+                    }
+                    if (!pivotsAgree(work[choice->blocker], pivot)) {
+                        return std::nullopt;
+                    }
+                }
+                return choice;
+            });
+            if (!move) {
+                return std::nullopt;
+            }
+            const Real step = direction * move->distance;
+            for (Index pos = 0; pos < m; ++pos) {
+                const Index j = basic[pos];
+                values[j] = std::clamp(values[j] - step * work[pos], lower[j], upper[j]);
+            }
+            if (move->blocker < 0) {
+                values[entering] = goal;
+                continue;
+            }
+            const Index leaving = basic[move->blocker];
+            values[leaving] =
+                direction * work[move->blocker] > 0.0 ? lower[leaving] : upper[leaving];
+            values[entering] =
+                std::clamp(values[entering] + step, lower[entering], upper[entering]);
+            if (!exchange(move->blocker, entering)) {
+                return std::nullopt;
+            }
+            ++stats.primal_push_pivots;
+        }
+    } catch (const std::runtime_error&) {
+        // Let simplex handle the original rank-screened basis if a push
+        // factor becomes singular.
+        return std::nullopt;
+    }
+    if (!equationsHold()) {
+        return std::nullopt;
+    }
+    for (Index j = 0; j < total; ++j) {
+        if (basis[j] != BasisStatus::Basic) {
+            basis[j] = nearestCrossoverBound(values[j], lower[j], upper[j]).status;
+        }
+    }
+    return basis;
+}
+
+}  // namespace
+
 // For the ray y and d = A^T y, getDualRay()'s alpha and beta (lp_solver.h),
 // from the model's own numbers, with every product and sum in long double.
 // The simplex's ray is tolerance-bound: its contract lets alpha - beta fall
@@ -2678,7 +3014,7 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     return alpha - beta > kGapRel * terms + rel * cancel;
 }
 
-bool BarrierSolver::runCrossover(bool probe_infeasibility) {
+bool BarrierSolver::runCrossover(bool probe_infeasibility, std::span<const Real> prices) {
     crossover_status_ = Status::Error;
     crossover_proved_infeasible_ = false;
     const auto deadline = deadline_.orStop(options_.stop_flag);
@@ -2709,6 +3045,28 @@ bool BarrierSolver::runCrossover(bool probe_infeasibility) {
         return false;
     }
 
+    if (!prices.empty()) {
+        if (const auto matrix = DualSimplexSolver::makeBasisMatrix(original_.matrix, deadline)) {
+            if (auto pushed = pushCrossoverBasis(original_, *matrix, primal_orig_, prices, *basis,
+                                                 deadline, crossover_stats_)) {
+                basis = std::move(pushed);
+                crossover_stats_.pushed_basis = true;
+            }
+        }
+        if (options_.verbose) {
+            const auto& s = crossover_stats_;
+            std::printf(
+                "Crossover pushes: %d dual (%d pivots), %d primal (%d pivots), %d LU "
+                "factors, %s.\n",
+                s.dual_pushes, s.dual_push_pivots, s.primal_pushes, s.primal_push_pivots,
+                s.push_lu_factors, s.pushed_basis ? "basis ready" : "basis unavailable");
+        }
+    }
+    if (deadline.passed()) {
+        crossover_status_ = stopped_status();
+        return false;
+    }
+
     // Phase 2: Basis cleanup using dual simplex.
     crossover_stats_.attempted = true;
     DualSimplexSolver ds;
@@ -2723,6 +3081,9 @@ bool BarrierSolver::runCrossover(bool probe_infeasibility) {
         return false;
     }
     ds.setVerbose(false);
+    if (crossover_stats_.pushed_basis) {
+        ds.lu_.setLowFillPivotSearch(true);
+    }
 
     const auto acceptBasis = [&](const DualSimplexSolver& simplex, const LpResult& result) {
         primal_orig_ = simplex.getPrimalValues();
@@ -2970,7 +3331,9 @@ LpResult BarrierSolver::solve() {
         return {status_, objective_, iterations_, 0.0};
     }
 
-    reconstructOriginalSolution(z, y);
+    std::vector<Real> crossover_prices;
+    reconstructOriginalSolution(
+        z, y, options_.crossover && options_.crossover_pushes ? &crossover_prices : nullptr);
     const bool near_optimal = outcome == BarrierIpmOutcome::NearOptimal;
     const bool feasible = checkOriginalPrimalFeasibility(primal_orig_);
     objective_ = computeOriginalObjective(original_, primal_orig_);
@@ -3008,7 +3371,7 @@ LpResult BarrierSolver::solve() {
 
     // Run crossover to extract a basic feasible solution.
     if (options_.crossover) {
-        const bool crossed = runCrossover(near_optimal);
+        const bool crossed = runCrossover(near_optimal, crossover_prices);
         if (options_.verbose && crossover_stats_.attempted) {
             std::printf(
                 "Crossover: %d simplex iterations, singular-basis recovery %s, "

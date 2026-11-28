@@ -8,13 +8,6 @@
 
 namespace mipx {
 
-namespace {
-
-struct CrossoverBound {
-    BasisStatus status;
-    Real distance;
-};
-
 CrossoverBound nearestCrossoverBound(Real value, Real lower, Real upper) {
     if (lower == upper) {
         return {BasisStatus::Fixed, 0.0};
@@ -29,8 +22,6 @@ CrossoverBound nearestCrossoverBound(Real value, Real lower, Real upper) {
     }
     return {BasisStatus::AtUpper, from_upper / std::max(1.0, std::abs(upper))};
 }
-
-}  // namespace
 
 std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
                                                        std::span<const Real> primal,

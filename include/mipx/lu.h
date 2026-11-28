@@ -101,6 +101,10 @@ public:
     void setFtDropTolerance(Real tol) { ft_drop_tol_ = std::max<Real>(0.0, tol); }
     [[nodiscard]] Real ftDropTolerance() const { return ft_drop_tol_; }
 
+    /// Use thresholded Markowitz search on large bases and search longer
+    /// before accepting a pivot. Used by the opt-in barrier crossover pushes.
+    void setLowFillPivotSearch(bool enable) { low_fill_pivot_search_ = enable; }
+
     /// Enable/disable mixed-precision mode (FP32 factorization + FP64 iterative refinement).
     void setMixedPrecision(bool enable) { mixed_precision_enabled_ = enable; }
     [[nodiscard]] bool mixedPrecision() const { return mixed_precision_active_; }
@@ -298,6 +302,7 @@ private:
     bool supernodal_enabled_ = true;
     // BTF block-wise elimination: off by default, see setBtfBlockElimination().
     bool btf_block_elimination_ = false;
+    bool low_fill_pivot_search_ = false;
     // Dense panel values: column-major, panel_rows x width.
     std::vector<Real> snode_panel_values_;
     // Row indices for each supernode (in original row space).

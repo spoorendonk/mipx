@@ -140,6 +140,9 @@ struct BarrierOptions {
     // Opt-in cap on columns left out of the GPU normal-equations factor.
     // Among columns above the GPU density threshold, the densest go first.
     Int gpu_ne_max_dense_cols = 0;
+    // Push the interior primal and dual values toward a basis before simplex
+    // cleanup. The pushes and cleanup share the solve deadline.
+    bool crossover_pushes = false;
 };
 
 class BarrierSolver : public LpSolver {
@@ -196,7 +199,7 @@ public:
     // Simplex iterations of the last solve's crossover, cold fallback
     // included; 0 when it did not run (or its basis guess was optimal).
     [[nodiscard]] Int crossoverIterations() const { return crossover_iters_; }
-    /// How the simplex cleanup ran in the most recent barrier solve.
+    /// How crossover ran in the most recent barrier solve.
     struct CrossoverStats {
         bool attempted = false;
         bool singular_recovery = false;
@@ -205,6 +208,12 @@ public:
         // warm optimum, for a rigorous Farkas ray (#408).
         bool infeasibility_probe = false;
         Int probe_iterations = 0;
+        bool pushed_basis = false;
+        Int dual_pushes = 0;
+        Int dual_push_pivots = 0;
+        Int primal_pushes = 0;
+        Int primal_push_pivots = 0;
+        Int push_lu_factors = 0;
     };
     [[nodiscard]] CrossoverStats crossoverStats() const { return crossover_stats_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
@@ -234,9 +243,10 @@ private:
     void clearTransformedSolution();
     BarrierIpmOutcome solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
                                         std::vector<Real>& s, Int& iters);
-    void reconstructOriginalSolution(const std::vector<Real>& z, const std::vector<Real>& y);
+    void reconstructOriginalSolution(const std::vector<Real>& z, const std::vector<Real>& y,
+                                     std::vector<Real>* crossover_prices);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
-    bool runCrossover(bool probe_infeasibility);
+    bool runCrossover(bool probe_infeasibility, std::span<const Real> prices);
 
     BarrierOptions options_{};
     LpProblem original_;
@@ -256,6 +266,7 @@ private:
     std::vector<Real> ustd_;
     std::vector<OriginalColExpr> col_expr_;
     std::vector<OriginalColExpr> dual_row_expr_;
+    std::vector<Index> standard_rows_;  // Presolved row to standard equality, or -1.
     Real std_obj_offset_ = 0.0;
     Real scaled_obj_ = 0.0;  // objective computed before Ruiz unscaling
 

@@ -376,7 +376,7 @@ bool SparseLU::factorizeUntil(const SparseMatrix& matrix, std::span<const Index>
     // Maximum columns to inspect per nnz bucket in the general Markowitz search.
     static constexpr Index kMaxColsPerBucket = 8;
     // Accept a pivot early if its Markowitz cost is at or below this fraction of dim.
-    static constexpr Real kEarlyAcceptFraction = 0.05;
+    const Real early_accept_fraction = low_fill_pivot_search_ ? 0.005 : 0.05;
 
     if (deadline.passed()) {
         return false;
@@ -924,13 +924,13 @@ bool SparseLU::factorizeUntil(const SparseMatrix& matrix, std::span<const Index>
 
         // General search over increasing column-nnz buckets.
         if (best_markowitz > 0) {
-            const bool use_fast_large_pivot = dim_ >= kFastPivotMinDim;
+            const bool use_fast_large_pivot = dim_ >= kFastPivotMinDim && !low_fill_pivot_search_;
             // Dynamic early-accept: accept a pivot whose Markowitz cost is
             // small relative to the remaining active dimension.
             const Index remaining = dim_ - step;
             const long long early_accept = std::max(
                 static_cast<long long>(1),
-                static_cast<long long>(kEarlyAcceptFraction * static_cast<Real>(remaining)));
+                static_cast<long long>(early_accept_fraction * static_cast<Real>(remaining)));
 
             for (Index nnz = 2; nnz <= dim_; ++nnz) {
                 if (col_bucket_head[static_cast<std::size_t>(nnz)] < 0) {

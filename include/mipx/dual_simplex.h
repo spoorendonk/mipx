@@ -509,6 +509,8 @@ private:
     Index numVars() const { return num_cols_ + num_rows_; }
 
     /// Build augmented_ = [A | -I], the matrix the basis is factorized from.
+    [[nodiscard]] static std::optional<SparseMatrix> makeBasisMatrix(const SparseMatrix& matrix,
+                                                                     const Deadline& deadline);
     [[nodiscard]] bool buildBasisMatrixSource(const Deadline& deadline = {});
     /// Swap each basic column in @p cols for a row's logical (removeCols).
     /// False, with the basis unchanged in meaning, when it cannot be done.

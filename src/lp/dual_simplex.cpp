@@ -631,9 +631,13 @@ void DualSimplexSolver::unscaleResults() {
 //  Build augmented matrix [A | -I]
 // ---------------------------------------------------------------------------
 
+std::optional<SparseMatrix> DualSimplexSolver::makeBasisMatrix(const SparseMatrix& matrix,
+                                                               const Deadline& deadline) {
+    return copySimplexMatrix(matrix, true, deadline, [](Index, Index, Real a) { return a; });
+}
+
 bool DualSimplexSolver::buildBasisMatrixSource(const Deadline& deadline) {
-    auto augmented =
-        copySimplexMatrix(matrix_, true, deadline, [](Index, Index, Real a) { return a; });
+    auto augmented = makeBasisMatrix(matrix_, deadline);
     if (!augmented || deadline.passed()) {
         return false;
     }
@@ -1811,8 +1815,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         return false;
     };
 
-    // Factorize basis.
-    if (!factorBasis()) {
+    // Barrier crossover can request lower fill for its warm start. Later
+    // simplex refactorizations use the usual pivot search.
+    const bool start_factored = factorBasis();
+    lu_.setLowFillPivotSearch(false);
+    if (!start_factored) {
         has_basis_ = false;
         dse_weights_valid_ = false;
         work_.add(lu_.workUnits());

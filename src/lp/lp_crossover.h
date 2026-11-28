@@ -11,6 +11,13 @@ namespace mipx {
 class Deadline;
 class DualSimplexSolver;
 
+struct CrossoverBound {
+    BasisStatus status;
+    Real distance;
+};
+
+CrossoverBound nearestCrossoverBound(Real value, Real lower, Real upper);
+
 // Construct a full-rank simplex start in the original model's space from an
 // interior solution. The basis still needs simplex cleanup to prove optimality.
 std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
