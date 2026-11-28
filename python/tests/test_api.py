@@ -167,6 +167,7 @@ def test_tree_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
     solver.set_presolve(False)
     solver.set_tree_cuts_enabled(True)
     solver.set_tree_cut_propagation_enabled(True)
+    solver.set_propagation_scheduler_enabled(True)
     solver.load(mipx.read_lp(str(path)))
     result = solver.solve()
     assert result.status == mipx.Status.Optimal

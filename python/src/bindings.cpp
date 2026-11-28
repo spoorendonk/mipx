@@ -195,6 +195,8 @@ NB_MODULE(_core, m) {
              &MipSolver::setRootInactiveCutPropagationEnabled, "enabled"_a)
         .def("set_root_cutoff_feedback_enabled", &MipSolver::setRootCutoffFeedbackEnabled,
              "enabled"_a)
+        .def("set_propagation_scheduler_enabled", &MipSolver::setPropagationSchedulerEnabled,
+             "enabled"_a)
         .def("set_root_cut_propagation_row_budget", &MipSolver::setRootCutPropagationRowBudget,
              "visits"_a,
              "Limit total root propagation visits, including enabled inference producers. Zero "

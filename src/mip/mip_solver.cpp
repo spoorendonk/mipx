@@ -54,6 +54,30 @@ void addPropagationWork(PropagationWork& total, const PropagationWork& delta, bo
     }
 }
 
+void logPropagationSchedule(Logger& log, const char* phase, const PropagationScheduleStats& stats) {
+    constexpr std::array names{"implications", "cliques", "rows", "inactive_cuts"};
+    static_assert(names.size() == PropagationScheduleStats::kCount);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const auto& producer = stats.producers[i];
+        const auto exitCount = [&](PropagationExit exit) {
+            return static_cast<unsigned long long>(producer.exits[static_cast<std::size_t>(exit)]);
+        };
+        if (producer.calls == 0 &&
+            std::ranges::all_of(producer.exits, [](auto n) { return n == 0; })) {
+            continue;
+        }
+        log.log(
+            "Propagation scheduler %s %s calls=%llu work=%llu endpoints=%llu deferrals=%llu "
+            "empty=%llu budget=%llu deadline=%llu contradiction=%llu\n",
+            phase, names[i], static_cast<unsigned long long>(producer.calls),
+            static_cast<unsigned long long>(producer.work),
+            static_cast<unsigned long long>(producer.endpoints),
+            static_cast<unsigned long long>(producer.deferrals), exitCount(PropagationExit::Empty),
+            exitCount(PropagationExit::Budget), exitCount(PropagationExit::Deadline),
+            exitCount(PropagationExit::Contradiction));
+    }
+}
+
 // Gives the next solve of `lp` `seconds` at most; negative means no limit.
 void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
     auto opts = lp.getOptions();
@@ -1764,6 +1788,9 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     cut_stats_.tree_cut_propagation_backouts += cuts.tree_cut_propagation_backouts;
     cut_stats_.tree_cut_propagation_budget_exhaustions +=
         cuts.tree_cut_propagation_budget_exhaustions;
+    if (propagation_scheduler_enabled_) {
+        cut_stats_.tree_propagation_schedule.merge(cuts.tree_propagation_schedule);
+    }
 }
 
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
@@ -3684,7 +3711,15 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         }
                         const Int before_visits = visits_left;
                         feasible =
-                            dp.propagateNewRows(base_row, visits_left, propagation, &deadline);
+                            propagation_scheduler_enabled_
+                                ? dp.propagateScheduled(visits_left, propagation,
+                                                        tree_cut_stats.tree_propagation_schedule,
+                                                        {.inactive = {},
+                                                         .sweep_rows = false,
+                                                         .first_new_row = base_row,
+                                                         .deadline = &deadline})
+                                : dp.propagateNewRows(base_row, visits_left, propagation,
+                                                      &deadline);
                         node_work_out +=
                             1e-6 * (static_cast<double>(domain_model.matrix.numNonzeros()) +
                                     domain_model.num_rows + before_visits - visits_left);
@@ -7722,6 +7757,10 @@ MipResult MipSolver::solveMinimizationOnce() {
                 cut_stats_.tree_cuts_global, cut_stats_.tree_cuts_purged,
                 cut_stats_.tree_cuts_revived, cut_stats_.tree_lp_delta);
         }
+        if (propagation_scheduler_enabled_) {
+            logPropagationSchedule(log_, "root", cut_stats_.root_propagation_schedule);
+            logPropagationSchedule(log_, "tree", cut_stats_.tree_propagation_schedule);
+        }
         if (tree_cut_propagation_enabled_) {
             const auto& work = cut_stats_.tree_cut_propagation;
             log_.log(
@@ -8183,11 +8222,23 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
                     propagator.setImplicationGraph(&implication_graph_);
                 }
             }
-            const bool feasible = root_cut_inference_enabled_ || !inactive_cuts.empty()
-                                      ? propagator.propagateWithInactiveCuts(
-                                            global_visits_left, inference_work, inactive_cuts,
-                                            pre_round_cliques, propagate_base_rows)
-                                      : propagator.propagateWithRowBudget(global_visits_left);
+            bool feasible;
+            if (propagation_scheduler_enabled_) {
+                const auto deadline = Deadline::after(timeLeft());
+                feasible = propagator.propagateScheduled(global_visits_left, inference_work,
+                                                         cut_stats_.root_propagation_schedule,
+                                                         {.inactive = inactive_cuts,
+                                                          .first_clique = pre_round_cliques,
+                                                          .sweep_rows = propagate_base_rows,
+                                                          .first_new_row = std::nullopt,
+                                                          .deadline = &deadline});
+            } else if (root_cut_inference_enabled_ || !inactive_cuts.empty()) {
+                feasible = propagator.propagateWithInactiveCuts(global_visits_left, inference_work,
+                                                                inactive_cuts, pre_round_cliques,
+                                                                propagate_base_rows);
+            } else {
+                feasible = propagator.propagateWithRowBudget(global_visits_left);
+            }
             round_visits_left -= global_limit - global_visits_left;
             if (!feasible && !inactive_cuts.empty() && verbose_) {
                 log_.log(
