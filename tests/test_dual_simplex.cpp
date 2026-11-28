@@ -722,18 +722,15 @@ TEST_CASE("DualSimplex: no-presolve #278 Netlib LPs solve within time limit",
     }
 }
 
-TEST_CASE("Regression #298: an optimum reached under bound perturbation is a vertex",
-          "[dual_simplex][regression]") {
-    // min -(1..6)·x  s.t.  x_{j+1} - x_j <= 0 (j < 5),  sum x <= 3,  x >= 0.
-    // The cold slack basis is primal feasible, its reduced costs cannot be
-    // fixed by bound flips (no upper bounds), and the chain rows sit at
-    // their zero sides, so the primal phase starts degenerate. With the
-    // stall threshold at one pivot the perturbation comes on at once, and
-    // pivots park leaving slacks on the shrunken bounds. The optimum,
-    // x_j = 0.5 for all j at -10.5, has every row tight: each nonbasic slack
-    // must be back on its true bound, so the rows hold with equality. It
-    // used to keep a slack at ub - eps, a feasible point that is no vertex.
-    constexpr Index n = 6;
+namespace {
+// min -(1..6)·x  s.t.  x_{j+1} - x_j <= 0 (j < 5),  sum x <= 3,  x >= 0.
+// The cold slack basis is primal feasible, its reduced costs cannot be
+// fixed by bound flips (no upper bounds), and the chain rows sit at their
+// zero sides, so the primal phase starts degenerate. The optimum, x_j = 0.5
+// for all j at -10.5, has every row tight.
+constexpr Index kChainCols = 6;
+LpProblem chainLp() {
+    constexpr Index n = kChainCols;
     LpProblem lp;
     lp.name = "chain";
     lp.sense = Sense::Minimize;
@@ -760,7 +757,19 @@ TEST_CASE("Regression #298: an optimum reached under bound perturbation is a ver
     }
     row_starts.push_back(static_cast<Index>(values.size()));
     lp.matrix = SparseMatrix(n, n, values, col_indices, row_starts);
+    return lp;
+}
+}  // namespace
 
+TEST_CASE("Regression #298: an optimum reached under bound perturbation is a vertex",
+          "[dual_simplex][regression]") {
+    // With the stall threshold at one pivot the perturbation comes on at
+    // once on chainLp()'s degenerate start, and pivots park leaving slacks on
+    // the shrunken bounds. At the optimum every row is tight: each nonbasic
+    // slack must be back on its true bound, so the rows hold with equality.
+    // It used to keep a slack at ub - eps, a feasible point that is no vertex.
+    constexpr Index n = kChainCols;
+    const LpProblem lp = chainLp();
     DualSimplexSolver solver;
     DualSimplexOptions opts = solver.getOptions();
     opts.enable_bound_perturbation = true;
@@ -848,6 +857,148 @@ TEST_CASE("DualSimplex: outward bound perturbation solves Beale's cycling LP",
     CHECK_FALSE(DualSimplexOptions{}.enable_primal_bound_perturbation);
     CHECK(solveWith(false) == 0);
     CHECK(solveWith(true) == 1);
+}
+
+// The stall-triggered perturbation's outward mode (#426) on Beale's cycling
+// example, with the stall threshold at one degenerate pivot: the first
+// degenerate primal pivot switches it on, it widens the box and stays on
+// until the optimum, where it comes off and the solution is a vertex of the
+// unperturbed LP. The a priori perturbation (#425) and the cost
+// perturbation are off, so only the stall path acts.
+TEST_CASE("DualSimplex: outward stall perturbation solves Beale's cycling LP",
+          "[dual_simplex][degeneracy]") {
+    LpProblem lp;
+    lp.name = "beale";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-0.75, 20.0, -0.5, 6.0};
+    lp.col_lower.assign(4, 0.0);
+    lp.col_upper.assign(4, kInf);
+    lp.col_type.assign(4, VarType::Continuous);
+    lp.num_rows = 3;
+    lp.row_lower.assign(3, -kInf);
+    lp.row_upper = {0.0, 0.0, 1.0};
+    lp.matrix = SparseMatrix(3, 4, {0.25, -8.0, -1.0, 9.0, 0.5, -12.0, -0.5, 3.0, 1.0},
+                             {0, 1, 2, 3, 0, 1, 2, 3, 2}, {0, 4, 8, 9});
+
+    auto solveWith = [&](bool outward) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.enable_cost_perturbation = false;
+        opts.enable_bound_perturbation = true;
+        opts.bound_perturbation_outward = outward;
+        opts.bound_perturbation_stall_pivots = 1;
+        solver.setOptions(opts);
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.25, 1e-9));
+        // The optimal vertex of the unperturbed LP, x1 = x3 = 1.
+        const auto x = solver.getPrimalValues();
+        REQUIRE(x.size() == 4);
+        CHECK_THAT(x[0], WithinAbs(1.0, 1e-9));
+        CHECK_THAT(x[1], WithinAbs(0.0, 1e-9));
+        CHECK_THAT(x[2], WithinAbs(1.0, 1e-9));
+        CHECK_THAT(x[3], WithinAbs(0.0, 1e-9));
+        const auto& stats = solver.getDegeneracyStats();
+        CHECK(stats.primal_bound_perturbation_activations == 0);
+        CHECK(stats.cleanup_budget_rejected == 0);
+        return stats;
+    };
+    // Off by default: the option alone switches the mode.
+    CHECK_FALSE(DualSimplexOptions{}.bound_perturbation_outward);
+    CHECK(solveWith(false).bound_perturbation_activations >= 1);
+    CHECK(solveWith(true).bound_perturbation_activations >= 1);
+}
+
+// Both stall modes on chainLp() (#426), threshold one degenerate pivot. The
+// inward perturbation comes off at the first non-degenerate pivot and on
+// again at the next degenerate one; the outward one stays on until the
+// optimum, so it is switched on once.
+TEST_CASE("DualSimplex: the outward stall perturbation stays on until the optimum",
+          "[dual_simplex][degeneracy]") {
+    const LpProblem lp = chainLp();
+    auto solveWith = [&](bool outward) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.enable_bound_perturbation = true;
+        opts.bound_perturbation_outward = outward;
+        opts.bound_perturbation_stall_pivots = 1;
+        opts.bound_perturbation_magnitude = 1e-3;
+        solver.setOptions(opts);
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-10.5, 1e-9));
+        const auto x = solver.getPrimalValues();
+        REQUIRE(x.size() == static_cast<std::size_t>(kChainCols));
+        for (Index j = 0; j < kChainCols; ++j) {
+            INFO("column " << j);
+            CHECK_THAT(x[j], WithinAbs(0.5, 1e-9));
+        }
+        const auto& stats = solver.getDegeneracyStats();
+        CHECK(stats.primal_bound_perturbation_activations == 0);
+        return stats.bound_perturbation_activations;
+    };
+    CHECK(solveWith(false) >= 2);
+    CHECK(solveWith(true) == 1);
+}
+
+// A cleanup whose budget runs out on a basis infeasible for the unperturbed
+// LP is not an optimum (#426). min -2x - y over x, y >= 0 and the rows
+// x <= 1/2 - d, x + y <= 1, y <= 1/2 (d = 1e-3; the middle row is
+// redundant, the optimum is x = 1/2 - d, y = 1/2). The outward perturbation
+// (#425), at base 1e-2, widens the rows' bounds by 5.9e-3, 1.1e-3 and
+// 4.3e-3 (its fixed hash, logicals 2 to 4), enough to make the middle row
+// bind: the perturbed optimum has the first two rows' logicals nonbasic at
+// their widened uppers. Put back on their true bounds they give
+// y = 1 - x = 1/2 + d, over the last row's bound, so the solve enters a
+// cleanup. With a one-iteration budget the cleanup runs out before its
+// first pivot, which used to return that basis as Optimal.
+TEST_CASE("DualSimplex: an exhausted cleanup on an infeasible basis is not optimal",
+          "[dual_simplex][degeneracy]") {
+    constexpr Real d = 1e-3;
+    LpProblem lp;
+    lp.name = "redundant_row";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {-2.0, -1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.num_rows = 3;
+    lp.row_lower.assign(3, -kInf);
+    lp.row_upper = {0.5 - d, 1.0, 0.5};
+    lp.matrix = SparseMatrix(3, 2, {1.0, 1.0, 1.0, 1.0}, {0, 0, 1, 1}, {0, 1, 3, 4});
+
+    auto solveWith = [&](Int cleanup_limit) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.enable_cost_perturbation = false;
+        opts.enable_bound_perturbation = false;
+        opts.enable_primal_bound_perturbation = true;
+        opts.primal_bound_perturbation_base = 1e-2;
+        opts.bound_perturbation_cleanup_iter_limit = cleanup_limit;
+        solver.setOptions(opts);
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-2.0 * (0.5 - d) - 0.5, 1e-9));
+        const auto x = solver.getPrimalValues();
+        REQUIRE(x.size() == 2);
+        CHECK_THAT(x[0], WithinAbs(0.5 - d, 1e-9));
+        CHECK_THAT(x[1], WithinAbs(0.5, 1e-9));
+        const auto stats = solver.getDegeneracyStats();
+        CHECK(stats.primal_bound_perturbation_activations == 1);
+        CHECK(stats.cleanup_phases >= 1);
+        CHECK(stats.cleanup_budget_exhausted == 0);
+        return stats.cleanup_budget_rejected;
+    };
+    CHECK(solveWith(500) == 0);
+    CHECK(solveWith(1) >= 1);
 }
 
 // The degeneracy counters (#422) add up on a cold dual-phase solve and start

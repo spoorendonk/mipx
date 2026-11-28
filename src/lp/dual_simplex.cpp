@@ -2134,6 +2134,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
+    // The outward mode's stall count (#426), after SoPlex's m_numCycle: one
+    // up per degenerate pivot, halved by a non-degenerate one; refactors and
+    // retries leave it alone. It goes back to 0 when the perturbation comes
+    // off at an optimum and at a stall restart.
+    Int stall_cycle_count = 0;
     // Consecutive zero dual steps, for DegeneracyStats only (#422).
     Int dual_zero_step_streak = 0;
     Int empty_candidate_retry_streak = 0;
@@ -2302,6 +2307,19 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // unscaled clean-up), so a cleanup that returns to the primal phase does
     // not perturb again.
     bool outward_perturbation_applied = false;
+    // An outward perturbation (#425, #426) has been on in this call, so a
+    // fixed variable may sit nonbasic at a widened bound.
+    bool outward_perturbation_used = false;
+    const bool stall_outward =
+        options_.enable_bound_perturbation && options_.bound_perturbation_outward;
+    // Every pivot (a primal bound flip included) moves the decaying count.
+    auto countStallPivot = [&](bool degenerate) {
+        if (degenerate) {
+            saturatingIncrement(stall_cycle_count);
+        } else {
+            stall_cycle_count /= 2;
+        }
+    };
 
     auto clearBoundPerturbation = [&]() {
         if (!bound_perturb_active_) {
@@ -2323,7 +2341,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // The outward perturbation widens fixed variables too (HiGHS
             // does, for basic ones), so one that left the basis while it was
             // on carries AtLower or AtUpper: it is Fixed again.
-            if (outward_perturbation_applied && base_var_lower[ks] == base_var_upper[ks] &&
+            if (outward_perturbation_used && base_var_lower[ks] == base_var_upper[ks] &&
                 (var_status_[k] == BasisStatus::AtLower ||
                  var_status_[k] == BasisStatus::AtUpper)) {
                 var_status_[k] = BasisStatus::Fixed;
@@ -2453,8 +2471,55 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         bound_perturb_active_ = true;
         bound_perturb_outward_ = true;
+        outward_perturbation_used = true;
         nonbasic_off_bounds = true;
         bound_perturb_level_ = level;
+        return true;
+    };
+
+    // Feasibility of the current basis for the unperturbed LP: every basic
+    // within its true bounds, every nonbasic's reduced cost of the right sign.
+    auto basicsWithinBaseBounds = [&]() -> bool {
+        for (Index i = 0; i < num_rows_; ++i) {
+            const Index bk = basis_[i];
+            const Real xk = primal_[bk];
+            const std::size_t bs = static_cast<std::size_t>(bk);
+            if (xk < base_var_lower[bs] - kPrimalTol || xk > base_var_upper[bs] + kPrimalTol) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto nonbasicsDualFeasible = [&]() -> bool {
+        for (Index k : nonbasic_) {
+            const Real rc = reduced_cost_[k];
+            const BasisStatus st = var_status_[k];
+            if ((st == BasisStatus::AtLower && rc < -kDualTol) ||
+                (st == BasisStatus::AtUpper && rc > kDualTol) ||
+                (st == BasisStatus::Free && std::abs(rc) > kDualTol)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto basisOptimalForBaseBounds = [&]() -> bool {
+        return basicsWithinBaseBounds() && nonbasicsDualFeasible();
+    };
+
+    // A stall's first activation (#426's outward mode or the inward one),
+    // within bound_perturbation_max_activations.
+    auto activateStallBoundPerturbation = [&]() -> bool {
+        if (!stall_outward) {
+            return activateBoundPerturbation(0);
+        }
+        if (options_.bound_perturbation_max_activations >= 0 &&
+            bound_perturb_activations_ >= options_.bound_perturbation_max_activations) {
+            return false;
+        }
+        if (!activateOutwardBoundPerturbation(0)) {
+            return false;
+        }
+        ++bound_perturb_activations_;
         return true;
     };
 
@@ -2504,9 +2569,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             break;
         }
 
-        // Cleanup phase budget: if we've exhausted cleanup iterations
-        // without reaching optimality, declare optimal anyway (the
-        // perturbation was only a numerical device).
+        // Cleanup phase budget: once it is exhausted, either accept the
+        // basis (optimal for the unperturbed LP) or leave cleanup.
         if (in_cleanup_phase) {
             --cleanup_iters_remaining;
             if (cleanup_iters_remaining <= 0) {
@@ -2517,16 +2581,24 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     // and let the main loop take the shifts off.
                     in_cleanup_phase = false;
                 } else {
-                    // Budget exhausted. Accept current solution, with
-                    // reduced costs priced from fresh duals if the ray guard
-                    // priced a column out since the last ones (#319).
+                    // Budget exhausted, with reduced costs priced from fresh
+                    // duals if the ray guard priced a column out since the
+                    // last ones (#319). Accept the basis only if it is
+                    // optimal for the unperturbed LP (#426); otherwise leave
+                    // cleanup and let the main loop finish the solve.
                     if (guard_fired_since_duals) {
                         guard_fired_since_duals = false;
                         computeDuals();
                     }
-                    ++degeneracy_stats_.cleanup_budget_exhausted;
-                    status_ = Status::Optimal;
-                    break;
+                    in_cleanup_phase = false;
+                    if (!bound_perturb_active_ && !nonbasic_off_bounds &&
+                        basisOptimalForBaseBounds()) {
+                        ++degeneracy_stats_.cleanup_budget_exhausted;
+                        status_ = Status::Optimal;
+                        break;
+                    }
+                    ++degeneracy_stats_.cleanup_budget_rejected;
+                    need_infeasible_rebuild = true;
                 }
             }
         }
@@ -2541,8 +2613,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (degenerate_pivot_streak == 0) {
                 if (bound_perturb_outward_) {
                     // The outward perturbation stays until the optimum; the
-                    // next escalation waits for a new stall.
-                    bound_perturb_streak_mark = 0;
+                    // next escalation waits for a new stall (in the outward
+                    // mode, #426, the mark follows the decaying count below).
+                    if (!stall_outward) {
+                        bound_perturb_streak_mark = 0;
+                    }
                 } else {
                     // Degeneracy resolved: de-activate perturbation.
                     clearBoundPerturbation();
@@ -2551,22 +2626,31 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
             }
         }
+        // The outward mode (#426) counts the stall on its decaying count, the
+        // others on the streak.
+        const Int stall_count = stall_outward ? stall_cycle_count : degenerate_pivot_streak;
+        if (stall_outward) {
+            // The mark follows the count down, so an escalation waits for
+            // bound_perturbation_stall_pivots more than the lowest count since
+            // the last activation or escalation.
+            bound_perturb_streak_mark = std::min(bound_perturb_streak_mark, stall_count);
+        }
         if ((options_.enable_bound_perturbation || bound_perturb_outward_) &&
             options_.bound_perturbation_stall_pivots > 0 &&
-            degenerate_pivot_streak >= options_.bound_perturbation_stall_pivots) {
+            stall_count >= options_.bound_perturbation_stall_pivots) {
             if (!bound_perturb_active_) {
                 // First activation at level 0.
-                if (activateBoundPerturbation(0)) {
+                if (activateStallBoundPerturbation()) {
                     ++degeneracy_stats_.bound_perturbation_activations;
-                    bound_perturb_streak_mark = degenerate_pivot_streak;
+                    bound_perturb_streak_mark = stall_count;
                     in_cleanup_phase = false;
                     need_infeasible_rebuild = true;
                 }
-            } else if (degenerate_pivot_streak - bound_perturb_streak_mark >=
+            } else if (stall_count - bound_perturb_streak_mark >=
                        options_.bound_perturbation_stall_pivots) {
                 // Degeneracy persists despite perturbation: escalate one
                 // level per further bound_perturbation_stall_pivots.
-                bound_perturb_streak_mark = degenerate_pivot_streak;
+                bound_perturb_streak_mark = stall_count;
                 if (escalateBoundPerturbation()) {
                     ++degeneracy_stats_.bound_perturbation_escalations;
                     need_infeasible_rebuild = true;
@@ -2580,6 +2664,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             degenerate_pivot_streak >= options_.stall_restart_pivots && restart_budget_ok) {
             clearBoundPerturbation();
             bound_perturb_level_ = 0;
+            stall_cycle_count = 0;
             clearCostShifts();
             ++basis_epoch;
             setupCrashBasis();
@@ -2926,22 +3011,14 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     computePrimals();
                     computeDuals();
                     degenerate_pivot_streak = 0;
+                    // The stall it answered is over: the cleanup counts its
+                    // own from zero, or a high count would perturb it at once.
+                    stall_cycle_count = 0;
+                    bound_perturb_streak_mark = 0;
                     resetPrimalFeasibleProgress();
 
                     // Check if primal feasibility was lost by removing perturbation.
-                    bool primal_ok = true;
-                    for (Index i = 0; i < num_rows_; ++i) {
-                        Index bk = basis_[i];
-                        Real xk = primal_[bk];
-                        Real lbk = base_var_lower[static_cast<std::size_t>(bk)];
-                        Real ubk = base_var_upper[static_cast<std::size_t>(bk)];
-                        if (xk < lbk - kPrimalTol || xk > ubk + kPrimalTol) {
-                            primal_ok = false;
-                            break;
-                        }
-                    }
-
-                    if (!primal_ok) {
+                    if (!basicsWithinBaseBounds()) {
                         // Primal infeasibilities from unperturbing: allow bounded
                         // cleanup iterations to resolve them via normal dual pivots.
                         in_cleanup_phase = true;
@@ -2953,18 +3030,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     }
 
                     // Primal OK: check if dual feasibility was lost.
-                    bool dual_ok = true;
-                    for (Index k : nonbasic_) {
-                        const Real rc = reduced_cost_[k];
-                        const BasisStatus st = var_status_[k];
-                        if ((st == BasisStatus::AtLower && rc < -kDualTol) ||
-                            (st == BasisStatus::AtUpper && rc > kDualTol) ||
-                            (st == BasisStatus::Free && std::abs(rc) > kDualTol)) {
-                            dual_ok = false;
-                            break;
-                        }
-                    }
-                    if (!dual_ok) {
+                    if (!nonbasicsDualFeasible()) {
                         // Shift-back: flip dual-infeasible nonbasic variables.
                         bool flipped = false;
                         for (Index k : nonbasic_) {
@@ -3018,7 +3084,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 outward_perturbation_applied = true;
                 if (activateOutwardBoundPerturbation(0)) {
                     ++degeneracy_stats_.primal_bound_perturbation_activations;
-                    bound_perturb_streak_mark = degenerate_pivot_streak;
+                    bound_perturb_streak_mark =
+                        stall_outward ? stall_cycle_count : degenerate_pivot_streak;
                     need_infeasible_rebuild = true;
                     continue;
                 }
@@ -3295,6 +3362,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 } else {
                     degenerate_pivot_streak = 0;
                 }
+                countStallPivot(primal_step_degenerate);
                 saturatingIncrement(primal_feasible_pivots_since_refactor);
                 ++iterations_;
                 continue;
@@ -3433,6 +3501,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             } else {
                 degenerate_pivot_streak = 0;
             }
+            countStallPivot(primal_step_degenerate);
             saturatingIncrement(primal_feasible_pivots_since_refactor);
 
             bool should_refactorize = lu_.needsRefactorization();
@@ -4371,7 +4440,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             pivot_col_pattern);
 
         ++degeneracy_stats_.dual_pivots;
-        if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
+        const bool dual_step_primal_degenerate =
+            std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol;
+        if (dual_step_primal_degenerate) {
             ++degenerate_pivot_streak;
             ++degeneracy_stats_.dual_degenerate_pivots;
             degeneracy_stats_.max_degenerate_streak =
@@ -4379,6 +4450,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         } else {
             degenerate_pivot_streak = 0;
         }
+        countStallPivot(dual_step_primal_degenerate);
 
         // Check if refactorization needed.
         bool should_refactorize = lu_.needsRefactorization();

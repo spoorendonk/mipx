@@ -151,8 +151,26 @@ struct DualSimplexOptions {
     Real bound_perturbation_expand_factor = 10.0;
     Int bound_perturbation_max_level = 3;
 
+    // Outward mode of the stall-triggered perturbation (#426), after SoPlex
+    // and Bach, Black, Huiberts, Kafer, arXiv:2510.21613. Off by default.
+    // Instead of shrinking the box (lb + eps, ub - eps) and coming off at the
+    // first non-degenerate pivot, a stall widens it with the a priori
+    // perturbation's shape (see enable_primal_bound_perturbation, sized by
+    // primal_bound_perturbation_base), keeps it until the apparent optimum
+    // and removes it through the same cleanup. The stall is counted the
+    // SoPlex way: one up per degenerate pivot, halved by a non-degenerate one
+    // (not reset by it or by a refactor; it starts again from zero when the
+    // perturbation comes off at an optimum). The perturbation comes on
+    // when the count reaches bound_perturbation_stall_pivots and escalates
+    // each time it gains that many again; bound_perturbation_max_activations
+    // and bound_perturbation_max_level bound it as in the inward mode, and
+    // it needs enable_bound_perturbation.
+    bool bound_perturbation_outward = false;
+
     // Cleanup phase: bounded iterations to resolve infeasibilities after
-    // removing perturbation at optimality.
+    // removing perturbation at optimality. A cleanup that runs out of them is
+    // accepted as Optimal only if the basis is primal and dual feasible for
+    // the unperturbed LP; otherwise the solve goes on without the budget.
     Int bound_perturbation_cleanup_iter_limit = 500;
 
     // A priori outward bound perturbation for the primal phase (#425), after
@@ -414,6 +432,9 @@ public:
         // perturbation came off or nonbasics were put back on their bounds.
         Int cleanup_phases = 0;
         Int cleanup_budget_exhausted = 0;  // cleanups declared Optimal on an exhausted budget
+        // Cleanups whose budget ran out on a basis infeasible for the
+        // unperturbed LP, so the solve went on (#426).
+        Int cleanup_budget_rejected = 0;
     };
     [[nodiscard]] const DegeneracyStats& getDegeneracyStats() const { return degeneracy_stats_; }
 
@@ -625,8 +646,9 @@ private:
     bool bound_perturb_active_ = false;
     Int bound_perturb_activations_ = 0;
     Int bound_perturb_level_ = 0;  // current escalation level (0 = initial)
-    // The active bound perturbation is the a priori outward one (#425):
-    // negative entries in the perturbation arrays, kept until an optimum.
+    // The active bound perturbation is an outward one (the a priori one,
+    // #425, or the stall-triggered one in outward mode, #426): negative
+    // entries in the perturbation arrays, kept until an optimum.
     bool bound_perturb_outward_ = false;
     Int bfrt_high_flip_iters_ = 0;  // consecutive iterations with high flip count
     // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
