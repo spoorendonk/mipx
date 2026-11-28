@@ -324,6 +324,9 @@ public:
     /// Nonbasic structural columns at one active bound in the current optimum.
     /// Applies the dual feasibility tolerance in the units of the accepted solve.
     std::optional<LpDualDegeneracy> measureDualDegeneracy() const;
+    /// Current Optimal objective after checking primal feasibility and the dual
+    /// gap in model units. Unavailable after an LP edit or if the check fails.
+    [[nodiscard]] std::optional<Real> checkedOptimalObjective() const;
     /// See LpSolver::getDualRay(). The ray is the row of B^{-1} for the basic
     /// variable that the dual ratio test proved cannot reach its bound.
     std::vector<Real> getDualRay() const override;

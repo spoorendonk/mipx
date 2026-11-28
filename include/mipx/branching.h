@@ -171,6 +171,15 @@ struct BranchSelectionHistories {
     const BranchCutoffComparison* cutoff = nullptr;
     BranchDualDegeneracyStats* dual_degeneracy = nullptr;
     const BranchRestartDiversification* restart_diversification = nullptr;
+    Int tree_lookahead_probe_cap = 0;
+};
+
+struct TreeBranchLookaheadStats {
+    Int comparisons = 0;
+    Int selection_changes = 0;
+    Int lp_solves = 0;
+    Int lp_iterations = 0;
+    double lp_work_units = 0.0;
 };
 
 struct BranchingTelemetry {
@@ -190,6 +199,7 @@ struct BranchingTelemetry {
     Int pseudocost_tree_skipped = 0;
     /// Column chosen for the first ordinary root split, in working columns.
     Index root_branch_variable = -1;
+    TreeBranchLookaheadStats tree_lookahead{};
 
     BranchingTelemetry& operator+=(const BranchingTelemetry& other) {
         selections += other.selections;
@@ -202,6 +212,11 @@ struct BranchingTelemetry {
         pseudocost_updates_strong += other.pseudocost_updates_strong;
         pseudocost_updates_tree += other.pseudocost_updates_tree;
         pseudocost_tree_skipped += other.pseudocost_tree_skipped;
+        tree_lookahead.comparisons += other.tree_lookahead.comparisons;
+        tree_lookahead.selection_changes += other.tree_lookahead.selection_changes;
+        tree_lookahead.lp_solves += other.tree_lookahead.lp_solves;
+        tree_lookahead.lp_iterations += other.tree_lookahead.lp_iterations;
+        tree_lookahead.lp_work_units += other.tree_lookahead.lp_work_units;
         return *this;
     }
 };

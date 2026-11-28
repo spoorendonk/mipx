@@ -15,6 +15,30 @@ namespace {
 constexpr Real kPseudocostEstimateIntTol = 1e-6;
 constexpr Real kNearTieRelativeGap = 0.01;
 
+struct ChildSplit {
+    Index col;
+    Real value;
+    Real lower;
+    Real upper;
+    std::vector<BasisStatus> basis;
+};
+
+std::optional<ChildSplit> firstChildSplit(const DualSimplexSolver& lp, const LpProblem& problem,
+                                          std::span<const Real> lower, std::span<const Real> upper,
+                                          Index first_col, Real first_lower, Real first_upper) {
+    const auto point = lp.getPrimalValues();
+    for (Index col = 0; col < problem.num_cols; ++col) {
+        const Real lb = col == first_col ? first_lower : lower[col];
+        const Real ub = col == first_col ? first_upper : upper[col];
+        const Real value = point[col];
+        if (problem.col_type[col] != VarType::Continuous && ub - lb > 1e-12 &&
+            std::isfinite(value) && !isIntegral(value)) {
+            return ChildSplit{col, value, lb, ub, lp.getBasis()};
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 Index MostFractionalBranching::select(std::span<const Real> primal_values,
@@ -541,14 +565,27 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     const bool may_retry = mode == BranchScoreMode::Product && probe_budget >= 2;
     const Candidate* best_reliable = bestReliable();
 
+    struct ProbeOutcome {
+        LpResult result;
+        std::optional<ChildSplit> split{};
+    };
     struct CachedProbe {
         Index variable;
         bool up;
-        LpResult result;
+        ProbeOutcome outcome;
+    };
+    struct LookaheadPair {
+        Index col;
+        Real split_value;
+        RankScore score;
+        std::optional<ChildSplit> down;
+        std::optional<ChildSplit> up;
     };
     std::vector<CachedProbe> cached_probes;
     std::vector<StrongBranchPseudocostSample> pending_samples;
     Int fresh_probes_remaining = probe_budget;
+    Int lookahead_remaining = histories.tree_lookahead_probe_cap;
+    const bool lookahead = lookahead_remaining > 0 && !force_strong_branch;
     Int distinct_probed = 0;
     bool started_probing = false;
     const auto strongWinner = [&]() -> std::optional<Index> {
@@ -562,14 +599,17 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         const Int old_limit = lp.getIterationLimit();
         lp.setIterationLimit(strong_branch_iter_limit_);
 
-        const auto cachedResult = [&](Index variable, bool up) -> const LpResult* {
+        const auto& options = lp.getOptions();
+        const auto deadline =
+            options.stop_flag ? options.deadline.orStop(options.stop_flag) : options.deadline;
+        const auto cachedResult = [&](Index variable, bool up) -> const ProbeOutcome* {
             const auto cached = std::ranges::find_if(cached_probes, [&](const CachedProbe& p) {
                 return p.variable == variable && p.up == up;
             });
-            return cached == cached_probes.end() ? nullptr : &cached->result;
+            return cached == cached_probes.end() ? nullptr : &cached->outcome;
         };
         const auto probeDirection = [&](const Candidate& c, bool up, Real lower, Real upper,
-                                        const LpResult* cached) {
+                                        const ProbeOutcome* cached) {
             if (cached != nullptr) {
                 return *cached;
             }
@@ -580,11 +620,17 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             ++telemetry.strong_branch_probes;
             telemetry.strong_branch_probe_iters += probe.iterations;
             telemetry.strong_branch_probe_work_units += probe.work_units;
+            ProbeOutcome outcome{probe};
+            if (lookahead && probe.status == Status::Optimal && std::isfinite(probe.objective) &&
+                !deadline.passed()) {
+                outcome.split =
+                    firstChildSplit(lp, problem, col_lower, col_upper, c.var, lower, upper);
+            }
             lp.setColBounds(c.var, col_lower[c.var], col_upper[c.var]);
             if (mode == BranchScoreMode::Product) {
-                cached_probes.push_back({c.var, up, probe});
+                cached_probes.push_back({c.var, up, outcome});
             }
-            return probe;
+            return outcome;
         };
         const auto probeGain = [&](const LpResult& probe, Real predicted) {
             if (probe.status == Status::Infeasible) {
@@ -622,6 +668,7 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
 
         std::optional<Index> winner = -1;
         std::optional<RankScore> best_score;
+        std::array<std::optional<LookaheadPair>, 2> lookahead_pairs;
         const auto consider = [&](Index variable, RankScore score) {
             if (score > best_score.value_or(RankScore{-kInf, score.exponent})) {
                 best_score = score;
@@ -641,8 +688,8 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             const Real up_lb = std::ceil(c.value);
             const bool solve_down = down_ub >= orig_lb - 1e-12;
             const bool solve_up = up_lb <= orig_ub + 1e-12;
-            const LpResult* cached_down = replay ? cachedResult(c.var, false) : nullptr;
-            const LpResult* cached_up = replay ? cachedResult(c.var, true) : nullptr;
+            const ProbeOutcome* cached_down = replay ? cachedResult(c.var, false) : nullptr;
+            const ProbeOutcome* cached_up = replay ? cachedResult(c.var, true) : nullptr;
             const Int fresh_needed =
                 (solve_down && cached_down == nullptr) + (solve_up && cached_up == nullptr);
             const bool new_candidate =
@@ -653,8 +700,9 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             }
             distinct_probed += new_candidate;
 
-            const auto down = solve_down ? probeDirection(c, false, orig_lb, down_ub, cached_down)
-                                         : LpResult{Status::Infeasible};
+            auto down_outcome = solve_down ? probeDirection(c, false, orig_lb, down_ub, cached_down)
+                                           : ProbeOutcome{{Status::Infeasible}};
+            const auto& down = down_outcome.result;
             if (down.status == Status::TimeLimit) {
                 break;
             }
@@ -666,8 +714,9 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             record(c, false, down, down_gain);
             --remaining;
 
-            const auto up = solve_up ? probeDirection(c, true, up_lb, orig_ub, cached_up)
-                                     : LpResult{Status::Infeasible};
+            auto up_outcome = solve_up ? probeDirection(c, true, up_lb, orig_ub, cached_up)
+                                       : ProbeOutcome{{Status::Infeasible}};
+            const auto& up = up_outcome.result;
             if (up.status == Status::TimeLimit) {
                 // The down sample stands. The unobserved up gain is zero
                 // when an already strong down gain makes this pair eligible.
@@ -684,9 +733,93 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             }
             record(c, true, up, up_gain);
             --remaining;
-            consider(c.var, directionalScore(mode, down_gain, up_gain));
+            const auto score = directionalScore(mode, down_gain, up_gain);
+            consider(c.var, score);
+            if (lookahead && down.status == Status::Optimal && up.status == Status::Optimal &&
+                std::isfinite(down.objective) && std::isfinite(up.objective) && score.isFinite()) {
+                if (!lookahead_pairs[0] || score > lookahead_pairs[0]->score) {
+                    lookahead_pairs[1] = std::move(lookahead_pairs[0]);
+                    lookahead_pairs[0] =
+                        LookaheadPair{c.var, c.value, score, std::move(down_outcome.split),
+                                      std::move(up_outcome.split)};
+                } else if (!lookahead_pairs[1] || score > lookahead_pairs[1]->score) {
+                    lookahead_pairs[1] =
+                        LookaheadPair{c.var, c.value, score, std::move(down_outcome.split),
+                                      std::move(up_outcome.split)};
+                }
+            }
         }
 
+        auto& stats = telemetry.tree_lookahead;
+        const auto grandchildBound = [&](const ChildSplit& split, Real lower,
+                                         Real upper) -> std::optional<Real> {
+            if (deadline.passed()) {
+                return std::nullopt;
+            }
+            if (lower > upper) {
+                return kInf;
+            }
+            if (lookahead_remaining == 0) {
+                return std::nullopt;
+            }
+            --lookahead_remaining;
+            lp.setColBounds(split.col, lower, upper);
+            lp.setBasis(split.basis);
+            const auto result = lp.solve();
+            ++stats.lp_solves;
+            stats.lp_iterations += result.iterations;
+            stats.lp_work_units += result.work_units;
+            std::optional<Real> bound;
+            if (!deadline.passed()) {
+                if (result.status == Status::Infeasible) {
+                    bound = kInf;  // Dual simplex validates the infeasibility ray.
+                } else if (result.status == Status::Optimal) {
+                    bound = lp.checkedOptimalObjective();
+                }
+            }
+            lp.setColBounds(split.col, split.lower, split.upper);
+            return bound;
+        };
+        const auto childGain = [&](const LookaheadPair& pair, bool up) -> std::optional<Real> {
+            const auto& split = up ? *pair.up : *pair.down;
+            lp.setColBounds(pair.col, up ? std::ceil(pair.split_value) : col_lower[pair.col],
+                            up ? col_upper[pair.col] : std::floor(pair.split_value));
+            const auto down_bound =
+                grandchildBound(split, split.lower, std::min(split.upper, std::floor(split.value)));
+            const auto up_bound =
+                down_bound ? grandchildBound(split, std::max(split.lower, std::ceil(split.value)),
+                                             split.upper)
+                           : std::nullopt;
+            lp.setColBounds(pair.col, col_lower[pair.col], col_upper[pair.col]);
+            if (!down_bound || !up_bound) {
+                return std::nullopt;
+            }
+            const Real bound = std::min(*down_bound, *up_bound);
+            if (bound == kInf) {
+                return kStrongInfeasibleGain;
+            }
+            const Real gain = bound - node_objective;
+            return std::isfinite(gain) ? std::optional{std::max<Real>(0.0, gain)} : std::nullopt;
+        };
+        const auto pairScore = [&](const LookaheadPair& pair) -> std::optional<RankScore> {
+            const auto down = childGain(pair, false);
+            const auto up = down ? childGain(pair, true) : std::nullopt;
+            return up ? std::optional{directionalScore(mode, *down, *up)} : std::nullopt;
+        };
+        if (winner && lookahead_pairs[0] && lookahead_pairs[1] &&
+            *winner == lookahead_pairs[0]->col && std::isfinite(node_objective) &&
+            std::ranges::all_of(lookahead_pairs,
+                                [](const auto& pair) { return pair->down && pair->up; })) {
+            const auto baseline = pairScore(*lookahead_pairs[0]);
+            const auto challenger = baseline ? pairScore(*lookahead_pairs[1]) : std::nullopt;
+            if (challenger && !deadline.passed()) {
+                ++stats.comparisons;
+                if (*challenger > *baseline) {
+                    winner = lookahead_pairs[1]->col;
+                    ++stats.selection_changes;
+                }
+            }
+        }
         lp.setIterationLimit(old_limit);
         lp.setBasis(saved_basis);
         return winner;

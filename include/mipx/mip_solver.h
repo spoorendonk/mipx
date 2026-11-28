@@ -648,6 +648,10 @@ public:
     /// Turn strong branching off: branching then rests on pseudocosts alone,
     /// learned from the tree. Mainly for tests and experiments.
     void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
+    /// Extra grandchild LP solves allowed per fresh serial tree decision. Zero disables it.
+    void setTreeBranchLookaheadProbeCap(Int cap) {
+        tree_branch_lookahead_probe_cap_ = std::max<Int>(0, cap);
+    }
     /// Give the weaker branch direction more weight in reliability branching.
     /// Off by default, which scores a branch by its larger directional gain.
     void setBalancedBranchScore(bool enabled) { branching_rule_.setBalancedScore(enabled); }
@@ -953,6 +957,7 @@ private:
         std::span<MipBranchInferenceStats> branch_inference_history;
         std::span<MipBranchCutoffStats> branch_cutoff_history;
         BranchDualDegeneracyStats* branch_dual_degeneracy = nullptr;
+        Int tree_branch_lookahead_probe_cap = 0;
         Int restart_index = 0;
         std::span<const Index> branch_history_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
@@ -1269,6 +1274,7 @@ private:
     bool conflict_ray_shortening_enabled_ = false;
     bool conflict_lp_proofs_enabled_ = false;
     bool strong_branching_enabled_ = true;
+    Int tree_branch_lookahead_probe_cap_ = 0;
     bool tree_pseudocosts_enabled_ = true;
     bool directional_inference_enabled_ = false;
     bool inference_branch_coverage_enabled_ = false;

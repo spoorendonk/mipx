@@ -181,6 +181,127 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
 }
 
+TEST_CASE("Tree branch look-ahead compares two complete pairs within its probe cap",
+          "[branching]") {
+    const auto mode =
+        GENERATE(BranchScoreMode::LargerGain, BranchScoreMode::Balanced, BranchScoreMode::Product);
+    const Int cap = GENERATE(0, 7, 8);
+    const auto injected =
+        GENERATE(std::optional<Status>{}, std::optional{Status::IterLimit},
+                 std::optional{Status::TimeLimit}, std::optional{Status::Optimal});
+    CAPTURE(cap, injected);
+
+    // Independent V-shaped costs put the root at x=z=y=0.5. Branching on
+    // x costs 4 and is initially preferred to y and z. The second split in
+    // index order pairs x with z (5, 5), but y with x (4.25, 7). Max and
+    // product prefer the latter, while the balanced score prefers x.
+    LpProblem lp;
+    lp.num_cols = 6;
+    lp.num_rows = 8;
+    lp.col_type = {VarType::Binary,     VarType::Binary,     VarType::Binary,
+                   VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.col_lower.assign(6, 0.0);
+    lp.col_upper = {1.0, 1.0, 1.0, kInf, kInf, kInf};
+    lp.obj = {0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+    lp.row_lower = {4.0, -4.0, 0.125, -1.0, 0.25, -3.0, 0.5, -0.5};
+    lp.row_upper.assign(8, kInf);
+    // z >= |x - 0.5| makes two grandchildren infeasible, with both
+    // first-level directions still feasible for every candidate.
+    lp.matrix = SparseMatrix(8, 6,
+                             std::vector<Triplet>{{0, 0, 8.0},
+                                                  {0, 3, 1.0},
+                                                  {1, 0, -8.0},
+                                                  {1, 3, 1.0},
+                                                  {2, 1, 0.25},
+                                                  {2, 4, 1.0},
+                                                  {3, 1, -2.0},
+                                                  {3, 4, 1.0},
+                                                  {4, 2, 0.5},
+                                                  {4, 5, 1.0},
+                                                  {5, 2, -6.0},
+                                                  {5, 5, 1.0},
+                                                  {6, 0, 1.0},
+                                                  {6, 1, 1.0},
+                                                  {7, 0, -1.0},
+                                                  {7, 1, 1.0}});
+    struct ProbeSolver : DualSimplexSolver {
+        std::optional<Status> injected;
+        std::vector<Status> results;
+
+        LpResult solve() override {
+            // The simulated Optimal has no solver state that validates it.
+            const auto result = injected && results.size() == 7 ? LpResult{*injected, 99.0}
+                                                                : DualSimplexSolver::solve();
+            results.push_back(result.status);
+            return result;
+        }
+    };
+    ProbeSolver simplex;
+    simplex.load(lp);
+    simplex.setIterationLimit(111);
+    const auto parent = simplex.solve();
+    REQUIRE(parent.status == Status::Optimal);
+    REQUIRE(parent.objective == 0.0);
+    const auto basis = simplex.getBasis();
+    const auto point = simplex.getPrimalValues();
+    simplex.results.clear();
+    simplex.injected = injected;
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(mode);
+    branching.setStrongBranchMaxCandidates(3);
+    branching.setStrongBranchProbeBudget(6);
+    BranchingTelemetry telemetry;
+    const auto selection = branching.selectWithHistories(
+        simplex, lp, point, lp.col_lower, lp.col_upper, parent.objective, false, telemetry, {},
+        {.tree_lookahead_probe_cap = cap});
+
+    const bool comparison = cap == 8 && !injected;
+    const bool change = comparison && mode != BranchScoreMode::Balanced;
+    REQUIRE(selection.variable == (change ? 2 : 0));
+    CHECK(telemetry.strong_branch_probes == 6);
+    CHECK(telemetry.pseudocost_updates_strong == 6);
+    CHECK(telemetry.tree_lookahead.lp_solves == (cap > 0 && injected ? 2 : cap));
+    CHECK(telemetry.tree_lookahead.comparisons == (comparison ? 1 : 0));
+    CHECK(telemetry.tree_lookahead.selection_changes == (change ? 1 : 0));
+    if (comparison) {
+        CHECK(std::ranges::count(simplex.results, Status::Infeasible) == 2);
+    }
+    CHECK(simplex.getIterationLimit() == 111);
+    CHECK(simplex.getBasis() == basis);
+    for (Index col = 0; col < lp.num_cols; ++col) {
+        Real lower = 0.0;
+        Real upper = 0.0;
+        simplex.getColBounds(col, lower, upper);
+        CHECK(lower == lp.col_lower[col]);
+        CHECK(upper == lp.col_upper[col]);
+    }
+    simplex.injected.reset();
+    const auto restored = simplex.solve();
+    CHECK(restored.status == Status::Optimal);
+    CHECK(restored.objective == parent.objective);
+
+    // Enumerate the two halves of each chosen split in the original model.
+    std::array<Real, 2> optimum{kInf, kInf};
+    DualSimplexSolver enumerator;
+    for (Int mask = 0; mask < 8; ++mask) {
+        if ((mask & 2) == 0) {
+            continue;  // Every integer x needs z=1.
+        }
+        enumerator.load(lp);
+        for (Index col = 0; col < 3; ++col) {
+            const Real value = (mask >> col) & 1;
+            enumerator.setColBounds(col, value, value);
+        }
+        const auto result = enumerator.solve();
+        REQUIRE(result.status == Status::Optimal);
+        auto& half = optimum[(mask >> selection.variable) & 1];
+        half = std::min(half, result.objective);
+    }
+    CHECK(optimum == std::array<Real, 2>{5.25, change ? 8.0 : 5.25});
+}
+
 TEST_CASE("Inference coverage only compares candidates on the winning pseudocost path",
           "[branching]") {
     LpProblem lp;

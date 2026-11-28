@@ -79,6 +79,7 @@ void printUsage(FILE* out) {
                  "[--root-lp-lookahead|--no-root-lp-lookahead] "
                  "[--root-lp-lookahead-depth 2|3] [--root-lp-lookahead-work N] "
                  "[--root-learning-allowance FRACTION WORK] "
+                 "[--tree-branch-lookahead-probes N (serial tree)] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
                  "[--presolve-probing-probes N] [--presolve-probing-time S] "
                  "[--clique-table|--no-clique-table] "
@@ -249,6 +250,7 @@ int main(int argc, char* argv[]) {
     bool root_lp_lookahead = false;
     std::optional<mipx::Int> root_lp_lookahead_depth;
     std::optional<mipx::Int> root_lp_lookahead_work;
+    mipx::Int tree_branch_lookahead_probes = 0;
     bool presolve_probing = false;
     std::optional<mipx::Int> presolve_probing_rounds;
     std::optional<mipx::Int> presolve_probing_probes;
@@ -442,7 +444,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--no-root-lp-lookahead") {
             root_lp_lookahead = false;
         } else if ((arg == "--root-rapid-learning-nodes" || arg == "--root-rapid-learning-rows" ||
-                    arg == "--root-lp-lookahead-depth" || arg == "--root-lp-lookahead-work") &&
+                    arg == "--root-lp-lookahead-depth" || arg == "--root-lp-lookahead-work" ||
+                    arg == "--tree-branch-lookahead-probes") &&
                    i + 1 < argc) {
             const std::string_view value = argv[++i];
             const auto end = value.data() + value.size();
@@ -460,6 +463,8 @@ int main(int argc, char* argv[]) {
                 root_lp_lookahead_depth = count;
             } else if (arg == "--root-lp-lookahead-work") {
                 root_lp_lookahead_work = count;
+            } else if (arg == "--tree-branch-lookahead-probes") {
+                tree_branch_lookahead_probes = count;
             } else {
                 (arg == "--root-rapid-learning-nodes" ? rapid_learning_nodes
                                                       : rapid_learning_rows) = count;
@@ -1045,6 +1050,7 @@ int main(int argc, char* argv[]) {
                 solver.setRootRapidLearningRowBudget(*rapid_learning_rows);
             }
             solver.setRootLpLookaheadEnabled(root_lp_lookahead);
+            solver.setTreeBranchLookaheadProbeCap(tree_branch_lookahead_probes);
             if (root_lp_lookahead_depth) {
                 solver.setRootLpLookaheadDepth(*root_lp_lookahead_depth);
             }
@@ -1208,6 +1214,21 @@ int main(int argc, char* argv[]) {
                     stats.duplicate_conflicts, stats.incumbents_rejected,
                     static_cast<unsigned long long>(stats.tree_conflict_tightenings),
                     static_cast<unsigned long long>(stats.tree_conflict_cutoffs));
+            }
+            if (tree_branch_lookahead_probes > 0) {
+#ifdef MIPX_HAS_TBB
+                if (num_threads > 1) {
+                    log.log("Tree branch look-ahead unavailable for parallel search\n");
+                } else
+#endif
+                {
+                    const auto& stats = solver.getBranchingStats().tree_lookahead;
+                    log.log(
+                        "Tree branch look-ahead: compared=%d changes=%d lp_solves=%d "
+                        "lp_iterations=%d lp_work=%.6f\n",
+                        stats.comparisons, stats.selection_changes, stats.lp_solves,
+                        stats.lp_iterations, stats.lp_work_units);
+                }
             }
             if (root_lp_lookahead) {
                 const auto& stats = solver.getRootLpLookaheadStats();

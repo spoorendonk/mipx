@@ -4070,7 +4070,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     ? nullptr
                     : &cutoff_comparison,
                 node_scratch.branch_dual_degeneracy,
-                node_scratch.restart_index > 0 ? &diversification : nullptr};
+                node_scratch.restart_index > 0 ? &diversification : nullptr,
+                node.depth > 0 ? node_scratch.tree_branch_lookahead_probe_cap : 0};
             selection = branching_rule_.selectWithHistories(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
                 false, branching_stats_, activity, branch_histories);
@@ -4183,6 +4184,13 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         lp.setColBounds(j, current_lower[j], current_upper[j]);
     }
     total_work += root_symmetry_work;
+    // Look-ahead work is reported but does not expand the tree heuristic budget.
+    const auto reportedWork = [&] {
+        return total_work + branching_stats_.tree_lookahead.lp_work_units;
+    };
+    const auto reportedIterations = [&] {
+        return total_lp_iters + branching_stats_.tree_lookahead.lp_iterations;
+    };
     std::vector<Index> touched_vars;
     double last_log_time = -kLogInterval;  // ensure first node is logged
     uint64_t det_log_next_tick = 1000000;
@@ -4199,6 +4207,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     node_scratch.branch_cutoff_history = branch_cutoff_stats_;
     node_scratch.branch_dual_degeneracy =
         branch_dual_degeneracy_enabled_ ? &branch_dual_degeneracy_stats_ : nullptr;
+    node_scratch.tree_branch_lookahead_probe_cap = tree_branch_lookahead_probe_cap_;
     node_scratch.branch_history_col_mapping = branch_history_col_mapping;
     node_scratch.conflict_global_rows = conflict_global_rows;
     node_scratch.reconvergence_model = reconvergence_model;
@@ -4506,10 +4515,11 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             best_solution = std::move(heur_outcome.solution->values);
             solution_pool.submit({best_solution, incumbent}, "rins", 0);
             ++rins_found;
-            const double log_elapsed = (parallel_mode_ == ParallelMode::Deterministic)
-                                           ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
-                                           : elapsed();
-            logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+            const double log_elapsed =
+                (parallel_mode_ == ParallelMode::Deterministic)
+                    ? static_cast<double>(workUnitTicks(reportedWork())) * 1e-6
+                    : elapsed();
+            logProgress(nodes_explored, queue.size(), reportedIterations(), incumbent,
                         queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                         node_int_inf);
             recordIncumbent();
@@ -4519,12 +4529,12 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
 
         if (verbose_) {
             if (parallel_mode_ == ParallelMode::Deterministic) {
-                const uint64_t cur_ticks = workUnitTicks(total_work);
+                const uint64_t cur_ticks = workUnitTicks(reportedWork());
                 if (cur_ticks >= det_log_next_tick || nodes_explored <= 1) {
                     while (cur_ticks >= det_log_next_tick) {
                         det_log_next_tick += 1000000;
                     }
-                    logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+                    logProgress(nodes_explored, queue.size(), reportedIterations(), incumbent,
                                 queue.empty() ? (incumbent < kInf ? incumbent : root_bound)
                                               : queue.bestBound(),
                                 static_cast<double>(cur_ticks) * 1e-6, false, node_int_inf);
@@ -4533,7 +4543,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 // Log progress periodically (time-based).
                 double now = elapsed();
                 if (now - last_log_time >= kLogInterval || nodes_explored <= 1) {
-                    logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+                    logProgress(nodes_explored, queue.size(), reportedIterations(), incumbent,
                                 queue.empty() ? (incumbent < kInf ? incumbent : root_bound)
                                               : queue.bestBound(),
                                 now, false, node_int_inf);
@@ -4549,9 +4559,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 solution_pool.submit({best_solution, incumbent}, "tree_integral", 0);
                 const double log_elapsed =
                     (parallel_mode_ == ParallelMode::Deterministic)
-                        ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
+                        ? static_cast<double>(workUnitTicks(reportedWork())) * 1e-6
                         : elapsed();
-                logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+                logProgress(nodes_explored, queue.size(), reportedIterations(), incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true, 0);
                 recordIncumbent();
                 nodes_since_incumbent = 0;
@@ -4614,9 +4624,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 solution_pool.submit({best_solution, incumbent}, "plunge_rounding", 0);
                 const double log_elapsed =
                     (parallel_mode_ == ParallelMode::Deterministic)
-                        ? static_cast<double>(workUnitTicks(total_work)) * 1e-6
+                        ? static_cast<double>(workUnitTicks(reportedWork())) * 1e-6
                         : elapsed();
-                logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
+                logProgress(nodes_explored, queue.size(), reportedIterations(), incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                             node_int_inf);
                 recordIncumbent();
@@ -4644,6 +4654,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         policy_stats->proof_completed = queue.empty() && !dropped_open;
     }
 
+    total_lp_iters = reportedIterations();
+    total_work = reportedWork();
     mergeNodeWorkStats(node_stats);
 
     if (verbose_ && rins_calls > 0) {

@@ -5046,6 +5046,15 @@ std::optional<LpDualDegeneracy> DualSimplexSolver::measureDualDegeneracy() const
     return result;
 }
 
+std::optional<Real> DualSimplexSolver::checkedOptimalObjective() const {
+    if (status_ != Status::Optimal || !optimal_basis_current_ || bound_perturb_active_ ||
+        !primalHoldsUnscaled() || !optimumHoldsUnscaled()) {
+        return std::nullopt;
+    }
+    const Real objective = getObjective();
+    return std::isfinite(objective) ? std::optional{objective} : std::nullopt;
+}
+
 std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
     // Before any solve or setBasis, load() has not sized the statuses:
     // return none rather than read past them.
