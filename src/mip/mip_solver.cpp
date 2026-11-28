@@ -1588,16 +1588,20 @@ bool MipSolver::runRootProbing() {
     if (systematic_probing_enabled_) {
         config.max_probes_per_round = systematic_probing_max_pairs_;
         config.systematic_rows_per_branch = systematic_probing_rows_per_branch_;
-        config.time_limit = timeLeft();
         config.learn_vubs = false;
     }
 
     ProbingEngine engine;
     auto stats = engine.probe(problem_, implication_graph_, vb_store_, config);
+    if (stats.skipped_unsupported_domains) {
+        probing_stats_ = {};
+        return false;
+    }
 
     probing_stats_.variables_probed = stats.variables_probed;
     probing_stats_.branches_probed = stats.branches_probed;
     probing_stats_.row_visits = stats.row_visits;
+    probing_stats_.implication_candidates = stats.implication_candidates;
     probing_stats_.fixings_found = stats.fixings_found;
     probing_stats_.implications_found = stats.implications_found;
     probing_stats_.vubs_found = stats.vubs_found;
@@ -1612,8 +1616,7 @@ bool MipSolver::runRootProbing() {
             clause.literals.push_back(branch);
             clause.lbd = 1;
             ++probing_stats_.checked_conflicts_published;
-            ++conflict_stats_.bound_conflicts_learned;
-            publishConflict(std::move(clause), ConflictSource::BoundInfeasible);
+            publishConflict(std::move(clause), ConflictSource::RootProbe);
         }
     }
 
@@ -2046,7 +2049,8 @@ void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
     conflict_stats_.lp_infeasible_conflicts += source == ConflictSource::LpInfeasible;
     conflict_stats_.bound_infeasible_conflicts += source == ConflictSource::BoundInfeasible;
 
-    if (conflict_restart_threshold_ > 0 && !clause.literals.empty()) {
+    if (conflict_restart_threshold_ > 0 && !clause.literals.empty() &&
+        source != ConflictSource::RootProbe) {
         // One event per learned clause. Reuse improves branch scores but
         // does not make the same clause fresh restart evidence again.
         conflict_restart_activity_ += 1.0;
@@ -2725,13 +2729,6 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         touched_vars.push_back(j);
     }
 
-    const auto before_implications = touched_vars.size();
-    if (systematic_probing_enabled_ && implication_graph_.numImplications() > 0 &&
-        !applyProbingImplications(lp, current_lower, current_upper, touched_vars, node_stats)) {
-        return false;
-    }
-    const bool probing_implication_tightened = touched_vars.size() > before_implications;
-
     // Carry the root-derived global reduced-cost fixings into this node's bound
     // vectors. This is a replay of recorded bound changes, not a recomputation:
     // no reduced costs are consulted here. Bounds looser than the global record
@@ -2897,6 +2894,30 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     if (pre_lp_tightenings > 0 && !applySos2Bounds()) {
         return false;
+    }
+    bool probing_implication_tightened = false;
+    if (systematic_probing_enabled_ && implication_graph_.numImplications() > 0) {
+        // Let the row propagation above record its own reasons before
+        // importing fixings whose sources are not on the branch path.
+        t0 = std::chrono::steady_clock::now();
+        const auto before = touched_vars.size();
+        const bool feasible =
+            applyProbingImplications(lp, current_lower, current_upper, touched_vars, node_stats);
+        node_stats.bound_apply_seconds +=
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        // Antecedents may come from incumbent-dependent bounds at node entry.
+        if (!feasible) {
+            return false;
+        }
+        probing_implication_tightened = touched_vars.size() > before;
+        if (probing_implication_tightened) {
+            if (std::isfinite(conflict_cutoff)) {
+                fallback_scope = BoundReasonScope{.cutoff = conflict_cutoff};
+            }
+            if (!applySos2Bounds()) {
+                return false;
+            }
+        }
     }
     const bool pre_lp_tightened =
         pre_lp_tightenings > 0 || bound_conflict_tightened || probing_implication_tightened;
@@ -4997,10 +5018,13 @@ MipResult MipSolver::solveMinimization() {
     const auto first_gate_openings = search_stats_.det_heur_gate_openings;
     const auto root_sos2_stats = lp_stats_.root_sos2_propagation;
     const auto tree_sos2_stats = lp_stats_.tree_sos2_propagation;
+    const auto first_probing_stats = probing_stats_;
     MipResult again = solveMinimizationOnce();
     search_stats_.det_heur_gate_openings += first_gate_openings;
     addSos2PropagationStats(lp_stats_.root_sos2_propagation, root_sos2_stats);
     addSos2PropagationStats(lp_stats_.tree_sos2_propagation, tree_sos2_stats);
+    probing_stats_.tree_implication_fixings += first_probing_stats.tree_implication_fixings;
+    probing_stats_.tree_implication_cutoffs += first_probing_stats.tree_implication_cutoffs;
     again.nodes += result.nodes;
     again.lp_iterations += result.lp_iterations;
     again.work_units += result.work_units;
@@ -5537,7 +5561,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
         const bool probing_infeasible = runRootProbing();
         total_work += systematic_probing_enabled_
-                          ? static_cast<double>(probing_stats_.row_visits) * 1e-6
+                          ? static_cast<double>(probing_stats_.row_visits +
+                                                probing_stats_.implication_candidates) *
+                                1e-6
                           : probing_stats_.time_seconds;
         if (probing_infeasible) {
             MipResult result;

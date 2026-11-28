@@ -421,13 +421,27 @@ void DomainPropagator::popCheckpoint() {
     }
 
     // Clear propagation queue since bounds have been restored.
+    for (Index row : queue_) {
+        row_in_queue_[row] = false;
+    }
     queue_.clear();
-    std::fill(row_in_queue_.begin(), row_in_queue_.end(), false);
 }
 
 Int DomainPropagator::numTightened() const {
     Index base = checkpoint_stack_.empty() ? 0 : checkpoint_stack_.back().changes;
     return static_cast<Int>(changes_.size()) - base;
+}
+
+void DomainPropagator::collectTightenedColumns(std::vector<Index>& columns) const {
+    const auto base = checkpoint_stack_.empty() ? 0 : checkpoint_stack_.back().changes;
+    columns.clear();
+    columns.reserve(changes_.size() - base);
+    for (std::size_t i = base; i < changes_.size(); ++i) {
+        columns.push_back(changes_[i].col);
+    }
+    std::ranges::sort(columns);
+    const auto duplicate_tail = std::ranges::unique(columns);
+    columns.erase(duplicate_tail.begin(), duplicate_tail.end());
 }
 
 bool DomainPropagator::checkCrossing(Index col) {

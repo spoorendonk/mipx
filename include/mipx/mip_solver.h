@@ -313,6 +313,7 @@ struct MipProbingStats {
     bool systematic = false;
     std::array<Int, 2> branches_probed{};
     std::uint64_t row_visits = 0;
+    std::uint64_t implication_candidates = 0;
     Int checked_conflicts_published = 0;
     std::uint64_t tree_implication_fixings = 0;
     std::uint64_t tree_implication_cutoffs = 0;
@@ -969,7 +970,7 @@ private:
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
-    enum class ConflictSource { BoundInfeasible, LpInfeasible, LpCutoff };
+    enum class ConflictSource { BoundInfeasible, LpInfeasible, LpCutoff, RootProbe };
     void publishConflict(ConflictClause clause, ConflictSource source);
     void recordConflictCutoff(ConflictClause& clause);
 

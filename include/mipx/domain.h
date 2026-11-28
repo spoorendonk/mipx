@@ -90,6 +90,8 @@ public:
 
     /// Get number of tightened bounds since last checkpoint.
     [[nodiscard]] Int numTightened() const;
+    /// Collect distinct columns tightened since the last checkpoint, in column order.
+    void collectTightenedColumns(std::vector<Index>& columns) const;
 
 private:
     void setBound(Index col, Real lower, Real upper, std::span<const BranchDecision> path,

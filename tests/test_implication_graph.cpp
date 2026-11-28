@@ -792,6 +792,7 @@ TEST_CASE("Systematic probing publishes unique global facts and uses them in the
     const auto full = engine.probe(model, graph, vb_store, config);
     CHECK(full.branches_probed == std::array{3, 3});
     CHECK(full.row_visits == 6);
+    CHECK(full.implication_candidates == 7);
     CHECK(full.implications_found == 2);  // One implication and its contrapositive.
     CHECK(graph.numImplications() == full.implications_found);
     REQUIRE(engine.fixings().size() == 1);
@@ -859,6 +860,48 @@ TEST_CASE("Systematic probing publishes unique global facts and uses them in the
     CHECK(solver.getImplicationGraph().numImplications() == 0);
     CHECK(solver.getProbingStats().checked_conflicts_published == 0);
     CHECK(solver.getProbingStats().tree_implication_fixings == 0);
+
+    solver.setProbingEnabled(true);
+    for (int run = 0; run < 2; ++run) {
+        check_result(solver.solve());
+        CHECK_FALSE(solver.getProbingStats().systematic);
+        CHECK(solver.getProbingStats().fixings_found == 1);
+        CHECK(solver.getImplicationGraph().numImplications() > 0);
+    }
+    solver.setProbingEnabled(false);
+    check_result(solver.solve());
+    CHECK_FALSE(solver.getProbingStats().enabled);
+    CHECK(solver.getImplicationGraph().numImplications() == 0);
+}
+
+TEST_CASE("Systematic probing requires a completed proof to exclude a branch", "[probing]") {
+    auto model =
+        makeProblem(2, 2, {{0, 0, 1.0}, {0, 1, -1.0}, {1, 1, 2.0}}, {-kInf, -kInf}, {0.0, 1.0},
+                    {0.0, 0.0}, {1.0, 1.0}, {VarType::Binary, VarType::Binary});
+    ProbingEngine engine;
+    ProbingConfig config;
+    config.max_probes_per_round = 1;
+    config.systematic_rows_per_branch = 1;
+    ImplicationGraph graph;
+    VariableBoundStore vb_store;
+    const auto limited = engine.probe(model, graph, vb_store, config);
+    CHECK(limited.branches_probed == std::array{1, 1});
+    CHECK(engine.checkedConflicts().empty());
+    CHECK(engine.fixings().empty());
+
+    config.systematic_rows_per_branch = 4;
+    engine.probe(model, graph, vb_store, config);
+    REQUIRE(engine.checkedConflicts().size() == 1);
+    REQUIRE(engine.fixings().size() == 1);
+    CHECK(engine.fixings().front() == std::pair{0, 0.0});
+
+    model.col_type[1] = VarType::SemiContinuous;
+    const auto skipped = engine.probe(model, graph, vb_store, config);
+    CHECK(skipped.skipped_unsupported_domains);
+    CHECK(skipped.branches_probed == std::array{0, 0});
+    CHECK(engine.checkedConflicts().empty());
+    CHECK(engine.fixings().empty());
+    CHECK(graph.numImplications() == 0);
 }
 
 TEST_CASE("Global contradiction checking rejects local rows and objective cutoffs", "[probing]") {

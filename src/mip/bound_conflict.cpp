@@ -168,10 +168,18 @@ bool checksRow(const LpProblem& model, const BoundReasonTrail& trail, Index row,
 bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, const BoundReason& step,
                      std::span<const BranchDecision> premises) {
     const auto& endpoint = step.endpoint;
+    if (endpoint.col < 0 || endpoint.col >= model.num_cols) {
+        return false;
+    }
+    const auto type = model.col_type[endpoint.col];
+    if (type == VarType::SemiContinuous || type == VarType::SemiInteger) {
+        return false;
+    }
     switch (step.source) {
         case BoundReasonSource::Model:
-            return endpoint.value == (endpoint.is_upper ? model.col_upper[endpoint.col]
-                                                        : model.col_lower[endpoint.col]);
+            return entails(
+                endpoint.is_upper ? model.col_upper[endpoint.col] : model.col_lower[endpoint.col],
+                endpoint.is_upper, endpoint.value);
         case BoundReasonSource::Branch:
             return std::ranges::any_of(premises, [&](const BranchDecision& premise) {
                 return premise.variable == endpoint.col && premise.is_upper == endpoint.is_upper &&
@@ -180,7 +188,7 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, cons
         case BoundReasonSource::Row: {
             auto opposite = endpoint;
             opposite.is_upper = !endpoint.is_upper;
-            if (model.col_type[endpoint.col] != VarType::Continuous) {
+            if (type != VarType::Continuous) {
                 if (endpoint.value != std::floor(endpoint.value)) {
                     return false;
                 }
@@ -193,7 +201,7 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, cons
             return checksRow(model, trail, step.source_index, step.supports, opposite);
         }
         case BoundReasonSource::IntegerRounding: {
-            if (model.col_type[endpoint.col] == VarType::Continuous) {
+            if (type == VarType::Continuous) {
                 return false;
             }
             auto ids = step.supports.ids();
@@ -362,11 +370,6 @@ std::optional<LearnedBoundConflict> analyzeConflict(const BoundReasonTrail& trai
 
 bool checkGlobalBoundContradiction(const LpProblem& model, const BoundReasonTrail& trail,
                                    std::span<const BranchDecision> premises) {
-    if (std::ranges::any_of(model.col_type, [](VarType type) {
-            return type == VarType::SemiContinuous || type == VarType::SemiInteger;
-        })) {
-        return false;
-    }
     return checksContradiction(model, trail, premises);
 }
 

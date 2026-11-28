@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace mipx {
@@ -20,6 +21,8 @@ struct ProbingStats {
     Int variables_probed = 0;
     std::array<Int, 2> branches_probed{};
     std::uint64_t row_visits = 0;  // Measured in systematic mode.
+    std::uint64_t implication_candidates = 0;
+    bool skipped_unsupported_domains = false;
     Int fixings_found = 0;
     Int implications_found = 0;
     Int vubs_found = 0;
@@ -95,8 +98,9 @@ private:
                        const ProbingConfig& config);
 
     /// Learn implications from bound changes after fixing a binary variable.
-    void learnImplications(Index fixed_var, bool fixed_val, const LpProblem& problem,
-                           DomainPropagator& dp, ImplicationGraph& graph, ProbingStats& stats);
+    void learnImplications(Index fixed_var, bool fixed_val, std::span<const Index> candidates,
+                           const DomainPropagator& dp, ImplicationGraph& graph,
+                           ProbingStats& stats);
 
     /// Learn VUBs/VLBs from bound changes after fixing a binary variable.
     void learnVariableBounds(Index fixed_var, bool fixed_val, const LpProblem& problem,

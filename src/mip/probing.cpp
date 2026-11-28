@@ -26,6 +26,9 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     if (systematic && std::ranges::any_of(problem.col_type, [](VarType type) {
             return type == VarType::SemiContinuous || type == VarType::SemiInteger;
         })) {
+        graph = {};
+        vb_store = {};
+        stats.skipped_unsupported_domains = true;
         return stats;
     }
 
@@ -40,11 +43,12 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     }
 
     if (binary_vars.empty()) {
+        graph = {};
+        vb_store = {};
         stats.time_seconds = elapsed();
         return stats;
     }
 
-    // Initialize graph and VB store if not already done.
     graph.init(problem.num_cols, binary_vars);
     vb_store.init(problem.num_cols);
 
@@ -168,6 +172,7 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
 
     // A partial propagation pass can still yield valid bound deductions.
     // A failed systematic branch needs a checked proof to yield a fixing.
+    std::vector<Index> changed_columns;
     std::array<bool, 2> infeasible{};
     for (const bool value : {false, true}) {
         dp.pushCheckpoint();
@@ -192,7 +197,13 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
         }
         if (feasible) {
             if (config.learn_implications) {
-                learnImplications(var, value, problem, dp, graph, stats);
+                std::span<const Index> candidates = graph.binaryVars();
+                if (config.systematic_rows_per_branch > 0) {
+                    dp.collectTightenedColumns(changed_columns);
+                    candidates = changed_columns;
+                    stats.implication_candidates += changed_columns.size();
+                }
+                learnImplications(var, value, candidates, dp, graph, stats);
             }
             if (config.learn_vubs) {
                 learnVariableBounds(var, value, problem, dp, vb_store, base_lower, base_upper,
@@ -219,10 +230,10 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
     return true;
 }
 
-void ProbingEngine::learnImplications(Index fixed_var, bool fixed_val, const LpProblem& problem,
-                                      DomainPropagator& dp, ImplicationGraph& graph,
-                                      ProbingStats& stats) {
-    for (Index j = 0; j < problem.num_cols; ++j) {
+void ProbingEngine::learnImplications(Index fixed_var, bool fixed_val,
+                                      std::span<const Index> candidates, const DomainPropagator& dp,
+                                      ImplicationGraph& graph, ProbingStats& stats) {
+    for (Index j : candidates) {
         if (j == fixed_var) {
             continue;
         }
