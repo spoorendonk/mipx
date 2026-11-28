@@ -74,6 +74,8 @@ public:
     void setMaxCutsPerFamily(Int value) { max_cuts_per_family_ = std::max<Int>(1, value); }
     void setMinViolation(Real value) { min_violation_ = std::max<Real>(1e-8, value); }
     void setVariableBoundStore(const VariableBoundStore* store) { vb_store_ = store; }
+    /// Use retained global column bounds to derive conditional bounds from rows.
+    void setImpliedBoundDomainFeedback(bool enabled) { implied_bound_domain_feedback_ = enabled; }
     /// Tighten each separated cut's coefficients with strengthenCut before it
     /// is scored and pooled, against the column bounds of the LpProblem passed
     /// to separate(), which must therefore hold wherever the cut is used.
@@ -192,6 +194,7 @@ private:
     Index global_row_count_ = -1;
     std::vector<Index> local_rows_;  // sorted
     const VariableBoundStore* vb_store_ = nullptr;
+    bool implied_bound_domain_feedback_ = false;
     const CliqueTable* clique_table_ = nullptr;
     bool strengthen_cuts_ = false;
     Deadline deadline_;

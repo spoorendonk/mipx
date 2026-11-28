@@ -6774,13 +6774,15 @@ MipResult MipSolver::solveMinimizationOnce() {
                                         isAcceptableIncumbent(best_solution)
                                     ? heuristic_detail::computeObjective(problem_, best_solution)
                                     : kInf;
-            if ((root_cut_propagation_enabled_ || std::isfinite(cutoff)) &&
+            const bool propagate_root_cuts =
+                root_cut_propagation_enabled_ || root_cut_inference_enabled_;
+            if ((propagate_root_cuts || std::isfinite(cutoff)) &&
                 cut_effort_mode_ != CutEffortMode::Off && max_cut_rounds_ > 0) {
                 if (root_certificate_problem_ptr == nullptr) {
                     root_certificate_problem = problem_;
                     root_certificate_problem_ptr = &root_certificate_problem;
                 }
-                if (root_cut_propagation_enabled_ && saved_root_lower.empty()) {
+                if (propagate_root_cuts && saved_root_lower.empty()) {
                     saved_root_lower = problem_.col_lower;
                     saved_root_upper = problem_.col_upper;
                 }
@@ -7500,6 +7502,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     CutPool pool;
     SeparatorManager separators;
     separators.setStrengthenCuts(cut_strengthening_);
+    separators.setImpliedBoundDomainFeedback(root_cut_inference_enabled_);
     // One separator call can outlast a short limit (rail507's cmir takes
     // seconds), so separation stops at the deadline too (#336).
     separators.setDeadline(Deadline::after(timeLeft()));
@@ -7577,6 +7580,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     const auto initial_basis = lp.getBasis();
     std::vector<RootCutBound> retained_bound_undo;
     std::vector<RootCutBound> proposed_bounds;
+    std::optional<CliqueTable> initial_cliques;
+    const auto initial_clique_stats = clique_stats_;
+    const bool propagate_root_cuts = root_cut_propagation_enabled_ || root_cut_inference_enabled_;
     auto setRootBounds = [&](const RootCutBound& bound) {
         problem_.col_lower[bound.col] = bound.lower;
         problem_.col_upper[bound.col] = bound.upper;
@@ -7712,20 +7718,15 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             ++selected_by_family[static_cast<std::size_t>(cut.family)];
         }
 
-        // Feed every cut entering the root LP back into the clique table:
-        // unit-coefficient binary cuts with rhs 1 are cliques themselves and
-        // may extend further through the conflict graph.
+        // Stage new clique entries alongside the cut rows. Merging can
+        // subsume older cliques, so defer it until the round succeeds.
+        const Index pre_round_cliques = clique_table_.numCliques();
         if (clique_table_enabled_) {
-            Int new_cliques = 0;
             for (const Cut* cut : selected_cuts) {
-                new_cliques += clique_table_.extractFromCut(*cut, problem_, conflict_graph_);
-            }
-            if (new_cliques > 0) {
-                clique_stats_.cliques_from_cuts += new_cliques;
-                clique_table_.mergeAndSubsume();
-                clique_stats_.num_cliques = clique_table_.numCliques();
+                clique_table_.extractFromCut(*cut, problem_, conflict_graph_);
             }
         }
+        const Index new_cliques = clique_table_.numCliques() - pre_round_cliques;
 
         Index cuts_this_round = static_cast<Index>(lower.size());
 
@@ -7742,8 +7743,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 appendCertificateRow(*certificate_problem, idx_span, val_span, lower[r], upper[r]);
                 // A mirror used only for tree conflict learning must leave
                 // the root cut budget and its stopping decisions unchanged.
-                if (exact_refinement_mode_ != ExactRefinementMode::Off ||
-                    root_cut_propagation_enabled_ || cutoff_feedback) {
+                if (exact_refinement_mode_ != ExactRefinementMode::Off || propagate_root_cuts ||
+                    cutoff_feedback) {
                     const double mirror_work = static_cast<double>((end - start) + 1) * 1e-6;
                     total_work += mirror_work;
                     cut_node_work += mirror_work;
@@ -7760,7 +7761,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                                                                       propagation_visits_left)
                                                            : certificate_problem->num_rows;
         Int round_visits_left = visit_limit;
-        if (root_cut_propagation_enabled_ && certificate_problem != nullptr) {
+        DomainPropagationWork inference_work;
+        if (propagate_root_cuts && certificate_problem != nullptr) {
             DomainPropagator propagator;
             propagator.load(*certificate_problem);
             // The mirror has exactly the rows in the LP. A full-pass visit
@@ -7770,7 +7772,19 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             // Reserve part of the same cap for rows woken by cutoff deductions.
             const Int global_limit = cutoff_feedback ? visit_limit - visit_limit / 2 : visit_limit;
             Int global_visits_left = global_limit;
-            const bool feasible = propagator.propagateWithRowBudget(global_visits_left);
+            bool feasible;
+            if (root_cut_inference_enabled_) {
+                if (cliquePropagationActive()) {
+                    propagator.setCliqueTable(&clique_table_);
+                }
+                if (implication_graph_.numImplications() > 0) {
+                    propagator.setImplicationGraph(&implication_graph_);
+                }
+                feasible = propagator.propagateWithInferenceBudget(
+                    global_visits_left, inference_work, pre_round_cliques);
+            } else {
+                feasible = propagator.propagateWithRowBudget(global_visits_left);
+            }
             round_visits_left -= global_limit - global_visits_left;
             if (feasible) {
                 for (Index j = 0; j < problem_.num_cols; ++j) {
@@ -7812,7 +7826,13 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             guide = cutoff_feedback->primals();
         }
         const Int visits = visit_limit - round_visits_left;
-        cut_stats_.root_cut_propagation_row_visits += static_cast<std::uint64_t>(visits);
+        auto& inference = cut_stats_.root_cut_inference;
+        inference.rows.visits += inference_work.rows.visits;
+        inference.cliques.visits += inference_work.cliques.visits;
+        inference.implications.visits += inference_work.implications.visits;
+        cut_stats_.root_cut_propagation_row_visits += static_cast<std::uint64_t>(visits) -
+                                                      inference_work.cliques.visits -
+                                                      inference_work.implications.visits;
         bool propagation_budget_exhausted = false;
         if (limit_propagation_visits && visits > 0) {
             propagation_visits_left -= visits;
@@ -7821,6 +7841,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         }
 
         if (result.status != Status::Optimal) {
+            clique_table_.truncate(pre_round_cliques);
             // Back the round out. Left in, its rows keep the LP in a state
             // with no optimal point, and the caller reads the root solution
             // from it (#240: root rounding took a column far outside its
@@ -7842,6 +7863,13 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 cut_stats_.root_cut_bound_tightenings_backed_out +=
                     static_cast<Int>(retained_bound_undo.size());
                 retained_bound_undo.clear();
+                if (initial_cliques) {
+                    clique_table_ = std::move(*initial_cliques);
+                    clique_stats_ = initial_clique_stats;
+                }
+                inference.rows.tightenings = 0;
+                inference.cliques.tightenings = 0;
+                inference.implications.tightenings = 0;
                 backOutRound(initial_rows, initial_basis, {});
                 total_cuts = 0;
                 rounds_done = 0;
@@ -7857,10 +7885,24 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             break;
         }
 
+        if (new_cliques > 0) {
+            if (!initial_cliques) {
+                initial_cliques = clique_table_;
+                initial_cliques->truncate(pre_round_cliques);
+            }
+            clique_table_.mergeAndSubsume();
+            clique_stats_.cliques_from_cuts += new_cliques;
+            clique_stats_.num_cliques = clique_table_.numCliques();
+        }
         for (const auto& bound : proposed_bounds) {
             const Index j = bound.col;
             retained_bound_undo.push_back({j, problem_.col_lower[j], problem_.col_upper[j]});
             setRootBounds(bound);
+        }
+        if (!proposed_bounds.empty()) {
+            inference.rows.tightenings += inference_work.rows.tightenings;
+            inference.cliques.tightenings += inference_work.cliques.tightenings;
+            inference.implications.tightenings += inference_work.implications.tightenings;
         }
         if (root_cut_recheck_) {
             pool.markInstalled(selected_indices);
@@ -7898,7 +7940,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 "reopt_work=%.1f policy={%s}\n",
                 round + 1, selected_total, improvement, orthogonality, result.work_units,
                 cut_manager.summarizeState().c_str());
-            if (root_cut_propagation_enabled_) {
+            if (propagate_root_cuts) {
                 log_.log("  cut-round %d propagation: tightened=%d bound=%.10e\n", round + 1,
                          static_cast<Int>(proposed_bounds.size()), log_obj_sign_ * new_obj);
             }
@@ -7970,13 +8012,25 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     cut_stats_.root_rounds += rounds_done;
     cut_stats_.root_cuts_added += total_cuts;
     cut_stats_.root_cut_bound_tightenings += static_cast<Int>(retained_bound_undo.size());
-    if (verbose_ && (root_cut_propagation_enabled_ || cutoff_feedback)) {
+    if (verbose_ && (propagate_root_cuts || cutoff_feedback)) {
         log_.log(
             "Root cut propagation: tightenings=%d backed_out=%d row_visits=%llu "
             "budget_exhaustions=%d\n",
             cut_stats_.root_cut_bound_tightenings, cut_stats_.root_cut_bound_tightenings_backed_out,
             static_cast<unsigned long long>(cut_stats_.root_cut_propagation_row_visits),
             cut_stats_.root_cut_propagation_budget_exhaustions);
+    }
+    if (verbose_ && root_cut_inference_enabled_) {
+        const auto& work = cut_stats_.root_cut_inference;
+        log_.log(
+            "Root cut inference (visits/tightenings): rows=%llu/%llu cliques=%llu/%llu "
+            "implications=%llu/%llu\n",
+            static_cast<unsigned long long>(work.rows.visits),
+            static_cast<unsigned long long>(work.rows.tightenings),
+            static_cast<unsigned long long>(work.cliques.visits),
+            static_cast<unsigned long long>(work.cliques.tightenings),
+            static_cast<unsigned long long>(work.implications.visits),
+            static_cast<unsigned long long>(work.implications.tightenings));
     }
     if (verbose_ && cutoff_feedback) {
         log_.log(

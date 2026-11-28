@@ -33,6 +33,9 @@ public:
     /// Returns the number of new cliques found.
     Int extractFromCut(const Cut& cut, const LpProblem& problem, const ConflictGraph& graph);
 
+    /// Undo appends since a saved numCliques(), before merging or subsumption.
+    void truncate(Index count);
+
     /// Number of cliques stored.
     [[nodiscard]] Index numCliques() const { return static_cast<Index>(cliques_.size()); }
 
@@ -84,6 +87,11 @@ public:
     bool propagate(std::span<const Real> lower, std::span<const Real> upper,
                    std::vector<BoundUpdate>& updates, PropagationFailure* failure = nullptr) const;
 
+    /// Scan at most one sweep, charging one visit per clique and advancing next.
+    bool propagateWithBudget(std::span<const Real> lower, std::span<const Real> upper,
+                             std::vector<BoundUpdate>& updates, PropagationFailure* failure,
+                             Int& visits_left, Index& next) const;
+
     /// Clique substitutions in presolve: identify variables that can be
     /// eliminated via clique structure. Returns pairs (eliminated_var,
     /// substitute_var) where eliminated_var = 1 - substitute_var within a
@@ -97,6 +105,10 @@ public:
     [[nodiscard]] std::vector<Substitution> findSubstitutions(const LpProblem& problem) const;
 
 private:
+    bool propagateImpl(std::span<const Real> lower, std::span<const Real> upper,
+                       std::vector<BoundUpdate>& updates, PropagationFailure* failure,
+                       Int* visits_left, Index& next) const;
+
     /// Greedy extension of a partial clique to a maximal clique.
     void extendClique(Clique& clique, const ConflictGraph& graph) const;
 

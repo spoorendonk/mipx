@@ -158,6 +158,15 @@ Int CliqueTable::extractFromCut(const Cut& cut, const LpProblem& problem,
     return 1;
 }
 
+void CliqueTable::truncate(Index count) {
+    while (count >= 0 && numCliques() > count) {
+        for (const auto& literal : cliques_.back().literals) {
+            lit_to_cliques_[literal.id()].pop_back();
+        }
+        cliques_.pop_back();
+    }
+}
+
 std::span<const Index> CliqueTable::cliquesOf(Literal lit) const {
     Index id = lit.id();
     if (id < 0 || id >= static_cast<Index>(lit_to_cliques_.size()))
@@ -445,13 +454,39 @@ std::vector<Clique> CliqueTable::cliquePartition(std::span<const Real> primals,
 
 bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> upper,
                             std::vector<BoundUpdate>& updates, PropagationFailure* failure) const {
+    Index next = 0;
+    return propagateImpl(lower, upper, updates, failure, nullptr, next);
+}
+
+bool CliqueTable::propagateWithBudget(std::span<const Real> lower, std::span<const Real> upper,
+                                      std::vector<BoundUpdate>& updates,
+                                      PropagationFailure* failure, Int& visits_left,
+                                      Index& next) const {
+    return propagateImpl(lower, upper, updates, failure, &visits_left, next);
+}
+
+bool CliqueTable::propagateImpl(std::span<const Real> lower, std::span<const Real> upper,
+                                std::vector<BoundUpdate>& updates, PropagationFailure* failure,
+                                Int* visits_left, Index& next) const {
     updates.clear();
     if (failure != nullptr) {
         *failure = {};
     }
 
-    for (Index clique = 0; clique < numCliques(); ++clique) {
-        const auto& clq = cliques_[clique];
+    const Index count = numCliques();
+    if (next < 0 || next >= count) {
+        next = 0;
+    }
+    for (Index i = 0; i < count; ++i) {
+        if (visits_left != nullptr) {
+            if (*visits_left <= 0) {
+                break;
+            }
+            --*visits_left;
+        }
+        const Index current = next;
+        next = next + 1 == count ? 0 : next + 1;
+        const auto& clq = cliques_[current];
         // Find which literal (if any) is fixed to 1.
         Index fixed_idx = -1;
         Index num_free = 0;
@@ -489,7 +524,7 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
                 if (fixed_idx >= 0) {
                     // Two literals fixed to 1 -- infeasible.
                     if (failure != nullptr) {
-                        *failure = {.clique = clique,
+                        *failure = {.clique = current,
                                     .fixed_one = fixed_idx,
                                     .other_one = k,
                                     .crossing = {}};
@@ -504,10 +539,10 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
         }
 
         const auto addUpdate = [&](Index k, Real lb, Real ub) {
-            const BoundUpdate update{clq.literals[k].var, lb, ub, clique, fixed_idx, k};
+            const BoundUpdate update{clq.literals[k].var, lb, ub, current, fixed_idx, k};
             if (lb > ub + 1e-8) {
                 if (failure != nullptr) {
-                    failure->clique = clique;
+                    failure->clique = current;
                     failure->fixed_one = fixed_idx;
                     failure->crossing = update;
                 }
@@ -564,7 +599,7 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
         } else if (num_free == 0 && clq.is_equality && fixed_idx < 0) {
             // All literals fixed to 0 in an equality clique -- infeasible.
             if (failure != nullptr) {
-                failure->clique = clique;
+                failure->clique = current;
             }
             return false;
         }

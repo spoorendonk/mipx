@@ -167,28 +167,116 @@ bool DomainPropagator::propagateWithRowBudget(Int& row_visits_left) {
     return feasible;
 }
 
-bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
-    // If queue is empty, seed with all rows.
+void DomainPropagator::seedRows() {
     if (queue_.empty()) {
         for (Index i = 0; i < num_rows_; ++i) {
             queue_.push_back(i);
             row_in_queue_[i] = true;
         }
     }
+}
 
-    while (!queue_.empty()) {
-        if (row_visits_left == 0) {
-            return true;
+bool DomainPropagator::propagateRows(Int& visits_left, InferencePass* pass, bool sweep) {
+    while (visits_left > 0) {
+        Index row;
+        if (!queue_.empty()) {
+            row = queue_.back();
+            queue_.pop_back();
+            row_in_queue_[row] = false;
+        } else if (sweep && pass != nullptr && pass->next_unvisited_row > 0) {
+            // Use the full sweep as a fallback so rows woken by a bound
+            // change stay ahead of unrelated rows in the bounded pass.
+            row = --pass->next_unvisited_row;
+            if (pass->visited_rows[row]) {
+                continue;
+            }
+        } else {
+            break;
         }
 
-        Index row = queue_.back();
-        queue_.pop_back();
-        row_in_queue_[row] = false;
-
-        --row_visits_left;
-        if (!propagateRow(row)) {
+        --visits_left;
+        if (pass != nullptr) {
+            pass->visited_rows[row] = true;
+            ++pass->work.rows.visits;
+        }
+        const auto before = changes_.size();
+        if (!propagateRow(row, pass)) {
             return false;
         }
+        if (sweep && pass != nullptr && pass->inferenceAllowance() > 0 &&
+            clique_table_ != nullptr && clique_table_->numCliques() > 0 &&
+            changes_.size() != before) {
+            break;
+        }
+    }
+    return true;
+}
+
+void DomainPropagator::prioritizeChangedCliques(InferencePass& pass,
+                                                std::size_t first_change) const {
+    for (std::size_t i = first_change; i < changes_.size(); ++i) {
+        for (const bool complemented : {false, true}) {
+            const auto incident = clique_table_->cliquesOf({changes_[i].col, complemented});
+            if (!incident.empty()) {
+                pass.next_clique = incident.front();
+                return;
+            }
+        }
+    }
+}
+
+bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainPropagationWork& work,
+                                                    Index first_clique) {
+    if (visits_left <= 0) {
+        return true;
+    }
+    const Index num_cliques = clique_table_ != nullptr ? clique_table_->numCliques() : 0;
+    InferencePass pass{visits_left, visits_left / 2,
+                       work,        first_clique,
+                       num_cliques, {},
+                       num_rows_,   std::vector<bool>(num_rows_)};
+    if (implication_graph_ != nullptr) {
+        pass.seen.resize(num_cols_);
+    }
+    auto clique_revision = changes_.size();
+    bool feasible = propagateCliques(&pass, implication_graph_ != nullptr);
+    for (Index j = 0;
+         feasible && pass.inferenceAllowance() > 0 && j < static_cast<Index>(pass.seen.size());
+         ++j) {
+        if (lower_[j] > upper_[j] - kTol) {
+            feasible = checkCrossing(j) && propagateImplications(j, &pass);
+        }
+    }
+    while (feasible && visits_left > 0) {
+        // Exhaust woken rows and pending clique work before starting or
+        // resuming a scan of unrelated rows.
+        if (!propagateRows(visits_left, &pass, false)) {
+            return false;
+        }
+        if (num_cliques > 0 && pass.inferenceAllowance() > 0) {
+            if (changes_.size() != clique_revision) {
+                prioritizeChangedCliques(pass, clique_revision);
+                clique_revision = changes_.size();
+                pass.cliques_left = num_cliques;
+            }
+            if (pass.cliques_left > 0) {
+                feasible = propagateCliques(&pass);
+                continue;
+            }
+        }
+        const auto before = changes_.size();
+        feasible = propagateRows(visits_left, &pass);
+        if (changes_.size() == before || pass.inferenceAllowance() <= 0 || num_cliques == 0) {
+            break;
+        }
+    }
+    return feasible;
+}
+
+bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
+    seedRows();
+    if (!propagateRows(row_visits_left)) {
+        return false;
     }
 
     // Run clique propagation after row-based propagation converges.
@@ -284,15 +372,37 @@ bool DomainPropagator::propagateObjective() {
     return true;
 }
 
-bool DomainPropagator::propagateCliques() {
+bool DomainPropagator::propagateCliques(InferencePass* pass, bool reserve_implications) {
     if (clique_table_ == nullptr) {
         return true;
     }
 
     std::vector<CliqueTable::BoundUpdate> updates;
     CliqueTable::PropagationFailure failure;
+    // Leave room for the implications a clique fixing can trigger, even
+    // when the clique table could spend the whole inference allowance.
+    Int allowance = 0;
+    if (pass != nullptr) {
+        allowance = std::min(pass->inferenceAllowance(), pass->cliques_left);
+        if (allowance <= 0) {
+            return true;
+        }
+        if (reserve_implications) {
+            allowance = std::min(allowance, std::max<Int>(1, pass->inferenceAllowance() / 2));
+        }
+    }
+    Int visits_left = allowance;
+    auto* failure_out = reasons_ ? &failure : nullptr;
     const bool feasible =
-        clique_table_->propagate(lower_, upper_, updates, reasons_ ? &failure : nullptr);
+        pass == nullptr ? clique_table_->propagate(lower_, upper_, updates, failure_out)
+                        : clique_table_->propagateWithBudget(lower_, upper_, updates, failure_out,
+                                                             visits_left, pass->next_clique);
+    if (pass != nullptr) {
+        const Int visits = allowance - visits_left;
+        pass->chargeInference(visits);
+        pass->cliques_left -= visits;
+        pass->work.cliques.visits += visits;
+    }
     // Take all antecedents from the input of this batch. An earlier update
     // can otherwise hide the endpoint that triggered a later clique.
     const auto literalReason = [&](const Literal& literal, bool value) {
@@ -368,6 +478,9 @@ bool DomainPropagator::propagateCliques() {
                 recorded = true;
             }
             lower_[upd.col] = upd.new_lower;
+            if (pass != nullptr) {
+                ++pass->work.cliques.tightenings;
+            }
             if (reasons_) {
                 record(upd, batch_supports[i], false, upd.new_lower, true);
             }
@@ -379,6 +492,9 @@ bool DomainPropagator::propagateCliques() {
                 recorded = true;
             }
             upper_[upd.col] = upd.new_upper;
+            if (pass != nullptr) {
+                ++pass->work.cliques.tightenings;
+            }
             if (reasons_) {
                 record(upd, batch_supports[i], true, upd.new_upper, true);
             }
@@ -391,6 +507,9 @@ bool DomainPropagator::propagateCliques() {
 
         if (changed) {
             enqueueColumn(upd.col);
+            if (pass != nullptr && !propagateImplications(upd.col, pass)) {
+                return false;
+            }
         }
     }
 
@@ -477,7 +596,7 @@ BoundReasonSupports::Snapshot DomainPropagator::activityReasons(SparseVectorView
     return result;
 }
 
-bool DomainPropagator::propagateRow(Index row) {
+bool DomainPropagator::propagateRow(Index row, InferencePass* pass) {
     auto rv = matrix_.row(row);
     Real rl = row_lower_[row];
     Real ru = row_upper_[row];
@@ -618,6 +737,8 @@ bool DomainPropagator::propagateRow(Index row) {
             new_lb = std::ceil(new_lb - kIntRoundTol);
         }
 
+        const Real old_lower = lower_[j];
+        const Real old_upper = upper_[j];
         bool changed = false;
         if (new_ub < upper_[j] - kTol) {
             recordChange(j);
@@ -661,11 +782,14 @@ bool DomainPropagator::propagateRow(Index row) {
         }
 
         if (changed) {
+            if (pass != nullptr) {
+                pass->work.rows.tightenings += (lower_[j] > old_lower) + (upper_[j] < old_upper);
+            }
             enqueueColumn(j);
             // Propagate binary implications when a variable becomes fixed.
             if (implication_graph_ != nullptr && col_type_[j] != VarType::Continuous &&
                 lower_[j] > upper_[j] - kTol) {
-                if (!propagateImplications(j)) {
+                if (!propagateImplications(j, pass)) {
                     return false;
                 }
             }
@@ -675,7 +799,7 @@ bool DomainPropagator::propagateRow(Index row) {
     return true;
 }
 
-bool DomainPropagator::propagateImplications(Index col) {
+bool DomainPropagator::propagateImplications(Index col, InferencePass* pass) {
     if (implication_graph_ == nullptr) {
         return true;
     }
@@ -690,6 +814,15 @@ bool DomainPropagator::propagateImplications(Index col) {
         if (!implication_graph_->isBinary(cur)) {
             continue;
         }
+        if (pass != nullptr) {
+            if (pass->inferenceAllowance() <= 0) {
+                break;
+            }
+            if (pass->seen[cur]) {
+                continue;
+            }
+            pass->seen[cur] = true;
+        }
 
         // Determine the fixed value.
         bool fixed_val = (lower_[cur] > 0.5);
@@ -697,6 +830,13 @@ bool DomainPropagator::propagateImplications(Index col) {
 
         const auto& imps = implication_graph_->implications(cur, fixed_val);
         for (const auto& imp : imps) {
+            if (pass != nullptr) {
+                if (pass->inferenceAllowance() <= 0) {
+                    return true;
+                }
+                pass->chargeInference(1);
+                ++pass->work.implications.visits;
+            }
             Index j = imp.to_var;
             if (j < 0 || j >= num_cols_) {
                 continue;
@@ -713,6 +853,9 @@ bool DomainPropagator::propagateImplications(Index col) {
                     recorded = true;
                 }
                 lower_[j] = new_lb;
+                if (pass != nullptr) {
+                    ++pass->work.implications.tightenings;
+                }
                 if (reasons_) {
                     reasons_->record({j, false, new_lb}, BoundReasonSource::Implication, {support},
                                      cur, implication_scope_,
@@ -726,6 +869,9 @@ bool DomainPropagator::propagateImplications(Index col) {
                     recorded = true;
                 }
                 upper_[j] = new_ub;
+                if (pass != nullptr) {
+                    ++pass->work.implications.tightenings;
+                }
                 if (reasons_) {
                     reasons_->record({j, true, new_ub}, BoundReasonSource::Implication, {support},
                                      cur, implication_scope_,

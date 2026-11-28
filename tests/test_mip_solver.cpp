@@ -1483,6 +1483,127 @@ TEST_CASE("MipSolver: a backed-out root cut batch discards its propagated bounds
     }
 }
 
+TEST_CASE("MipSolver: root cut clique deductions feed the next implied-bound round",
+          "[mip][cuts][domain][clique]") {
+    const bool reject = GENERATE(false, true);
+    // The first LP has a=1, y=0.5. Cover separation from 2a+2y<=3
+    // yields a+y<=1. Its clique fixes y=0 and wakes y+z>=1.
+    // With z>=1 and x<=1, x+b+z<=2.5 yields x+0.5b<=1, which
+    // cuts the second LP point (x,b)=(1,0.5).
+    LpProblem lp;
+    lp.num_cols = reject ? 8 : 5;
+    lp.num_rows = reject ? 5 : 3;
+    lp.col_lower = {1, 0, 0, 0, 0};
+    lp.col_upper = {1, 1, 1, 1, 1};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Continuous,
+                   VarType::Continuous};
+    lp.obj = {0, -100, -1, -10, 0};
+    lp.row_lower = {-kInf, -kInf};
+    lp.row_upper = {3, 2.5};
+    std::vector<Triplet> entries{{0, 0, 2}, {0, 1, 2}, {1, 2, 1}, {1, 3, 1}, {1, 4, 1}};
+    if (reject) {
+        // These two rows jointly require y>=0.25. The free columns keep
+        // interval propagation from spotting the contradiction before the LP.
+        lp.col_lower.insert(lp.col_lower.end(), 2, -kInf);
+        lp.col_upper.insert(lp.col_upper.end(), 2, kInf);
+        lp.col_type.insert(lp.col_type.end(), 2, VarType::Continuous);
+        lp.obj.insert(lp.obj.end(), 2, 0);
+        lp.row_lower.insert(lp.row_lower.end(), {0.25, -kInf});
+        lp.row_upper.insert(lp.row_upper.end(), {kInf, 0});
+        entries.insert(entries.end(), {{2, 1, 1}, {2, 5, 1}, {2, 6, -1}, {3, 5, 1}, {3, 6, -1}});
+    }
+    lp.row_lower.push_back(1);
+    lp.row_upper.push_back(kInf);
+    entries.insert(entries.end(), {{lp.num_rows - 1, 1, 1}, {lp.num_rows - 1, 4, 1}});
+    if (reject) {
+        // The one-row probe of y learns !y => w from its last incident row.
+        lp.col_lower.push_back(0);
+        lp.col_upper.push_back(1);
+        lp.col_type.push_back(VarType::Binary);
+        lp.obj.push_back(0);
+        lp.row_lower.push_back(1);
+        lp.row_upper.push_back(kInf);
+        entries.insert(entries.end(), {{lp.num_rows, 1, 1}, {lp.num_rows, 7, 1}});
+        ++lp.num_rows;
+    }
+    // Later, unrelated rows would precede the woken model row in a LIFO
+    // full sweep. The small cap must reach the woken row first.
+    lp.num_rows += 3;
+    lp.row_lower.insert(lp.row_lower.end(), 3, -kInf);
+    lp.row_upper.insert(lp.row_upper.end(), 3, kInf);
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, entries);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCliqueTableEnabled(true);
+    solver.setRootCutRecheck(true);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    if (reject) {
+        solver.setSystematicProbingEnabled(true);
+        solver.setSystematicProbingMaxPairs(1);
+        solver.setSystematicProbingRowsPerBranch(1);
+    }
+    for (Int f = 1; f < static_cast<Int>(CutFamily::Count); ++f) {
+        const auto family = static_cast<CutFamily>(f);
+        solver.setCutFamilyEnabled(family,
+                                   family == CutFamily::Cover || family == CutFamily::ImpliedBound);
+    }
+    const auto installed = [&](CutFamily family) {
+        return solver.getRootCutFamilyStats().families[static_cast<std::size_t>(family)].installed;
+    };
+    solver.load(lp);
+    if (!reject) {
+        REQUIRE(solver.solve().status == Status::Optimal);
+        CHECK(installed(CutFamily::Cover) == 1);
+        CHECK(installed(CutFamily::ImpliedBound) == 0);
+        CHECK(solver.getCutStats().root_cut_inference.cliques.visits == 0);
+    }
+
+    solver.setRootCutInferenceEnabled(true);
+    if (!reject) {
+        // One inference visit goes to the appended clique. Two row visits
+        // suffice to carry its fixing into the different model row.
+        solver.setRootCutPropagationRowBudget(3);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        const auto& stats = solver.getCutStats();
+        CHECK(stats.root_cut_inference.cliques.visits == 1);
+        CHECK(stats.root_cut_inference.cliques.tightenings == 1);
+        CHECK(stats.root_cut_inference.rows.visits == 2);
+        CHECK(stats.root_cut_inference.rows.tightenings == 1);
+        CHECK(stats.root_cut_propagation_budget_exhaustions == 1);
+        CHECK(installed(CutFamily::ImpliedBound) == 0);
+    }
+
+    solver.setRootCutPropagationRowBudget(0);
+    const auto result = solver.solve();
+    const auto& stats = solver.getCutStats();
+    CHECK(stats.root_cut_inference.cliques.visits > 0);
+    if (reject) {
+        REQUIRE(result.status == Status::Infeasible);
+        CHECK(stats.root_rounds_backed_out == 1);
+        CHECK(stats.root_cuts_added == 0);
+        CHECK(stats.root_cut_bound_tightenings == 0);
+        CHECK(stats.root_cut_bound_tightenings_backed_out == 3);
+        CHECK(stats.root_cut_inference.cliques.tightenings == 0);
+        CHECK(stats.root_cut_inference.rows.tightenings == 0);
+        CHECK(solver.getProbingStats().implications_found > 0);
+        CHECK(stats.root_cut_inference.implications.visits > 0);
+        CHECK(stats.root_cut_inference.implications.tightenings == 0);
+        CHECK(solver.getCliqueStats().cliques_from_cuts == 0);
+        CHECK(solver.getExactRefinementStats().rows_evaluated == lp.num_rows);
+        CHECK(solver.getExactRefinementStats().certificate_passed);
+    } else {
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-10, 1e-8));
+        CHECK(stats.root_cut_inference.cliques.tightenings == 1);
+        CHECK(stats.root_cut_inference.rows.tightenings >= 1);
+        CHECK(solver.getCliqueStats().cliques_from_cuts == 1);
+        CHECK(installed(CutFamily::ImpliedBound) == 1);
+    }
+}
+
 TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][cuts][domain]") {
     const bool pre_root = GENERATE(false, true);
     const Int row_budget = GENERATE(0, 1);

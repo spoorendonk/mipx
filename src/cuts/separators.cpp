@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -390,15 +391,24 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
 
         auto row = problem.matrix.row(i);
         bool nonnegative = true;
+        Real minimum = 0.0;
         for (Index p = 0; p < row.size(); ++p) {
-            if (row.values[p] < 0.0 || problem.col_lower[row.indices[p]] < -1e-12) {
+            const Real lb = problem.col_lower[row.indices[p]];
+            if (row.values[p] < 0.0 || lb < (implied_bound_domain_feedback_ ? 0.0 : -1e-12)) {
                 nonnegative = false;
                 break;
             }
+            if (implied_bound_domain_feedback_) {
+                minimum += row.values[p] * lb;
+            }
         }
-        if (!nonnegative) {
+        if (!nonnegative || !std::isfinite(minimum)) {
             continue;
         }
+        // Account for rounding in the activity sum and in removing the two
+        // columns. Keep a conservative upper side when the residual is small.
+        const Real slack = std::numeric_limits<Real>::epsilon() * (4.0 * row.size() + 8.0) *
+                           std::max(rhs, minimum);
 
         for (Index px = 0; px < row.size() && accepted < max_cuts_per_family_; ++px) {
             const Index x = row.indices[px];
@@ -422,8 +432,15 @@ Int SeparatorManager::separateImpliedBound(const LpProblem& problem, std::span<c
                 }
                 ++stats.attempted;
 
-                const Real ub0 = rhs / ax;
-                const Real ub1 = (rhs - ay) / ax;
+                Real ub0 = rhs / ax;
+                Real ub1 = (rhs - ay) / ax;
+                if (implied_bound_domain_feedback_) {
+                    const Real residual =
+                        minimum - ax * problem.col_lower[x] - ay * problem.col_lower[y];
+                    const Real capacity = rhs - residual + slack;
+                    ub0 = std::min(problem.col_upper[x], capacity / ax);
+                    ub1 = std::min(problem.col_upper[x], (capacity - ay) / ax);
+                }
                 if (!std::isfinite(ub0) || !std::isfinite(ub1)) {
                     continue;
                 }

@@ -477,6 +477,107 @@ TEST_CASE("Bound reasons: implications retain each edge in a chain", "[domain][r
     CHECK(std::ranges::equal(trail.reason(z).supports.ids(), std::vector{y}));
 }
 
+TEST_CASE("Bounded inference carries an appended clique fixing through an implication and a row",
+          "[domain][cuts][clique]") {
+    // a = 1, cut a+b <= 1, implication !b => c, row c <= d.
+    const auto model = makeProblem(4, 1, {{0, 2, 1}, {0, 3, -1}}, {-kInf}, {0}, {1, 0, 0, 0},
+                                   {1, 1, 1, 1}, std::vector(4, VarType::Binary));
+    ConflictGraph conflicts;
+    conflicts.build(model);
+    CliqueTable cliques;
+    cliques.build(model, conflicts);
+    REQUIRE(cliques.numCliques() == 0);
+    const Cut cut{.indices = {0, 1}, .values = {1, 1}, .upper = 1};
+    REQUIRE(cliques.extractFromCut(cut, model, conflicts) == 1);
+    ImplicationGraph implications;
+    implications.init(4, {0, 1, 2, 3});
+    REQUIRE(implications.addImplication(1, false, 2, true));
+
+    DomainPropagator dp;
+    dp.load(model);
+    dp.setCliqueTable(&cliques);
+    dp.setImplicationGraph(&implications);
+    Int budget = 4;
+    DomainPropagationWork work;
+    REQUIRE(dp.propagateWithInferenceBudget(budget, work));
+    CHECK(dp.getUpper(1) == 0);
+    CHECK(dp.getLower(2) == 1);
+    CHECK(dp.getLower(3) == 1);
+    CHECK(work.cliques.visits == 1);
+    CHECK(work.cliques.tightenings == 1);
+    CHECK(work.implications.visits == 1);
+    CHECK(work.implications.tightenings == 1);
+    CHECK(work.rows.visits == 2);
+    CHECK(work.rows.tightenings == 1);
+    CHECK(budget == 0);
+
+    cliques.truncate(0);
+    CHECK(cliques.cliquesOf({0, false}).empty());
+    CHECK(cliques.cliquesOf({1, false}).empty());
+    dp.load(model);
+    budget = 4;
+    work = {};
+    REQUIRE(dp.propagateWithInferenceBudget(budget, work));
+    CHECK(dp.getUpper(1) == 1);
+    CHECK(dp.getLower(2) == 0);
+    CHECK(dp.getLower(3) == 0);
+    CHECK(work.cliques.visits == 0);
+    CHECK(work.implications.visits == 0);
+    CHECK(work.rows.tightenings == 0);
+}
+
+TEST_CASE("Bounded inference uses remaining visits after a late row fixes a binary", "[domain]") {
+    const auto model = makeProblem(2, 3, {{0, 0, 1}}, {1, -kInf, -kInf}, {kInf, kInf, kInf}, {0, 0},
+                                   {1, 1}, std::vector(2, VarType::Binary));
+    ImplicationGraph graph;
+    graph.init(2, {0, 1});
+    REQUIRE(graph.addImplication(0, true, 1, true));
+    DomainPropagator dp;
+    dp.load(model);
+    dp.setImplicationGraph(&graph);
+    DomainPropagationWork work;
+    Int budget = 4;
+    REQUIRE(dp.propagateWithInferenceBudget(budget, work));
+    CHECK(budget == 0);
+    CHECK(work.rows.visits == 3);
+    CHECK(work.implications.visits == 1);
+    CHECK(dp.getLower(1) == 1);
+}
+
+TEST_CASE("Bounded inference visits pending cliques before unrelated rows", "[domain][clique]") {
+    const bool from_implication = GENERATE(false, true);
+    // Inert rows would fill the whole shared budget. The initial clique
+    // scan sees only two cliques. Either the third is already actionable,
+    // or an implication makes the second clique actionable after that scan.
+    const auto model =
+        makeProblem(6, 8, {}, std::vector<Real>(8, -kInf), std::vector<Real>(8, kInf),
+                    {0, 0, 0, 0, from_implication ? 0.0 : 1.0, 0},
+                    {from_implication ? 0.0 : 1.0, 1, 1, 1, 1, 1}, std::vector(6, VarType::Binary));
+    ConflictGraph conflicts;
+    conflicts.build(model);
+    CliqueTable cliques;
+    cliques.build(model, conflicts);
+    for (Index j : {0, 2, 4}) {
+        const Cut cut{.indices = {j, j + 1}, .values = {1, 1}, .upper = 1};
+        REQUIRE(cliques.extractFromCut(cut, model, conflicts) == 1);
+    }
+    ImplicationGraph implications;
+    implications.init(6, {0, 1, 2, 3, 4, 5});
+    REQUIRE(implications.addImplication(0, false, from_implication ? 2 : 1, true));
+    DomainPropagator dp;
+    dp.load(model);
+    dp.setCliqueTable(&cliques);
+    dp.setImplicationGraph(&implications);
+    Int budget = 8;
+    DomainPropagationWork work;
+    REQUIRE(dp.propagateWithInferenceBudget(budget, work));
+    CHECK(dp.getUpper(from_implication ? 3 : 5) == 0);
+    CHECK(work.implications.visits == (from_implication ? 1 : 0));
+    CHECK(work.cliques.tightenings == 1);
+    CHECK(work.cliques.visits + work.implications.visits + work.rows.visits == 8);
+    CHECK(budget == 0);
+}
+
 TEST_CASE("Bound reasons: clique records the forcing literal", "[domain][reasons]") {
     const auto binaries = std::vector(3, VarType::Binary);
     const auto packing = makeProblem(3, 1, {{0, 0, 1}, {0, 1, 1}, {0, 2, 1}}, {-kInf}, {1},

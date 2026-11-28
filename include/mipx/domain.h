@@ -14,6 +14,17 @@ class CliqueTable;
 class ImplicationGraph;
 class ObjectivePropagator;
 
+struct PropagationWork {
+    std::uint64_t visits = 0;
+    std::uint64_t tightenings = 0;
+};
+
+struct DomainPropagationWork {
+    PropagationWork rows;
+    PropagationWork cliques;
+    PropagationWork implications;
+};
+
 class DomainPropagator {
 public:
     /// Bound tolerance: a column crossed by up to kTol counts as feasible,
@@ -84,6 +95,12 @@ public:
     /// contradictory row. A nonpositive budget returns true without evaluating rows.
     bool propagateWithRowBudget(Int& row_visits_left);
 
+    /// Run row, clique and binary implication propagation with a shared cap.
+    /// Inference may spend up to half the cap. Newly appended cliques are
+    /// visited first, starting at first_clique. No objective cutoff is used.
+    bool propagateWithInferenceBudget(Int& visits_left, DomainPropagationWork& work,
+                                      Index first_clique = 0);
+
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();
     void popCheckpoint();
@@ -103,8 +120,29 @@ private:
     [[nodiscard]] BoundReasonSupports::Snapshot activityReasons(SparseVectorView row,
                                                                 bool minimum) const;
 
-    /// Propagate a single row. Returns false if infeasibility detected.
-    bool propagateRow(Index row);
+    struct InferencePass {
+        Int& shared_visits_left;
+        Int inference_visits_left;
+        DomainPropagationWork& work;
+        Index next_clique;
+        Index cliques_left;
+        std::vector<bool> seen;
+        Index next_unvisited_row;
+        std::vector<bool> visited_rows;
+
+        [[nodiscard]] Int inferenceAllowance() const {
+            return std::min(shared_visits_left, inference_visits_left);
+        }
+        void chargeInference(Int visits) {
+            shared_visits_left -= visits;
+            inference_visits_left -= visits;
+        }
+    };
+
+    void seedRows();
+    bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true);
+    bool propagateRow(Index row, InferencePass* pass);
+    void prioritizeChangedCliques(InferencePass& pass, std::size_t first_change) const;
 
     /// propagate() after `objective_passes` passes of the objective row,
     /// debiting the same row budget when clique or objective updates wake rows.
@@ -115,7 +153,7 @@ private:
     bool propagateObjective();
 
     /// Propagate clique constraints. Returns false if infeasibility detected.
-    bool propagateCliques();
+    bool propagateCliques(InferencePass* pass = nullptr, bool reserve_implications = false);
 
     /// Record a bound change for the undo stack.
     void recordChange(Index col);
@@ -125,7 +163,7 @@ private:
 
     /// Propagate binary implications when a binary variable gets fixed.
     /// Returns false if infeasibility detected.
-    bool propagateImplications(Index col);
+    bool propagateImplications(Index col, InferencePass* pass = nullptr);
 
     // Problem data
     Index num_cols_ = 0;

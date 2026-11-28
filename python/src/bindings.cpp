@@ -187,12 +187,13 @@ NB_MODULE(_core, m) {
         .def("set_root_cut_recheck", &MipSolver::setRootCutRecheck, "enabled"_a)
         .def("set_root_cut_propagation_enabled", &MipSolver::setRootCutPropagationEnabled,
              "enabled"_a)
+        .def("set_root_cut_inference_enabled", &MipSolver::setRootCutInferenceEnabled, "enabled"_a)
         .def("set_root_cutoff_feedback_enabled", &MipSolver::setRootCutoffFeedbackEnabled,
              "enabled"_a)
         .def("set_root_cut_propagation_row_budget", &MipSolver::setRootCutPropagationRowBudget,
              "visits"_a,
-             "Limit total root cut propagation and cutoff feedback row visits. Zero disables the "
-             "cap.")
+             "Limit total root propagation visits, including enabled inference producers. Zero "
+             "keeps only the per-round limit.")
         .def("set_root_flow_cover_enabled", &MipSolver::setRootFlowCoverEnabled, "enabled"_a)
         .def("set_num_threads", &MipSolver::setNumThreads, "threads"_a)
         .def("set_root_lp_policy", &MipSolver::setRootLpPolicy, "policy"_a)

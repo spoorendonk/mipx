@@ -21,7 +21,7 @@ std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& pol
         }
         const auto& cut = pool[index];
         const auto fi = static_cast<std::size_t>(cut.family);
-        if ((!recheck_violation && cut.age > 0) || !policy.family_enabled[fi]) {
+        if (cut.local || (!recheck_violation && cut.age > 0) || !policy.family_enabled[fi]) {
             continue;
         }
         if (policy.per_family_cap[fi] > 0 && selected_by_family[fi] >= policy.per_family_cap[fi]) {

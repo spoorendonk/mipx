@@ -131,6 +131,8 @@ struct MipCutStats {
     Int root_cut_bound_tightenings_backed_out = 0;
     /// Includes visits in rounds whose LP changes were backed out.
     std::uint64_t root_cut_propagation_row_visits = 0;
+    /// Work attempted by root cut inference. Tightenings count retained updates.
+    DomainPropagationWork root_cut_inference;
     /// Counts a pass that spends its entire cap, even if its last visit also
     /// reaches a row fixpoint or its final cut batch is backed out.
     Int root_cut_propagation_budget_exhaustions = 0;
@@ -382,9 +384,11 @@ public:
     void setRootCutRecheck(bool enabled) { root_cut_recheck_ = enabled; }
     /// Propagate installed model and cut rows during root cut rounds. Off by default.
     void setRootCutPropagationEnabled(bool enabled) { root_cut_propagation_enabled_ = enabled; }
+    /// Feed global cliques, implications and bounds back into root cut rounds.
+    void setRootCutInferenceEnabled(bool enabled) { root_cut_inference_enabled_ = enabled; }
     /// Feed incumbent-derived bounds back into root separation. Off by default.
     void setRootCutoffFeedbackEnabled(bool enabled) { root_cutoff_feedback_enabled_ = enabled; }
-    /// Limit row visits across all root cut rounds, shared by root propagators.
+    /// Limit visits across all root cut rounds, shared by root propagators.
     /// Zero keeps only the per-round limit. A negative value throws std::invalid_argument.
     void setRootCutPropagationRowBudget(Int visits);
     void setCutFamilyEnabled(CutFamily family, bool enabled) {
@@ -1018,6 +1022,7 @@ private:
     Int max_cut_rounds_ = 20;
     bool root_cut_recheck_ = false;
     bool root_cut_propagation_enabled_ = false;
+    bool root_cut_inference_enabled_ = false;
     bool root_cutoff_feedback_enabled_ = false;
     Int root_cut_propagation_row_budget_ = 0;
     Int max_cuts_per_round_ = 50;
