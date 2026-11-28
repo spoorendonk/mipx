@@ -67,21 +67,14 @@ set_property(SOURCE test_paths.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/tests/data"
 )
 
-# The dense-column tests drive a barrier backend through its internal
-# interface (src/lp/newton_solver.h), so those files alone see src/; the
-# time-limit tests do too, for the checks inside factorize() (#275), and the
-# augmented-backend tests, to compare its directions with the NE's (#270),
-# and the HSD tests, for the dtau denominator (#370).
-set_property(SOURCE test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
+# Barrier tests that drive a backend directly use src/lp/newton_solver.h.
+# This covers sparse ordering, dense columns, time limits, the augmented
+# backend and the HSD denominator.
+set_property(SOURCE test_barrier.cpp test_barrier_dense_cols.cpp test_barrier_time_limit.cpp
     test_barrier_augmented.cpp test_barrier_hsd.cpp
     APPEND PROPERTY INCLUDE_DIRECTORIES
     ${PROJECT_SOURCE_DIR}/src
 )
-if(MIPX_HAS_CUDSS)
-    set_property(SOURCE test_barrier.cpp APPEND PROPERTY INCLUDE_DIRECTORIES
-        ${PROJECT_SOURCE_DIR}/src
-    )
-endif()
 # Likewise presolve's working matrix (src/presolve/presolve_matrix.h, #326),
 # and the rank-revealing LU presolve will use (src/lp/rank_revealing_lu.h, #392),
 # and PDLP's restart policy and fixed-point residual.

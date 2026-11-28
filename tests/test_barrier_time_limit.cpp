@@ -136,7 +136,7 @@ TEST_CASE("Sparse normal equations stop their setup once the deadline has passed
     const SparseMatrix A(kRows, kCols, t);
     BarrierOptions opts;
     opts.verbose = false;
-    opts.ordering = GENERATE(BarrierOrdering::Amd, BarrierOrdering::Nd);
+    opts.ordering = GENERATE(BarrierOrdering::Amd, BarrierOrdering::Nd, BarrierOrdering::Screened);
     INFO("ordering " << static_cast<int>(opts.ordering));
 
     auto solver = createCpuSparseCholeskySolver();

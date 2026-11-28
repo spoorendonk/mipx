@@ -7,6 +7,7 @@
 #include <cmath>
 #include <numeric>
 #include <random>
+#include <utility>
 #include <vector>
 
 using namespace mipx;
@@ -443,4 +444,28 @@ TEST_CASE("SparseCholesky refuses a factor above its memory cap", "[sparse_chole
     SparseCholesky chol;
     CHECK_FALSE(chol.analyze(80, p.col_starts, p.rows, id, 1024));
     CHECK_FALSE(chol.error().empty());
+}
+
+TEST_CASE("SparseCholesky can reuse a fitting symbolic layout", "[sparse_cholesky]") {
+    const auto m = randomSpd(80, 0.02, 19);
+    const Pattern p = lowerOf(m);
+    const auto perm = randomPerm(p.n, 27);
+    SparseCholesky chol;
+    REQUIRE(chol.analyzeSymbolic(p.n, p.col_starts, p.rows, perm, 0, {}));
+    const auto bytes = chol.factorBytes();
+    const auto fill = chol.stats().nnz_l;
+    CHECK_FALSE(chol.factorize(p.vals, {}));
+
+    SparseCholesky rejected;
+    CHECK_FALSE(rejected.analyzeSymbolic(p.n, p.col_starts, p.rows, perm, bytes - 1, {}));
+    CHECK(rejected.stats().nnz_l == fill);
+    CHECK(rejected.factorBytes() == bytes);
+    CHECK_FALSE(rejected.prepareNumeric(p.col_starts, p.rows, {}));
+
+    SparseCholesky selected = std::move(chol);
+    REQUIRE(selected.prepareNumeric(p.col_starts, p.rows, {}));
+    CHECK(selected.factorBytes() == bytes);
+    CHECK(selected.stats().nnz_l == fill);
+    REQUIRE(selected.factorize(p.vals, {}));
+    CHECK(solveResidual(m, selected, 17) < 1e-12);
 }

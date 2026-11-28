@@ -87,7 +87,7 @@ void printUsage(FILE* out) {
                  "[--pdlp-opt-norm l2|linf] [--pdlp-restart-gap-decay F] "
                  "[--pdlp-restart-kkt-decay F] [--pdlp-adaptive-eval-frequency] "
                  "[--pdlp-restart-first-step-anchor] "
-                 "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
+                 "[--barrier-ordering auto|amd|nd|cudss|screened] [--barrier-ne dense|sparse] "
                  "[--barrier-augmented] [--barrier-ne-lower-updates] "
                  "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
@@ -564,6 +564,8 @@ int main(int argc, char* argv[]) {
                 barrier_ordering = mipx::BarrierOrdering::Nd;
             } else if (mode == "cudss") {
                 barrier_ordering = mipx::BarrierOrdering::CuDSS;
+            } else if (mode == "screened") {
+                barrier_ordering = mipx::BarrierOrdering::Screened;
             } else {
                 std::fprintf(stderr, "Unknown barrier ordering: %s\n", mode.c_str());
                 return 1;

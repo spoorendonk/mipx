@@ -21,6 +21,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <utility>
 
 #ifdef MIPX_BLAS_LIBRARY
 #include <dlfcn.h>
@@ -229,10 +230,13 @@ std::vector<Index> postorder(Index n, const std::vector<Index>& parent) {
 // has a nonzero in column j for every j on the etree paths from the entries of
 // upper column k up to k (Davis 2006, cs_ereach). O(nnz(L)) time, O(n) space.
 std::vector<Index> columnCounts(Index n, const PermutedPattern& pat,
-                                const std::vector<Index>& parent) {
+                                const std::vector<Index>& parent, const Deadline& deadline) {
     std::vector<Index> count(static_cast<size_t>(n), 1);
     std::vector<Index> mark(static_cast<size_t>(n), -1);
     for (Index k = 0; k < n; ++k) {
+        if (k % 256 == 0 && deadline.passed()) {
+            return {};
+        }
         mark[k] = k;
         for (Index p = pat.up_ptr[k]; p < pat.up_ptr[k + 1]; ++p) {
             for (Index j = pat.up_idx[p]; mark[j] != k; j = parent[j]) {
@@ -390,43 +394,88 @@ bool SparseCholesky::blasAvailable() {
 bool SparseCholesky::analyze(Index n, std::span<const Index> col_starts,
                              std::span<const Index> row_indices, std::span<const Index> perm,
                              std::size_t max_bytes, const Deadline& deadline) {
-    error_.clear();
-    analyzed_ = false;
-    try {
-        analyzed_ = analyzeImpl(n, col_starts, row_indices, perm, max_bytes, deadline);
-        return analyzed_;
-    } catch (const std::bad_alloc&) {
-        // Release everything the analysis built; keep the stats it reached.
-        const Stats reached = stats_;
-        *this = SparseCholesky{};
-        stats_ = reached;
-        error_ = "out of memory in the sparse Cholesky analysis";
-        return false;
-    }
+    return analyzeSymbolic(n, col_starts, row_indices, perm, max_bytes, deadline) &&
+           prepareNumeric(col_starts, row_indices, deadline);
 }
 
-bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
-                                 std::span<const Index> row_indices, std::span<const Index> perm,
-                                 std::size_t max_bytes, const Deadline& deadline) {
+bool SparseCholesky::analyzeSymbolic(Index n, std::span<const Index> col_starts,
+                                     std::span<const Index> row_indices,
+                                     std::span<const Index> perm, std::size_t max_bytes,
+                                     const Deadline& deadline) {
     const auto t0 = std::chrono::steady_clock::now();
+    error_.clear();
+    analyzed_ = false;
+    symbolic_ready_ = false;
+    row_index_count_ = 0;
+    try {
+        symbolic_ready_ =
+            analyzeSymbolicImpl(n, col_starts, row_indices, perm, max_bytes, deadline);
+    } catch (const std::bad_alloc&) {
+        error_ = "out of memory in the sparse Cholesky analysis";
+    }
+    if (!symbolic_ready_) {
+        discardFailedAnalysis();
+    }
+    stats_.analyze_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return symbolic_ready_;
+}
+
+bool SparseCholesky::prepareNumeric(std::span<const Index> col_starts,
+                                    std::span<const Index> row_indices, const Deadline& deadline) {
+    const auto t0 = std::chrono::steady_clock::now();
+    error_.clear();
+    if (!symbolic_ready_) {
+        error_ = "numeric allocation without a completed symbolic analysis";
+        return false;
+    }
+    symbolic_ready_ = false;
+    try {
+        analyzed_ = prepareNumericImpl(col_starts, row_indices, deadline);
+    } catch (const std::bad_alloc&) {
+        error_ = "out of memory in the sparse Cholesky analysis";
+    }
+    if (!analyzed_) {
+        discardFailedAnalysis();
+    }
+    stats_.analyze_seconds +=
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return analyzed_;
+}
+
+void SparseCholesky::discardFailedAnalysis() {
+    // Release the partially built factor; preserve its options and diagnostic estimates.
+    const Stats reached = stats_;
+    const std::size_t rows = row_index_count_;
+    const bool lower_triangle_updates = lower_triangle_updates_;
+    std::string error = std::move(error_);
+    *this = SparseCholesky{};
+    stats_ = reached;
+    row_index_count_ = rows;
+    lower_triangle_updates_ = lower_triangle_updates;
+    error_ = std::move(error);
+}
+
+bool SparseCholesky::analysisInterrupted(const Deadline& deadline) {
+    if (!deadline.passed()) {
+        return false;
+    }
+    error_ = deadline.stopped() ? "stopped in the analysis" : "time limit reached in the analysis";
+    return true;
+}
+
+bool SparseCholesky::analyzeSymbolicImpl(Index n, std::span<const Index> col_starts,
+                                         std::span<const Index> row_indices,
+                                         std::span<const Index> perm, std::size_t max_bytes,
+                                         const Deadline& deadline) {
     n_ = n;
     stats_ = Stats{};
     stats_.n = n;
     stats_.nnz_input = static_cast<std::size_t>(col_starts[n]);
     num_dependent_ = 0;
-    // Between the passes, each linear in the pattern or the factor's row
-    // structure, and inside the two that loop over the supernodes and the
-    // input entries. A cut-short analysis leaves no factor to use.
-    auto timedOut = [&] {
-        if (!deadline.passed()) {
-            return false;
-        }
-        error_ =
-            deadline.stopped() ? "stopped in the analysis" : "time limit reached in the analysis";
-        stats_.analyze_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        return true;
-    };
+    if (analysisInterrupted(deadline)) {
+        return false;
+    }
 
     // Fill-reducing order, then the etree's postorder on top of it, which
     // keeps the fill and makes every supernode a contiguous range of columns.
@@ -436,7 +485,7 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     }
     PermutedPattern pat;
     buildPermutedPattern(n, col_starts, row_indices, iperm0, pat);
-    if (timedOut()) {
+    if (analysisInterrupted(deadline)) {
         return false;
     }
     const std::vector<Index> post = postorder(n, eliminationTree(n, pat));
@@ -446,16 +495,20 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
         perm_[k] = perm[post[k]];
         iperm_[perm_[k]] = k;
     }
-    if (timedOut()) {
+    if (analysisInterrupted(deadline)) {
         return false;
     }
     buildPermutedPattern(n, col_starts, row_indices, iperm_, pat);
     const std::vector<Index> parent = eliminationTree(n, pat);
-    if (timedOut()) {
+    if (analysisInterrupted(deadline)) {
         return false;
     }
-    const std::vector<Index> count = columnCounts(n, pat, parent);
-    if (timedOut()) {
+    const std::vector<Index> count = columnCounts(n, pat, parent, deadline);
+    if (analysisInterrupted(deadline)) {
+        return false;
+    }
+    if (count.empty() && n != 0) {
+        error_ = "stopped in the analysis";
         return false;
     }
     for (Index j = 0; j < n; ++j) {
@@ -519,39 +572,40 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
 
     snode_start_.resize(static_cast<size_t>(ns) + 1);
     col_snode_.resize(static_cast<size_t>(n));
+    std::size_t predicted_rows = 0;
     for (Index s = 0; s < ns; ++s) {
-        snode_start_[s] = merged[s].first;
-        stats_.max_supernode_cols = std::max(stats_.max_supernode_cols, merged[s].ncols);
-        for (Index t = 0; t < merged[s].ncols; ++t) {
-            col_snode_[merged[s].first + t] = s;
-        }
+        const Snode& node = merged[s];
+        snode_start_[s] = node.first;
+        stats_.max_supernode_cols = std::max(stats_.max_supernode_cols, node.ncols);
+        predicted_rows += static_cast<std::size_t>(node.nrows);
     }
     snode_start_[ns] = n;
+    for (Index s = 0; s < ns; ++s) {
+        std::fill(col_snode_.begin() + snode_start_[s], col_snode_.begin() + snode_start_[s + 1],
+                  s);
+    }
 
     // Row structure of each supernode: its columns, the matrix's rows below
     // them, and its children's rows below them.
-    std::vector<Index> sparent(static_cast<size_t>(ns), -1);
     std::vector<Index> child_head(static_cast<size_t>(ns), -1);
     std::vector<Index> child_next(static_cast<size_t>(ns), -1);
     for (Index s = ns - 1; s >= 0; --s) {
         const Index p = parent[snode_start_[s + 1] - 1];
         if (p != -1) {
-            sparent[s] = col_snode_[p];
-            child_next[s] = child_head[sparent[s]];
-            child_head[sparent[s]] = s;
+            const Index sparent = col_snode_[p];
+            child_next[s] = child_head[sparent];
+            child_head[sparent] = s;
         }
     }
     snode_row_ptr_.assign(static_cast<size_t>(ns) + 1, 0);
     snode_rows_.clear();
-    std::size_t total_rows = 0;
-    for (Index s = 0; s < ns; ++s) {
-        total_rows += static_cast<std::size_t>(merged[s].nrows);
-    }
-    snode_rows_.reserve(total_rows);
+    const std::size_t max_rows =
+        max_bytes != 0 ? max_bytes / sizeof(Index) : snode_rows_.max_size();
+    snode_rows_.reserve(std::min(predicted_rows, max_rows));
     std::vector<Index> mark(static_cast<size_t>(n), -1);
     std::vector<Index> below;
     for (Index s = 0; s < ns; ++s) {
-        if (timedOut()) {
+        if (analysisInterrupted(deadline)) {
             return false;
         }
         const Index first = snode_start_[s];
@@ -577,6 +631,11 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
                 }
             }
         }
+        const auto ncols = static_cast<std::size_t>(last - first + 1);
+        if (ncols + below.size() > max_rows - snode_rows_.size()) {
+            error_ = "sparse Cholesky factor row indices alone are above the cap";
+            return false;
+        }
         std::sort(below.begin(), below.end());
         for (Index j = first; j <= last; ++j) {
             snode_rows_.push_back(j);
@@ -584,8 +643,7 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
         snode_rows_.insert(snode_rows_.end(), below.begin(), below.end());
         snode_row_ptr_[s + 1] = snode_rows_.size();
     }
-    pat = PermutedPattern{};
-
+    row_index_count_ = snode_rows_.size();
     snode_val_ptr_.assign(static_cast<size_t>(ns) + 1, 0);
     for (Index s = 0; s < ns; ++s) {
         const auto ncols = static_cast<std::size_t>(snode_start_[s + 1] - snode_start_[s]);
@@ -593,16 +651,23 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
         snode_val_ptr_[s + 1] = snode_val_ptr_[s] + ncols * nrows;
     }
     stats_.stored = snode_val_ptr_[ns];
-
     const std::size_t bytes = factorBytes();
-    stats_.analyze_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (max_bytes != 0 && bytes > max_bytes) {
         error_ = "sparse Cholesky factor needs " + std::to_string(bytes >> 20) +
                  " MB, above the cap of " + std::to_string(max_bytes >> 20) + " MB";
         return false;
     }
+    return !analysisInterrupted(deadline);
+}
 
+bool SparseCholesky::prepareNumericImpl(std::span<const Index> col_starts,
+                                        std::span<const Index> row_indices,
+                                        const Deadline& deadline) {
+    if (analysisInterrupted(deadline)) {
+        return false;
+    }
+    const Index n = n_;
+    const Index ns = stats_.num_supernodes;
     // Block position of each input entry: column min, row max (permuted).
     entry_pos_.resize(stats_.nnz_input);
     // Checked every ~1M entries, not every so many columns: a dense column
@@ -611,7 +676,7 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     for (Index c = 0; c < n; ++c) {
         if (col_starts[c] >= next_check) {
             next_check = std::int64_t{col_starts[c]} + (std::int64_t{1} << 20);
-            if (timedOut()) {
+            if (analysisInterrupted(deadline)) {
                 return false;
             }
         }
@@ -647,15 +712,13 @@ bool SparseCholesky::analyzeImpl(Index n, std::span<const Index> col_starts,
     }
     update_.assign(max_rows, 0.0);
 
-    stats_.analyze_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return true;
 }
 
 std::size_t SparseCholesky::factorBytes() const {
-    return stats_.stored * sizeof(Real) + snode_rows_.size() * sizeof(Index) +
+    return stats_.stored * sizeof(Real) + row_index_count_ * sizeof(Index) +
            stats_.nnz_input * sizeof(std::size_t) +
-           static_cast<std::size_t>(n_) * (3 * sizeof(Index) + 2 * sizeof(Real));
+           static_cast<std::size_t>(stats_.n) * (3 * sizeof(Index) + 2 * sizeof(Real));
 }
 
 bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& rule,

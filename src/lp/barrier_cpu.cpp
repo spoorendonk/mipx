@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -22,6 +23,7 @@
 #include <string>
 #include <unistd.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace mipx {
@@ -202,7 +204,7 @@ bool ndRecurse(const std::vector<std::vector<Index>>& adj, const std::vector<Ind
 }  // namespace nd_detail
 
 // False, with perm and iperm not an ordering, when the deadline passed.
-bool computeNd(Index n, const std::vector<Index>& col_starts, const std::vector<Index>& row_indices,
+bool computeNd(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
                std::vector<Index>& perm, std::vector<Index>& iperm, const Deadline& deadline = {}) {
     perm.resize(static_cast<size_t>(n));
     iperm.resize(static_cast<size_t>(n));
@@ -277,6 +279,10 @@ BarrierOrdering autoSelectOrdering(Index n, Index nnz) {
     return BarrierOrdering::Amd;
 }
 
+const char* cpuOrderingName(BarrierOrdering ordering) {
+    return ordering == BarrierOrdering::Nd ? "ND" : "AMD";
+}
+
 // ============================================================================
 // Symbolic factorization
 // ============================================================================
@@ -345,7 +351,7 @@ static void symbolicAnalyze(Index n, const std::vector<Index>& col_starts,
 
     // Select ordering.
     BarrierOrdering effective = ordering;
-    if (effective == BarrierOrdering::Auto || effective == BarrierOrdering::CuDSS) {
+    if (effective != BarrierOrdering::Amd && effective != BarrierOrdering::Nd) {
         Index nnz = static_cast<Index>(row_indices.size());
         effective = autoSelectOrdering(n, nnz);
     }
@@ -426,7 +432,7 @@ static void symbolicAnalyze(Index n, const std::vector<Index>& col_starts,
     // Report fill-in quality.
     if (verbose) {
         Index nnz_a = static_cast<Index>(row_indices.size());
-        const char* ordering_name = (effective == BarrierOrdering::Nd) ? "ND" : "AMD";
+        const char* ordering_name = cpuOrderingName(effective);
         std::fprintf(stdout, "  Ordering: %s, n=%d, nnz(A)=%d, nnz(L)=%d, fill-in=%.2f\n",
                      ordering_name, n, nnz_a, sym.l_nnz,
                      nnz_a > 0 ? static_cast<double>(sym.l_nnz) / nnz_a : 0.0);
@@ -1026,6 +1032,90 @@ private:
 // columns go back into the factor, as without this handling; if that factor
 // does not fit, they stay out and S may grow to twice the cap.
 
+bool analyzeNeOrdering(Index m, std::span<const Index> starts, std::span<const Index> indices,
+                       BarrierOrdering ordering, std::size_t cap, const Deadline& deadline,
+                       SparseCholesky& factor, double& ordering_seconds) {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<Index> perm;
+    std::vector<Index> iperm;
+    const bool ordered = ordering == BarrierOrdering::Nd
+                             ? computeNd(m, starts, indices, perm, iperm, deadline)
+                             : amdOrder(m, starts, indices, perm, iperm, {}, nullptr, deadline);
+    ordering_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return ordered && factor.analyzeSymbolic(m, starts, indices, perm, cap, deadline);
+}
+
+bool screenNeOrderings(Index m, std::span<const Index> starts, std::span<const Index> indices,
+                       std::size_t cap, const Deadline& deadline, bool verbose,
+                       BarrierOrdering& ordering, double& ordering_seconds, SparseCholesky& factor,
+                       std::string& error) {
+    // The heuristic goes first and wins exact ties. Only symbolic state is
+    // held while comparing the candidates. Both trials share the deadline.
+    // The cap covers M and one resident factor. During setup we keep the
+    // first fitting layout while analyzing the other ordering.
+    ordering = autoSelectOrdering(m, starts[m]);
+    const BarrierOrdering alternate =
+        ordering == BarrierOrdering::Amd ? BarrierOrdering::Nd : BarrierOrdering::Amd;
+    const auto t0 = std::chrono::steady_clock::now();
+    factor = SparseCholesky{};
+    SparseCholesky other;
+    double alternate_seconds = 0.0;
+    std::string first_error;
+    std::string alternate_error;
+    const auto trial = [&](BarrierOrdering choice, SparseCholesky& candidate, double& seconds,
+                           std::string& failure) {
+        bool fits = false;
+        try {
+            fits = analyzeNeOrdering(m, starts, indices, choice, cap, deadline, candidate, seconds);
+            if (!fits) {
+                failure = candidate.error();
+            }
+        } catch (const std::bad_alloc&) {
+            failure = "out of memory in sparse normal-equations ordering";
+        }
+        if (verbose && !deadline.passed()) {
+            const auto& st = candidate.stats();
+            const auto bytes =
+                st.stored == 0 ? "unavailable" : std::to_string(candidate.factorBytes());
+            std::printf(
+                "  NE ordering trial: ordering=%s nnz(L)=%zu bytes=%s flops=%.6e "
+                "ordering_time=%.4fs symbolic_time=%.4fs %s\n",
+                cpuOrderingName(choice), st.nnz_l, bytes.c_str(), st.factor_flops, seconds,
+                st.analyze_seconds, fits ? "fits" : failure.c_str());
+        }
+        return fits;
+    };
+    const bool fits = trial(ordering, factor, ordering_seconds, first_error);
+    if (deadline.passed()) {
+        return false;
+    }
+    const bool alternate_fits = trial(alternate, other, alternate_seconds, alternate_error);
+    if (deadline.passed()) {
+        return false;
+    }
+    if (!fits && !alternate_fits) {
+        error = std::string("no screened normal-equations factor fits: ") +
+                cpuOrderingName(ordering) + ": " + first_error + "; " + cpuOrderingName(alternate) +
+                ": " + alternate_error;
+        return false;
+    }
+    const auto score = [](const SparseCholesky& candidate) {
+        return std::pair{candidate.stats().factor_flops, candidate.factorBytes()};
+    };
+    if (alternate_fits && (!fits || score(other) < score(factor))) {
+        factor = std::move(other);
+        ordering = alternate;
+        ordering_seconds = alternate_seconds;
+    }
+    if (verbose) {
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("  NE ordering selection: %s screening_time=%.4fs\n", cpuOrderingName(ordering),
+                    elapsed);
+    }
+    return true;
+}
+
 class CpuSparseCholeskySolver final : public NormalEquationsSolver {
 public:
     explicit CpuSparseCholeskySolver(Index max_schur_order) : max_schur_order_(max_schur_order) {}
@@ -1064,7 +1154,6 @@ private:
 
     bool setupFactor(const BarrierOptions& opts) override {
         opts_ = opts;
-        chol_.setLowerTriangleUpdates(opts.ne_lower_updates);
         findDenseColumns(opts);
         return analyzePattern();
     }
@@ -1101,19 +1190,6 @@ private:
             ordering = autoSelectOrdering(m, ne_ptr_[m]);
         }
         SparseCholesky::setBlasThreads(opts.threads);
-        const auto t0 = std::chrono::steady_clock::now();
-        std::vector<Index> perm;
-        std::vector<Index> iperm;
-        const bool ordered =
-            ordering == BarrierOrdering::Nd
-                ? computeNd(m, ne_ptr_, ne_idx_, perm, iperm, deadline_)
-                : amdOrder(m, ne_ptr_, ne_idx_, perm, iperm, {}, nullptr, deadline_);
-        if (!ordered) {
-            timedOut();  // the only way an ordering ends early
-            return false;
-        }
-        const double order_seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
         // The factor shares the cap with M's pattern and its values (an Index
         // and a Real per entry, held for the solve); 1 byte left when they
@@ -1123,17 +1199,30 @@ private:
             const std::size_t ne_bytes = sparseNeMatrixBytes(ne_idx_.size(), m);
             cap = cap > ne_bytes ? cap - ne_bytes : 1;
         }
-        const bool analyzed = chol_.analyze(m, ne_ptr_, ne_idx_, perm, cap, deadline_);
+        double order_seconds = 0.0;
+        const bool screened = ordering == BarrierOrdering::Screened;
+        const bool symbolic =
+            screened ? screenNeOrderings(m, ne_ptr_, ne_idx_, cap, deadline_, opts.verbose,
+                                         ordering, order_seconds, chol_, error_)
+                     : analyzeNeOrdering(m, ne_ptr_, ne_idx_, ordering, cap, deadline_, chol_,
+                                         order_seconds);
+        if (!symbolic && (timedOut() || screened)) {
+            return false;
+        }
+        chol_.setLowerTriangleUpdates(opts.ne_lower_updates);
+        const bool analyzed = symbolic && chol_.prepareNumeric(ne_ptr_, ne_idx_, deadline_);
         // Printed also when the factor is refused: its size is the finding.
         if (opts.verbose) {
             const auto& st = chol_.stats();
             std::printf(
                 "  NE Cholesky: m=%d dense_cols=%zu nnz(M)=%zu nnz(L)=%zu supernodes=%d "
-                "(widest %d) factor=%s ordering=%s %.2fs analysis=%.2fs blas=%s\n",
+                "(widest %d) factor=%s ordering=%s %.2fs analysis=%.2fs blas=%s "
+                "bytes=%zu flops=%.6e\n",
                 m, dense_cols_.size(), st.nnz_input, st.nnz_l, st.num_supernodes,
                 st.max_supernode_cols, megabytes(chol_.factorBytes()).c_str(),
-                ordering == BarrierOrdering::Nd ? "ND" : "AMD", order_seconds, st.analyze_seconds,
-                SparseCholesky::blasAvailable() ? "yes" : "no");
+                cpuOrderingName(ordering), order_seconds, st.analyze_seconds,
+                SparseCholesky::blasAvailable() ? "yes" : "no", chol_.factorBytes(),
+                st.factor_flops);
         }
         if (!analyzed) {
             error_ = chol_.error();
@@ -1731,25 +1820,29 @@ double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions
         } else {
             computeNePattern(matrix, peeled, starts, indices);
         }
-        if (peel_dense_columns && options.ne_max_bytes != 0) {
+        if (peel_dense_columns &&
+            (options.ne_max_bytes != 0 || options.ordering == BarrierOrdering::Screened)) {
             const auto matrix_bytes = sparseNeMatrixBytes(indices.size(), m);
-            if (matrix_bytes >= options.ne_max_bytes) {
+            const auto cap = options.ne_max_bytes;
+            if (cap != 0 && matrix_bytes >= cap) {
                 return kInf;
             }
             // In a bounded-size trial, use the backend's actual supernode
             // layout to count the factor and its storage against the cap.
+            const auto factor_cap = cap == 0 ? 0 : cap - matrix_bytes;
             BarrierOrdering ordering = options.ordering;
             if (ordering == BarrierOrdering::Auto || ordering == BarrierOrdering::CuDSS) {
                 ordering = autoSelectOrdering(m, starts[m]);
             }
-            std::vector<Index> perm;
-            std::vector<Index> iperm;
-            const bool ordered = ordering == BarrierOrdering::Nd
-                                     ? computeNd(m, starts, indices, perm, iperm)
-                                     : amdOrder(m, starts, indices, perm, iperm);
             SparseCholesky factor;
-            if (!ordered ||
-                !factor.analyze(m, starts, indices, perm, options.ne_max_bytes - matrix_bytes)) {
+            double order_seconds = 0.0;
+            std::string error;
+            const bool analyzed = ordering == BarrierOrdering::Screened
+                                      ? screenNeOrderings(m, starts, indices, factor_cap, {}, false,
+                                                          ordering, order_seconds, factor, error)
+                                      : analyzeNeOrdering(m, starts, indices, ordering, factor_cap,
+                                                          {}, factor, order_seconds);
+            if (!analyzed) {
                 return kInf;
             }
             factor_entries = static_cast<double>(factor.stats().nnz_l);
@@ -1802,7 +1895,7 @@ double augmentedFactorFlops(const SparseMatrix& matrix, const BarrierOptions& op
     computeAugPattern(matrix, m, n, starts, indices);
     // The ordering CpuAugmentedSolver's symbolicAnalyze() takes.
     BarrierOrdering ordering = options.ordering;
-    if (ordering == BarrierOrdering::Auto || ordering == BarrierOrdering::CuDSS) {
+    if (ordering != BarrierOrdering::Amd && ordering != BarrierOrdering::Nd) {
         ordering = autoSelectOrdering(dim, starts[dim]);
     }
     std::vector<Index> perm;
@@ -1815,14 +1908,9 @@ double augmentedFactorFlops(const SparseMatrix& matrix, const BarrierOptions& op
     }
     // Column counts give the factor's pattern without forming it; the
     // supernodal layout is the sparse NE's, not the left-looking LDL''s, but
-    // the fill and the flops are the ordering's. Only the flops are wanted,
-    // so a one-byte cap ends the analysis once its layout is known, before it
-    // maps the input entries; the stats it reached hold the flops then. Its
-    // stored count is set only after the column counts, so a deadline or an
-    // out-of-memory before them gives +inf, not a partial sum.
+    // the fill and the flops are the ordering's.
     SparseCholesky factor;
-    const bool analyzed = factor.analyze(dim, starts, indices, perm, 1, deadline);
-    if ((!analyzed && deadline.passed()) || factor.stats().stored == 0) {
+    if (!factor.analyzeSymbolic(dim, starts, indices, perm, 0, deadline)) {
         return kInf;
     }
     return factor.stats().factor_flops;

@@ -1,3 +1,4 @@
+#include "lp/newton_solver.h"
 #include "mipx/barrier.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
@@ -13,8 +14,6 @@
 #include <utility>
 
 #ifdef MIPX_HAS_CUDSS
-#include "lp/newton_solver.h"
-
 #include <cuda_runtime_api.h>
 #endif
 
@@ -1331,6 +1330,77 @@ TEST_CASE("BarrierSolver: AMD and ND orderings agree on objective", "[barrier][o
     REQUIRE(amd_result.status == Status::Optimal);
     REQUIRE(nd_result.status == Status::Optimal);
     CHECK_THAT(amd_result.objective, WithinAbs(nd_result.objective, 1e-5));
+}
+
+TEST_CASE("BarrierSolver: screened sparse ordering agrees with the explicit arms",
+          "[barrier][ordering][sparse-ne]") {
+    auto lp = buildTriangleLp();
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.crossover = false;
+    opts.algorithm = BarrierAlgorithm::CpuSparseCholesky;
+    opts.ordering = GENERATE(BarrierOrdering::Amd, BarrierOrdering::Nd, BarrierOrdering::Screened);
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(lp);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(-7.5, 1e-5));
+}
+
+TEST_CASE("Sparse NE screened ordering takes a factor that fits the memory cap",
+          "[barrier][ordering][sparse-ne]") {
+    // An edge column per grid edge and a singleton per row give a positive
+    // definite NE matrix on the grid. Auto chooses ND at this size, but the
+    // ND factor exceeds the budget at which AMD fits.
+    constexpr Index kSide = 71;
+    constexpr Index kRows = kSide * kSide;
+    std::vector<Triplet> entries;
+    Index num_cols = 0;
+    const auto addEdge = [&](Index first, Index second) {
+        entries.push_back({first, num_cols, 1.0});
+        entries.push_back({second, num_cols++, 1.0});
+    };
+    for (Index row = 0; row < kRows; ++row) {
+        entries.push_back({row, num_cols++, 1.0});
+        if (row % kSide + 1 < kSide) {
+            addEdge(row, row + 1);
+        }
+        if (row + kSide < kRows) {
+            addEdge(row, row + kSide);
+        }
+    }
+    const SparseMatrix matrix(kRows, num_cols, std::move(entries));
+    auto solver = createCpuSparseCholeskySolver();
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.ne_max_bytes = 1'955'000;
+    REQUIRE_FALSE(solver->setup(matrix, kRows, num_cols, opts));
+    opts.ordering = BarrierOrdering::Amd;
+    REQUIRE(solver->setup(matrix, kRows, num_cols, opts));
+    const auto amd = solver->factorStats();
+
+    opts.ordering = BarrierOrdering::Screened;
+    REQUIRE(solver->setup(matrix, kRows, num_cols, opts));
+    CHECK(solver->factorStats().nnz_l == amd.nnz_l);
+    CHECK(solver->factorStats().factor_flops == amd.factor_flops);
+
+    opts.ne_max_bytes = 3'000'000;
+    opts.ordering = BarrierOrdering::Nd;
+    REQUIRE(solver->setup(matrix, kRows, num_cols, opts));
+    REQUIRE(solver->factorStats().factor_flops > amd.factor_flops);
+    opts.ordering = BarrierOrdering::Screened;
+    REQUIRE(solver->setup(matrix, kRows, num_cols, opts));
+    CHECK(solver->factorStats().factor_flops == amd.factor_flops);
+
+    opts.ne_max_bytes = 1;
+    CHECK_FALSE(solver->setup(matrix, kRows, num_cols, opts));
+    CHECK(solver->lastError().find("no screened normal-equations factor fits") !=
+          std::string::npos);
+    CHECK(solver->lastError().find("AMD: ") != std::string::npos);
+    CHECK(solver->lastError().find("ND: ") != std::string::npos);
 }
 
 TEST_CASE("BarrierSolver: AMD ordering with augmented backend", "[barrier][ordering]") {

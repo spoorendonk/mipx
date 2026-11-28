@@ -30,10 +30,11 @@ enum class BarrierAlgorithm {
 };
 
 enum class BarrierOrdering {
-    Auto,   // Pick based on problem size/structure.
-    Amd,    // Approximate minimum degree.
-    Nd,     // Nested dissection.
-    CuDSS,  // cuDSS internal ordering (GPU only).
+    Auto,      // Pick based on problem size/structure.
+    Amd,       // Approximate minimum degree.
+    Nd,        // Nested dissection.
+    CuDSS,     // cuDSS internal ordering (GPU only).
+    Screened,  // Compare AMD and ND symbolically (sparse CPU normal equations).
 };
 
 enum class BarrierDualize { Off, On, Auto };
@@ -75,7 +76,7 @@ struct BarrierOptions {
     // Fill-reducing ordering for the sparse CPU paths (augmented LDL' and
     // sparse normal equations). The dense normal-equations path has no
     // sparsity to preserve, and the GPU path delegates ordering to cuDSS, so
-    // this is ignored by both.
+    // this is ignored by both. The augmented CPU path treats Screened as Auto.
     BarrierOrdering ordering = BarrierOrdering::Auto;
     // Threads of the BLAS behind the sparse normal-equations factorization.
     Int threads = 1;

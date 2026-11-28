@@ -89,6 +89,16 @@ public:
                  std::span<const Index> perm, std::size_t max_bytes = 0,
                  const Deadline& deadline = {});
 
+    /// Build the symbolic layout and estimate cost and storage before
+    /// allocating numeric entries. A trial over max_bytes fails.
+    bool analyzeSymbolic(Index n, std::span<const Index> col_starts,
+                         std::span<const Index> row_indices, std::span<const Index> perm,
+                         std::size_t max_bytes, const Deadline& deadline);
+
+    /// Finish a successful symbolic trial once, using the same input pattern.
+    bool prepareNumeric(std::span<const Index> col_starts, std::span<const Index> row_indices,
+                        const Deadline& deadline);
+
     /// Numeric factorization of the matrix whose entries are `values`, aligned
     /// with the analyzed pattern. Returns false when a pivot is not finite, or
     /// when `deadline` passes or its stop flag is raised (checked before each
@@ -124,7 +134,7 @@ public:
     [[nodiscard]] const std::vector<ShiftedPivot>& shiftedPivots() const { return shifted_; }
     [[nodiscard]] const std::string& error() const { return error_; }
 
-    /// Bytes the numeric factor and its index arrays take once analyzed.
+    /// Estimated bytes for the numeric factor and its index arrays.
     [[nodiscard]] std::size_t factorBytes() const;
 
     /// Supernode partition, for tests: supernode s holds the permuted columns
@@ -132,8 +142,13 @@ public:
     [[nodiscard]] const std::vector<Index>& snodeStart() const { return snode_start_; }
 
 private:
-    bool analyzeImpl(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
-                     std::span<const Index> perm, std::size_t max_bytes, const Deadline& deadline);
+    bool analyzeSymbolicImpl(Index n, std::span<const Index> col_starts,
+                             std::span<const Index> row_indices, std::span<const Index> perm,
+                             std::size_t max_bytes, const Deadline& deadline);
+    bool prepareNumericImpl(std::span<const Index> col_starts, std::span<const Index> row_indices,
+                            const Deadline& deadline);
+    bool analysisInterrupted(const Deadline& deadline);
+    void discardFailedAnalysis();
 
     bool lower_triangle_updates_ = false;
     Index n_ = 0;
@@ -149,6 +164,7 @@ private:
     std::vector<Index> snode_rows_;
     std::vector<std::size_t> snode_val_ptr_;
     std::vector<Index> col_snode_;  // supernode of each permuted column
+    std::size_t row_index_count_ = 0;
 
     std::vector<std::size_t> entry_pos_;  // block position of each input entry
     // The factor's blocks, stored entries long: allocated uninitialized by
@@ -157,8 +173,9 @@ private:
     std::unique_ptr<Real[]> values_;
     std::size_t values_size_ = 0;
     std::vector<Real> orig_diag_;  // M's diagonal before elimination, permuted
-    // Set by a completed analyze(); a refused or cut-short one leaves the
-    // structure half built, and factorize() refuses to run on it.
+    // Numeric preparation requires a successful symbolic analysis.
+    bool symbolic_ready_ = false;
+    // Factorization requires a successfully prepared numeric layout.
     bool analyzed_ = false;
 
     // Numeric scratch.
