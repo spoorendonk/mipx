@@ -462,9 +462,8 @@ TEST_CASE("BarrierSolver CPU Augmented: triangle LP", "[barrier][cpu-augmented]"
 
 TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
           "[barrier][cpu-augmented]") {
-    // The second column-generation master of the public CommaLab grid2
-    // instance (#270). CpuAugmented, which Auto picks on a CPU-only build,
-    // diverged from its first step until the fixes above.
+    // The grid2 master after one pricing sweep, with coupled demand and
+    // capacity rows. This covers the augmented-system regression from #270.
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuAugmented,
                                BarrierAlgorithm::CpuSparseCholesky);
     const bool presolve = GENERATE(false, true);
@@ -480,8 +479,8 @@ TEST_CASE("BarrierSolver CPU: column-generation master solves on every backend",
     solver.load(lp);
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
-    // Both mipx dual simplex and HiGHS reach this objective.
-    constexpr Real kOptimum = 2039020.0;
+    // The reference objective of the pinned v1 master.
+    constexpr Real kOptimum = 3040780.0;
     CHECK(std::abs(result.objective - kOptimum) <= 1e-6 * kOptimum);
 }
 

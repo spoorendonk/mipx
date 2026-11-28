@@ -30,8 +30,8 @@ tests/data/*_roundtrip.mps
 !tests/data/mps_*.mps
 # LP sequences for replay tests, including the public CommaLab grid1 (#267).
 !tests/data/lpseq/**/*.mps
-# The second column-generation master of the public CommaLab grid2 is
-# CpuAugmented's regression LP (#270).
+# The public CommaLAB grid2 master after one pricing sweep covers the
+# CpuAugmented regression (#270, #484).
 !tests/data/grid2_master_0001.mps
 # Netlib cplex2, infeasible by 1.6e-11 per row: crossover's regression LP
 # for a rigorous Farkas ray (#408).

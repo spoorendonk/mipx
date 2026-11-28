@@ -478,14 +478,14 @@ TEST_CASE("CLI: the dual simplex flags are accepted and solve the LP", "[cli]") 
 }
 
 TEST_CASE("CLI: --dual-dense-row-price reaches the dual simplex", "[cli]") {
-    // Presolve would empty this model, leaving no pivots to count.
+    // Start from the slack basis to exercise row pricing.
     const std::string base = "'" + testDataDir() + "/grid2_master_0001.mps' --dual --no-presolve ";
     const auto adaptive = runSolver(base);
     const auto dense = runSolver(base + "--dual-dense-row-price");
 
     for (const auto* run : {&adaptive, &dense}) {
         CHECK(run->exit_code == 0);
-        CHECK(run->mentions("Objective: 2.0390200000e+06"));
+        CHECK(run->mentions("Objective: 3.0407800000e+06"));
     }
     // The default takes the hyper-sparse row price on every pivot of this
     // model; the flag turns it off. Counts are left unpinned, so a change to
@@ -512,14 +512,14 @@ double workUnits(const CliRun& run) {
 }  // namespace
 
 TEST_CASE("CLI: --dual-row-price-actual-work reaches the dual simplex", "[cli]") {
-    // Presolve would empty this model, leaving no pivots to charge.
+    // Start from the slack basis to exercise work accounting on the pivots.
     const std::string base = "'" + testDataDir() + "/grid2_master_0001.mps' --dual --no-presolve ";
     const auto flat = runSolver(base);
     const auto actual = runSolver(base + "--dual-row-price-actual-work");
 
     for (const auto* run : {&flat, &actual}) {
         CHECK(run->exit_code == 0);
-        CHECK(run->mentions("Objective: 2.0390200000e+06"));
+        CHECK(run->mentions("Objective: 3.0407800000e+06"));
         CHECK(run->mentions("DSE fallbacks: "));
     }
     // Every pivot of this model takes the hyper-sparse row price, which

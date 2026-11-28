@@ -512,8 +512,7 @@ Artifacts:
 
 `mipx-lpseq-replay` (built with the CLI) replays a recorded LP and its
 incremental edits on mipx's LP solvers. It checks every solve against the
-recorded status and objective. The [CPU Barrier Gate](#cpu-barrier-gate-296)
-uses this format to capture column-generation masters.
+recorded status and objective.
 
 ```bash
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
@@ -618,11 +617,12 @@ row-bound edits, each round's edits timed against its solve:
 ./build/mipx-lp-edit-bench LP.mps ROUNDS EDITS [barrier-p|barrier-np|pdlp]...
 ```
 
-`tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
-HiGHS simplex, 9 masters); ctest replays it on `dual-warm`, `dual-cold`,
-`barrier` and `pdlp` with primal Devex off and on. It also tests bound
-perturbation and the dual stats CSV, and replays grid1 and the edits sequence
-on `barrier-hsd` with each `--barrier-ne` factor.
+`tests/data/lpseq/grid1` contains nine restricted masters generated in-tree
+from the public CommaLAB grid1 instance. CTest replays it on `dual-warm`,
+`dual-cold`, `barrier` and `pdlp` with primal Devex off and on. It also
+tests bound perturbation and the dual stats CSV, and replays grid1 and the
+edits sequence on `barrier-hsd` with each `--barrier-ne` factor. See the
+[fixture recipe](../data/lpseq/grid1/README.md) for regeneration.
 
 **The HiGHS side** (#268): configure with `-DMIPX_BENCH_HIGHS=ON` (OFF by
 default; fetches HiGHS v1.16.0 with HiPO, needs a BLAS such as

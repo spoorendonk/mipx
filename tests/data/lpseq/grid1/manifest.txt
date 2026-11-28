@@ -1,7 +1,2 @@
 format = lpseq 1
-backend = highs simplex presolve=off
-tol_primal = 9.9999999999999995e-08
-tol_dual = 9.9999999999999995e-08
 sense = min
-snapshot_every = 0
-obj_offset = 0
