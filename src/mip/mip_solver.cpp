@@ -1599,6 +1599,7 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     lp_stats_.cold_starts += stats.cold_starts;
     lp_stats_.pre_lp_propagation_calls += stats.pre_lp_propagation_calls;
     lp_stats_.pre_lp_propagation_pruned += stats.pre_lp_propagation_pruned;
+    lp_stats_.pre_lp_propagation_fixings += stats.pre_lp_propagation_fixings;
 }
 
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
@@ -2347,7 +2348,26 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
 
-    if (pre_lp_propagation_enabled_ && node.depth > 0 && problem_.num_rows > 0) {
+    const bool binary_lite = tree_presolve_binary_lite_profile_active_;
+    const Int tree_presolve_max_depth =
+        binary_lite ? std::min(tree_presolve_max_depth_, kTreePresolveBinaryLiteMaxDepth)
+                    : tree_presolve_max_depth_;
+    const Int tree_presolve_depth_frequency =
+        binary_lite
+            ? std::max(tree_presolve_depth_frequency_, kTreePresolveBinaryLiteDepthFrequency)
+            : tree_presolve_depth_frequency_;
+    // Mixed continuous MIPs need additional hardening before activity bounds
+    // are trusted in-tree. Pre-LP deductions use only the depth gate.
+    const bool tree_presolve_eligible =
+        tree_presolve_enabled_ && model_continuous_vars_ == 0 &&
+        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) && node.depth > 0 &&
+        node.depth <= tree_presolve_max_depth;
+    const bool depth_gate =
+        tree_presolve_eligible && node.depth % tree_presolve_depth_frequency == 0;
+    const bool apply_pre_lp_bounds = pre_lp_propagation_bounds_enabled_ && depth_gate;
+    Int pre_lp_tightenings = 0;
+    if ((pre_lp_propagation_enabled_ || apply_pre_lp_bounds) && node.depth > 0 &&
+        problem_.num_rows > 0) {
         auto& propagator = node_scratch.pre_lp_propagator;
         if (!propagator) {
             propagator = std::make_unique<DomainPropagator>();
@@ -2357,9 +2377,27 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         for (Index j : touched_vars) {
             propagator->setBound(j, current_lower[j], current_upper[j]);
         }
-        // The visit budget is the number of model rows. With no contradiction
-        // proved within that budget, continue with the original LP bounds.
+        const Int before_rows = propagator->numTightened();
+        // Deductions made within the row visit budget hold even if the
+        // propagator stops before reaching a fixpoint.
         const bool feasible = propagator->propagate(problem_.num_rows);
+        if (feasible && apply_pre_lp_bounds && propagator->numTightened() > before_rows) {
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                const Real lb = std::max(current_lower[j], propagator->getLower(j));
+                const Real ub = std::min(current_upper[j], propagator->getUpper(j));
+                if (lb > ub || (lb <= current_lower[j] + 1e-9 && ub >= current_upper[j] - 1e-9)) {
+                    continue;
+                }
+                if (lb == ub && current_lower[j] < current_upper[j]) {
+                    ++node_stats.pre_lp_propagation_fixings;
+                }
+                lp.setColBounds(j, lb, ub);
+                current_lower[j] = lb;
+                current_upper[j] = ub;
+                touched_vars.push_back(j);
+                ++pre_lp_tightenings;
+            }
+        }
         propagator->popCheckpoint();
         ++node_stats.pre_lp_propagation_calls;
         if (!feasible) {
@@ -2428,7 +2466,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // at the cutoff, so the gain says more about the incumbent than about
     // the branching. A caller that runs nodes concurrently but must stay
     // deterministic collects the sample instead and applies it in batch order.
-    if (tree_pseudocosts_enabled_) {
+    // The pre-LP deductions are local. A sample using them would compare
+    // LPs whose domains differ by more than the branch decision.
+    if (tree_pseudocosts_enabled_ && pre_lp_tightenings == 0) {
         const bool cutoff = node_result.status == Status::Optimal && incumbent_snapshot < kInf &&
                             node_result.objective >= pruneBound(incumbent_snapshot);
         const auto sample = TreePseudocostSample::fromChild(node, node_result.status,
@@ -2468,7 +2508,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // can raise the objective with cuts the children do inherit, so a sample
     // after such rounds overstates the gain a little; that is preferred to
     // understating it as zero, which would still count toward reliability.
-    const Real children_reference_objective = node_result.objective;
+    const Real children_reference_objective =
+        pre_lp_tightenings == 0 ? node_result.objective : -kInf;
     node_primals_out = lp.getPrimalValues();
 
     // Count integer infeasibilities (fractional integer variables).
@@ -2483,21 +2524,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     int_inf_out = frac_count;
 
-    Int tree_presolve_max_depth = tree_presolve_max_depth_;
-    Int tree_presolve_min_frac = tree_presolve_min_frac_;
-    Int tree_presolve_depth_frequency = tree_presolve_depth_frequency_;
-    bool tree_presolve_frac_gate_enabled = true;
-    if (tree_presolve_binary_lite_profile_active_) {
-        tree_presolve_max_depth =
-            std::min<Int>(tree_presolve_max_depth, kTreePresolveBinaryLiteMaxDepth);
-        tree_presolve_min_frac =
-            std::max<Int>(tree_presolve_min_frac, kTreePresolveBinaryLiteMinFrac);
-        tree_presolve_depth_frequency =
-            std::max<Int>(tree_presolve_depth_frequency, kTreePresolveBinaryLiteDepthFrequency);
-        tree_presolve_frac_gate_enabled = false;
-    }
-
-    const bool tree_presolve_model_supported = (model_continuous_vars_ == 0);
+    const Int tree_presolve_min_frac =
+        binary_lite ? std::max(tree_presolve_min_frac_, kTreePresolveBinaryLiteMinFrac)
+                    : tree_presolve_min_frac_;
 
     // Node-local reduced-cost fixing statistics are accumulated in this
     // stack-local delta and flushed once per node, mirroring the tree-presolve
@@ -2515,12 +2544,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         rc_delta = {};
     };
 
-    // In-tree presolve: currently limited to all-discrete models. Mixed
-    // continuous MIPs need additional hardening before row-activity tightening
-    // is trusted in-tree.
-    if (tree_presolve_enabled_ && tree_presolve_model_supported &&
-        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) && node.depth > 0 &&
-        node.depth <= tree_presolve_max_depth) {
+    if (tree_presolve_eligible) {
         const auto tree_presolve_snapshot = treePresolveStatsSnapshot();
         MipTreePresolveStats tree_presolve_delta{};
         tree_presolve_delta.attempts = 1;
@@ -2533,19 +2557,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             flushRcStats();
             tree_presolve_stats_flushed = true;
         };
-        const bool depth_gate = (node.depth % tree_presolve_depth_frequency == 0);
-        const bool frac_gate =
-            tree_presolve_frac_gate_enabled && (frac_count >= tree_presolve_min_frac);
+        const bool frac_gate = !binary_lite && frac_count >= tree_presolve_min_frac;
 
         bool benefit_skip = false;
-        const Int benefit_skip_runs = tree_presolve_binary_lite_profile_active_ ? 4 : 6;
+        const Int benefit_skip_runs = binary_lite ? 4 : 6;
         if (tree_presolve_snapshot.runs >= benefit_skip_runs) {
             const Real avg_tight =
                 static_cast<Real>(tree_presolve_snapshot.activity_tightenings +
                                   tree_presolve_snapshot.reduced_cost_tightenings) /
                 static_cast<Real>(std::max<Int>(1, tree_presolve_snapshot.runs));
-            const bool binary_lite_cold =
-                tree_presolve_binary_lite_profile_active_ && avg_tight < 4.0;
+            const bool binary_lite_cold = binary_lite && avg_tight < 4.0;
             if (binary_lite_cold ||
                 (avg_tight < 0.5 && frac_count < tree_presolve_min_frac * 2 && !depth_gate)) {
                 benefit_skip = true;
@@ -2581,6 +2602,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 return false;
             }
 
+            // Save the duals from the solve that produced the primal and
+            // objective before installing any post-LP deductions.
+            const bool run_rc_fixing = rc_fixer_.loaded() && incumbent_snapshot < kInf &&
+                                       node_obj_out < pruneBound(incumbent_snapshot);
+            const auto reduced = run_rc_fixing ? lp.getReducedCosts() : std::vector<Real>{};
             Int activity_tight = 0;
             Int rc_tight = 0;
             auto applyTightening = [&](Index j, Real new_lb, Real new_ub, bool from_rc) {
@@ -2635,12 +2661,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             // The engine is the single producer of RC tightenings at a node;
             // the tree-presolve counter below records the subset produced while
             // inside this block, which is what the benefit heuristic reads.
-            if (rc_fixer_.loaded() && incumbent_snapshot < kInf &&
-                node_obj_out < pruneBound(incumbent_snapshot)) {
+            if (run_rc_fixing) {
                 node_rc_pass_ran = true;
                 auto& rc_tightened = node_scratch.rc_tightened;
                 rc_tightened.clear();
-                const auto reduced = lp.getReducedCosts();
                 const bool rc_feasible = rc_fixer_.applyLocalFixing(
                     reduced, node_primals_out, node_obj_out, incumbent_snapshot, current_lower,
                     current_upper, rc_tightened, rc_delta);
@@ -2704,7 +2728,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
 
             ++tree_presolve_delta.runs;
-            tree_presolve_delta.activity_tightenings += activity_tight;
+            // Credit row deductions already installed before the first LP.
+            // They count toward the benefit of this run and require no refresh.
+            tree_presolve_delta.activity_tightenings += activity_tight + pre_lp_tightenings;
             tree_presolve_delta.reduced_cost_tightenings += rc_tight;
             const Int total_tight = activity_tight + rc_tight;
             if (total_tight > 0) {
@@ -3142,9 +3168,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(strong_branch_budget_override);
             }
+            const Real probe_reference =
+                pre_lp_tightenings == 0 ? node_result.objective : node_obj_out;
             auto selection =
                 branching_rule_.select(lp, problem_, node_primals_out, current_lower, current_upper,
-                                       node_result.objective, false, branching_stats_);
+                                       probe_reference, false, branching_stats_);
             if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(saved_budget);
@@ -6421,9 +6449,11 @@ MipResult MipSolver::solveMinimizationOnce() {
         rc_fixing_stats_.root_global_tightenings = root_rc_stats.root_global_tightenings;
     }
 
-    if (verbose_ && pre_lp_propagation_enabled_) {
-        log_.log("Pre-LP propagation: calls=%d pruned=%d\n", lp_stats_.pre_lp_propagation_calls,
-                 lp_stats_.pre_lp_propagation_pruned);
+    if (verbose_ && (pre_lp_propagation_enabled_ || pre_lp_propagation_bounds_enabled_)) {
+        log_.log("Pre-LP propagation: calls=%d pruned=%d fixings=%d\n",
+                 lp_stats_.pre_lp_propagation_calls, lp_stats_.pre_lp_propagation_pruned,
+                 lp_stats_.pre_lp_propagation_fixings);
+        log_.log("Tree node LPs: first=%d\n", lp_stats_.warm_starts + lp_stats_.cold_starts);
     }
 
     if (verbose_ && objective_propagator_.loaded()) {

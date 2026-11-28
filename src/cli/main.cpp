@@ -31,6 +31,7 @@ void printUsage(FILE* out) {
                  "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
                  "[--conflicts|--no-conflicts] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
+                 "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
                  "[--tree-presolve-auto|--no-tree-presolve-auto] "
                  "[--tree-presolve-max-depth N] "
@@ -148,6 +149,7 @@ int main(int argc, char* argv[]) {
     bool pre_root_portfolio = true;
     bool conflicts_enabled = true;
     bool pre_lp_propagation = false;
+    bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
     bool tree_presolve_auto = true;
     mipx::Int tree_presolve_max_depth = 24;
@@ -223,6 +225,10 @@ int main(int argc, char* argv[]) {
             pre_lp_propagation = true;
         } else if (arg == "--no-pre-lp-propagation") {
             pre_lp_propagation = false;
+        } else if (arg == "--pre-lp-propagation-bounds") {
+            pre_lp_propagation_bounds = true;
+        } else if (arg == "--no-pre-lp-propagation-bounds") {
+            pre_lp_propagation_bounds = false;
         } else if (arg == "--tree-presolve") {
             tree_presolve_enabled = true;
         } else if (arg == "--no-tree-presolve") {
@@ -685,6 +691,7 @@ int main(int argc, char* argv[]) {
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setConflictsEnabled(conflicts_enabled);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
+            solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
             solver.setTreePresolveAutoTuning(tree_presolve_auto);
             solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
@@ -738,18 +745,19 @@ int main(int argc, char* argv[]) {
             }
             log.log(
                 "Run profile: mode=%s seed=%llu threads=%d search=%s "
-                "conflicts=%s pre_lp_propagation=%s tree_presolve=%s tree_presolve_min_frac=%d "
+                "conflicts=%s pre_lp_propagation=%s pre_lp_propagation_bounds=%s "
+                "tree_presolve=%s tree_presolve_min_frac=%d "
                 "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s "
                 "cut_strengthening=%s objective_propagation=%s objective_integrality=%s "
                 "tree_pseudocosts=%s balanced_branch_score=%s\n",
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
-                pre_lp_propagation ? "on" : "off", tree_presolve_enabled ? "on" : "off",
-                tree_presolve_min_frac, tree_presolve_depth_frequency,
-                tree_presolve_auto ? "on" : "off", tree_cuts_enabled ? "on" : "off",
-                cut_strengthening ? "on" : "off", objective_propagation ? "on" : "off",
-                objective_integrality ? "on" : "off", tree_pseudocosts ? "on" : "off",
-                balanced_branch_score ? "on" : "off");
+                pre_lp_propagation ? "on" : "off", pre_lp_propagation_bounds ? "on" : "off",
+                tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
+                tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
+                tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
+                objective_propagation ? "on" : "off", objective_integrality ? "on" : "off",
+                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");

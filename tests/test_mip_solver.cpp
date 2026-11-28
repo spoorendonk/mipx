@@ -1928,6 +1928,60 @@ TEST_CASE("MipSolver: pre-LP propagation leaves an inconclusive node LP intact",
     CHECK(stats.cold_starts == baseline_stats.cold_starts);
 }
 
+TEST_CASE("MipSolver: depth-scheduled row fixing reaches the first LP and stays local",
+          "[mip][domain]") {
+    // The root LP takes x=0.5, z=0. The down child requires z=1, although
+    // its unpropagated LP takes z=0.5. The up child wins with z=0.
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.5};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.num_rows = 1;
+    lp.row_lower = {0.5};
+    lp.row_upper = {kInf};
+    lp.matrix = SparseMatrix(1, 2, {{0, 0, 1.0}, {0, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setTreePresolveAutoTuning(false);
+    solver.setTreePresolveControls(1, 1, 1);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK(solver.getLpStats().pre_lp_propagation_fixings == 0);
+    CHECK(solver.getTreePresolveStats().lp_resolves == 1);
+    const auto baseline_branching = solver.getBranchingStats();
+
+    solver.setPreLpPropagationBoundsEnabled(true);
+    const auto tightened = solver.solve();
+    REQUIRE(tightened.status == Status::Optimal);
+    CHECK_THAT(tightened.objective, WithinAbs(1.0, 1e-8));
+    REQUIRE(tightened.solution.size() == 2);
+    CHECK_THAT(tightened.solution[0], WithinAbs(1.0, 1e-8));
+    CHECK_THAT(tightened.solution[1], WithinAbs(0.0, 1e-8));
+    const auto& stats = solver.getLpStats();
+    CHECK(stats.pre_lp_propagation_calls == 2);
+    CHECK(stats.pre_lp_propagation_fixings == 1);
+    CHECK(stats.warm_starts + stats.cold_starts == 2);
+    CHECK(solver.getTreePresolveStats().lp_resolves == 0);
+    const auto& branching = solver.getBranchingStats();
+    CHECK(branching.pseudocost_updates_tree + branching.pseudocost_tree_skipped ==
+          baseline_branching.pseudocost_updates_tree + baseline_branching.pseudocost_tree_skipped -
+              1);
+
+    solver.setTreePresolveControls(1, 1, 2);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+    CHECK(solver.getLpStats().pre_lp_propagation_fixings == 0);
+    CHECK(solver.getTreePresolveStats().lp_resolves == 1);
+}
+
 // ---------------------------------------------------------------------------
 // Helper: set packing on an odd cycle (5-hole)
 // min -x0 -x1 -x2 -x3 -x4  s.t. x_i + x_{i+1 mod 5} <= 1, all binary

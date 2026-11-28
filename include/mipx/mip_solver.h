@@ -97,6 +97,7 @@ struct MipLpStats {
     Real dropped_node_bound = kInf;
     Int pre_lp_propagation_calls = 0;
     Int pre_lp_propagation_pruned = 0;
+    Int pre_lp_propagation_fixings = 0;
 };
 
 struct MipCutStats {
@@ -194,6 +195,7 @@ struct MipTreePresolveStats {
     Int runs = 0;
     Int skipped = 0;
     Int infeasible = 0;
+    /// Activity tightenings on runs credited by the tree presolve benefit heuristic.
     Int activity_tightenings = 0;
     Int reduced_cost_tightenings = 0;
     Int lp_resolves = 0;
@@ -455,6 +457,11 @@ public:
     [[nodiscard]] Real getPlungeBoundQuotient() const { return plunge_bound_quotient_; }
     /// Check child bounds for a row propagation contradiction before solving the LP.
     void setPreLpPropagationEnabled(bool enabled) { pre_lp_propagation_enabled_ = enabled; }
+    /// Apply row bounds at depth-scheduled tree presolve nodes of all-discrete
+    /// models in serial or opportunistic search. Off by default.
+    void setPreLpPropagationBoundsEnabled(bool enabled) {
+        pre_lp_propagation_bounds_enabled_ = enabled;
+    }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
     void setTreePresolveAutoTuning(bool enabled) {
         tree_presolve_auto_tuning_enabled_ = enabled;
@@ -578,6 +585,7 @@ private:
         Int cold_starts = 0;
         Int pre_lp_propagation_calls = 0;
         Int pre_lp_propagation_pruned = 0;
+        Int pre_lp_propagation_fixings = 0;
     };
 
     void mergeNodeWorkStats(const NodeWorkStats& stats);
@@ -816,6 +824,7 @@ private:
     Int plunge_max_depth_ = 0;
     Real plunge_bound_quotient_ = 0.05;
     bool pre_lp_propagation_enabled_ = false;
+    bool pre_lp_propagation_bounds_enabled_ = false;
     // Serial in-tree presolve is enabled by default because it materially
     // improves hard MIP search on benchmark instances.
     bool tree_presolve_enabled_ = true;
