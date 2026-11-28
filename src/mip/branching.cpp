@@ -169,11 +169,21 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                                                 std::span<const Real> col_upper,
                                                 Real node_objective, bool force_strong_branch,
                                                 BranchingTelemetry& telemetry) {
-    return selectWithProbeSink(
-        lp, problem, primal_values, col_lower, col_upper, node_objective, force_strong_branch,
-        strong_branch_probe_budget_, telemetry, [&](const StrongBranchPseudocostSample& sample) {
-            updatePseudoCost(sample.variable, sample.up_direction, sample.gain_per_unit);
-        });
+    return selectWithConflictActivity(lp, problem, primal_values, col_lower, col_upper,
+                                      node_objective, force_strong_branch, telemetry, {});
+}
+
+BranchingSelection ReliabilityBranching::selectWithConflictActivity(
+    DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+    std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+    bool force_strong_branch, BranchingTelemetry& telemetry,
+    std::span<const Real> conflict_activity) {
+    return selectWithProbeSink(lp, problem, primal_values, col_lower, col_upper, node_objective,
+                               force_strong_branch, strong_branch_probe_budget_, telemetry,
+                               conflict_activity, [&](const StrongBranchPseudocostSample& sample) {
+                                   updatePseudoCost(sample.variable, sample.up_direction,
+                                                    sample.gain_per_unit);
+                               });
 }
 
 BranchingSelection ReliabilityBranching::selectDeferred(
@@ -183,7 +193,8 @@ BranchingSelection ReliabilityBranching::selectDeferred(
     std::vector<StrongBranchPseudocostSample>& samples) const {
     return selectWithProbeSink(
         lp, problem, primal_values, col_lower, col_upper, node_objective, false, probe_budget,
-        telemetry, [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
+        telemetry, {},
+        [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
 }
 
 template <typename RecordProbe>
@@ -191,12 +202,14 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
     std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
     bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
-    RecordProbe record_probe) const {
+    std::span<const Real> conflict_activity, RecordProbe record_probe) const {
     BranchingSelection selection;
     ++telemetry.selections;
 
     std::vector<Candidate> candidates;
     candidates.reserve(static_cast<std::size_t>(problem.num_cols));
+    const bool score_conflicts =
+        conflict_activity.size() == static_cast<std::size_t>(problem.num_cols);
 
     for (Index j = 0; j < problem.num_cols; ++j) {
         if (problem.col_type[j] == VarType::Continuous)
@@ -223,6 +236,12 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         c.up_dist = up_dist;
         c.reliable = isReliable(j);
         c.pseudo_score = directionalScore(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
+        if (score_conflicts) {
+            // A bounded, scale-free boost keeps LP gains relevant even when
+            // many learned conflicts mention the same column.
+            const Real activity = std::max<Real>(0.0, conflict_activity[j]);
+            c.pseudo_score *= 2.0 - 1.0 / (1.0 + activity);
+        }
         c.prefilter_score = blendScore(c.frac, c.pseudo_score);
         candidates.push_back(c);
     }

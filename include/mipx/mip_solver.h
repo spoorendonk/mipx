@@ -217,6 +217,9 @@ struct MipSearchStats {
     Int plunge_rounding_improvements = 0;
     /// Openings of the work-unit heuristic gate in the deterministic parallel tree.
     uint64_t det_heur_gate_openings = 0;
+    /// Serial restarts whose conflict activity reached the configured threshold.
+    Int conflict_restarts = 0;
+    Real last_conflict_restart_activity = 0.0;
 };
 
 struct MipSerialNodePolicyStats {
@@ -490,6 +493,10 @@ public:
         exact_refinement_rational_scale_ = std::max<Real>(1.0, scale);
     }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    /// Use decayed conflict activity in serial pseudocost ranking. Off by default.
+    void setConflictActivityBranchingEnabled(bool enabled) {
+        conflict_activity_branching_enabled_ = enabled;
+    }
     /// Index learned path no-goods in the serial tree. Off by default.
     void setConflictWatchesEnabled(bool enabled) { conflict_watches_enabled_ = enabled; }
 
@@ -532,6 +539,13 @@ public:
     /// Pass nullopt for the profile schedule. DepthFirst is not a supported override.
     void setSerialNodePolicyOverride(std::optional<NodePolicy> policy);
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
+    /// Opt in to exact-safe serial restarts on recent learned conflicts.
+    /// Evidence decays by 0.995 per node, gains one per nonempty published
+    /// conflict, and resets on any restart.
+    /// Zero disables this trigger. Stable search and the queue-size floor still apply.
+    void setConflictRestartThreshold(Int threshold) {
+        conflict_restart_threshold_ = std::max<Int>(0, threshold);
+    }
     void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
         restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
         restart_keep_nodes_ = std::max<Int>(2, keep_nodes);
@@ -979,6 +993,7 @@ private:
     bool pre_root_lp_light_enabled_ = false;
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
+    bool conflict_activity_branching_enabled_ = false;
     bool conflict_watches_enabled_ = false;
     bool bound_reasons_enabled_ = false;
     bool bound_conflict_learning_enabled_ = false;
@@ -995,6 +1010,7 @@ private:
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
+    Int conflict_restart_threshold_ = 0;
     // Plunging is off by default: enabling it changes the serial node order.
     Int plunge_max_depth_ = 0;
     Real plunge_bound_quotient_ = 0.05;
@@ -1053,6 +1069,7 @@ private:
     std::size_t conflict_clause_pool_limit_ = 256;
     std::size_t conflict_clause_capacity_limit_ = 4096;
     std::vector<Real> conflict_scores_{};
+    Real conflict_restart_activity_ = 0.0;
     std::unordered_map<Int, Index> sibling_branch_cache_{};
     ReliabilityBranching branching_rule_;
     BranchingTelemetry branching_stats_{};

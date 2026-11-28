@@ -3,6 +3,7 @@
 #include "mipx/symmetry.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
@@ -270,6 +271,51 @@ TEST_CASE("Balanced branch scoring prefers gains in both pseudocost directions",
               .variable == 1);
     CHECK(telemetry.pseudocost_hits == 2);
     CHECK(telemetry.strong_branch_probes == 0);
+}
+
+TEST_CASE("Conflict activity changes pseudocost ranking without changing observations",
+          "[branching][conflicts]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    const std::vector<Real> primals = {0.5, 0.5};
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    const Int reliability_threshold = GENERATE(1, 2);
+    branching.setReliabilityThreshold(reliability_threshold);
+    for (const bool up : {false, true}) {
+        branching.updatePseudoCost(0, up, 4.0);
+        branching.updatePseudoCost(1, up, 3.0);
+    }
+
+    BranchingTelemetry telemetry;
+    const auto select = [&](std::span<const Real> activity) {
+        return branching.selectWithConflictActivity(solver, lp, primals, lp.col_lower, lp.col_upper,
+                                                    0.0, false, telemetry, activity);
+    };
+    REQUIRE(select({}).variable == 0);
+    const std::vector<Real> activity = {0.0, 1.0};
+    const auto selected = select(activity);
+    CHECK(selected.variable == 1);
+    CHECK(selected.used_pseudocost);
+    CHECK(selected.used_reliable_pseudocost == (reliability_threshold == 1));
+    const std::vector<Real> low_activity = {0.0, 0.25};
+    CHECK(select(low_activity).variable == 0);
+
+    CHECK(branching.upPseudoCost(0) == 4.0);
+    CHECK(branching.downPseudoCost(0) == 4.0);
+    CHECK(branching.upPseudoCost(1) == 3.0);
+    CHECK(branching.downPseudoCost(1) == 3.0);
+    for (Index col = 0; col < lp.num_cols; ++col) {
+        CHECK(branching.upReliability(col) == 1);
+        CHECK(branching.downReliability(col) == 1);
+    }
+    CHECK(telemetry.pseudocost_updates_strong == 0);
+    CHECK(telemetry.pseudocost_updates_tree == 0);
 }
 
 TEST_CASE("Balanced branch scoring prefers gains in both strong probes", "[branching]") {

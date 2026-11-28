@@ -43,6 +43,8 @@ namespace mipx {
 
 namespace {
 
+constexpr Real kConflictActivityDecay = 0.995;
+
 // Gives the next solve of `lp` `seconds` at most; negative means no limit.
 void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
     auto opts = lp.getOptions();
@@ -1780,15 +1782,21 @@ void MipSolver::recycleConflictClause(ConflictClause clause) {
 }
 
 void MipSolver::ageConflictPool() {
+    if (conflict_restart_threshold_ > 0) {
+        conflict_restart_activity_ *= kConflictActivityDecay;
+    }
+    if (!conflict_pool_.empty() ||
+        (conflict_activity_branching_enabled_ && conflict_stats_.learned > 0)) {
+        for (auto& score : conflict_scores_) {
+            score = std::max<Real>(0.0, score * kConflictActivityDecay);
+        }
+    }
     if (conflict_pool_.empty()) {
         return;
     }
 
     for (auto& clause : conflict_pool_) {
         ++clause.age;
-    }
-    for (auto& score : conflict_scores_) {
-        score = std::max<Real>(0.0, score * 0.995);
     }
 
     Int purged = 0;
@@ -1980,9 +1988,17 @@ void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
     conflict_stats_.lp_infeasible_conflicts += source == ConflictSource::LpInfeasible;
     conflict_stats_.bound_infeasible_conflicts += source == ConflictSource::BoundInfeasible;
 
+    if (conflict_restart_threshold_ > 0 && !clause.literals.empty()) {
+        // One event per learned clause. Reuse improves branch scores but
+        // does not make the same clause fresh restart evidence again.
+        conflict_restart_activity_ += 1.0;
+    }
+    const Real bump = conflict_activity_branching_enabled_ && clause.lbd > 0
+                          ? 1.0 + 1.0 / static_cast<Real>(clause.lbd)
+                          : 1.0;
     for (const auto& lit : clause.literals) {
         if (lit.variable >= 0 && lit.variable < static_cast<Index>(conflict_scores_.size())) {
-            conflict_scores_[lit.variable] += 1.0;
+            conflict_scores_[lit.variable] += bump;
         }
     }
 
@@ -3602,16 +3618,19 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(strong_branch_budget_override);
             }
-            auto selection =
-                branching_rule_.select(lp, problem_, node_primals_out, current_lower, current_upper,
-                                       probe_reference, false, branching_stats_);
+            const auto activity = use_conflicts && conflict_activity_branching_enabled_
+                                      ? std::span<const Real>(conflict_scores_)
+                                      : std::span<const Real>{};
+            auto selection = branching_rule_.selectWithConflictActivity(
+                lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
+                false, branching_stats_, activity);
             if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(saved_budget);
             }
             branch_var = selection.variable;
         }
-        if (use_conflicts && branch_var >= 0) {
+        if (use_conflicts && !conflict_activity_branching_enabled_ && branch_var >= 0) {
             branch_var = selectConflictAwareBranchVariable(node_primals_out, current_lower,
                                                            current_upper, branch_var);
         }
@@ -3772,14 +3791,24 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
 
         const bool allow_restarts =
             (search_profile_ == SearchProfile::Aggressive) || restarts_enabled_;
-        if (allow_restarts && search_profile_ != SearchProfile::Stable &&
-            nodes_since_incumbent >= restart_stagnation_nodes_ &&
+        const bool conflict_restart = conflict_restart_threshold_ > 0 &&
+                                      conflict_restart_activity_ >= conflict_restart_threshold_;
+        const bool stagnation_restart =
+            allow_restarts && nodes_since_incumbent >= restart_stagnation_nodes_;
+        if ((stagnation_restart || conflict_restart) && search_profile_ != SearchProfile::Stable &&
             queue.size() > restart_keep_nodes_) {
             // Exact-safe restart: reset the queue policy without discarding any
             // unexplored nodes. Dropping queued nodes would turn restart into a
             // heuristic truncation and can produce invalid "optimal" claims.
+            const Int open = queue.size();
             queue.setPolicy(serial_node_policy_override_.value_or(NodePolicy::BestFirst));
+            search_stats_.restart_nodes_dropped += open - queue.size();
             ++search_stats_.restarts;
+            if (conflict_restart) {
+                ++search_stats_.conflict_restarts;
+                search_stats_.last_conflict_restart_activity = conflict_restart_activity_;
+            }
+            conflict_restart_activity_ = 0.0;
             if (policy_stats) {
                 ++policy_stats->restarts;
             }
@@ -4980,6 +5009,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         conflict_watches_ = std::make_unique<ConflictWatchIndex>();
     }
     conflict_scores_.assign(problem_.num_cols, 0.0);
+    conflict_restart_activity_ = 0.0;
     sibling_branch_cache_.clear();
     lp_stats_.root_policy = root_lp_policy_;
     exact_refinement_stats_.mode = exact_refinement_mode_;
@@ -5376,6 +5406,9 @@ MipResult MipSolver::solveMinimizationOnce() {
     }
 
     branching_rule_.reset(problem_.num_cols);
+    if (conflict_activity_branching_enabled_ && conflicts_enabled_ && num_threads_ <= 1) {
+        conflict_scores_.resize(problem_.num_cols, 0.0);
+    }
     // Set every solve, so turning strong branching back on takes effect.
     branching_rule_.setStrongBranchProbeBudget(
         strong_branching_enabled_ ? ReliabilityBranching::kDefaultStrongBranchProbeBudget : 0);
@@ -7199,6 +7232,11 @@ MipResult MipSolver::solveMinimizationOnce() {
                 search_stats_.restarts, search_stats_.restart_nodes_dropped,
                 search_stats_.sibling_cache_hits, search_stats_.sibling_cache_misses,
                 search_stats_.strong_budget_updates);
+        }
+        if (search_stats_.conflict_restarts > 0) {
+            log_.log("Conflict restarts: count=%d threshold=%d last_activity=%.6g\n",
+                     search_stats_.conflict_restarts, conflict_restart_threshold_,
+                     search_stats_.last_conflict_restart_activity);
         }
         if (tree_presolve_stats_.attempts > 0) {
             log_.log(

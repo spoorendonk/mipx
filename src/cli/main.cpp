@@ -31,6 +31,8 @@ void printUsage(FILE* out) {
                  "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
                  "[--conflicts|--no-conflicts] "
                  "[--conflict-watches|--no-conflict-watches] "
+                 "[--conflict-activity-branching|--no-conflict-activity-branching] "
+                 "[--conflict-restart-threshold N] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
@@ -165,6 +167,8 @@ int main(int argc, char* argv[]) {
     bool pre_root_portfolio = true;
     bool conflicts_enabled = true;
     bool conflict_watches = false;
+    bool conflict_activity_branching = false;
+    mipx::Int conflict_restart_threshold = 0;
     bool bound_conflict_learning = false;
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
@@ -254,6 +258,20 @@ int main(int argc, char* argv[]) {
             conflict_watches = true;
         } else if (arg == "--no-conflict-watches") {
             conflict_watches = false;
+        } else if (arg == "--conflict-activity-branching") {
+            conflict_activity_branching = true;
+        } else if (arg == "--no-conflict-activity-branching") {
+            conflict_activity_branching = false;
+        } else if (arg == "--conflict-restart-threshold" && i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const char* end = value.data() + value.size();
+            const auto [parsed, ec] =
+                std::from_chars(value.data(), end, conflict_restart_threshold);
+            if (ec != std::errc{} || parsed != end || conflict_restart_threshold < 0) {
+                std::fprintf(stderr,
+                             "--conflict-restart-threshold requires a nonnegative integer\n");
+                return 1;
+            }
         } else if (arg == "--bound-conflict-learning") {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
@@ -775,6 +793,8 @@ int main(int argc, char* argv[]) {
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setConflictsEnabled(conflicts_enabled);
             solver.setConflictWatchesEnabled(conflict_watches);
+            solver.setConflictActivityBranchingEnabled(conflict_activity_branching);
+            solver.setConflictRestartThreshold(conflict_restart_threshold);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
             solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
@@ -842,6 +862,7 @@ int main(int argc, char* argv[]) {
                 "Run profile: mode=%s seed=%llu threads=%d search=%s "
                 "conflicts=%s conflict_ray_shortening=%s bound_conflict_learning_requested=%s "
                 "conflict_lp_proofs=%s "
+                "conflict_activity_branching_requested=%s conflict_restart_threshold=%d "
                 "pre_lp_propagation=%s "
                 "pre_lp_propagation_bounds=%s "
                 "tree_presolve=%s tree_presolve_min_frac=%d "
@@ -853,6 +874,7 @@ int main(int argc, char* argv[]) {
                 conflict_ray_shortening && conflicts_enabled && num_threads <= 1 ? "on" : "off",
                 bound_conflict_learning ? "on" : "off",
                 conflict_lp_proofs && conflicts_enabled && num_threads <= 1 ? "on" : "off",
+                conflict_activity_branching ? "on" : "off", conflict_restart_threshold,
                 pre_lp_propagation ? "on" : "off", pre_lp_propagation_bounds ? "on" : "off",
                 tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",

@@ -394,6 +394,25 @@ static LpProblem buildSearchStagnationMip() {
     return lp;
 }
 
+static LpProblem buildSearchStagnationMipWithEscape() {
+    // The parity subproblem is infeasible when escape = 0. At escape = 1,
+    // four chosen binaries suffice, with objective one.
+    auto lp = buildSearchStagnationMip();
+    const Index escape = lp.num_cols++;
+    lp.obj.push_back(1.0);
+    lp.col_lower.push_back(0.0);
+    lp.col_upper.push_back(1.0);
+    lp.col_type.push_back(VarType::Binary);
+    lp.col_names.emplace_back("escape");
+    std::vector<Triplet> row;
+    for (Index col = 0; col < escape; ++col) {
+        row.push_back({0, col, 1.0});
+    }
+    row.push_back({0, escape, 0.5});
+    lp.matrix = SparseMatrix(1, lp.num_cols, std::move(row));
+    return lp;
+}
+
 // ---------------------------------------------------------------------------
 // Helper: bounded general-integer knapsack whose reduced costs are exploitable
 // once an incumbent exists, so that both root global and node-local
@@ -2084,21 +2103,7 @@ TEST_CASE("MipSolver: opt-in bound conflicts learn and tighten serial nodes", "[
 }
 
 TEST_CASE("MipSolver: bound conflicts preserve a feasible optimum", "[mip][conflicts]") {
-    // The escape column costs one. With escape fixed to zero the parity
-    // subproblem is infeasible. At escape = 1, four chosen binaries suffice.
-    auto lp = buildSearchStagnationMip();
-    const Index escape = lp.num_cols++;
-    lp.obj.push_back(1.0);
-    lp.col_lower.push_back(0.0);
-    lp.col_upper.push_back(1.0);
-    lp.col_type.push_back(VarType::Binary);
-    lp.col_names.emplace_back("escape");
-    std::vector<Triplet> row;
-    for (Index col = 0; col < escape; ++col) {
-        row.push_back({0, col, 1.0});
-    }
-    row.push_back({0, escape, 0.5});
-    lp.matrix = SparseMatrix(1, lp.num_cols, std::move(row));
+    auto lp = buildSearchStagnationMipWithEscape();
 
     MipSolver solver;
     solver.setVerbose(false);
@@ -2118,13 +2123,80 @@ TEST_CASE("MipSolver: bound conflicts preserve a feasible optimum", "[mip][confl
     CHECK_THAT(learned.objective, WithinAbs(baseline.objective, 1e-9));
     CHECK(solver.getConflictStats().bound_conflict_tightenings > 0);
 
-    lp.col_type[escape] = VarType::Continuous;
+    lp.col_type.back() = VarType::Continuous;
     solver.load(lp);
     const auto mixed = solver.solve();
     REQUIRE(mixed.status == Status::Optimal);
     CHECK_THAT(mixed.objective, WithinAbs(baseline.objective, 1e-9));
     CHECK(solver.getConflictStats().bound_conflicts_learned == 0);
     CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+}
+
+TEST_CASE("MipSolver: learned and aged conflict activity changes a tree branch",
+          "[mip][conflicts][branching]") {
+    enum : Index { r, x, y, w, z, num_cols };
+    // ROOT takes r=0.25. The r=0 subtree learns two conflicts on y, one
+    // for each endpoint. Then r=w=1 has y=0.5 and the specified fractional x.
+    const Real x_fraction = GENERATE(0.167, 0.2);
+    LpProblem lp;
+    lp.num_cols = num_cols;
+    lp.obj = {1.0, 0.1, 0.01, 0.05, 1.5};
+    lp.col_lower.assign(num_cols, 0.0);
+    lp.col_upper.assign(num_cols, 1.0);
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary,
+                   VarType::Continuous};
+    lp.num_rows = 6;
+    lp.row_lower = {0.25, -0.5, -x_fraction, 0.5, -0.5, -kInf};
+    lp.row_upper = {kInf, kInf, kInf, kInf, kInf, 0.75};
+    lp.matrix = SparseMatrix(6, num_cols,
+                             {{0, r, 1.0},
+                              {0, z, 1.0},
+                              {1, w, 1.0},
+                              {1, r, -1.0},
+                              {2, x, 1.0},
+                              {2, w, -2 * x_fraction},
+                              {3, y, 1.0},
+                              {3, r, 0.5},
+                              {4, y, 1.0},
+                              {4, w, -1.0},
+                              {5, y, 1.0},
+                              {5, r, -0.25}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setPlungeControls(1, 1.0);
+    solver.setDirectionalInferenceEnabled(true);
+    solver.setGapTolerance(0.0);
+    solver.setNodeLimit(8);  // Visit only the first child of r=w=1.
+    solver.load(lp);
+
+    const auto down_children = [&](Index col) {
+        const auto& down = solver.getBranchInferenceStats()[col].down;
+        return down.samples + down.cutoffs + down.skipped;
+    };
+    solver.setConflictsEnabled(false);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(down_children(x) == 1);
+    CHECK(down_children(y) == 1);
+    const auto baseline = solver.getBranchingStats();
+
+    solver.setConflictsEnabled(true);
+    solver.setConflictActivityBranchingEnabled(true);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getConflictStats().learned == 4);
+    // Two fresh bumps give y a score of 5/6. Aging across the intervening
+    // nodes leaves it below 0.833 but above 0.8. Only x's fractional value
+    // differs between the two cases, giving it score 0.833 or 0.8.
+    const bool y_wins = x_fraction == 0.2;
+    CHECK(down_children(x) == (y_wins ? 0 : 1));
+    CHECK(down_children(y) == (y_wins ? 2 : 1));
+    CHECK(solver.getBranchingStats().pseudocost_updates_tree == baseline.pseudocost_updates_tree);
 }
 
 TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[mip][conflicts]") {
@@ -3070,6 +3142,76 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(policy_stats.restarts >= 1);
     CHECK(sstats.restart_nodes_dropped == 0);
     CHECK(policy_stats.nodes_selected == pinned.nodes - 1);
+}
+
+TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
+          "[mip][conflicts][search]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setBoundConflictLearningEnabled(true);
+    solver.setGapTolerance(0.0);
+    // Fix the queue order so that a policy reset consumes activity without
+    // changing which nodes, clauses, and pseudocost observations we see.
+    solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    solver.setRestartControls(10000, 2);
+    solver.load(buildSearchStagnationMipWithEscape());
+
+    const auto both_off = solver.solve();
+    REQUIRE(both_off.status == Status::Optimal);
+    CHECK(both_off.objective == 1.0);
+    CHECK(solver.getSearchStats().restarts == 0);
+
+    solver.setConflictActivityBranchingEnabled(true);
+    const auto baseline = solver.solve();
+    const auto conflicts = solver.getConflictStats();
+    const auto branching = solver.getBranchingStats();
+    REQUIRE(baseline.status == both_off.status);
+    CHECK(baseline.objective == both_off.objective);
+    REQUIRE(conflicts.bound_conflicts_learned > 2);
+    REQUIRE(conflicts.bound_conflict_tightenings > 0);
+    REQUIRE(branching.pseudocost_updates_tree > 0);
+    REQUIRE(branching.pseudocost_hits > 0);
+    CHECK(solver.getSearchStats().restarts == 0);
+
+    solver.setConflictRestartThreshold(2);
+    const auto restarted = solver.solve();
+    const auto search = solver.getSearchStats();
+    REQUIRE(search.conflict_restarts > 1);
+    CHECK(search.restarts == search.conflict_restarts);
+    // At most one conflict is published per node in this fixture. Two
+    // publications with intervening decay cannot reach the threshold of two.
+    CHECK(search.conflict_restarts <= conflicts.learned / 3);
+    CHECK(search.last_conflict_restart_activity > 2.0);
+    CHECK(search.last_conflict_restart_activity < 3.0);
+    CHECK(search.restart_nodes_dropped == 0);
+    CHECK(restarted.status == baseline.status);
+    CHECK(restarted.objective == baseline.objective);
+    CHECK(restarted.nodes == baseline.nodes);
+    CHECK(restarted.lp_iterations == baseline.lp_iterations);
+    CHECK(solver.getConflictStats().bound_conflicts_learned == conflicts.bound_conflicts_learned);
+    CHECK(solver.getConflictStats().bound_conflict_tightenings ==
+          conflicts.bound_conflict_tightenings);
+    CHECK(solver.getConflictStats().bound_conflict_cutoffs == conflicts.bound_conflict_cutoffs);
+    CHECK(solver.getBranchingStats().pseudocost_updates_tree == branching.pseudocost_updates_tree);
+    CHECK(solver.getBranchingStats().pseudocost_hits == branching.pseudocost_hits);
+    CHECK(solver.getBranchingStats().strong_branch_probes == branching.strong_branch_probes);
+
+    solver.setSerialNodePolicyOverride(std::nullopt);
+    const auto scheduled = solver.solve();
+    CHECK(scheduled.status == both_off.status);
+    CHECK(scheduled.objective == both_off.objective);
+    CHECK(solver.getSearchStats().conflict_restarts > 0);
+
+    solver.setSearchProfile(SearchProfile::Stable);
+    CHECK(solver.solve().status == Status::Optimal);
+    CHECK(solver.getSearchStats().restarts == 0);
+    CHECK(solver.getSearchStats().conflict_restarts == 0);
+    CHECK(solver.getSearchStats().last_conflict_restart_activity == 0.0);
 }
 
 TEST_CASE("MipSolver: serial node policy attributes work and resets on solve", "[mip][search]") {

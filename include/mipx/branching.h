@@ -160,6 +160,16 @@ public:
                               std::span<const Real> col_upper, Real node_objective,
                               bool force_strong_branch, BranchingTelemetry& telemetry);
 
+    /// Nonnegative conflict activity in model column order biases pseudocost
+    /// ranking. An empty span disables the bias. Gain observations are unweighted.
+    BranchingSelection selectWithConflictActivity(DualSimplexSolver& lp, const LpProblem& problem,
+                                                  std::span<const Real> primal_values,
+                                                  std::span<const Real> col_lower,
+                                                  std::span<const Real> col_upper,
+                                                  Real node_objective, bool force_strong_branch,
+                                                  BranchingTelemetry& telemetry,
+                                                  std::span<const Real> conflict_activity);
+
     /// Read the batch's pseudocosts and collect this node's probe observations
     /// for ordered application after every node in the batch has finished.
     BranchingSelection selectDeferred(DualSimplexSolver& lp, const LpProblem& problem,
@@ -171,13 +181,11 @@ public:
 
 private:
     template <typename RecordProbe>
-    BranchingSelection selectWithProbeSink(DualSimplexSolver& lp, const LpProblem& problem,
-                                           std::span<const Real> primal_values,
-                                           std::span<const Real> col_lower,
-                                           std::span<const Real> col_upper, Real node_objective,
-                                           bool force_strong_branch, Int probe_budget,
-                                           BranchingTelemetry& telemetry,
-                                           RecordProbe record_probe) const;
+    BranchingSelection selectWithProbeSink(
+        DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+        std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+        bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
+        std::span<const Real> conflict_activity, RecordProbe record_probe) const;
 
     struct PseudoCost {
         Real up = 0.0;
