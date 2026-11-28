@@ -607,7 +607,8 @@ bool DomainPropagator::propagateCliques(InferencePass* pass, bool reserve_implic
 
         if (changed) {
             enqueueColumn(upd.col);
-            if (pass != nullptr && !propagateImplications(upd.col, pass)) {
+            if (pass != nullptr && pass->follow_implications &&
+                !propagateImplications(upd.col, pass)) {
                 return false;
             }
         }
@@ -706,7 +707,7 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
 
 bool DomainPropagator::propagateActivity(SparseVectorView rv, Real rl, Real ru, Index row,
                                          InferencePass* pass, PropagationWork* work,
-                                         const Deadline* deadline) {
+                                         const Deadline* deadline, bool follow_implications) {
     // Save the endpoints that contributed to each activity sum. If an
     // earlier implication tightens the target itself, subtracting its live
     // contribution weakens the residual deduction from the saved endpoints.
@@ -904,8 +905,8 @@ bool DomainPropagator::propagateActivity(SparseVectorView rv, Real rl, Real ru, 
             }
             enqueueColumn(j);
             // Propagate binary implications when a variable becomes fixed.
-            if (implication_graph_ != nullptr && col_type_[j] != VarType::Continuous &&
-                lower_[j] > upper_[j] - kTol) {
+            if (follow_implications && implication_graph_ != nullptr &&
+                col_type_[j] != VarType::Continuous && lower_[j] > upper_[j] - kTol) {
                 if (!propagateImplications(j, pass)) {
                     return false;
                 }
@@ -943,8 +944,6 @@ bool DomainPropagator::propagateImplications(Index col, InferencePass* pass) {
 
         // Determine the fixed value.
         bool fixed_val = (lower_[cur] > 0.5);
-        const auto support = reasons_ ? reasons_->current(cur, !fixed_val) : kNoBoundReason;
-
         const auto& imps = implication_graph_->implications(cur, fixed_val);
         for (const auto& imp : imps) {
             if (pass != nullptr) {
@@ -954,63 +953,50 @@ bool DomainPropagator::propagateImplications(Index col, InferencePass* pass) {
                 pass->chargeInference(1);
                 ++pass->work.implications.visits;
             }
-            Index j = imp.to_var;
-            if (j < 0 || j >= num_cols_) {
-                continue;
-            }
-
-            Real new_lb = imp.to_val ? 1.0 : lower_[j];
-            Real new_ub = imp.to_val ? upper_[j] : 0.0;
-
-            bool bound_changed = false;
-            bool recorded = false;
-            if (new_lb > lower_[j] + kTol) {
-                if (!recorded) {
-                    recordChange(j);
-                    recorded = true;
-                }
-                lower_[j] = new_lb;
-                if (pass != nullptr) {
-                    ++pass->work.implications.tightenings;
-                }
-                if (reasons_) {
-                    reasons_->record({j, false, new_lb}, BoundReasonSource::Implication, {support},
-                                     cur, implication_scope_,
-                                     implication_scope_.node_local ? reason_level_ : 0);
-                }
-                bound_changed = true;
-            }
-            if (new_ub < upper_[j] - kTol) {
-                if (!recorded) {
-                    recordChange(j);
-                    recorded = true;
-                }
-                upper_[j] = new_ub;
-                if (pass != nullptr) {
-                    ++pass->work.implications.tightenings;
-                }
-                if (reasons_) {
-                    reasons_->record({j, true, new_ub}, BoundReasonSource::Implication, {support},
-                                     cur, implication_scope_,
-                                     implication_scope_.node_local ? reason_level_ : 0);
-                }
-                bound_changed = true;
-            }
-
-            if (!checkCrossing(j)) {
+            const auto before = changes_.size();
+            if (!propagateImplication(cur, imp,
+                                      pass != nullptr ? &pass->work.implications : nullptr)) {
                 return false;
             }
-
-            if (bound_changed) {
-                enqueueColumn(j);
-                // If this variable also became fixed, add to worklist.
-                if (lower_[j] > upper_[j] - kTol) {
-                    worklist.push_back(j);
-                }
+            const Index j = imp.to_var;
+            if (changes_.size() != before && lower_[j] > upper_[j] - kTol) {
+                worklist.push_back(j);
             }
         }
     }
 
+    return true;
+}
+
+bool DomainPropagator::propagateImplication(Index from, const BinaryImplication& edge,
+                                            PropagationWork* work) {
+    const Index col = edge.to_var;
+    if (col < 0 || col >= num_cols_) {
+        return true;
+    }
+    const bool is_upper = !edge.to_val;
+    const Real value = edge.to_val ? 1.0 : 0.0;
+    const bool changed = is_upper ? value < upper_[col] - kTol : value > lower_[col] + kTol;
+    if (changed) {
+        const auto support =
+            reasons_ ? reasons_->current(from, lower_[from] <= 0.5) : kNoBoundReason;
+        recordChange(col);
+        (is_upper ? upper_[col] : lower_[col]) = value;
+        if (work != nullptr) {
+            ++work->tightenings;
+        }
+        if (reasons_) {
+            reasons_->record({col, is_upper, value}, BoundReasonSource::Implication, {support},
+                             from, implication_scope_,
+                             implication_scope_.node_local ? reason_level_ : 0);
+        }
+    }
+    if (!checkCrossing(col)) {
+        return false;
+    }
+    if (changed) {
+        enqueueColumn(col);
+    }
     return true;
 }
 

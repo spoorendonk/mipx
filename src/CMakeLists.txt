@@ -23,6 +23,7 @@ add_library(mipx STATIC
     mip/bound_reasons.cpp
     mip/bound_conflict.cpp
     mip/domain.cpp
+    mip/domain_scheduling.cpp
     mip/implication_graph.cpp
     mip/variable_bounds.cpp
     mip/probing.cpp

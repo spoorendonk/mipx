@@ -153,6 +153,9 @@ struct MipCutStats {
     /// Successful LP re-solves with cutoff-scoped bounds.
     Int root_cutoff_feedbacks = 0;
     Int root_cutoff_resolves_backed_out = 0;
+    /// Work and unique endpoints per scheduled call, including abandoned batches.
+    PropagationScheduleStats root_propagation_schedule;
+    PropagationScheduleStats tree_propagation_schedule;
 };
 
 struct MipConflictStats {
@@ -463,6 +466,8 @@ public:
     }
     /// Feed incumbent-derived bounds back into root separation. Off by default.
     void setRootCutoffFeedbackEnabled(bool enabled) { root_cutoff_feedback_enabled_ = enabled; }
+    /// Schedule enabled cut propagation producers by measured yield. Off by default.
+    void setPropagationSchedulerEnabled(bool enabled) { propagation_scheduler_enabled_ = enabled; }
     /// Limit visits across all root cut rounds, shared by root propagators.
     /// Zero keeps only the per-round limit. A negative value throws std::invalid_argument.
     void setRootCutPropagationRowBudget(Int visits);
@@ -1165,6 +1170,7 @@ private:
     bool root_cut_inference_enabled_ = false;
     bool root_inactive_cut_propagation_enabled_ = false;
     bool root_cutoff_feedback_enabled_ = false;
+    bool propagation_scheduler_enabled_ = false;
     Int root_cut_propagation_row_budget_ = 0;
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;

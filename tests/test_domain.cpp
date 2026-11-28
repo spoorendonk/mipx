@@ -1,6 +1,7 @@
 #include "mipx/bound_conflict.h"
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
+#include "mipx/deadline.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/implication_graph.h"
@@ -623,6 +624,129 @@ TEST_CASE("New rows give inference work to affected cliques and implications", "
     REQUIRE(dp.propagateWithInactiveCuts(budget, work, {}, 0, false));
     CHECK(dp.getUpper(1) == 0);
     CHECK(work.implications.visits == 1);
+}
+
+TEST_CASE("Propagation scheduler learns yield and defers three zero-yield calls", "[domain]") {
+    using Producer = PropagationProducer;
+    PropagationScheduler scheduler;
+    scheduler.enqueue(Producer::Rows);
+    scheduler.enqueue(Producer::Cliques);
+    REQUIRE(scheduler.next(2) == Producer::Cliques);
+    scheduler.record(Producer::Cliques, 2, 1);
+    REQUIRE(scheduler.next(2) == Producer::Rows);
+    scheduler.record(Producer::Rows, 1, 0);
+    scheduler.enqueue(Producer::Rows);
+    scheduler.enqueue(Producer::Cliques);
+    REQUIRE(scheduler.next(2) == Producer::Cliques);
+    scheduler.record(Producer::Cliques, 1, 1);
+    for (int i = 0; i < 2; ++i) {
+        REQUIRE(scheduler.next(2) == Producer::Rows);
+        scheduler.record(Producer::Rows, 1, 0);
+        scheduler.enqueue(Producer::Rows);
+    }
+    for (int i = 0; i < 3; ++i) {
+        scheduler.enqueue(Producer::Cliques);
+        REQUIRE(scheduler.next(2) == Producer::Cliques);
+        scheduler.record(Producer::Cliques, 1, 1);
+    }
+    scheduler.enqueue(Producer::Cliques);
+    REQUIRE(scheduler.next(2) == Producer::Rows);
+    scheduler.record(Producer::Rows, 1, 2);
+    REQUIRE(scheduler.next(2) == Producer::Cliques);
+    scheduler.record(Producer::Cliques, 1, 1);
+    scheduler.enqueue(Producer::Rows, 2);
+    scheduler.enqueue(Producer::InactiveCuts);
+    REQUIRE(scheduler.next(1) == Producer::InactiveCuts);
+    scheduler.record(Producer::InactiveCuts, 1, 0);
+    CHECK_FALSE(scheduler.next(1).has_value());
+    CHECK(scheduler.pending());
+    scheduler.finish(PropagationExit::Budget);
+    const auto& rows = scheduler.stats().producers[static_cast<std::size_t>(Producer::Rows)];
+    CHECK(rows.calls == 4);
+    CHECK(rows.endpoints == 2);
+    CHECK(rows.deferrals == 1);
+    CHECK(rows.exits[static_cast<std::size_t>(PropagationExit::Budget)] == 1);
+    CHECK_FALSE(scheduler.pending());
+}
+
+TEST_CASE("Scheduled domain visits wake affected producers within the shared cap",
+          "[domain][cuts]") {
+    // After the implication fires, row 0 must go ahead of the trailing row
+    // even though both were initially eligible for the fallback sweep.
+    const auto model = makeProblem(4, 2, {{0, 1, 1}, {0, 2, 1}, {1, 3, 1}}, {1, -kInf}, {kInf, 1},
+                                   {1, 0, 0, 0}, {1, 1, 1, 1}, std::vector(4, VarType::Binary));
+    ImplicationGraph graph;
+    graph.init(4, {0, 1, 2, 3});
+    REQUIRE(graph.addImplication(0, true, 1, false));
+    Cut cut{.indices = {2, 3}, .values = {1, 1}, .upper = 1};
+    const std::array<const Cut*, 1> inactive{&cut};
+    for (Int cap : {1, 2, 32, 32}) {
+        DomainPropagator dp;
+        dp.load(model);
+        dp.setImplicationGraph(&graph);
+        DomainPropagationWork work;
+        PropagationScheduleStats stats;
+        Int left = cap;
+        REQUIRE(dp.propagateScheduled(left, work, stats, {.inactive = inactive}));
+        CHECK(dp.getUpper(1) == 0);
+        CHECK(work.rows.visits + work.implications.visits + work.inactive_cuts.visits ==
+              static_cast<std::uint64_t>(cap - left));
+        const auto& rows = stats.producers[static_cast<std::size_t>(PropagationProducer::Rows)];
+        if (cap == 1) {
+            CHECK(left == 0);
+            CHECK(rows.exits[static_cast<std::size_t>(PropagationExit::Budget)] == 1);
+            CHECK(dp.getLower(2) == 0);
+        } else if (cap == 2) {
+            CHECK(left == 0);
+            CHECK(rows.endpoints == 1);
+            CHECK(dp.getLower(2) == 1);
+            CHECK(dp.getUpper(3) == 1);
+        } else {
+            CHECK(rows.endpoints == 1);
+            CHECK(dp.getLower(2) == 1);
+            CHECK(work.inactive_cuts.tightenings == 1);
+            CHECK(dp.getUpper(3) == 0);
+        }
+    }
+}
+
+TEST_CASE("Scheduled propagation reports a stop before the first visit", "[domain]") {
+    const auto model = makeProblem(1, 1, {{0, 0, 1}}, {1}, {kInf}, {0}, {1});
+    DomainPropagator dp;
+    dp.load(model);
+    const auto expired = Deadline::after(0);
+    DomainPropagationWork work;
+    PropagationScheduleStats stats;
+    Int left = 3;
+    REQUIRE(dp.propagateScheduled(
+        left, work, stats, {.inactive = {}, .first_new_row = std::nullopt, .deadline = &expired}));
+    CHECK(left == 3);
+    CHECK(dp.getLower(0) == 0);
+    const auto& rows = stats.producers[static_cast<std::size_t>(PropagationProducer::Rows)];
+    CHECK(rows.calls == 0);
+    CHECK(rows.exits[static_cast<std::size_t>(PropagationExit::Deadline)] == 1);
+    CHECK(rows.exits[static_cast<std::size_t>(PropagationExit::Empty)] == 0);
+}
+
+TEST_CASE("Scheduled clique propagation spends one visit to settle a clique", "[domain][clique]") {
+    const auto model =
+        makeProblem(2, 0, {}, {}, {}, {1, 0}, {1, 1}, std::vector(2, VarType::Binary));
+    ConflictGraph graph;
+    graph.build(model);
+    CliqueTable table;
+    table.build(model, graph);
+    const Cut cut{.indices = {0, 1}, .values = {1, 1}, .upper = 1};
+    REQUIRE(table.extractFromCut(cut, model, graph) == 1);
+    DomainPropagator dp;
+    dp.load(model);
+    dp.setCliqueTable(&table);
+    DomainPropagationWork work;
+    PropagationScheduleStats stats;
+    Int left = 4;
+    REQUIRE(dp.propagateScheduled(left, work, stats, {}));
+    CHECK(dp.getUpper(1) == 0);
+    CHECK(left == 3);
+    CHECK(work.cliques.visits == 1);
 }
 
 TEST_CASE("Inactive pool propagation uses satisfied global cuts and wakes active rows",
