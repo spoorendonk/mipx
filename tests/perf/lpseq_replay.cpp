@@ -150,6 +150,7 @@ struct Options {
     std::vector<ArmKind> arms;
     bool primal_devex = false;
     bool primal_bound_perturbation = false;
+    bool keep_basis_on_row_removal = false;  // --dual-keep-basis-on-row-removal (#519)
     // CPU factor for both barrier arms (--barrier-ne); Auto, the solver's
     // default, unless set.
     BarrierAlgorithm barrier_algorithm = BarrierAlgorithm::Auto;
@@ -185,6 +186,7 @@ DualSimplexOptions dualOptions(const Options& o) {
     DualSimplexOptions d;
     d.enable_primal_devex = o.primal_devex;
     d.enable_primal_bound_perturbation = o.primal_bound_perturbation;
+    d.keep_basis_on_row_removal = o.keep_basis_on_row_removal;
     return d;
 }
 
@@ -551,7 +553,8 @@ void usage() {
     std::cerr
         << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|barrier-hsd|pdlp]... "
            "[--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] "
-           "[--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] [--dual-stats-csv FILE] "
+           "[--dual-keep-basis-on-row-removal] [--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] "
+           "[--dual-stats-csv FILE] "
            "[--refactor-csv FILE] [--edit-csv FILE]\n";
 }
 
@@ -592,6 +595,8 @@ int main(int argc, char** argv) {
             opt.primal_devex = true;
         } else if (a == "--primal-bound-perturbation") {
             opt.primal_bound_perturbation = true;
+        } else if (a == "--dual-keep-basis-on-row-removal") {
+            opt.keep_basis_on_row_removal = true;
         } else if (a == "--rel-tol" && i + 1 < argc) {
             opt.rel_tol = std::atof(argv[++i]);
         } else if (a == "--pdlp-rel-tol" && i + 1 < argc) {

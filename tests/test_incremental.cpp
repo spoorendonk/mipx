@@ -1,8 +1,12 @@
 #include "mipx/dual_simplex.h"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -323,4 +327,181 @@ TEST_CASE("Incremental: removeRows without basis preservation leaves no stale st
 
     // The basis status vector must describe the LP as it stands now.
     CHECK(static_cast<Index>(solver.getBasis().size()) == solver.numCols() + solver.numRows());
+}
+
+// ---------------------------------------------------------------------------
+// keep_basis_on_row_removal (#519): removeRows keeps the basis by pivoting
+// each removed row's nonbasic logical into it first.
+// ---------------------------------------------------------------------------
+
+static DualSimplexSolver keepBasisSolver(const LpProblem& lp, bool keep) {
+    DualSimplexSolver solver;
+    DualSimplexOptions opts;
+    opts.keep_basis_on_row_removal = keep;
+    solver.setOptions(opts);
+    solver.load(lp);
+    return solver;
+}
+
+// The LP with @p rows (sorted) left out.
+static LpProblem withoutRows(const LpProblem& lp, const std::vector<Index>& rows) {
+    std::vector<Index> row_map(static_cast<std::size_t>(lp.num_rows), 0);
+    Index removed = 0;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const bool drop = std::ranges::binary_search(rows, i);
+        row_map[i] = drop ? -1 : i - removed;
+        removed += drop ? 1 : 0;
+    }
+    LpProblem out = lp;
+    out.num_rows = lp.num_rows - removed;
+    out.row_lower.clear();
+    out.row_upper.clear();
+    out.row_names.clear();
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (row_map[i] < 0) {
+            continue;
+        }
+        out.row_lower.push_back(lp.row_lower[i]);
+        out.row_upper.push_back(lp.row_upper[i]);
+        out.row_names.push_back(lp.row_names[i]);
+        auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            trips.push_back({row_map[i], rv.indices[k], rv.values[k]});
+        }
+    }
+    out.matrix = SparseMatrix(out.num_rows, lp.num_cols, std::move(trips));
+    return out;
+}
+
+static Real coldObjective(const LpProblem& lp) {
+    DualSimplexSolver solver;
+    solver.load(lp);
+    auto r = solver.solve();
+    REQUIRE(r.status == Status::Optimal);
+    return r.objective;
+}
+
+TEST_CASE("Incremental: keep_basis_on_row_removal keeps it through a binding row's removal",
+          "[incremental]") {
+    // At the optimum x = 1, y = 3, rows 0 (x + y <= 4) and 2 (y <= 3) bind,
+    // so row 0's logical is nonbasic and removing the row leaves one basic
+    // variable too many.
+    auto lp = buildLP_2var4row();
+    auto solver = keepBasisSolver(lp, true);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    REQUIRE(solver.getBasis()[2] != BasisStatus::Basic);
+
+    const std::vector<Index> remove = {0};
+    solver.removeRows(remove);
+    REQUIRE(solver.numRows() == 3);
+
+    // Left: x <= 3, y <= 3, x + 2y <= 9, so x = y = 3 and objective -9.
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_FALSE(solver.basisStartStats().cold_start);
+    CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
+    CHECK_THAT(result.objective, WithinAbs(coldObjective(withoutRows(lp, remove)), 1e-6));
+}
+
+TEST_CASE("Incremental: keep_basis_on_row_removal keeps it when a logical is basic elsewhere",
+          "[incremental]") {
+    // The basis of the stale-state test above: row 0's logical is basic at
+    // kept row 1's position, which the positional rule cannot remap, and row
+    // 3's logical is nonbasic.
+    const std::vector<BasisStatus> basis = {
+        BasisStatus::AtLower,  // x
+        BasisStatus::Basic,    // y
+        BasisStatus::Basic,    // logical of row 0  <- removed
+        BasisStatus::Basic,    // logical of row 1
+        BasisStatus::Basic,    // logical of row 2
+        BasisStatus::AtUpper,  // logical of row 3  <- removed
+    };
+    const std::vector<Index> remove = {0, 3};
+    auto lp = buildLP_2var4row();
+
+    for (const bool keep : {true, false}) {
+        CAPTURE(keep);
+        auto solver = keepBasisSolver(lp, keep);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        solver.setBasis(basis);
+        solver.removeRows(remove);
+        REQUIRE(solver.numRows() == 2);
+
+        // Left: x <= 3, y <= 3, so x = y = 3 and objective -9.
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(solver.basisStartStats().cold_start == !keep);
+        CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
+    }
+}
+
+// min c^T x over 0 <= x <= 5 and m rows a_i x <= b_i with b_i > 0, from a
+// fixed linear congruential stream, so the LP is feasible (x = 0) and bounded.
+static LpProblem buildSeededLP(std::uint32_t seed, Index n, Index m) {
+    std::uint32_t s = seed;
+    const auto next = [&s](std::uint32_t mod) {
+        s = s * 1664525u + 1013904223u;
+        return (s >> 8) % mod;
+    };
+    LpProblem lp;
+    lp.name = "seeded";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    for (Index j = 0; j < n; ++j) {
+        lp.obj.push_back(-1.0 - static_cast<Real>(next(5)));
+        lp.col_lower.push_back(0.0);
+        lp.col_upper.push_back(5.0);
+        lp.col_type.push_back(VarType::Continuous);
+        lp.col_names.push_back("x" + std::to_string(j));
+    }
+    lp.num_rows = m;
+    std::vector<Triplet> trips;
+    for (Index i = 0; i < m; ++i) {
+        for (Index j = 0; j < n; ++j) {
+            if (next(3) == 0) {
+                continue;
+            }
+            const Real a = static_cast<Real>(next(6)) - 2.0;
+            if (a != 0.0) {
+                trips.push_back({i, j, a});
+            }
+        }
+        lp.row_lower.push_back(-kInf);
+        lp.row_upper.push_back(3.0 + static_cast<Real>(next(10)));
+        lp.row_names.push_back("r" + std::to_string(i));
+    }
+    lp.matrix = SparseMatrix(m, n, std::move(trips));
+    return lp;
+}
+
+TEST_CASE("Incremental: keep_basis_on_row_removal stays warm over repeated removals",
+          "[incremental]") {
+    for (std::uint32_t seed = 1; seed <= 20; ++seed) {
+        CAPTURE(seed);
+        LpProblem lp = buildSeededLP(seed, 8, 12);
+        auto solver = keepBasisSolver(lp, true);
+        REQUIRE(solver.solve().status == Status::Optimal);
+
+        // Two rounds: every third row, then the first and last of what is left.
+        for (int round = 0; round < 2; ++round) {
+            CAPTURE(round);
+            std::vector<Index> remove;
+            if (round == 0) {
+                for (Index i = 0; i < lp.num_rows; i += 3) {
+                    remove.push_back(i);
+                }
+            } else {
+                remove = {0, lp.num_rows - 1};
+            }
+            solver.removeRows(remove);
+            lp = withoutRows(lp, remove);
+            REQUIRE(solver.numRows() == lp.num_rows);
+
+            auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            CHECK_FALSE(solver.basisStartStats().cold_start);
+            CHECK_THAT(result.objective, WithinAbs(coldObjective(lp), 1e-6));
+        }
+    }
 }

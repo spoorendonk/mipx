@@ -5485,6 +5485,20 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     optimal_basis_current_ = false;
     Index new_rows = num_rows_ - removed;
 
+    // #519: while the old model is still in place, make every removed row's
+    // logical basic. The remap below then drops those logicals with their
+    // positions, and what is left of B stays nonsingular: each dropped column
+    // is the unit column of a dropped row.
+    bool repack = false;
+    bool repack_failed = false;
+    if (options_.keep_basis_on_row_removal && has_basis_) {
+        const auto sized = [&](const auto& v) { return static_cast<Index>(v.size()) == old_vars; };
+        repack = static_cast<Index>(basis_.size()) == old_rows && sized(var_status_) &&
+                 sized(primal_) && sized(reduced_cost_) && sized(basis_pos_) &&
+                 pivotInRemovedRowLogicals(row_map);
+        repack_failed = !repack;
+    }
+
     // Rebuild matrix without removed rows.
     std::vector<Triplet> triplets;
     triplets.reserve(matrix_.numNonzeros());
@@ -5541,10 +5555,30 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
             }
         }
 
-        bool can_preserve = true;
+        bool can_preserve = !repack_failed;
         std::vector<Index> new_basis(static_cast<std::size_t>(new_rows), -1);
-        if (static_cast<Index>(basis_.size()) != old_rows) {
+        if (!can_preserve || static_cast<Index>(basis_.size()) != old_rows) {
             can_preserve = false;
+        } else if (repack) {
+            // Every removed row's logical is basic: drop their positions and
+            // pack the rest in order.
+            Index pos = 0;
+            for (Index old_pos = 0; old_pos < old_rows; ++old_pos) {
+                const Index old_var = basis_[old_pos];
+                if (old_var < 0 || old_var >= old_vars) {
+                    can_preserve = false;
+                    break;
+                }
+                const Index new_var = var_map[old_var];
+                if (new_var < 0) {
+                    continue;
+                }
+                if (pos == new_rows) {
+                    can_preserve = false;
+                    break;
+                }
+                new_basis[pos++] = new_var;
+            }
         } else {
             for (Index old_row = 0; old_row < old_rows; ++old_row) {
                 Index new_row = row_map[old_row];
@@ -5660,6 +5694,82 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     // of range with them (issue #211 surfaced this once Gomory started feeding
     // the in-tree cut loop, which adds and removes rows node after node).
     dropBasis();
+}
+
+bool DualSimplexSolver::pivotInRemovedRowLogicals(std::span<const Index> row_map) {
+    const auto removed_logical = [&](Index v) {
+        return v >= num_cols_ && row_map[v - num_cols_] < 0;
+    };
+    std::vector<Index> pending;
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (row_map[i] < 0 && basis_pos_[num_cols_ + i] < 0) {
+            pending.push_back(i);
+        }
+    }
+    if (pending.empty()) {
+        return true;
+    }
+    dse_weights_valid_ = false;
+    if (!buildBasisMatrixSource()) {
+        return false;
+    }
+    std::vector<Real> alpha(static_cast<std::size_t>(num_rows_));
+    for (std::size_t t = 0; t < pending.size(); ++t) {
+        if (t == 0 || lu_.needsRefactorization()) {
+            try {
+                refactorize();
+            } catch (const std::runtime_error&) {
+                return false;
+            }
+            if (!factors_available_) {
+                return false;
+            }
+        }
+        // alpha = B^{-1} a_s for the logical's column -e_i of [A | -I]. Some
+        // position other than a removed row's logical has alpha != 0, or
+        // -e_i would be a combination of other rows' unit columns.
+        const Index row = pending[t];
+        std::ranges::fill(alpha, 0.0);
+        alpha[row] = -1.0;
+        lu_.ftran(alpha);
+        Index best = -1;
+        Real best_abs = 0.0;
+        for (Index p = 0; p < num_rows_; ++p) {
+            if (removed_logical(basis_[p])) {
+                continue;
+            }
+            const Real a = std::abs(alpha[p]);
+            if (a > best_abs) {
+                best_abs = a;
+                best = p;
+            }
+        }
+        if (best < 0 || best_abs < kPivotTol) {
+            return false;
+        }
+        const Index slack = num_cols_ + row;
+        const Index leaving = basis_[best];
+        const Real minus_one = -1.0;
+        lu_.update(best, std::span(&row, 1), std::span(&minus_one, 1));
+        basis_[best] = slack;
+        basis_pos_[slack] = best;
+        basis_pos_[leaving] = -1;
+        var_status_[slack] = BasisStatus::Basic;
+        reduced_cost_[slack] = 0.0;
+        // The leaving variable goes to the bound nearest its current value.
+        const Real lo = leaving < num_cols_ ? col_lower_[leaving] : row_lower_[leaving - num_cols_];
+        const Real up = leaving < num_cols_ ? col_upper_[leaving] : row_upper_[leaving - num_cols_];
+        const Real x = primal_[leaving];
+        const bool nearer_upper =
+            up != kInf && (lo == -kInf || std::abs(up - x) < std::abs(x - lo));
+        var_status_[leaving] = nearer_upper ? BasisStatus::AtUpper : BasisStatus::AtLower;
+        reconcileNonbasicStatus(leaving, lo, up);
+        reduced_cost_[leaving] = 0.0;
+        if (best < static_cast<Index>(devex_weights_.size())) {
+            devex_weights_[best] = 1.0;
+        }
+    }
+    return true;
 }
 
 void DualSimplexSolver::dropBasis() {

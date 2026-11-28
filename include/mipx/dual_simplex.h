@@ -294,6 +294,13 @@ struct DualSimplexOptions {
 
     // Keep DSE weights for the current basis across reinversions and warm solves.
     bool retain_dse_weights = false;
+
+    // removeRows keeps the basis by first pivoting each deleted row's
+    // nonbasic logical into it (#519). Without this, the basis is kept only
+    // when every deleted row's basis position goes with that row; after
+    // pivots, a deleted row's logical usually sits basic elsewhere, and the
+    // next solve starts cold. Off by default pending a timed comparison.
+    bool keep_basis_on_row_removal = false;
 };
 
 class DualSimplexSolver : public LpSolver {
@@ -335,7 +342,11 @@ public:
                  std::span<const Real> values, std::span<const Real> lower,
                  std::span<const Real> upper) override;
     /// Remove rows, keeping the basis when every remaining basic variable
-    /// survives the removal.
+    /// survives the removal. With keep_basis_on_row_removal, each deleted
+    /// row's logical is first pivoted into the basis (on the largest entry of
+    /// B^{-1} of its column, one Forrest-Tomlin update each), so the basis
+    /// survives whenever it can be factorized; the variable that leaves goes
+    /// to its bound nearest its current value.
     ///
     /// Postcondition: re-solve before reading a solution. When the basis is
     /// kept, primal and reduced-cost values of the surviving variables carry
@@ -565,6 +576,11 @@ private:
     /// Swap each basic column in @p cols for a row's logical (removeCols).
     /// False, with the basis unchanged in meaning, when it cannot be done.
     bool swapOutBasicColumns(std::span<const Index> cols);
+    /// Pivot the logical of each row with @p row_map entry -1 into the basis
+    /// (removeRows with keep_basis_on_row_removal), on the model before the
+    /// removal. False when the basis cannot be factorized or a pivot is too
+    /// small; the basis is then to be dropped.
+    bool pivotInRemovedRowLogicals(std::span<const Index> row_map);
     /// Drop the basis, sizing every per-variable vector to the model.
     void dropBasis();
 

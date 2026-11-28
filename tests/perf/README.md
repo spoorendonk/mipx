@@ -518,7 +518,7 @@ recorded status and objective.
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
     --arm dual-warm --arm dual-cold --arm barrier --arm barrier-hsd --arm pdlp \
     [--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] \
-    [--csv out.csv] [--dual-stats-csv dual.csv] [--refactor-csv refactor.csv]
+    [--dual-keep-basis-on-row-removal] [--csv out.csv] [--dual-stats-csv dual.csv] [--refactor-csv refactor.csv]
 ```
 
 The version 1 format is implemented in [`lpseq_format.h`](lpseq_format.h).
@@ -581,7 +581,11 @@ to max(1, |recorded|), `--rel-tol` 1e-6, `--pdlp-rel-tol` 1e-4), 1 when one
 does not, 2 on a format error.
 
 `--primal-devex` and `--primal-bound-perturbation` enable the corresponding
-opt-ins for both dual arms. Use separate replays to compare each option with
+opt-ins for both dual arms. `--dual-keep-basis-on-row-removal` (#519) sets
+`DualSimplexOptions::keep_basis_on_row_removal`, which matters only to
+`dual-warm`: a `del_rows` op then keeps its basis instead of dropping it
+whenever a removed row's logical is nonbasic or basic at another row's
+position. Use separate replays to compare each option with
 the default. `--dual-stats-csv` writes one row per solve and dual arm to a
 separate file with these columns.
 
