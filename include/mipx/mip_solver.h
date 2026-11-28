@@ -107,6 +107,7 @@ struct MipLpStats {
     Int pre_lp_propagation_calls = 0;
     Int pre_lp_propagation_pruned = 0;
     Int pre_lp_propagation_fixings = 0;
+    /// Cumulative across internal retries and unboundedness confirmation passes.
     Sos2PropagationStats root_sos2_propagation;
     Sos2PropagationStats tree_sos2_propagation;
 };

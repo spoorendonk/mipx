@@ -2399,7 +2399,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
     }
 
-    if (sos2_propagation_enabled_ && !problem_.native_sos2.empty()) {
+    const auto applySos2Bounds = [&]() {
+        if (!sos2_propagation_enabled_ || problem_.native_sos2.empty()) {
+            return true;
+        }
         auto& tightened = node_scratch.rc_tightened;
         tightened.clear();
         const auto stats = propagateSos2(problem_, current_lower, current_upper, &tightened);
@@ -2410,14 +2413,20 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             touched_vars.push_back(j);
         }
         if (stats.prunes > 0) {
-            node_stats.bound_apply_seconds +=
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            // A refresh can be pruned after the first LP populated these.
+            node_primals_out.clear();
+            int_inf_out = -1;
             return false;
         }
-    }
+        return true;
+    };
 
+    const bool sos2_feasible = applySos2Bounds();
     node_stats.bound_apply_seconds +=
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (!sos2_feasible) {
+        return false;
+    }
     if (use_conflicts && isConflictTriggered(node_scratch)) {
         return false;
     }
@@ -2481,6 +2490,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
             return false;
         }
+    }
+    if (pre_lp_tightenings > 0 && !applySos2Bounds()) {
+        return false;
     }
 
     // Set basis for warm-start.
@@ -2808,6 +2820,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             tree_presolve_delta.reduced_cost_tightenings += rc_tight;
             const Int total_tight = activity_tight + rc_tight;
             if (total_tight > 0) {
+                if (!applySos2Bounds()) {
+                    ++tree_presolve_delta.infeasible;
+                    flushTreePresolveStats();
+                    return false;
+                }
                 const Real prev_obj = node_obj_out;
                 auto refresh = lp.solve();
                 node_iters_out += refresh.iterations;
@@ -2930,6 +2947,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             flushRcStats();
 
             // Re-solve LP with tightened bounds.
+            if (!applySos2Bounds()) {
+                return false;
+            }
             auto refresh = lp.solve();
             node_iters_out += refresh.iterations;
             node_work_out += refresh.work_units;

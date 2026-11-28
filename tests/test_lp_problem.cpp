@@ -1318,7 +1318,8 @@ TEST_CASE("Native SOS2 propagation closes overlapping forced windows", "[lp_prob
         CHECK_THAT(propagated.objective, WithinAbs(expected, 1e-7));
         CHECK_THAT(branching.objective, WithinAbs(expected, 1e-7));
         REQUIRE(propagated.solution.size() == 7);
-        CHECK(propagated.solution == branching.solution);
+        CHECK(std::ranges::equal(propagated.solution, branching.solution,
+                                 [](Real lhs, Real rhs) { return std::abs(lhs - rhs) <= 1e-9; }));
         CHECK(propagated.solution[2] == 0.0);
         CHECK(propagated.solution[3] == 0.0);
         CHECK(propagated.solution[6] == 0.0);
@@ -1373,11 +1374,16 @@ TEST_CASE("Native SOS2 propagation uses node-local integer branch bounds",
             const auto baseline = solver.solve();
             REQUIRE(baseline.status == Status::Optimal);
             CHECK_THAT(baseline.objective, WithinAbs(3.0, 1e-7));
+            CHECK(solver.getLpStats().tree_sos2_propagation.member_visits == 0);
             solver.setSos2Propagation(true);
             const auto propagated = solver.solve();
             REQUIRE(propagated.status == Status::Optimal);
             CHECK_THAT(propagated.objective, WithinAbs(3.0, 1e-7));
-            CHECK(propagated.solution == baseline.solution);
+            CHECK(
+                std::ranges::equal(propagated.solution, baseline.solution,
+                                   [](Real lhs, Real rhs) { return std::abs(lhs - rhs) <= 1e-9; }));
+            CHECK(propagated.solution[1] == 0.0);
+            CHECK_THAT(propagated.solution[3], WithinAbs(3.0, 1e-7));
             if (threads == 1) {
                 CHECK(solver.getSearchStats().plunge_nodes > 0);
             }
@@ -1385,6 +1391,47 @@ TEST_CASE("Native SOS2 propagation uses node-local integer branch bounds",
             CHECK(solver.getLpStats().tree_sos2_propagation.fixings > 0);
         }
     }
+}
+
+TEST_CASE("Native SOS2 prunes support forced by pre-LP row bounds", "[lp_problem][features]") {
+    LpProblem lp;
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 5;
+    lp.obj = {0.0, -1.0, 0.0, -1.0, 10.0};
+    lp.col_lower.assign(5, 0.0);
+    lp.col_upper = {1.0, 1.0, 0.0, 1.0, 1.0};
+    lp.col_type.assign(5, VarType::Binary);
+    // Branching up from b=0.5 forces both nonadjacent members through the rows.
+    lp.num_rows = 4;
+    lp.row_lower.assign(4, -kInf);
+    lp.row_upper = {0.0, 2.0, 1.0, 1.0};
+    lp.matrix = SparseMatrix(4, lp.num_cols,
+                             {{0, 4, 1.0},
+                              {0, 0, -2.0},
+                              {1, 4, 1.0},
+                              {1, 0, 2.0},
+                              {2, 0, 2.0},
+                              {2, 1, -1.0},
+                              {3, 0, 2.0},
+                              {3, 3, -1.0}});
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {1, 2, 3}, {}, "test"}};
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setRootHeuristicThresholds(0, 0);
+    solver.setTreePresolveAutoTuning(false);
+    solver.setTreePresolveControls(2, 1, 1);
+    solver.setPreLpPropagationBoundsEnabled(true);
+    solver.setSos2NativeBranching(true);
+    solver.setSos2Propagation(true);
+    solver.load(lp);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(0.0, 1e-7));
+    CHECK(solver.getLpStats().pre_lp_propagation_fixings >= 2);
+    CHECK(solver.getLpStats().tree_sos2_propagation.prunes == 1);
 }
 
 // ---------------------------------------------------------------------------
