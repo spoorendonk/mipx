@@ -38,9 +38,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--node-limit", type=int, default=0)
     p.add_argument("--gap-tol", type=float, default=1e-4)
     p.add_argument("--max-instances", type=int, default=0)
-    p.add_argument("--instances", default="")
+    selection = p.add_mutually_exclusive_group()
+    selection.add_argument("--instances", default="")
+    selection.add_argument("--corpus", type=Path, help="CSV with an instance column")
     p.add_argument("--solver-arg", action="append", default=[])
-    return p.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
+    args = p.parse_args(normalize_solver_arg_tokens(sys.argv[1:]))
+    if args.corpus is not None and args.max_instances > 0:
+        p.error("--corpus requires running every instance; omit --max-instances")
+    return args
+
+
+def load_corpus_instances(path: Path) -> list[str]:
+    if not path.is_file():
+        raise SystemExit(f"Corpus CSV not found: {path}")
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None or "instance" not in reader.fieldnames:
+            raise SystemExit(f"{path}: missing instance column")
+        names = [name for row in reader if (name := (row["instance"] or "").strip())]
+    if not names:
+        raise SystemExit(f"{path}: no instances")
+    if len(names) != len(set(names)):
+        raise SystemExit(f"{path}: duplicate instance names")
+    return names
 
 
 def median(vals: list[float]) -> float:
@@ -94,6 +114,30 @@ def run_cmd(cmd: list[str]) -> tuple[int, str, float]:
     return proc.returncode, out, elapsed
 
 
+def select_instances(miplib_dir: Path, corpus: Path | None, names: str) -> list[Path]:
+    if corpus is not None:
+        instances = [miplib_dir / f"{name}.mps.gz" for name in load_corpus_instances(corpus)]
+        missing = [path.name for path in instances if not path.is_file()]
+        if missing:
+            raise SystemExit(f"Missing corpus files in {miplib_dir}: {', '.join(missing)}")
+        return instances
+
+    instances = sorted(miplib_dir.glob("*.mps.gz"))
+    if not instances:
+        raise SystemExit(f"No .mps.gz instances found in {miplib_dir}")
+    if not names:
+        return instances
+
+    picked: list[Path] = []
+    for name in [name.strip() for name in names.split(",") if name.strip()]:
+        path = miplib_dir / f"{name}.mps.gz"
+        if path.is_file():
+            picked.append(path)
+        else:
+            print(f"Warning: instance not found: {name}", file=sys.stderr)
+    return picked
+
+
 def main() -> int:
     args = parse_args()
     bin_path = Path(args.binary)
@@ -103,19 +147,7 @@ def main() -> int:
     if not bin_path.is_file() or not bin_path.stat().st_mode & 0o111:
         raise SystemExit(f"Binary not executable: {bin_path}")
 
-    instances = sorted(miplib_dir.glob("*.mps.gz"))
-    if not instances:
-        raise SystemExit(f"No .mps.gz instances found in {miplib_dir}")
-
-    if args.instances:
-        picked: list[Path] = []
-        for n in [x.strip() for x in args.instances.split(",") if x.strip()]:
-            p = miplib_dir / f"{n}.mps.gz"
-            if p.is_file():
-                picked.append(p)
-            else:
-                print(f"Warning: instance not found: {n}", file=sys.stderr)
-        instances = picked
+    instances = select_instances(miplib_dir, args.corpus, args.instances)
 
     if args.max_instances > 0:
         instances = instances[: args.max_instances]

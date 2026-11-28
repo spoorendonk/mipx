@@ -1,0 +1,12 @@
+instance,source,notes
+air04,https://miplib.zib.de/WebData/instances/air04.mps.gz,bounded_mip_gap_slice
+air05,https://miplib.zib.de/WebData/instances/air05.mps.gz,bounded_mip_gap_slice
+blend2,https://miplib.zib.de/WebData/instances/blend2.mps.gz,bounded_mip_gap_slice
+dcmulti,https://miplib.zib.de/WebData/instances/dcmulti.mps.gz,bounded_mip_gap_slice
+flugpl,https://miplib.zib.de/WebData/instances/flugpl.mps.gz,bounded_mip_gap_slice
+gen,https://miplib.zib.de/WebData/instances/gen.mps.gz,bounded_mip_gap_slice
+glass4,https://miplib.zib.de/WebData/instances/glass4.mps.gz,bounded_mip_gap_slice
+gt2,https://miplib.zib.de/WebData/instances/gt2.mps.gz,bounded_mip_gap_slice
+p0201,https://miplib.zib.de/WebData/instances/p0201.mps.gz,bounded_mip_gap_slice
+supportcase16,https://miplib.zib.de/WebData/instances/supportcase16.mps.gz,bounded_mip_gap_slice
+stein45inf,https://miplib.zib.de/WebData/instances/stein45inf.mps.gz,bounded_mip_gap_slice

@@ -12,13 +12,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from run_mittelman_mip_bench import load_corpus_instances
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PERF_DIR = ROOT_DIR / "tests" / "perf"
-DEFAULT_INSTANCES = (
-    "air04,air05,blend2,dcmulti,flugpl,gen,glass4,gt2,p0201,"
-    "supportcase16,stein45inf"
-)
+DEFAULT_CORPUS = PERF_DIR / "mittelman_mip_corpus.csv"
 SOLVED_STATUSES = {
     "optimal",
     "gap_limit",
@@ -48,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--highs-binary", default="")
     p.add_argument("--miplib-dir", default=str(ROOT_DIR / "tests" / "data" / "miplib"))
     p.add_argument("--out-dir", default="/tmp/mipx_mip_gap_summary")
-    p.add_argument("--instances", default=DEFAULT_INSTANCES)
+    p.add_argument("--instances", help="Comma-separated override for the bounded corpus")
     p.add_argument("--threads", type=int, default=8)
     p.add_argument("--time-limit", type=float, default=60.0)
     p.add_argument("--gap-tol", type=float, default=1e-4)
@@ -219,9 +217,14 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    instances = [name.strip() for name in args.instances.split(",") if name.strip()]
-    if not instances:
-        raise SystemExit("no instances selected")
+    if args.instances is None:
+        instances = load_corpus_instances(DEFAULT_CORPUS)
+        selection = ["--corpus", str(DEFAULT_CORPUS)]
+    else:
+        instances = [name.strip() for name in args.instances.split(",") if name.strip()]
+        if not instances:
+            raise SystemExit("no instances selected")
+        selection = ["--instances", ",".join(instances)]
 
     mipx_csv = out_dir / "mipx_mip_gap.csv"
     highs_csv = out_dir / "highs_mip_gap.csv"
@@ -248,8 +251,7 @@ def main() -> int:
             f"{args.time_limit:g}",
             "--gap-tol",
             f"{args.gap_tol:g}",
-            "--instances",
-            ",".join(instances),
+            *selection,
             "--repeats",
             "1",
             *solver_args,
