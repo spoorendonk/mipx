@@ -32,6 +32,7 @@ void printUsage(FILE* out) {
                  "[--conflicts|--no-conflicts] "
                  "[--conflict-watches|--no-conflict-watches] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
+                 "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
                  "[--conflict-lp-proofs|--no-conflict-lp-proofs] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
@@ -165,6 +166,7 @@ int main(int argc, char* argv[]) {
     bool conflicts_enabled = true;
     bool conflict_watches = false;
     bool bound_conflict_learning = false;
+    bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
     bool conflict_lp_proofs = false;
     bool pre_lp_propagation = false;
@@ -256,6 +258,10 @@ int main(int argc, char* argv[]) {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
             bound_conflict_learning = false;
+        } else if (arg == "--reconvergence-cuts") {
+            reconvergence_cuts = true;
+        } else if (arg == "--no-reconvergence-cuts") {
+            reconvergence_cuts = false;
         } else if (arg == "--conflict-ray-shortening") {
             conflict_ray_shortening = true;
         } else if (arg == "--no-conflict-ray-shortening") {
@@ -770,6 +776,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictsEnabled(conflicts_enabled);
             solver.setConflictWatchesEnabled(conflict_watches);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
+            solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
             solver.setConflictLpProofsEnabled(conflict_lp_proofs);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);

@@ -2,11 +2,15 @@
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
 #include "mipx/domain.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/implication_graph.h"
+#include "mipx/mip_solver.h"
 #include "mipx/objective_propagator.h"
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 using namespace mipx;
@@ -35,6 +39,38 @@ LpProblem makeProblem(Index num_cols, Index num_rows, std::vector<Triplet> tripl
     }
     return prob;
 }
+
+namespace reconvergence_fixture {
+
+constexpr Index a = 0, b = 1, r = 2, p = 3, q = 4, u = 5, y = 6, z = 7;
+
+LpProblem make(bool branch_fixture) {
+    std::vector<Triplet> entries{{0, a, 1},  {0, r, -1}, {1, b, 1},  {1, p, -2}, {2, b, 1},
+                                 {2, q, -2}, {3, a, 1},  {3, r, 1},  {3, p, 1},  {3, q, 1},
+                                 {3, u, -1}, {4, u, 1},  {4, y, -2}, {5, u, 1},  {5, z, -2},
+                                 {6, a, 1},  {6, y, 1},  {6, z, 1}};
+    std::vector<Real> row_upper{0, 0, 0, 3, 0, 0, 2};
+    const Index cols = branch_fixture ? 10 : 8;
+    if (branch_fixture) {
+        // Charging for the escape columns gives a and b fractional values in
+        // the relaxation, so serial branching can encounter both UIPs.
+        entries.insert(entries.end(), {{7, a, 1}, {7, 8, -0.5}, {8, b, 1}, {8, 9, -0.5}});
+        row_upper.insert(row_upper.end(), {0.5, 0.5});
+    }
+    const Index rows = static_cast<Index>(row_upper.size());
+    auto model =
+        makeProblem(cols, rows, std::move(entries), std::vector<Real>(rows, -kInf),
+                    std::move(row_upper), std::vector<Real>(cols, 0), std::vector<Real>(cols, 1),
+                    std::vector<VarType>(cols, VarType::Binary));
+    model.obj[a] = model.obj[b] = -1;
+    model.obj[u] = 1;
+    if (branch_fixture) {
+        model.obj[8] = model.obj[9] = 0.75;
+    }
+    return model;
+}
+
+}  // namespace reconvergence_fixture
 
 }  // namespace
 
@@ -177,6 +213,138 @@ TEST_CASE("Bound conflicts: objective scope requires an equally strong cutoff",
     }
     CHECK_FALSE(evaluate(2.5));  // Both ones are feasible here.
     CHECK_FALSE(evaluate(kInf));
+}
+
+TEST_CASE("Bound conflicts: check and strengthen a binary reconvergence cut",
+          "[domain][conflicts]") {
+    // b reaches u through p and q. Both a and r support the reason for u,
+    // but a already forces r. At the next fork u forces y and z, which
+    // conflict when a=1. The two UIPs are b and u.
+    using namespace reconvergence_fixture;
+    auto model = make(false);
+
+    const auto learn = [&](Index global_rows) {
+        DomainPropagator dp;
+        dp.load(model, true, global_rows);
+        dp.setBranchBound(a, false, 1, 1);
+        REQUIRE(dp.propagate());
+        REQUIRE(dp.getLower(r) == 1);
+        dp.setBranchBound(b, false, 1, 2);
+        REQUIRE_FALSE(dp.propagate());
+        return analyzeBoundConflict(*dp.boundReasons(), true);
+    };
+    const auto proof = learn(model.num_rows);
+    REQUIRE(proof);
+    const auto candidate = checkedReconvergenceCut(proof->reconvergence, model);
+    REQUIRE(candidate);
+    CutPool pool;
+    pool.setMinEfficacy(0.0);
+    REQUIRE(pool.addCut(*candidate));
+    const auto& cut = pool[0];
+    CHECK(cut.indices == std::vector<Index>{a, b, u});
+    CHECK(cut.values == std::vector<Real>{1, 1, -1});
+    CHECK(cut.upper == 1);
+    CHECK(cut.lower == -kInf);
+    CHECK_FALSE(cut.local);
+
+    const auto feasible = [&](const std::array<Real, 8>& point) {
+        for (Index row = 0; row < model.num_rows; ++row) {
+            const auto sparse = model.matrix.row(row);
+            Real activity = 0.0;
+            for (Index k = 0; k < sparse.size(); ++k) {
+                activity += sparse.values[k] * point[sparse.indices[k]];
+            }
+            if (activity > model.row_upper[row]) {
+                return false;
+            }
+        }
+        return true;
+    };
+    for (unsigned mask = 0; mask < (1U << 8); ++mask) {
+        std::array<Real, 8> point{};
+        for (Index col = 0; col < model.num_cols; ++col) {
+            point[col] = (mask >> col) & 1U;
+        }
+        if (feasible(point)) {
+            CAPTURE(mask);
+            CHECK(cutViolation(cut, point) == 0);
+        }
+    }
+
+    const std::array<Real, 8> fractional{0.5, 1, 0.5, 0.5, 0.5, 0, 0, 0};
+    REQUIRE(feasible(fractional));
+    // The unstrengthened row is a + r + b - u <= 2.
+    CHECK(fractional[a] + fractional[r] + fractional[b] - fractional[u] == 2);
+    CHECK(cutViolation(cut, fractional) == 0.5);
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    const auto baseline = lp.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(-2, 1e-9));
+    constexpr std::array<Index, 1> starts{0};
+    lp.addRows(starts, cut.indices, cut.values, std::span(&cut.lower, 1), std::span(&cut.upper, 1));
+    const auto tightened = lp.solve();
+    REQUIRE(tightened.status == Status::Optimal);
+    CHECK_THAT(tightened.objective, WithinAbs(-1, 1e-9));
+
+    CHECK_FALSE(learn(model.num_rows - 1));
+    auto unsupported = proof->reconvergence;
+    unsupported.front().bound = -1;
+    CHECK_FALSE(checkedReconvergenceCut(unsupported, model));
+    model.col_type[b] = VarType::Integer;
+    model.col_upper[b] = 2;
+    CHECK_FALSE(checkedReconvergenceCut(proof->reconvergence, model));
+    model.col_upper[b] = 1;
+    model.row_upper[1] = 1;  // b=1 no longer forces p=1.
+    CHECK_FALSE(checkedReconvergenceCut(proof->reconvergence, model));
+}
+
+TEST_CASE("MipSolver: install a checked reconvergence cut in the serial tree", "[mip][conflicts]") {
+    const bool lp_proofs = GENERATE(false, true);
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setProbingEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setBalancedBranchScore(true);
+    solver.setTreePresolveEnabled(false);
+    solver.setMaxCutRounds(0);
+    solver.setConflictLpProofsEnabled(lp_proofs);
+    solver.load(reconvergence_fixture::make(true));
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(-0.25, 1e-9));
+    CHECK(solver.getConflictStats().reconvergence_cuts_added == 0);
+
+    solver.setReconvergenceCutsEnabled(true);
+    const auto learned = solver.solve();
+    REQUIRE(learned.status == Status::Optimal);
+    CHECK_THAT(learned.objective, WithinAbs(baseline.objective, 1e-9));
+    CHECK(solver.getLpStats().pre_lp_propagation_calls > 0);
+    CHECK(solver.getLpStats().pre_lp_propagation_pruned == 0);
+    CHECK(solver.getConflictStats().reconvergence_cuts_added > 0);
+
+    solver.setCutEffortMode(CutEffortMode::Off);
+    const auto without_cuts = solver.solve();
+    REQUIRE(without_cuts.status == Status::Optimal);
+    CHECK_THAT(without_cuts.objective, WithinAbs(baseline.objective, 1e-9));
+    CHECK(solver.getConflictStats().reconvergence_cuts_added == 0);
+}
+
+TEST_CASE("Bound conflicts: reject reconvergence certificates with overflowing activity",
+          "[domain][conflicts]") {
+    constexpr Real large = 1e308;
+    // (1, 1, 1) is feasible. Summing the positive terms first in double
+    // precision makes the apparent minimum activity infinite.
+    const auto model =
+        makeProblem(3, 1, {{0, 0, large}, {0, 1, large}, {0, 2, -large}}, {-kInf}, {1.1e308},
+                    {0, 0, 0}, {1, 1, 1}, std::vector(3, VarType::Binary));
+    const std::array<BranchDecision, 3> premises{{{0, 1, false}, {1, 1, false}, {2, 1, false}}};
+    CHECK_FALSE(checkedReconvergenceCut(premises, model));
 }
 
 TEST_CASE("Bound conflicts: integer complement of a fractional upper endpoint",

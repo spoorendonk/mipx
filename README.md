@@ -89,6 +89,7 @@ Key options:
 | `--cuts` / `--no-cuts` | on | Cutting planes |
 | `--conflict-watches` / `--no-conflict-watches` | off | Index learned path no-goods by watched bound conditions in the serial tree |
 | `--bound-conflict-learning` / `--no-bound-conflict-learning` | off | Learn and propagate 1-UIP bound conflicts in serial search on all-discrete models |
+| `--reconvergence-cuts` / `--no-reconvergence-cuts` | off | Add checked binary reconvergence cuts in serial search on all-discrete models with cuts and conflicts enabled |
 | `--conflict-ray-shortening` / `--no-conflict-ray-shortening` | off | Shorten serial tree no-goods when a rechecked LP ray proves infeasibility with fewer branch bounds |
 | `--pre-lp-propagation` / `--no-pre-lp-propagation` | off | Use bounded row propagation to prune contradictory child domains before simplex |
 | `--pre-lp-propagation-bounds` / `--no-pre-lp-propagation-bounds` | off | Apply bounded row deductions before simplex at depth-scheduled tree presolve nodes of all-discrete models in serial or opportunistic search |

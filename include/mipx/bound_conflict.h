@@ -2,6 +2,7 @@
 
 #include "mipx/bound_reasons.h"
 #include "mipx/branch_decision.h"
+#include "mipx/cut_pool.h"
 
 namespace mipx {
 
@@ -9,6 +10,8 @@ struct LearnedBoundConflict {
     // The conjunction of these conditions is forbidden within scope.
     std::vector<BranchDecision> literals;
     std::vector<BranchDecision> removed_literals;
+    // Forbidden binary conditions for the implication between two UIPs.
+    std::vector<BranchDecision> reconvergence;
     BoundReasonScope scope;
     Int lbd = 0;
 };
@@ -16,7 +19,12 @@ struct LearnedBoundConflict {
 /// Resolve a contradiction to the first unique condition at the highest
 /// participating level. Local or opaque proofs fall back to path learning.
 [[nodiscard]] std::optional<LearnedBoundConflict> analyzeBoundConflict(
-    const BoundReasonTrail& trail);
+    const BoundReasonTrail& trail, bool find_reconvergence = false);
+
+/// Recheck a reconvergence clause using only the global model and return its
+/// binary inequality if the forbidden assignment can be ruled out.
+[[nodiscard]] std::optional<Cut> checkedReconvergenceCut(std::span<const BranchDecision> forbidden,
+                                                         const LpProblem& global_model);
 
 /// Resolve the bound premises of an independently checked contradiction.
 [[nodiscard]] std::optional<LearnedBoundConflict> analyzeBoundConflict(

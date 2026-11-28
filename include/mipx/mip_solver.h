@@ -152,6 +152,7 @@ struct MipConflictStats {
     Int bound_conflict_cutoffs = 0;
     Int lp_cutoff_proofs_learned = 0;
     Int lp_combined_proofs_learned = 0;
+    Int reconvergence_cuts_added = 0;
 };
 
 struct MipPreRootStats {
@@ -499,6 +500,8 @@ public:
     void setBoundConflictLearningEnabled(bool enabled) {
         bound_conflict_learning_enabled_ = enabled;
     }
+    /// Add checked binary reconvergence cuts in serial all-discrete search.
+    void setReconvergenceCutsEnabled(bool enabled) { reconvergence_cuts_enabled_ = enabled; }
     /// Shorten serial tree no-goods with rechecked LP infeasibility rays. Off by default.
     void setConflictRayShorteningEnabled(bool enabled) {
         conflict_ray_shortening_enabled_ = enabled;
@@ -715,6 +718,8 @@ private:
         std::span<const Index> branch_inference_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
         LpProblem* conflict_global_rows = nullptr;
+        const LpProblem* reconvergence_model = nullptr;
+        CutPool reconvergence_pool;
     };
 
     /// The solve proper, on a minimization: solve() negates a maximization
@@ -739,7 +744,8 @@ private:
                      SolutionPool& solution_pool, Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound, const std::function<double()>& elapsed,
                      std::span<const Index> branch_inference_col_mapping,
-                     LpProblem* conflict_global_rows = nullptr);
+                     LpProblem* conflict_global_rows = nullptr,
+                     const LpProblem* reconvergence_model = nullptr);
 
     /// Parallel branch-and-bound loop using TBB.
     void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue, Int& nodes_explored,
@@ -824,13 +830,19 @@ private:
                                std::span<const Index> local_rows = {},
                                std::optional<BoundReasonScope> scope = std::nullopt);
     void learnPropagationConflict(const std::vector<BranchDecision>& path,
-                                  const DomainPropagator& dp,
-                                  std::optional<BoundReasonScope> fallback_scope);
+                                  const DomainPropagator& dp, NodeScratch& scratch,
+                                  std::optional<BoundReasonScope> fallback_scope,
+                                  bool learn_nogood = true);
     bool learnLpConflictProof(const std::vector<BranchDecision>& path, const DualSimplexSolver& lp,
                               const LpProblem& global_rows, std::span<const Index> local_rows,
                               Real cutoff, Status status);
     [[nodiscard]] bool lpConflictProofsActive() const {
         return conflict_lp_proofs_enabled_ && conflicts_enabled_ && num_threads_ <= 1;
+    }
+    [[nodiscard]] bool reconvergenceCutsActive() const {
+        return reconvergence_cuts_enabled_ && cuts_enabled_ &&
+               cut_effort_mode_ != CutEffortMode::Off && conflicts_enabled_ && num_threads_ <= 1 &&
+               model_continuous_vars_ == 0;
     }
     [[nodiscard]] bool boundConflictLearningActive() const {
         return bound_conflict_learning_enabled_ && conflicts_enabled_ && num_threads_ <= 1 &&
@@ -970,6 +982,7 @@ private:
     bool conflict_watches_enabled_ = false;
     bool bound_reasons_enabled_ = false;
     bool bound_conflict_learning_enabled_ = false;
+    bool reconvergence_cuts_enabled_ = false;
     bool conflict_ray_shortening_enabled_ = false;
     bool conflict_lp_proofs_enabled_ = false;
     bool strong_branching_enabled_ = true;
