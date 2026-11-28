@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <filesystem>
+#include <thread>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -90,8 +91,7 @@ static LpProblem buildLpLightProbeMip() {
     return lp;
 }
 
-static LpProblem buildSearchStagnationMip() {
-    constexpr Index n = 10;
+static LpProblem buildSearchStagnationMip(Index n = 10) {
     LpProblem lp;
     lp.name = "parallel_search_stagnation_mip";
     lp.sense = Sense::Minimize;
@@ -100,16 +100,16 @@ static LpProblem buildSearchStagnationMip() {
     lp.col_lower.assign(n, 0.0);
     lp.col_upper.assign(n, 1.0);
     lp.col_type.assign(n, VarType::Binary);
-    lp.col_names = {"x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10"};
 
     lp.num_rows = 1;
-    lp.row_lower = {4.5};
-    lp.row_upper = {4.5};
+    lp.row_lower = {static_cast<Real>((n - 1) / 2) + 0.5};
+    lp.row_upper = lp.row_lower;
     lp.row_names = {"eq"};
 
     std::vector<Triplet> trips;
     trips.reserve(n);
     for (Index j = 0; j < n; ++j) {
+        lp.col_names.push_back("x" + std::to_string(j + 1));
         trips.push_back({0, j, 1.0});
     }
     lp.matrix = SparseMatrix(1, n, std::move(trips));
@@ -699,6 +699,122 @@ TEST_CASE("Parallel: deterministic batch branching repeats its search work",
             CHECK(branching.pseudocost_updates_tree == expected_branching.pseudocost_updates_tree);
         }
     }
+}
+
+TEST_CASE("Parallel: deterministic tree presolve tightens an all-discrete node",
+          "[parallel][tbb][presolve]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.5};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.num_rows = 1;
+    lp.row_lower = {0.5};
+    lp.row_upper = {kInf};
+    lp.matrix = SparseMatrix(1, 2, {{0, 0, 1.0}, {0, 1, 1.0}});
+
+    const auto run = [](const LpProblem& problem, Int threads, bool opt_in,
+                        bool tree_presolve = true) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(false);
+        solver.setStrongBranchingEnabled(false);
+        solver.setNumThreads(threads);
+        solver.setParallelMode(ParallelMode::Deterministic);
+        solver.setTreePresolveEnabled(tree_presolve);
+        solver.setTreePresolveAutoTuning(false);
+        solver.setTreePresolveControls(1, 1, 1);
+        if (opt_in) {
+            solver.setDeterministicTreePresolve(true);
+        }
+        solver.load(problem);
+        const auto result = solver.solve();
+        return std::pair{result, solver.getTreePresolveStats()};
+    };
+
+    for (const Int threads : {2, 4, 8}) {
+        CAPTURE(threads);
+        const auto [baseline, baseline_stats] = run(lp, threads, false);
+        REQUIRE(baseline.status == Status::Optimal);
+        REQUIRE(baseline.objective == 1.0);
+        CHECK(baseline_stats.attempts == 0);
+
+        // The down child takes the second binary at 0.5. Row propagation
+        // fixes it to 1 and refreshes the bound from 0.75 to 1.5.
+        const auto [expected, expected_stats] = run(lp, threads, true);
+        REQUIRE(expected.status == Status::Optimal);
+        CHECK(expected.objective == baseline.objective);
+        CHECK(expected_stats.runs == 1);
+        CHECK(expected_stats.activity_tightenings == 1);
+        CHECK(expected_stats.lp_resolves == 1);
+        CHECK(expected_stats.lp_delta == 0.75);
+        for (Int repeat = 0; repeat < 3; ++repeat) {
+            const auto [result, stats] = run(lp, threads, true);
+            CHECK(result.status == expected.status);
+            CHECK(result.objective == expected.objective);
+            CHECK(result.nodes == expected.nodes);
+            CHECK(result.lp_iterations == expected.lp_iterations);
+            CHECK(result.work_units == expected.work_units);
+            CHECK(stats.attempts == expected_stats.attempts);
+            CHECK(stats.runs == expected_stats.runs);
+            CHECK(stats.skipped == expected_stats.skipped);
+            CHECK(stats.infeasible == expected_stats.infeasible);
+            CHECK(stats.activity_tightenings == expected_stats.activity_tightenings);
+            CHECK(stats.reduced_cost_tightenings == expected_stats.reduced_cost_tightenings);
+            CHECK(stats.lp_resolves == expected_stats.lp_resolves);
+            CHECK(stats.lp_delta == expected_stats.lp_delta);
+        }
+    }
+
+    const auto [disabled, disabled_stats] = run(lp, 4, true, false);
+    REQUIRE(disabled.status == Status::Optimal);
+    CHECK(disabled.objective == 1.0);
+    CHECK(disabled_stats.attempts == 0);
+
+    lp.col_type[1] = VarType::Continuous;
+    const auto [mixed, mixed_stats] = run(lp, 4, true);
+    REQUIRE(mixed.status == Status::Optimal);
+    CHECK(mixed.objective == 0.75);
+    CHECK(mixed_stats.attempts == 0);
+}
+
+TEST_CASE("Parallel: deterministic presolve benefit history advances between batches",
+          "[parallel][tbb][presolve]") {
+    if (std::thread::hardware_concurrency() < 8) {
+        SKIP("A batch of eight logical workers is needed to cross the four-run gate");
+    }
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(8);
+    solver.setParallelMode(ParallelMode::Deterministic);
+    solver.setSearchProfile(SearchProfile::Stable);
+    solver.setDeterministicTreePresolve(true);
+    solver.setNodeLimit(300);
+    solver.load(buildSearchStagnationMip(16));
+    REQUIRE(solver.isTreePresolveBinaryLiteProfileActive());
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::NodeLimit);
+    const auto& stats = solver.getTreePresolveStats();
+    // The first eight depth-six nodes can all satisfy the row without fixing
+    // any variable. All eight see zero prior runs, even though four unproductive
+    // runs are enough to close the binary-lite gate for the following batches.
+    CHECK(stats.runs == 8);
+    CHECK(stats.activity_tightenings == 0);
+    CHECK(stats.lp_resolves == 0);
+
+    solver.setNumThreads(1);
+    // Allow the serial search to reach more depth-six nodes after four runs.
+    solver.setNodeLimit(2000);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    const auto& serial_stats = solver.getTreePresolveStats();
+    CHECK(serial_stats.runs == 4);
+    CHECK(serial_stats.activity_tightenings == 0);
 }
 
 TEST_CASE("Parallel: deterministic aggressive search updates search controls",

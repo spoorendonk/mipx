@@ -2252,7 +2252,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                             std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                             NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                             Int strong_branch_budget_override,
-                            DeferredBranching* deferred_branching) {
+                            DeferredBranching* deferred_branching,
+                            const DeferredTreePresolve* deferred_tree_presolve) {
     children_out.clear();
     const bool stable_branching = deferred_branching != nullptr && deterministic_batch_branching_;
     node_iters_out = 0;
@@ -2510,8 +2511,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // are trusted in-tree. Pre-LP deductions use only the depth gate.
     const bool tree_presolve_eligible =
         tree_presolve_enabled_ && model_continuous_vars_ == 0 &&
-        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic) && node.depth > 0 &&
-        node.depth <= tree_presolve_max_depth;
+        (num_threads_ <= 1 || parallel_mode_ == ParallelMode::Opportunistic ||
+         deferred_tree_presolve != nullptr) &&
+        node.depth > 0 && node.depth <= tree_presolve_max_depth;
     const bool depth_gate =
         tree_presolve_eligible && node.depth % tree_presolve_depth_frequency == 0;
     const bool apply_pre_lp_bounds = pre_lp_propagation_bounds_enabled_ && depth_gate;
@@ -2696,15 +2698,21 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     };
 
     if (tree_presolve_eligible) {
-        const auto tree_presolve_snapshot = treePresolveStatsSnapshot();
-        MipTreePresolveStats tree_presolve_delta{};
+        const auto tree_presolve_snapshot = deferred_tree_presolve != nullptr
+                                                ? deferred_tree_presolve->snapshot
+                                                : treePresolveStatsSnapshot();
+        MipTreePresolveStats immediate_delta{};
+        auto& tree_presolve_delta =
+            deferred_tree_presolve != nullptr ? deferred_tree_presolve->delta : immediate_delta;
         tree_presolve_delta.attempts = 1;
         bool tree_presolve_stats_flushed = false;
         auto flushTreePresolveStats = [&]() {
             if (tree_presolve_stats_flushed) {
                 return;
             }
-            mergeTreePresolveStatsDelta(tree_presolve_delta);
+            if (deferred_tree_presolve == nullptr) {
+                mergeTreePresolveStatsDelta(tree_presolve_delta);
+            }
             flushRcStats();
             tree_presolve_stats_flushed = true;
         };
@@ -2783,6 +2791,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (!applyTightening(j, dp.getLower(j), dp.getUpper(j), false)) {
+                    flushTreePresolveStats();
                     if (use_conflicts) {
                         learnConflictFromNode(node.bound_changes, false);
                     }
@@ -3824,6 +3833,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             double node_work = 0.0;
             Int node_int_inf = -1;
             DeferredBranching branching;
+            MipTreePresolveStats tree_presolve;
         };
 
         if (verbose_) {
@@ -3927,20 +3937,28 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 ++search_stats_.strong_budget_updates;
             }
 
+            // All tasks use the benefit history from completed batches only.
+            const auto tree_presolve_snapshot =
+                deterministic_tree_presolve_ ? treePresolveStatsSnapshot() : MipTreePresolveStats{};
             tbb::parallel_for(Int(0), batch_size, [&](Int i) {
                 auto& task = tasks[static_cast<std::size_t>(i)];
                 auto& worker_ctx = workers[static_cast<std::size_t>(task.worker_id)];
+                const DeferredTreePresolve tree_presolve{tree_presolve_snapshot,
+                                                         task.tree_presolve};
                 task.branched = processNode(
                     worker_ctx.lp, task.node, batch_incumbent, task.children, task.node_obj,
                     task.node_primals, task.node_iters, task.node_work, worker_ctx.current_lower,
                     worker_ctx.current_upper, worker_ctx.touched_vars, worker_ctx.node_scratch,
                     worker_ctx.node_stats, task.node_int_inf, task.strong_branch_budget,
-                    &task.branching);
+                    &task.branching, deterministic_tree_presolve_ ? &tree_presolve : nullptr);
             });
 
             for (Int i = 0; i < batch_size; ++i) {
                 auto& task = tasks[static_cast<std::size_t>(i)];
                 auto& worker_ctx = workers[static_cast<std::size_t>(task.worker_id)];
+                if (task.tree_presolve.attempts > 0) {
+                    mergeTreePresolveStatsDelta(task.tree_presolve);
+                }
                 // Tree observations commit in task order. The opt-in also
                 // defers probe observations, keeping every sample even if
                 // another task probed the same column and direction.

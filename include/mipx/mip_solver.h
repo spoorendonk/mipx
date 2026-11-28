@@ -522,11 +522,15 @@ public:
     /// Check child bounds for a row propagation contradiction before solving the LP.
     void setPreLpPropagationEnabled(bool enabled) { pre_lp_propagation_enabled_ = enabled; }
     /// Apply row bounds at depth-scheduled tree presolve nodes of all-discrete
-    /// models in serial or opportunistic search. Off by default.
+    /// models. Deterministic batches require setDeterministicTreePresolve.
+    /// Off by default.
     void setPreLpPropagationBoundsEnabled(bool enabled) {
         pre_lp_propagation_bounds_enabled_ = enabled;
     }
     void setTreePresolveEnabled(bool enabled) { tree_presolve_enabled_ = enabled; }
+    /// Allow in-tree presolve in deterministic TBB batches when tree presolve is enabled.
+    /// This includes depth-gated pre-LP bounds when enabled separately.
+    void setDeterministicTreePresolve(bool enabled) { deterministic_tree_presolve_ = enabled; }
     void setTreePresolveAutoTuning(bool enabled) {
         tree_presolve_auto_tuning_enabled_ = enabled;
         if (loaded_) {
@@ -754,6 +758,11 @@ private:
         std::vector<StrongBranchPseudocostSample> probe_samples;
     };
 
+    struct DeferredTreePresolve {
+        const MipTreePresolveStats& snapshot;
+        MipTreePresolveStats& delta;
+    };
+
     /// Process a single node. Returns true if children were created.
     ///
     /// The node's LP outcome is a pseudocost sample for the branching that
@@ -761,6 +770,8 @@ private:
     /// deferred_branching for ordered application after the batch. With batch
     /// branching enabled, selection and estimates also read the stable shared
     /// rule, and probe samples are deferred alongside the tree sample.
+    /// With deferred_tree_presolve, use the batch's gate snapshot and collect
+    /// this task's presolve stats for the coordinator to apply in order.
     bool processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent_snapshot,
                      std::vector<BnbNode>& children_out, Real& node_obj_out,
                      std::vector<Real>& node_primals_out, Int& node_iters_out,
@@ -768,7 +779,8 @@ private:
                      std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                      NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                      Int strong_branch_budget_override = -1,
-                     DeferredBranching* deferred_branching = nullptr);
+                     DeferredBranching* deferred_branching = nullptr,
+                     const DeferredTreePresolve* deferred_tree_presolve = nullptr);
     /// Re-solve from a cold basis a node LP that ended without a verdict;
     /// returns `first` unchanged when it has one (#283), or when the time
     /// limit stopped it: no time is left to retry in (#351).
@@ -921,6 +933,7 @@ private:
     // Serial in-tree presolve is enabled by default because it materially
     // improves hard MIP search on benchmark instances.
     bool tree_presolve_enabled_ = true;
+    bool deterministic_tree_presolve_ = false;
     bool tree_presolve_auto_tuning_enabled_ = true;
     Int tree_presolve_max_depth_ = 24;
     Int tree_presolve_min_frac_ = 8;

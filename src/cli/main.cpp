@@ -34,6 +34,7 @@ void printUsage(FILE* out) {
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
+                 "[--deterministic-tree-presolve (deterministic TBB tree)] "
                  "[--tree-presolve-auto|--no-tree-presolve-auto] "
                  "[--tree-presolve-max-depth N] "
                  "[--tree-presolve-min-frac N] "
@@ -159,6 +160,7 @@ int main(int argc, char* argv[]) {
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
+    bool deterministic_tree_presolve = false;
     bool tree_presolve_auto = true;
     mipx::Int tree_presolve_max_depth = 24;
     mipx::Int tree_presolve_min_frac = 8;
@@ -251,6 +253,8 @@ int main(int argc, char* argv[]) {
             tree_presolve_enabled = true;
         } else if (arg == "--no-tree-presolve") {
             tree_presolve_enabled = false;
+        } else if (arg == "--deterministic-tree-presolve") {
+            deterministic_tree_presolve = true;
         } else if (arg == "--tree-presolve-auto") {
             tree_presolve_auto = true;
         } else if (arg == "--no-tree-presolve-auto") {
@@ -736,6 +740,7 @@ int main(int argc, char* argv[]) {
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
+            solver.setDeterministicTreePresolve(deterministic_tree_presolve);
             solver.setTreePresolveAutoTuning(tree_presolve_auto);
             solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
