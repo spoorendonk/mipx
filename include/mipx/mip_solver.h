@@ -143,6 +143,9 @@ struct MipConflictStats {
     Int ray_shortened = 0;
     Int ray_literals_dropped = 0;
     Int ray_reused = 0;
+    std::uint64_t watch_candidates = 0;
+    std::uint64_t watch_body_scans = 0;
+    std::uint64_t watch_literal_checks = 0;
 };
 
 struct MipPreRootStats {
@@ -320,9 +323,12 @@ struct MipResult {
     std::vector<Real> solution;
 };
 
+class ConflictWatchIndex;
+
 class MipSolver {
 public:
-    MipSolver() = default;
+    MipSolver();
+    ~MipSolver();
 
     void load(const LpProblem& problem);
     MipResult solve();
@@ -477,6 +483,8 @@ public:
         exact_refinement_rational_scale_ = std::max<Real>(1.0, scale);
     }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    /// Index learned path no-goods in the serial tree. Off by default.
+    void setConflictWatchesEnabled(bool enabled) { conflict_watches_enabled_ = enabled; }
     /// Shorten serial tree no-goods with rechecked LP infeasibility rays. Off by default.
     void setConflictRayShorteningEnabled(bool enabled) {
         conflict_ray_shortening_enabled_ = enabled;
@@ -855,6 +863,10 @@ private:
         Int age = 0;
         Int hits = 0;
         bool ray_shortened = false;
+        std::uint64_t watch_id = 0;
+
+        /// Checked ray shortening proves the exact path endpoints.
+        [[nodiscard]] Real tolerance() const { return ray_shortened ? 0.0 : 1e-9; }
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
@@ -917,6 +929,7 @@ private:
     bool pre_root_lp_light_enabled_ = false;
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
+    bool conflict_watches_enabled_ = false;
     bool conflict_ray_shortening_enabled_ = false;
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;
@@ -982,6 +995,7 @@ private:
     MipExactRefinementStats exact_refinement_stats_{};
     std::vector<ConflictClause> conflict_pool_{};
     std::vector<ConflictClause> conflict_clause_pool_{};
+    std::unique_ptr<ConflictWatchIndex> conflict_watches_;
     std::size_t conflict_clause_pool_limit_ = 256;
     std::size_t conflict_clause_capacity_limit_ = 4096;
     std::vector<Real> conflict_scores_{};

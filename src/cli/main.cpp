@@ -30,6 +30,7 @@ void printUsage(FILE* out) {
                  "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
                  "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
                  "[--conflicts|--no-conflicts] "
+                 "[--conflict-watches|--no-conflict-watches] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
@@ -157,6 +158,7 @@ int main(int argc, char* argv[]) {
     bool pre_root_lplight = false;
     bool pre_root_portfolio = true;
     bool conflicts_enabled = true;
+    bool conflict_watches = false;
     bool conflict_ray_shortening = false;
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
@@ -239,6 +241,10 @@ int main(int argc, char* argv[]) {
             conflicts_enabled = true;
         } else if (arg == "--no-conflicts") {
             conflicts_enabled = false;
+        } else if (arg == "--conflict-watches") {
+            conflict_watches = true;
+        } else if (arg == "--no-conflict-watches") {
+            conflict_watches = false;
         } else if (arg == "--conflict-ray-shortening") {
             conflict_ray_shortening = true;
         } else if (arg == "--no-conflict-ray-shortening") {
@@ -741,6 +747,7 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setConflictsEnabled(conflicts_enabled);
+            solver.setConflictWatchesEnabled(conflict_watches);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);

@@ -1,4 +1,5 @@
 #include "../src/mip/conflict_ray.h"
+#include "../src/mip/conflict_watches.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "perf/slow_root_set_cover.hpp"
@@ -1920,6 +1921,170 @@ TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conf
     REQUIRE(with_result.status == Status::Optimal);
     REQUIRE(without_result.status == Status::Optimal);
     CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
+}
+
+TEST_CASE("Conflict watches agree with a scan across sibling paths and eviction",
+          "[mip][conflicts]") {
+    const std::vector<BranchDecision> interval = {{0, 3, false}, {0, 5, true}, {1, 2, false}};
+    const std::vector<BranchDecision> singleton = {{2, 7, true}};
+    // Same condition with a strict threshold, as used for ray-shortened clauses.
+    const std::vector<BranchDecision> exact = {{2, 7, true}};
+    const std::vector<BranchDecision> replacement = {{1, 2, false}};
+    const std::vector<BranchDecision> spread = {{0, 3, false}, {1, 2, false}, {2, 7, true}};
+    const std::vector<BranchDecision> shared = {{0, 3, false}, {1, 2, false}, {1, 4, true}};
+    ConflictWatchIndex watches;
+    const auto interval_id = watches.add(interval, 1e-9);
+    const auto exact_id = watches.add(exact, 0.0);
+    const auto singleton_id = watches.add(singleton, 1e-9);
+
+    struct Entry {
+        ConflictWatchIndex::Id id;
+        std::span<const BranchDecision> literals;
+        Real tolerance;
+    };
+    std::vector<Entry> active = {
+        {interval_id, interval, 1e-9}, {exact_id, exact, 0.0}, {singleton_id, singleton, 1e-9}};
+    struct PathBound {
+        Index col;
+        Real lower;
+        Real upper;
+    };
+    const auto check = [&](std::initializer_list<PathBound> path) {
+        std::vector<Index> columns;
+        for (const auto& bound : path) {
+            columns.push_back(bound.col);
+        }
+        const auto entails = [&](const BranchDecision& lit, Real tolerance) {
+            const auto bound = std::ranges::find(path, lit.variable, &PathBound::col);
+            return bound != path.end() && (lit.is_upper ? bound->upper <= lit.bound + tolerance
+                                                        : bound->lower >= lit.bound - tolerance);
+        };
+        const auto expected = std::ranges::find_if(active, [&](const Entry& entry) {
+            return std::ranges::all_of(
+                entry.literals, [&](const auto& lit) { return entails(lit, entry.tolerance); });
+        });
+        const auto result = watches.findTriggered(columns, entails);
+        CHECK(result.triggered ==
+              (expected == active.end() ? std::nullopt : std::optional(expected->id)));
+        return result;
+    };
+
+    CHECK(check({{3, 0, 1}}).candidates == 0);
+    const auto failed_watch = check({{0, 3, 6}, {1, 2, 4}});
+    CHECK(failed_watch.body_scans == 0);
+    CHECK(failed_watch.literal_checks == 2);
+    // Both initial watches share column 0. Move one to the absent column 1,
+    // then revisit a sibling whose relaxed upper bound blocks the other.
+    CHECK(check({{0, 3, 5}}).body_scans == 1);
+    CHECK(check({{0, 3, 6}, {1, 2, 4}}).body_scans == 0);
+    CHECK(check({{1, 2, 4}, {0, 3, 5}, {2, 0, 7}}).triggered == interval_id);
+    CHECK(check({{2, 0, 7.0 + 5e-10}}).triggered == singleton_id);
+    CHECK(check({{2, 0, 7}}).triggered == exact_id);
+
+    watches.remove(interval_id);
+    active.erase(active.begin());
+    CHECK(check({{0, 3, 5}, {1, 2, 4}}).candidates == 0);
+    const auto replacement_id = watches.add(replacement, 1e-9);
+    active.push_back({replacement_id, replacement, 1e-9});
+    CHECK(check({{0, 3, 5}, {1, 2, 4}}).triggered == replacement_id);
+    CHECK(check({{1, 2, 4}, {2, 0, 7}}).triggered == exact_id);
+
+    const auto spread_id = watches.add(spread, 1e-9);
+    const auto shared_id = watches.add(shared, 1e-9);
+    active.push_back({spread_id, spread, 1e-9});
+    active.push_back({shared_id, shared, 1e-9});
+    watches.remove(replacement_id);
+    std::erase_if(active, [&](const Entry& entry) { return entry.id == replacement_id; });
+    // Move the first watch to a new column in spread and to the column of
+    // the other watch in shared. Neither clause should still visit column 0.
+    CHECK(check({{0, 3, 5}, {1, 2, 5}}).body_scans == 2);
+    CHECK(check({{0, 3, 5}}).candidates == 0);
+    CHECK(check({{0, 3, 5}, {1, 2, 4}}).triggered == shared_id);
+}
+
+TEST_CASE("MipSolver: watched no-goods preserve age purging", "[mip][conflicts]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.load(buildSearchStagnationMip());
+
+    const auto scan = solver.solve();
+    const auto stats = solver.getConflictStats();
+    REQUIRE(scan.status == Status::Infeasible);
+    REQUIRE(stats.purged > 0);
+
+    solver.setConflictWatchesEnabled(true);
+    const auto watched = solver.solve();
+    const auto& watched_stats = solver.getConflictStats();
+    CHECK(watched.status == scan.status);
+    CHECK(watched.nodes == scan.nodes);
+    CHECK(watched.lp_iterations == scan.lp_iterations);
+    CHECK(watched_stats.learned == stats.learned);
+    CHECK(watched_stats.reused == stats.reused);
+    CHECK(watched_stats.purged == stats.purged);
+    CHECK(watched_stats.watch_candidates > 0);
+}
+
+TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[mip][conflicts]") {
+    // Minimizing x first branches on y=0.5. Both y children then take x=0.5.
+    // The x>=1 child is LP-infeasible independently of y, so a ray-shortened
+    // clause learned on the first side can prune it on the other side.
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 1.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.num_rows = 3;
+    lp.row_lower = {0.5, -0.5, -kInf};
+    lp.row_upper = {kInf, kInf, 0.5};
+    lp.matrix =
+        SparseMatrix(3, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, -1.0}, {1, 1, 1.0}, {2, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setConflictRayShorteningEnabled(true);
+    solver.load(lp);
+    const auto scan = solver.solve();
+    const auto stats = solver.getConflictStats();
+    REQUIRE(scan.status == Status::Infeasible);
+    REQUIRE(stats.ray_reused > 0);
+    CHECK(stats.watch_candidates == 0);
+
+    solver.setConflictWatchesEnabled(true);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto watched = solver.solve();
+        const auto& watched_stats = solver.getConflictStats();
+        CHECK(watched.status == scan.status);
+        CHECK(watched.objective == scan.objective);
+        CHECK(watched.nodes == scan.nodes);
+        CHECK(watched.lp_iterations == scan.lp_iterations);
+        CHECK(watched_stats.learned == stats.learned);
+        CHECK(watched_stats.reused == stats.reused);
+        CHECK(watched_stats.pruned == stats.pruned);
+        CHECK(watched_stats.purged == stats.purged);
+        CHECK(watched_stats.ray_shortened == stats.ray_shortened);
+        CHECK(watched_stats.ray_reused == stats.ray_reused);
+        CHECK(watched_stats.watch_candidates > 0);
+    }
+
+    solver.setConflictsEnabled(false);
+    CHECK(solver.solve().status == scan.status);
+    CHECK(solver.getConflictStats().learned == 0);
+    CHECK(solver.getConflictStats().watch_candidates == 0);
+    solver.setConflictsEnabled(true);
+    solver.setNumThreads(2);
+    CHECK(solver.solve().status == scan.status);
+    CHECK(solver.getConflictStats().learned == 0);
+    CHECK(solver.getConflictStats().watch_candidates == 0);
 }
 
 TEST_CASE("MipSolver: a checked LP ray drops an irrelevant branch bound", "[mip][conflicts]") {

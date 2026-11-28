@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -22,6 +24,7 @@
 #include "../heuristics/common.h"
 #include "../lp/lp_crossover.h"
 #include "conflict_ray.h"
+#include "conflict_watches.h"
 #include "mipx/barrier.h"
 #include "mipx/cut_pool.h"
 #include "mipx/heuristics.h"
@@ -1484,6 +1487,9 @@ void addSos2PropagationStats(Sos2PropagationStats& total, const Sos2PropagationS
 
 }  // namespace
 
+MipSolver::MipSolver() = default;
+MipSolver::~MipSolver() = default;
+
 void MipSolver::load(const LpProblem& problem) {
     if (hasAdvancedModelFeatures(problem)) {
         auto formulation = Sos2Formulation::Pairwise;
@@ -1752,6 +1758,9 @@ MipSolver::ConflictClause MipSolver::acquireConflictClause() {
 }
 
 void MipSolver::recycleConflictClause(ConflictClause clause) {
+    if (conflict_watches_ && !clause.literals.empty()) {
+        conflict_watches_->remove(clause.watch_id);
+    }
     clause.literals.clear();
     clause.age = 0;
     clause.hits = 0;
@@ -1869,6 +1878,12 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
         }
     }
 
+    if (conflict_watches_ && !clause.literals.empty()) {
+        // Moving the owning vector between pool entries preserves its buffer.
+        static_assert(std::is_nothrow_move_constructible_v<ConflictClause>);
+        static_assert(std::is_nothrow_move_assignable_v<ConflictClause>);
+        clause.watch_id = conflict_watches_->add(clause.literals, clause.tolerance());
+    }
     conflict_pool_.push_back(std::move(clause));
     while (static_cast<Int>(conflict_pool_.size()) > conflict_max_pool_size_) {
         auto victim = std::max_element(conflict_pool_.begin(), conflict_pool_.end(),
@@ -1892,50 +1907,49 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
         return false;
     }
 
-    for (auto& clause : conflict_pool_) {
-        bool triggered = true;
-        // The checked proof used exact path endpoints.
-        const Real tolerance = clause.ray_shortened ? 0.0 : 1e-9;
-        for (const auto& lit : clause.literals) {
-            if (lit.variable < 0 ||
-                lit.variable >= static_cast<Index>(node_scratch.var_epoch.size())) {
-                triggered = false;
-                break;
-            }
-            if (node_scratch.var_epoch[lit.variable] != node_scratch.current_epoch) {
-                triggered = false;
-                break;
-            }
-            const Index p = node_scratch.var_pos[lit.variable];
-            if (lit.is_upper) {
-                if (node_scratch.node_ub[p] > lit.bound + tolerance) {
-                    triggered = false;
-                    break;
-                }
-            } else {
-                if (node_scratch.node_lb[p] < lit.bound - tolerance) {
-                    triggered = false;
-                    break;
-                }
-            }
+    const auto entails = [&](const ConflictLiteral& lit, Real tolerance) {
+        if (lit.variable < 0 || lit.variable >= static_cast<Index>(node_scratch.var_epoch.size()) ||
+            node_scratch.var_epoch[lit.variable] != node_scratch.current_epoch) {
+            return false;
         }
+        const Index pos = node_scratch.var_pos[lit.variable];
+        return lit.is_upper ? !(node_scratch.node_ub[pos] > lit.bound + tolerance)
+                            : !(node_scratch.node_lb[pos] < lit.bound - tolerance);
+    };
 
-        if (triggered) {
-            ++conflict_stats_.reused;
-            conflict_stats_.ray_reused += clause.ray_shortened;
-            ++conflict_stats_.pruned;
-            clause.age = 0;
-            ++clause.hits;
-            for (const auto& lit : clause.literals) {
-                if (lit.variable >= 0 &&
-                    lit.variable < static_cast<Index>(conflict_scores_.size())) {
-                    conflict_scores_[lit.variable] += 0.25;
-                }
-            }
-            return true;
+    auto match = conflict_pool_.end();
+    if (conflict_watches_) {
+        const auto query = conflict_watches_->findTriggered(node_scratch.vars, entails);
+        conflict_stats_.watch_candidates += query.candidates;
+        conflict_stats_.watch_body_scans += query.body_scans;
+        conflict_stats_.watch_literal_checks += query.literal_checks;
+        if (query.triggered) {
+            match = std::ranges::lower_bound(conflict_pool_, *query.triggered, {},
+                                             &ConflictClause::watch_id);
+            assert(match != conflict_pool_.end() && match->watch_id == *query.triggered);
+        }
+    } else {
+        match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
+            return std::ranges::all_of(
+                clause.literals, [&](const auto& lit) { return entails(lit, clause.tolerance()); });
+        });
+    }
+    if (match == conflict_pool_.end()) {
+        return false;
+    }
+
+    auto& clause = *match;
+    ++conflict_stats_.reused;
+    conflict_stats_.ray_reused += clause.ray_shortened;
+    ++conflict_stats_.pruned;
+    clause.age = 0;
+    ++clause.hits;
+    for (const auto& lit : clause.literals) {
+        if (lit.variable >= 0 && lit.variable < static_cast<Index>(conflict_scores_.size())) {
+            conflict_scores_[lit.variable] += 0.25;
         }
     }
-    return false;
+    return true;
 }
 
 Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals,
@@ -4707,10 +4721,14 @@ MipResult MipSolver::solveMinimizationOnce() {
     obj_prop_node_tightenings_.store(0, std::memory_order_relaxed);
     obj_prop_node_infeasible_.store(0, std::memory_order_relaxed);
     obj_prop_repropagations_.store(0, std::memory_order_relaxed);
+    conflict_watches_.reset();
     for (auto& clause : conflict_pool_) {
         recycleConflictClause(std::move(clause));
     }
     conflict_pool_.clear();
+    if (conflict_watches_enabled_ && conflicts_enabled_ && num_threads_ <= 1) {
+        conflict_watches_ = std::make_unique<ConflictWatchIndex>();
+    }
     conflict_scores_.assign(problem_.num_cols, 0.0);
     sibling_branch_cache_.clear();
     lp_stats_.root_policy = root_lp_policy_;
@@ -6882,6 +6900,12 @@ MipResult MipSolver::solveMinimizationOnce() {
                 check_conflict_rays ? "yes" : "no", conflict_stats_.ray_qualified,
                 conflict_stats_.ray_shortened, conflict_stats_.ray_literals_dropped,
                 conflict_stats_.ray_reused);
+        }
+        if (conflict_watches_) {
+            log_.log("Conflict watches: candidates=%llu body_scans=%llu literal_checks=%llu\n",
+                     static_cast<unsigned long long>(conflict_stats_.watch_candidates),
+                     static_cast<unsigned long long>(conflict_stats_.watch_body_scans),
+                     static_cast<unsigned long long>(conflict_stats_.watch_literal_checks));
         }
         if (search_stats_.plunge_nodes > 0 || search_stats_.plunge_backtracks_bound > 0) {
             log_.log(
