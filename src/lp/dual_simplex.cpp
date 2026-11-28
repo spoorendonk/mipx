@@ -185,6 +185,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 }
 
 bool DualSimplexSolver::loadUntil(const LpProblem& problem, const Deadline& deadline) {
+    optimal_basis_current_ = false;
     loaded_ = false;
     has_basis_ = false;
     factors_available_ = false;
@@ -865,6 +866,8 @@ bool DualSimplexSolver::refactorize(const Deadline& deadline) {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
+    optimal_basis_current_ = false;
+    optimal_basis_from_unscaled_cleanup_ = false;
     // The earlier of the two limits (#351) covers all passes and factorizations.
     const auto deadline = Deadline::after(options_.max_solve_seconds)
                               .limitBy(options_.deadline)
@@ -892,6 +895,7 @@ LpResult DualSimplexSolver::solve() {
     if (res.status == Status::Infeasible && !dualRayMeetsContract()) {
         return withdrawVerdict(res, Status::Error);
     }
+    optimal_basis_current_ = res.status == Status::Optimal && has_basis_;
     return res;
 }
 
@@ -1484,6 +1488,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
     if (restore) {
         clean.objective = getObjective();
     }
+    optimal_basis_from_unscaled_cleanup_ = !restore && clean.status == Status::Optimal;
     clean.iterations += res.iterations;
     clean.work_units += res.work_units;
     iterations_ = clean.iterations;
@@ -4981,6 +4986,36 @@ std::vector<Real> DualSimplexSolver::getReducedCosts() const {
     return result;
 }
 
+std::optional<LpDualDegeneracy> DualSimplexSolver::measureDualDegeneracy() const {
+    if (!optimal_basis_current_ || bound_perturb_active_) {
+        return std::nullopt;
+    }
+    LpDualDegeneracy result;
+    for (Index j = 0; j < num_cols_; ++j) {
+        const auto status = var_status_[j];
+        if (status != BasisStatus::AtLower && status != BasisStatus::AtUpper) {
+            continue;
+        }
+        const Real lower = col_lower_[j];
+        const Real upper = col_upper_[j];
+        const Real active = status == BasisStatus::AtLower ? lower : upper;
+        if (!std::isfinite(active) || upper - lower < kZeroTol) {
+            continue;
+        }
+        const Real scale = optimal_basis_from_unscaled_cleanup_ ? col_scale_[j] : 1.0;
+        const Real magnitude = std::abs(reduced_cost_[j]) / scale;
+        if (!std::isfinite(magnitude)) {
+            return std::nullopt;
+        }
+        ++result.eligible;
+        result.zero_reduced_cost += magnitude <= kDualTol;
+    }
+    if (result.eligible == 0) {
+        return std::nullopt;
+    }
+    return result;
+}
+
 std::vector<BasisStatus> DualSimplexSolver::getBasis() const {
     // Before any solve or setBasis, load() has not sized the statuses:
     // return none rather than read past them.
@@ -5054,6 +5089,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     }
 
     // Ensure solution vectors are allocated.
+    optimal_basis_current_ = false;
     factors_available_ = false;
     var_status_.resize(n);
     primal_.resize(n, 0.0);
@@ -5106,6 +5142,9 @@ void DualSimplexSolver::setColBounds(Index col, Real lower, Real upper) {
     Real int_lower = (lower == -kInf) ? -kInf : lower / scale;
     Real int_upper = (upper == kInf) ? kInf : upper / scale;
 
+    if (int_lower != col_lower_[col] || int_upper != col_upper_[col]) {
+        optimal_basis_current_ = false;
+    }
     col_lower_[col] = int_lower;
     col_upper_[col] = int_upper;
 
@@ -5161,6 +5200,7 @@ void DualSimplexSolver::setObjective(std::span<const Real> obj) {
         return;
     }
 
+    optimal_basis_current_ = false;
     for (Index j = 0; j < num_cols_; ++j) {
         Real c = obj[j];
         if (sense_ == Sense::Maximize) {
@@ -5187,6 +5227,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
         return;
     }
 
+    optimal_basis_current_ = false;
     Index old_rows = num_rows_;
     Index old_vars = numVars();
     num_rows_ += num_new;
@@ -5411,6 +5452,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
         }
     }
 
+    optimal_basis_current_ = false;
     Index new_rows = num_rows_ - removed;
 
     // Rebuild matrix without removed rows.
@@ -5592,6 +5634,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
 
 void DualSimplexSolver::dropBasis() {
     const Index new_vars = numVars();
+    optimal_basis_current_ = false;
     has_basis_ = false;
     factors_available_ = false;
     dse_weights_valid_ = false;
@@ -5644,6 +5687,7 @@ void DualSimplexSolver::addCols(std::span<const Index> starts, std::span<const I
     if (k == 0) {
         return;
     }
+    optimal_basis_current_ = false;
     dual_ray_.clear();  // a new column can break a Farkas proof
     primal_ray_.clear();
     bound_perturb_active_ = false;
@@ -5797,6 +5841,7 @@ void DualSimplexSolver::removeCols(std::span<const Index> cols) {
     if (sorted.empty()) {
         return;
     }
+    optimal_basis_current_ = false;
     dual_ray_.clear();
     primal_ray_.clear();
     bound_perturb_active_ = false;
@@ -5878,6 +5923,7 @@ void DualSimplexSolver::setRowBounds(Index row, Real lower, Real upper) {
     if (!loaded_ || row < 0 || row >= num_rows_) {
         return;
     }
+    optimal_basis_current_ = false;
     const Real rs = scaled_ ? row_scale_[row] : 1.0;
     row_lower_[row] = (lower == -kInf) ? -kInf : lower * rs;
     row_upper_[row] = (upper == kInf) ? kInf : upper * rs;
@@ -5893,6 +5939,7 @@ void DualSimplexSolver::setColObjective(Index col, Real cost) {
     if (!loaded_ || col < 0 || col >= num_cols_) {
         return;
     }
+    optimal_basis_current_ = false;
     Real c = (sense_ == Sense::Maximize) ? -cost : cost;
     if (scaled_) {
         c *= col_scale_[col];

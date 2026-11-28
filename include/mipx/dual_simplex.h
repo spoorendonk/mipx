@@ -11,10 +11,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
 namespace mipx {
+
+struct LpDualDegeneracy {
+    Int eligible = 0;
+    Int zero_reduced_cost = 0;
+};
 
 namespace test {
 struct DualSimplexPricingAccess;
@@ -307,6 +313,10 @@ public:
     /// the basis resolves (about |c_B|^T |B^-1 a_j| eps): the primal path
     /// prices out a ray whose gain is round-off of its terms (#241, #319).
     std::vector<Real> getReducedCosts() const override;
+
+    /// Nonbasic structural columns at one active bound in the current optimum.
+    /// Applies the dual feasibility tolerance in the units of the accepted solve.
+    std::optional<LpDualDegeneracy> measureDualDegeneracy() const;
     /// See LpSolver::getDualRay(). The ray is the row of B^{-1} for the basic
     /// variable that the dual ratio test proved cannot reach its bound.
     std::vector<Real> getDualRay() const override;
@@ -627,6 +637,8 @@ private:
 
     // Solver state.
     Status status_ = Status::Error;
+    bool optimal_basis_current_ = false;
+    bool optimal_basis_from_unscaled_cleanup_ = false;
     Int iterations_ = 0;
     Int iter_limit_ = 1000000;
     bool loaded_ = false;

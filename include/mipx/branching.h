@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -146,9 +147,20 @@ struct BranchCutoffComparison {
     bool select_by_cutoff = false;
 };
 
+struct BranchDualDegeneracyStats {
+    std::uint64_t eligible = 0;
+    std::uint64_t zero_reduced_cost = 0;
+    std::uint64_t unavailable = 0;
+    /// Ten bins [i/10, (i+1)/10), followed by a bin for exactly 1.
+    std::array<std::uint64_t, 11> histogram{};
+
+    void record(std::optional<LpDualDegeneracy> measurement);
+};
+
 struct BranchSelectionHistories {
     const BranchInferenceCoverage* inference = nullptr;
     const BranchCutoffComparison* cutoff = nullptr;
+    BranchDualDegeneracyStats* dual_degeneracy = nullptr;
 };
 
 struct BranchingTelemetry {

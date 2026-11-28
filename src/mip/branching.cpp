@@ -359,6 +359,18 @@ BranchingSelection ReliabilityBranching::selectDeferred(
         [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
 }
 
+void BranchDualDegeneracyStats::record(std::optional<LpDualDegeneracy> measurement) {
+    if (!measurement || measurement->eligible == 0) {
+        ++unavailable;
+        return;
+    }
+    const auto columns = static_cast<std::uint64_t>(measurement->eligible);
+    const auto zeros = static_cast<std::uint64_t>(measurement->zero_reduced_cost);
+    eligible += columns;
+    zero_reduced_cost += zeros;
+    ++histogram[10 * zeros / columns];
+}
+
 template <typename RecordProbe>
 BranchingSelection ReliabilityBranching::selectWithProbeSink(
     DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
@@ -411,6 +423,10 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
 
     if (candidates.empty())
         return selection;
+
+    if (histories.dual_degeneracy != nullptr) {
+        histories.dual_degeneracy->record(lp.measureDualDegeneracy());
+    }
 
     if (symmetry_manager_ != nullptr) {
         std::vector<Candidate> filtered;

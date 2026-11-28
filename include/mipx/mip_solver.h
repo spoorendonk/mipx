@@ -582,6 +582,11 @@ public:
     void setInferenceBranchScoreEnabled(bool enabled) { inference_branch_score_enabled_ = enabled; }
     /// Count qualified first-LP dispositions of actual serial variable children.
     void setBranchCutoffStatsEnabled(bool enabled) { branch_cutoff_stats_enabled_ = enabled; }
+
+    /// Collect LP dual degeneracy at fresh serial reliability decisions.
+    /// Root heuristics or reduced-cost fixing can leave the root basis stale,
+    /// in which case its decision is counted as unavailable.
+    void setBranchDualDegeneracyEnabled(bool enabled) { branch_dual_degeneracy_enabled_ = enabled; }
     /// Compare smoothed cutoff rates on the serial pseudocost shortlist.
     /// Score takes precedence over inference ranking. Both may record coverage.
     void setBranchCutoffScoreMode(BranchCutoffScoreMode mode) { branch_cutoff_score_mode_ = mode; }
@@ -716,6 +721,10 @@ public:
     const BranchCutoffComparisonStats& getBranchCutoffComparisonStats() const {
         return branch_cutoff_comparison_stats_;
     }
+
+    const BranchDualDegeneracyStats& getBranchDualDegeneracyStats() const {
+        return branch_dual_degeneracy_stats_;
+    }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
     [[nodiscard]] ObjPropStats getObjPropStats() const {
@@ -829,6 +838,7 @@ private:
         std::vector<MipBranchInferenceStats>* branch_inference = nullptr;
         std::span<MipBranchInferenceStats> branch_inference_history;
         std::span<MipBranchCutoffStats> branch_cutoff_history;
+        BranchDualDegeneracyStats* branch_dual_degeneracy = nullptr;
         std::span<const Index> branch_history_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
         LpProblem* conflict_global_rows = nullptr;
@@ -1116,6 +1126,7 @@ private:
     bool inference_branch_coverage_enabled_ = false;
     bool inference_branch_score_enabled_ = false;
     bool branch_cutoff_stats_enabled_ = false;
+    bool branch_dual_degeneracy_enabled_ = false;
     BranchCutoffScoreMode branch_cutoff_score_mode_ = BranchCutoffScoreMode::Off;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
@@ -1159,6 +1170,7 @@ private:
     BranchInferenceCoverageStats branch_inference_coverage_stats_;
     std::vector<MipBranchCutoffStats> branch_cutoff_stats_;
     BranchCutoffComparisonStats branch_cutoff_comparison_stats_;
+    BranchDualDegeneracyStats branch_dual_degeneracy_stats_;
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
     RcFixingStats rc_fixing_stats_{};

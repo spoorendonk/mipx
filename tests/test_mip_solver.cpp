@@ -14,6 +14,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 using namespace mipx;
@@ -2992,7 +2993,7 @@ TEST_CASE("MipSolver: directional inference counts distinct columns at the first
     CHECK(solver.getBranchInferenceStats().empty());
 }
 
-TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions only",
+TEST_CASE("MipSolver: branch diagnostics observe serial reliability decisions only",
           "[mip][branching]") {
     auto lp = buildRcFixingKnapsackMip();
 
@@ -3010,8 +3011,16 @@ TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions on
     REQUIRE(baseline.status == Status::Optimal);
     REQUIRE(baseline.nodes > 5);
     const auto& coverage = solver.getBranchInferenceCoverageStats();
+    const auto& degeneracy = solver.getBranchDualDegeneracyStats();
+    const auto measured_bases = [&] {
+        return std::accumulate(degeneracy.histogram.begin(), degeneracy.histogram.end(),
+                               std::uint64_t{0});
+    };
     CHECK(coverage.fallback.decisions == 0);
+    CHECK(measured_bases() == 0);
+    CHECK(degeneracy.unavailable == 0);
     solver.setInferenceBranchCoverageEnabled(true);
+    solver.setBranchDualDegeneracyEnabled(true);
     const auto measured = solver.solve();
     CHECK(measured.status == baseline.status);
     CHECK(measured.objective == baseline.objective);
@@ -3021,6 +3030,8 @@ TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions on
     CHECK(measured.lp_iterations == baseline.lp_iterations);
     CHECK(measured.work_units == baseline.work_units);
     CHECK(coverage.fallback.decisions > 0);
+    CHECK(measured_bases() > 1);
+    CHECK(degeneracy.eligible >= measured_bases());
     CHECK(std::cmp_less(coverage.fallback.decisions, solver.getBranchingStats().selections));
     CHECK(solver.getBranchInferenceStats().empty());
 
@@ -3031,8 +3042,11 @@ TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions on
 #ifdef MIPX_HAS_TBB
     CHECK(coverage.reliable.decisions == 0);
     CHECK(coverage.fallback.decisions == 0);
+    CHECK(measured_bases() == 0);
+    CHECK(degeneracy.unavailable == 0);
 #else
     CHECK(coverage.fallback.decisions > 0);
+    CHECK(measured_bases() > 1);
 #endif
 }
 

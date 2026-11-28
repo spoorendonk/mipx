@@ -1,3 +1,4 @@
+#include "mipx/branching.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "test_paths.hpp"
@@ -482,6 +483,82 @@ TEST_CASE("DualSimplex: basis recovery", "[dual_simplex]") {
         }
     }
     CHECK(num_basic == lp.num_rows);
+}
+
+// ---------------------------------------------------------------------------
+TEST_CASE("Dual simplex measures bounded nonbasic structural dual degeneracy", "[dual_simplex]") {
+    LpProblem lp;
+    lp.num_cols = 5;
+    lp.num_rows = 1;
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0, -kInf};
+    lp.col_upper = {1.0, kInf, 1.0, 0.0, kInf};
+    lp.col_type = {VarType::Binary, VarType::Continuous, VarType::Continuous, VarType::Continuous,
+                   VarType::Continuous};
+    lp.row_lower = lp.row_upper = {0.5};
+    lp.matrix = SparseMatrix(1, 5, std::vector<Triplet>{{0, 0, 1.0}});
+    constexpr std::array basis = {BasisStatus::Basic, BasisStatus::AtLower, BasisStatus::AtUpper,
+                                  BasisStatus::Fixed, BasisStatus::Free,    BasisStatus::Fixed};
+
+    DualSimplexOptions options;
+    options.enable_scaling = false;
+    DualSimplexSolver solver;
+    solver.setOptions(options);
+
+    BranchDualDegeneracyStats stats;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    BranchingTelemetry telemetry;
+    const auto select = [&](std::span<const Real> point) {
+        return branching
+            .selectWithHistories(solver, lp, point, lp.col_lower, lp.col_upper, 0.0, false,
+                                 telemetry, {}, {.dual_degeneracy = &stats})
+            .variable;
+    };
+
+    for (Int zeros = 0; zeros <= 2; ++zeros) {
+        lp.obj = {0.0, zeros >= 1 ? 1e-7 : 2e-7, zeros == 2 ? 0.0 : -1.0, 0.0, 0.0};
+        solver.load(lp);
+        CHECK_FALSE(solver.measureDualDegeneracy());
+        solver.setBasis(basis);
+        CHECK_FALSE(solver.measureDualDegeneracy());
+        REQUIRE(solver.solve().status == Status::Optimal);
+        const auto measurement = solver.measureDualDegeneracy();
+        REQUIRE(measurement);
+        CHECK(measurement->eligible == 2);
+        CHECK(measurement->zero_reduced_cost == zeros);
+        CHECK(select(solver.getPrimalValues()) == 0);
+    }
+    CHECK(stats.eligible == 6);
+    CHECK(stats.zero_reduced_cost == 3);
+    CHECK(stats.histogram == std::array<std::uint64_t, 11>{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+    CHECK(stats.unavailable == 0);
+
+    auto integer_point = solver.getPrimalValues();
+    integer_point[0] = 0.0;
+    CHECK(select(integer_point) == -1);
+    CHECK(stats.eligible == 6);
+    CHECK(stats.unavailable == 0);
+
+    const auto fractional_point = solver.getPrimalValues();
+    solver.setColBounds(1, 0.0, 0.0);
+    CHECK(solver.getStatus() == Status::Optimal);
+    CHECK_FALSE(solver.measureDualDegeneracy());
+    CHECK(select(fractional_point) == 0);
+    CHECK(stats.unavailable == 1);
+    solver.setColBounds(2, 1.0, 1.0);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK_FALSE(solver.measureDualDegeneracy());  // Empty denominator.
+
+    solver.setRowBounds(0, 2.0, 2.0);
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    CHECK_FALSE(solver.measureDualDegeneracy());
+
+    solver.setRowBounds(0, 0.5, 0.5);
+    options.max_solve_seconds = 0.0;
+    solver.setOptions(options);
+    REQUIRE(solver.solve().status == Status::TimeLimit);
+    CHECK_FALSE(solver.measureDualDegeneracy());
 }
 
 // ---------------------------------------------------------------------------

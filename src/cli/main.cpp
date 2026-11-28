@@ -56,6 +56,7 @@ void printUsage(FILE* out) {
                  "[--inference-branch-coverage (serial tree)] "
                  "[--inference-branch-score (serial tree)] "
                  "[--branch-cutoff-stats (serial tree)] "
+                 "[--branch-dual-degeneracy (serial tree)] "
                  "[--branch-cutoff-score off|record|on (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
@@ -204,6 +205,7 @@ int main(int argc, char* argv[]) {
     bool inference_branch_coverage = false;
     bool inference_branch_score = false;
     bool branch_cutoff_stats = false;
+    bool branch_dual_degeneracy = false;
     auto branch_cutoff_score = mipx::BranchCutoffScoreMode::Off;
     std::optional<mipx::NodePolicy> serial_node_policy;
     const char* serial_node_policy_name = nullptr;
@@ -443,6 +445,8 @@ int main(int argc, char* argv[]) {
             inference_branch_score = true;
         } else if (arg == "--branch-cutoff-stats") {
             branch_cutoff_stats = true;
+        } else if (arg == "--branch-dual-degeneracy") {
+            branch_dual_degeneracy = true;
         } else if (arg == "--branch-cutoff-score" && i + 1 < argc) {
             const std::string_view mode = argv[++i];
             if (mode == "off") {
@@ -916,6 +920,7 @@ int main(int argc, char* argv[]) {
             solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
             solver.setInferenceBranchScoreEnabled(inference_branch_score);
             solver.setBranchCutoffStatsEnabled(branch_cutoff_stats);
+            solver.setBranchDualDegeneracyEnabled(branch_dual_degeneracy);
             solver.setBranchCutoffScoreMode(branch_cutoff_score);
             solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
@@ -1168,6 +1173,26 @@ int main(int argc, char* argv[]) {
                     };
                     report("reliable", coverage.reliable);
                     report("fallback", coverage.fallback);
+                }
+            }
+            if (branch_dual_degeneracy) {
+#ifdef MIPX_HAS_TBB
+                if (num_threads > 1) {
+                    log.log("Branch dual degeneracy unavailable for parallel search\n");
+                } else
+#endif
+                {
+                    const auto& stats = solver.getBranchDualDegeneracyStats();
+                    log.log(
+                        "Branch dual degeneracy: eligible=%llu zero_reduced_cost=%llu "
+                        "unavailable=%llu histogram (10 deciles, then exactly 1):",
+                        static_cast<unsigned long long>(stats.eligible),
+                        static_cast<unsigned long long>(stats.zero_reduced_cost),
+                        static_cast<unsigned long long>(stats.unavailable));
+                    for (auto count : stats.histogram) {
+                        log.log(" %llu", static_cast<unsigned long long>(count));
+                    }
+                    log.log("\n");
                 }
             }
             if (branch_cutoff_stats) {

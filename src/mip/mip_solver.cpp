@@ -3770,7 +3770,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 cutoff_history.empty() || node.depth == 0 ||
                         branch_cutoff_score_mode_ == BranchCutoffScoreMode::Off
                     ? nullptr
-                    : &cutoff_comparison};
+                    : &cutoff_comparison,
+                node_scratch.branch_dual_degeneracy};
             selection = branching_rule_.selectWithHistories(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
                 false, branching_stats_, activity, branch_histories);
@@ -3877,6 +3878,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     }
     node_scratch.branch_inference_history = branch_inference_history;
     node_scratch.branch_cutoff_history = branch_cutoff_stats_;
+    node_scratch.branch_dual_degeneracy =
+        branch_dual_degeneracy_enabled_ ? &branch_dual_degeneracy_stats_ : nullptr;
     node_scratch.branch_history_col_mapping = branch_history_col_mapping;
     node_scratch.conflict_global_rows = conflict_global_rows;
     node_scratch.reconvergence_model = reconvergence_model;
@@ -4968,6 +4971,7 @@ MipResult MipSolver::solve() {
     branch_inference_coverage_stats_ = {};
     branch_cutoff_stats_.clear();
     branch_cutoff_comparison_stats_ = {};
+    branch_dual_degeneracy_stats_ = {};
     serial_node_policy_stats_ = {};
     rapid_learning_stats_ = {};
     if (!loaded_) {
@@ -5167,6 +5171,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     branch_inference_coverage_stats_ = {};
     branch_cutoff_stats_.clear();
     branch_cutoff_comparison_stats_ = {};
+    branch_dual_degeneracy_stats_ = {};
     search_stats_ = {};
     // A retry keeps work counters, but only the last attempt supplies a proof bound.
     serial_node_policy_stats_.proof_bound_improvement = 0.0;
@@ -7213,6 +7218,12 @@ MipResult MipSolver::solveMinimizationOnce() {
     }
     NodeQueue queue(initial_policy);
 
+    // Choose serial or parallel tree search.
+    bool use_parallel = false;
+#ifdef MIPX_HAS_TBB
+    use_parallel = (num_threads_ > 1);
+#endif
+
     // Create root children.
     BnbNode root_node;
     root_node.id = 0;
@@ -7229,9 +7240,12 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     } else {
         std::lock_guard<std::mutex> lock(branching_mutex_);
-        const auto selection =
-            branching_rule_.select(lp, problem_, root_primals, problem_.col_lower,
-                                   problem_.col_upper, root_bound, true, branching_stats_);
+        const auto selection = branching_rule_.selectWithHistories(
+            lp, problem_, root_primals, problem_.col_lower, problem_.col_upper, root_bound, true,
+            branching_stats_, {},
+            {.dual_degeneracy = !use_parallel && branch_dual_degeneracy_enabled_
+                                    ? &branch_dual_degeneracy_stats_
+                                    : nullptr});
         const Index branch_var = selection.variable;
         if (branch_var >= 0) {
             auto [left, right] =
@@ -7249,12 +7263,6 @@ MipResult MipSolver::solveMinimizationOnce() {
     }
 
     Int nodes_explored = 1;  // root counts
-
-    // Choose serial or parallel tree search.
-    bool use_parallel = false;
-#ifdef MIPX_HAS_TBB
-    use_parallel = (num_threads_ > 1);
-#endif
 
     if (use_parallel) {
         solveParallel(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
