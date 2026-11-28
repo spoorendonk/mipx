@@ -182,6 +182,14 @@ TEST_CASE("CLI: native SOS2 branching still enforces SOS1", "[cli][io]") {
     CHECK(run.mentions("Objective: 4.0000000000e+00"));
 }
 
+TEST_CASE("CLI: native SOS2 propagation is opt-in", "[cli][io]") {
+    const auto run =
+        runSolver("'" + testDataDir() + "/mps_sos.mps' --sos2-native-branching --sos2-propagation");
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Root SOS2 propagation:"));
+    CHECK(run.mentions("Objective: 4.0000000000e+00"));
+}
+
 TEST_CASE("CLI: an MPS file's indicator constraints reach the solver", "[cli][io]") {
     const auto run = runSolver("'" + testDataDir() + "/mps_indicators.mps' --quiet");
 

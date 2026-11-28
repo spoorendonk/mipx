@@ -1255,6 +1255,138 @@ TEST_CASE("Presolve stopped at its deadline returns an identity postsolve",
     CHECK(presolver.postsolve({2.0}) == std::vector<Real>{2.0});
 }
 
+TEST_CASE("Native SOS2 propagation closes overlapping forced windows", "[lp_problem][features]") {
+    LpProblem lp;
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 7;
+    lp.obj.assign(7, 1.0);
+    lp.col_lower = {1e-10, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0};
+    lp.col_type.assign(7, VarType::Continuous);
+    lp.matrix = SparseMatrix(0, lp.num_cols);
+    const auto type = LpProblem::SosConstraint::Type::Sos2;
+    const std::vector<std::vector<Index>> sets{{0, 1, 2, 3}, {2, 6, 3, 4, 5}};
+    lp.sos_constraints = {{type, sets[0], {}, "a"}, {type, sets[1], {}, "b"}};
+    SECTION("One forced member restricts each set") {}
+    SECTION("Two adjacent forced members restrict a set to their pair") {
+        lp.col_lower[1] = 0.5;
+    }
+    SECTION("A tiny positive lower bound can contradict a distant forced member") {
+        lp.col_lower[3] = 1e-10;
+    }
+
+    Real expected = -kInf;
+    for (std::size_t a = 0; a + 1 < sets[0].size(); ++a) {
+        for (std::size_t b = 0; b + 1 < sets[1].size(); ++b) {
+            auto window = lp;
+            window.sos_constraints.clear();
+            for (std::size_t i = 0; i < sets.size(); ++i) {
+                const auto first = i == 0 ? a : b;
+                for (std::size_t p = 0; p < sets[i].size(); ++p) {
+                    if (p < first || p > first + 1) {
+                        window.col_upper[sets[i][p]] = 0.0;
+                    }
+                }
+            }
+            if (std::ranges::equal(window.col_lower, window.col_upper, std::less_equal{})) {
+                const auto oracle = solveFeatureModel(window);
+                REQUIRE(oracle.status == Status::Optimal);
+                expected = std::max(expected, oracle.objective);
+            }
+        }
+    }
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setGapTolerance(0.0);
+    solver.setSos2NativeBranching(true);
+    solver.load(lp);
+    const auto branching = solver.solve();
+    CHECK(solver.getLpStats().root_sos2_propagation.member_visits == 0);
+    solver.setSos2Propagation(true);
+    const auto propagated = solver.solve();
+    const auto stats = solver.getLpStats().root_sos2_propagation;
+    REQUIRE(branching.status == propagated.status);
+    if (expected == -kInf) {
+        CHECK(propagated.status == Status::Infeasible);
+        CHECK(stats.prunes == 1);
+        CHECK(propagated.lp_iterations == 0);
+    } else {
+        REQUIRE(propagated.status == Status::Optimal);
+        CHECK(stats.fixings == 2);
+        CHECK(stats.prunes == 0);
+        CHECK_THAT(propagated.objective, WithinAbs(expected, 1e-7));
+        CHECK_THAT(branching.objective, WithinAbs(expected, 1e-7));
+        REQUIRE(propagated.solution.size() == 7);
+        CHECK(propagated.solution == branching.solution);
+        CHECK(propagated.solution[2] == 0.0);
+        CHECK(propagated.solution[3] == 0.0);
+        CHECK(propagated.solution[6] == 0.0);
+    }
+}
+
+TEST_CASE("Native SOS2 propagation uses node-local integer branch bounds",
+          "[lp_problem][features]") {
+    LpProblem lp;
+    lp.sense = Sense::Maximize;
+    // Columns b, a, middle, c, t_b, t_a. The root branches on b=0.5.
+    // At b=0 the LP takes a=0.75, t_a=3 and c=0. The serial plunge
+    // visits a=1 first and zeros c. Its a=0 sibling needs c=3 to win.
+    lp.num_cols = 6;
+    lp.obj = {-10.0, -0.125, 0.0, 1.0, 100.0, 10.0};
+    lp.col_lower.assign(6, 0.0);
+    lp.col_upper = {1.0, 1.0, 0.0, 3.0, 1.0, 3.0};
+    lp.col_type = {VarType::Binary,     VarType::Binary,     VarType::Continuous,
+                   VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    lp.num_rows = 6;
+    lp.row_lower.assign(6, -kInf);
+    lp.row_upper = {0.0, 2.0, 0.0, 12.0, 3.0, 3.0};
+    lp.matrix = SparseMatrix(6, lp.num_cols,
+                             {{0, 4, 1.0},
+                              {0, 0, -2.0},
+                              {1, 4, 1.0},
+                              {1, 0, 2.0},
+                              {2, 5, 1.0},
+                              {2, 1, -4.0},
+                              {3, 5, 1.0},
+                              {3, 1, 12.0},
+                              {4, 5, 1.0},
+                              {4, 4, 3.0},
+                              {5, 5, 1.0},
+                              {5, 3, 1.0}});
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {1, 2, 3}, {}, "test"}};
+
+    for (Int threads : {1, 2}) {
+        for (auto mode : {ParallelMode::Deterministic, ParallelMode::Opportunistic}) {
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setPresolve(false);
+            solver.setCutsEnabled(false);
+            solver.setStrongBranchingEnabled(false);
+            solver.setRootHeuristicThresholds(0, 0);
+            solver.setPlungeControls(2, 100.0);
+            solver.setGapTolerance(0.0);
+            solver.setNumThreads(threads);
+            solver.setParallelMode(mode);
+            solver.setSos2NativeBranching(true);
+            solver.load(lp);
+            const auto baseline = solver.solve();
+            REQUIRE(baseline.status == Status::Optimal);
+            CHECK_THAT(baseline.objective, WithinAbs(3.0, 1e-7));
+            solver.setSos2Propagation(true);
+            const auto propagated = solver.solve();
+            REQUIRE(propagated.status == Status::Optimal);
+            CHECK_THAT(propagated.objective, WithinAbs(3.0, 1e-7));
+            CHECK(propagated.solution == baseline.solution);
+            if (threads == 1) {
+                CHECK(solver.getSearchStats().plunge_nodes > 0);
+            }
+            CHECK(solver.getLpStats().root_sos2_propagation.fixings == 0);
+            CHECK(solver.getLpStats().tree_sos2_propagation.fixings > 0);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Format dispatch and empty-parse rejection (issue #198).
 //

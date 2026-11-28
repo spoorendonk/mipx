@@ -44,6 +44,7 @@ void printUsage(FILE* out) {
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--sos2-adjacent-intervals|--sos2-native-branching] "
+                 "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
@@ -164,6 +165,7 @@ int main(int argc, char* argv[]) {
     bool root_cut_recheck = false;
     bool sos2_adjacent_intervals = false;
     bool sos2_native_branching = false;
+    bool sos2_propagation = false;
     // Off by default in the solver; a numeric knob left unset keeps the
     // solver's own default, so a run without these flags is unchanged.
     bool probing_enabled = false;
@@ -311,6 +313,8 @@ int main(int argc, char* argv[]) {
             sos2_adjacent_intervals = true;
         } else if (arg == "--sos2-native-branching") {
             sos2_native_branching = true;
+        } else if (arg == "--sos2-propagation") {
+            sos2_propagation = true;
         } else if (arg == "--presolve-forcing-rows") {
             presolve_forcing_rows = true;
         } else if (arg == "--no-presolve-forcing-rows") {
@@ -732,6 +736,7 @@ int main(int argc, char* argv[]) {
             solver.setSearchProfile(search_profile);
             solver.setSos2AdjacentIntervals(sos2_adjacent_intervals);
             solver.setSos2NativeBranching(sos2_native_branching);
+            solver.setSos2Propagation(sos2_propagation);
             solver.load(lp);
             auto result = solver.solve();
             const char* parallel_mode_name = (parallel_mode == mipx::ParallelMode::Deterministic)

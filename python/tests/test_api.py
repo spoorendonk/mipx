@@ -93,10 +93,13 @@ def test_native_sos2_can_be_selected_before_load() -> None:
         solver.solve(),
         mipx.solve_file(path, sos2_native_branching=True),
         mipx.solve_mps(path, sos2_native_branching=True),
+        mipx.solve_file(path, sos2_native_branching=True, sos2_propagation=True),
     ):
         assert result.status == mipx.Status.Optimal
         assert result.objective == pytest.approx(4.0)
         assert len(result.solution) == model.num_cols + 3  # SOS1 selectors
+    solver.set_sos2_propagation(True)
+    assert solver.solve().objective == pytest.approx(4.0)
 
 
 def test_read_model_detects_and_forces_format() -> None:

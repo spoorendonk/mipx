@@ -1409,6 +1409,62 @@ bool normalizeSos2FixedZeros(const LpProblem& problem, std::span<const Real> low
     return changed;
 }
 
+Sos2PropagationStats propagateSos2(const LpProblem& problem, std::span<Real> lower,
+                                   std::span<Real> upper, std::vector<Index>* tightened = nullptr) {
+    Sos2PropagationStats stats;
+    for (const auto& members : problem.native_sos2) {
+        auto first = members.size();
+        auto last = first;
+        stats.member_visits += members.size();
+        for (std::size_t p = 0; p < members.size(); ++p) {
+            const Index j = members[p];
+            // These are bounds, not an LP point. A tiny positive lower bound
+            // (or negative upper bound) still rules out an exact zero.
+            if (lower[j] > 0.0 || upper[j] < 0.0) {
+                first = std::min(first, p);
+                last = p;
+            }
+        }
+        if (first == members.size()) {
+            continue;
+        }
+        if (last - first > 1) {
+            ++stats.prunes;
+            break;
+        }
+        if (first == last) {
+            first = first > 0 ? first - 1 : 0;
+            last = std::min(last + 1, members.size() - 1);
+        }
+        const auto fixZero = [&](std::span<const Index> excluded) {
+            stats.member_visits += excluded.size();
+            for (Index j : excluded) {
+                if (lower[j] == 0.0 && upper[j] == 0.0) {
+                    continue;
+                }
+                lower[j] = upper[j] = 0.0;
+                ++stats.fixings;
+                if (tightened != nullptr) {
+                    tightened->push_back(j);
+                }
+            }
+        };
+        const std::span ordered(members);
+        fixZero(ordered.first(first));
+        fixZero(ordered.subspan(last + 1));
+    }
+    // Zero fixings leave every set's forced nonzero members unchanged.
+    // Thus the union of these fixings is already the SOS-only fixpoint,
+    // even when columns occur in several sets.
+    return stats;
+}
+
+void addSos2PropagationStats(Sos2PropagationStats& total, const Sos2PropagationStats& delta) {
+    total.fixings += delta.fixings;
+    total.member_visits += delta.member_visits;
+    total.prunes += delta.prunes;
+}
+
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
@@ -1600,6 +1656,7 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     lp_stats_.pre_lp_propagation_calls += stats.pre_lp_propagation_calls;
     lp_stats_.pre_lp_propagation_pruned += stats.pre_lp_propagation_pruned;
     lp_stats_.pre_lp_propagation_fixings += stats.pre_lp_propagation_fixings;
+    addSos2PropagationStats(lp_stats_.tree_sos2_propagation, stats.sos2_propagation);
 }
 
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
@@ -2336,6 +2393,23 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             touched_vars.push_back(j);
         }
         if (!obj_ok) {
+            node_stats.bound_apply_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return false;
+        }
+    }
+
+    if (sos2_propagation_enabled_ && !problem_.native_sos2.empty()) {
+        auto& tightened = node_scratch.rc_tightened;
+        tightened.clear();
+        const auto stats = propagateSos2(problem_, current_lower, current_upper, &tightened);
+        addSos2PropagationStats(node_stats.sos2_propagation, stats);
+        node_work_out += static_cast<double>(stats.member_visits) * 1e-6;
+        for (Index j : tightened) {
+            lp.setColBounds(j, 0.0, 0.0);
+            touched_vars.push_back(j);
+        }
+        if (stats.prunes > 0) {
             node_stats.bound_apply_seconds +=
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             return false;
@@ -4262,6 +4336,7 @@ MipResult MipSolver::solve() {
 MipResult MipSolver::solveMinimization() {
     const bool native_sos2 = !problem_.native_sos2.empty();
     if (native_sos2 && (node_limit_ <= 0 || time_limit_ <= 0.0)) {
+        lp_stats_ = {};
         MipResult stopped;
         stopped.status = time_limit_ <= 0.0 ? Status::TimeLimit : Status::NodeLimit;
         stopped.best_bound = -kInf;
@@ -4334,8 +4409,12 @@ MipResult MipSolver::solveMinimization() {
     time_limit_ = time_left;
     node_limit_ = nodes_left;
     const auto first_gate_openings = search_stats_.det_heur_gate_openings;
+    const auto root_sos2_stats = lp_stats_.root_sos2_propagation;
+    const auto tree_sos2_stats = lp_stats_.tree_sos2_propagation;
     MipResult again = solveMinimizationOnce();
     search_stats_.det_heur_gate_openings += first_gate_openings;
+    addSos2PropagationStats(lp_stats_.root_sos2_propagation, root_sos2_stats);
+    addSos2PropagationStats(lp_stats_.tree_sos2_propagation, tree_sos2_stats);
     again.nodes += result.nodes;
     again.lp_iterations += result.lp_iterations;
     again.work_units += result.work_units;
@@ -4389,7 +4468,11 @@ MipResult MipSolver::confirmNativeSos2Unbounded(MipResult relaxation) {
     problem_.obj_offset = 0.0;
     node_limit_ = nodes_left;
     time_limit_ = time_left;
+    const auto root_sos2_stats = lp_stats_.root_sos2_propagation;
+    const auto tree_sos2_stats = lp_stats_.tree_sos2_propagation;
     const MipResult feasibility = solveMinimization();
+    addSos2PropagationStats(lp_stats_.root_sos2_propagation, root_sos2_stats);
+    addSos2PropagationStats(lp_stats_.tree_sos2_propagation, tree_sos2_stats);
     relaxation.status = feasibility.solution.empty() ? feasibility.status : Status::Unbounded;
     relaxation.nodes += feasibility.nodes;
     relaxation.lp_iterations += feasibility.lp_iterations;
@@ -4585,6 +4668,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     // Presolve.
     Presolver presolver;
     const bool native_sos2 = !problem_.native_sos2.empty();
+    const bool propagate_native_sos2 = sos2_propagation_enabled_ && native_sos2;
     if (native_sos2) {
         presolver.setDeadline(Deadline::after(timeLeft()));
     }
@@ -4708,7 +4792,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         return result;
     }
 
-    const bool using_transformed_problem = did_presolve || symmetry_cuts_added > 0;
+    // Native propagation restricts the root bounds for this solve only.
+    const bool using_transformed_problem =
+        did_presolve || symmetry_cuts_added > 0 || propagate_native_sos2;
     symmetry_stats_.cuts_applied = (symmetry_cuts_added > 0) && using_transformed_problem;
     LpProblem original_problem;
     if (using_transformed_problem) {
@@ -4855,6 +4941,24 @@ MipResult MipSolver::solveMinimizationOnce() {
             result.status = Status::Infeasible;
             result.nodes = 0;
             result.lp_iterations = total_lp_iters;
+            result.work_units = canonicalReportedWork(total_work);
+            result.time_seconds = elapsed();
+            restoreProblem();
+            return result;
+        }
+    }
+
+    if (propagate_native_sos2) {
+        auto& stats = lp_stats_.root_sos2_propagation;
+        stats = propagateSos2(problem_, problem_.col_lower, problem_.col_upper);
+        total_work += static_cast<double>(stats.member_visits) * 1e-6;
+        if (verbose_) {
+            log_.log("Root SOS2 propagation: fixings=%llu prunes=%d\n",
+                     static_cast<unsigned long long>(stats.fixings), stats.prunes);
+        }
+        if (stats.prunes > 0) {
+            MipResult result;
+            result.status = Status::Infeasible;
             result.work_units = canonicalReportedWork(total_work);
             result.time_seconds = elapsed();
             restoreProblem();
@@ -6454,6 +6558,11 @@ MipResult MipSolver::solveMinimizationOnce() {
                  lp_stats_.pre_lp_propagation_calls, lp_stats_.pre_lp_propagation_pruned,
                  lp_stats_.pre_lp_propagation_fixings);
         log_.log("Tree node LPs: first=%d\n", lp_stats_.warm_starts + lp_stats_.cold_starts);
+    }
+    if (verbose_ && propagate_native_sos2) {
+        const auto& stats = lp_stats_.tree_sos2_propagation;
+        log_.log("Tree SOS2 propagation: fixings=%llu prunes=%d\n",
+                 static_cast<unsigned long long>(stats.fixings), stats.prunes);
     }
 
     if (verbose_ && objective_propagator_.loaded()) {

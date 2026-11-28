@@ -63,6 +63,15 @@ enum class ExactRefinementMode {
     On,
 };
 
+struct Sos2PropagationStats {
+    /// Columns fixed to zero. A column already fixed at the node counts zero times.
+    uint64_t fixings = 0;
+    /// Member bounds inspected while finding forced support or applying its fixings.
+    uint64_t member_visits = 0;
+    /// LPs skipped because forced support spanned more than one adjacent window.
+    Int prunes = 0;
+};
+
 struct MipLpStats {
     RootLpPolicy root_policy = RootLpPolicy::DualDefault;
     double root_lp_seconds = 0.0;
@@ -98,6 +107,8 @@ struct MipLpStats {
     Int pre_lp_propagation_calls = 0;
     Int pre_lp_propagation_pruned = 0;
     Int pre_lp_propagation_fixings = 0;
+    Sos2PropagationStats root_sos2_propagation;
+    Sos2PropagationStats tree_sos2_propagation;
 };
 
 struct MipCutStats {
@@ -287,6 +298,8 @@ public:
     void setSos2AdjacentIntervals(bool enabled) { sos2_adjacent_intervals_ = enabled; }
     /// Branch directly on SOS2 sets on subsequent loads. Takes precedence over selectors.
     void setSos2NativeBranching(bool enabled) { sos2_native_branching_ = enabled; }
+    /// Apply local forced-support fixings when solving a model with native SOS2 sets.
+    void setSos2Propagation(bool enabled) { sos2_propagation_enabled_ = enabled; }
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
@@ -586,6 +599,7 @@ private:
         Int pre_lp_propagation_calls = 0;
         Int pre_lp_propagation_pruned = 0;
         Int pre_lp_propagation_fixings = 0;
+        Sos2PropagationStats sos2_propagation;
     };
 
     void mergeNodeWorkStats(const NodeWorkStats& stats);
@@ -771,6 +785,7 @@ private:
     // Parameters.
     bool sos2_adjacent_intervals_ = false;
     bool sos2_native_branching_ = false;
+    bool sos2_propagation_enabled_ = false;
     Int node_limit_ = 1000000;
     double time_limit_ = 3600.0;
     // Start of the current solveMinimizationOnce(): with time_limit_, the one
