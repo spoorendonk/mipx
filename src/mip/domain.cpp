@@ -202,7 +202,15 @@ bool DomainPropagator::propagateRows(Int& visits_left, InferencePass* pass, bool
             ++pass->work.rows.visits;
         }
         const auto before = changes_.size();
-        if (!propagateRow(row, pass)) {
+        const bool feasible = propagateRow(row, pass, deadline);
+        if (deadline != nullptr && deadline->passed()) {
+            if (feasible && !row_in_queue_[row]) {
+                queue_.push_back(row);
+                row_in_queue_[row] = true;
+            }
+            return feasible;
+        }
+        if (!feasible) {
             return false;
         }
         if (sweep && pass != nullptr && pass->inferenceAllowance() > 0 &&
@@ -587,14 +595,17 @@ BoundReasonId DomainPropagator::recordRounding(Index col, bool is_upper, Real va
                     : kNoBoundReason;
 }
 
-BoundReasonSupports::Snapshot DomainPropagator::activityReasons(SparseVectorView row,
-                                                                bool minimum) const {
-    if (!reasons_) {
+BoundReasonSupports::Snapshot DomainPropagator::activityReasons(SparseVectorView row, bool minimum,
+                                                                const Deadline* deadline) const {
+    if (!reasons_ || (deadline != nullptr && deadline->passed())) {
         return {};
     }
     auto result = std::make_shared<std::vector<BoundReasonId>>();
     result->reserve(row.indices.size());
     for (Index k = 0; k < row.size(); ++k) {
+        if (deadline != nullptr && k % 256 == 0 && deadline->passed()) {
+            return {};
+        }
         const auto id = row.values[k] == 0
                             ? kNoBoundReason
                             : reasons_->current(row.indices[k], (row.values[k] < 0) == minimum);
@@ -603,15 +614,18 @@ BoundReasonSupports::Snapshot DomainPropagator::activityReasons(SparseVectorView
     return result;
 }
 
-bool DomainPropagator::propagateRow(Index row, InferencePass* pass) {
+bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadline* deadline) {
     auto rv = matrix_.row(row);
     Real rl = row_lower_[row];
     Real ru = row_upper_[row];
     // Save the endpoints that contributed to each activity sum. If an
     // earlier implication tightens the target itself, subtracting its live
     // contribution weakens the residual deduction from the saved endpoints.
-    const auto min_reasons = activityReasons(rv, true);
-    const auto max_reasons = activityReasons(rv, false);
+    const auto min_reasons = activityReasons(rv, true, deadline);
+    const auto max_reasons = activityReasons(rv, false, deadline);
+    if (deadline != nullptr && deadline->passed()) {
+        return true;
+    }
     const BoundReasonScope scope{.node_local = row >= global_rows_};
     const Int level = scope.node_local ? reason_level_ : 0;
 
@@ -633,6 +647,9 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass) {
     }
 
     for (Index k = 0; k < rv.size(); ++k) {
+        if (deadline != nullptr && k % 256 == 0 && deadline->passed()) {
+            return true;
+        }
         Index j = rv.indices[k];
         Real a = rv.values[k];
         Real lb = lower_[j];
@@ -685,6 +702,9 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass) {
 
     // Try to tighten each variable's bounds.
     for (Index k = 0; k < rv.size(); ++k) {
+        if (deadline != nullptr && k % 256 == 0 && deadline->passed()) {
+            return true;
+        }
         Index j = rv.indices[k];
         Real a = rv.values[k];
 

@@ -1191,6 +1191,23 @@ TEST_CASE("Rapid learning charges dense proof checks to the propagation row allo
     }
     auto model = makeProblem(n, 1, std::move(row), {n}, {kInf}, std::vector<Real>(n, 0),
                              std::vector<Real>(n, 1), std::vector<VarType>(n, VarType::Binary));
+    DomainPropagator domain;
+    domain.load(model, true);
+    const auto expired = Deadline::after(0);
+    Int rows_left = 3;
+    CHECK(domain.propagateWithRowBudget(rows_left, &expired));
+    CHECK(rows_left == 3);
+    CHECK(domain.getLower(0) == 0);
+    REQUIRE(domain.propagate());
+    CHECK(domain.getLower(0) == 1);
+    const auto& trail = *domain.boundReasons();
+    const auto proof = trail.current(0, false);
+    REQUIRE(checkGlobalBoundDeduction(model, trail, proof));
+    BoundProofBudget expired_budget{rows_left, expired};
+    CHECK_FALSE(checkGlobalBoundDeduction(model, trail, proof, &expired_budget));
+    CHECK(expired_budget.stopped());
+    CHECK(rows_left == 3);
+
     MipSolver solver;
     solver.setPresolve(false);
     solver.setSymmetryEnabled(false);

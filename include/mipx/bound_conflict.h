@@ -34,8 +34,10 @@ struct BoundProofBudget {
     const Deadline& deadline;
     bool interrupted = false;
 
+    [[nodiscard]] bool stopped() const { return interrupted || deadline.passed(); }
+
     [[nodiscard]] bool debitRow() {
-        if (rows_left <= 0 || deadline.passed()) {
+        if (rows_left <= 0 || stopped()) {
             interrupted = true;
             return false;
         }

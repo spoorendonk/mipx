@@ -118,8 +118,8 @@ private:
                           Int level);
     [[nodiscard]] bool checkCrossing(Index col);
     BoundReasonId recordRounding(Index col, bool is_upper, Real value, bool applied = true);
-    [[nodiscard]] BoundReasonSupports::Snapshot activityReasons(SparseVectorView row,
-                                                                bool minimum) const;
+    [[nodiscard]] BoundReasonSupports::Snapshot activityReasons(
+        SparseVectorView row, bool minimum, const Deadline* deadline = nullptr) const;
 
     struct InferencePass {
         Int& shared_visits_left;
@@ -143,7 +143,7 @@ private:
     void seedRows();
     bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true,
                        const Deadline* deadline = nullptr);
-    bool propagateRow(Index row, InferencePass* pass);
+    bool propagateRow(Index row, InferencePass* pass, const Deadline* deadline);
     void prioritizeChangedCliques(InferencePass& pass, std::size_t first_change) const;
 
     /// propagate() after `objective_passes` passes of the objective row,
