@@ -13,8 +13,10 @@ namespace mipx {
 
 class CliqueTable;
 class Deadline;
+class DualSimplexSolver;
 class ImplicationGraph;
 class ObjectivePropagator;
+class ReducedCostFixer;
 struct Cut;
 struct BinaryImplication;
 
@@ -28,6 +30,16 @@ struct DomainPropagationWork {
     PropagationWork cliques;
     PropagationWork implications;
     PropagationWork inactive_cuts;
+    PropagationWork objective;
+    PropagationWork reduced_cost;
+};
+
+/// Price the exact column bounds of an optimal LP, independently of any
+/// bounds already tightened in the cutoff working domain.
+struct ScheduledReducedCostInput {
+    const DualSimplexSolver& lp;
+    const ReducedCostFixer& fixer;
+    Real incumbent;
 };
 
 struct ScheduledPropagationInputs {
@@ -36,6 +48,8 @@ struct ScheduledPropagationInputs {
     bool sweep_rows = true;
     std::optional<Index> first_new_row = std::nullopt;
     const Deadline* deadline = nullptr;
+    const ScheduledReducedCostInput* reduced_cost = nullptr;
+    PropagationScheduler* history = nullptr;
 };
 
 class DomainPropagator {
@@ -125,7 +139,9 @@ public:
     /// Visit newly appended rows and any active rows woken by deductions.
     bool propagateNewRows(Index first, Int& visits_left, DomainPropagationWork& work,
                           const Deadline* deadline = nullptr);
-    /// Schedule eligible domain work, charging one unit per row, clique or edge.
+    /// Charge one unit per row, clique or implication edge, and one per block
+    /// of up to 16 columns in a cutoff scan. Attach a cutoff only to a scoped
+    /// working domain. An optional history carries samples across input events.
     bool propagateScheduled(Int& visits_left, DomainPropagationWork& work,
                             PropagationScheduleStats& stats,
                             const ScheduledPropagationInputs& inputs);
@@ -189,7 +205,8 @@ private:
 
     /// Propagate the objective cutoff row. Returns false if no point of the
     /// domain improves on the cutoff.
-    bool propagateObjective();
+    bool propagateObjective(bool follow_implications = true);
+    bool propagateReducedCost(const ScheduledReducedCostInput& input);
 
     /// Propagate clique constraints. Returns false if infeasibility detected.
     bool propagateCliques(InferencePass* pass = nullptr, bool reserve_implications = false);

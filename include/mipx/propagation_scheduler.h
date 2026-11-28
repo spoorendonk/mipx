@@ -11,8 +11,22 @@
 namespace mipx {
 
 // Declaration order breaks ties and tries unmeasured sparse producers first.
-enum class PropagationProducer { Implications, Cliques, Rows, InactiveCuts, Count };
+enum class PropagationProducer {
+    Implications,
+    Cliques,
+    Rows,
+    InactiveCuts,
+    Objective,
+    ReducedCost,
+    Count
+};
 enum class PropagationExit { Empty, Budget, Deadline, Contradiction, Count };
+
+/// One unit per block of up to 16 columns in an objective or price scan.
+[[nodiscard]] constexpr Int cutoffScanWork(Index columns) {
+    constexpr Int kColumnsPerWorkUnit = 16;
+    return std::max<Int>(1, columns / kColumnsPerWorkUnit + (columns % kColumnsPerWorkUnit != 0));
+}
 
 struct PropagationProducerStats {
     std::uint64_t calls = 0;
@@ -29,16 +43,22 @@ struct PropagationScheduleStats {
     static constexpr auto kCount = static_cast<std::size_t>(PropagationProducer::Count);
     std::array<PropagationProducerStats, kCount> producers{};
 
-    void merge(const PropagationScheduleStats& delta) {
+    void merge(const PropagationScheduleStats& sample) {
+        mergeDelta(sample, PropagationScheduleStats{});
+    }
+
+    void mergeDelta(const PropagationScheduleStats& sample,
+                    const PropagationScheduleStats& before) {
         for (std::size_t i = 0; i < producers.size(); ++i) {
             auto& total = producers[i];
-            const auto& sample = delta.producers[i];
-            total.calls += sample.calls;
-            total.work += sample.work;
-            total.endpoints += sample.endpoints;
-            total.deferrals += sample.deferrals;
+            const auto& after = sample.producers[i];
+            const auto& prior = before.producers[i];
+            total.calls += after.calls - prior.calls;
+            total.work += after.work - prior.work;
+            total.endpoints += after.endpoints - prior.endpoints;
+            total.deferrals += after.deferrals - prior.deferrals;
             for (std::size_t j = 0; j < total.exits.size(); ++j) {
-                total.exits[j] += sample.exits[j];
+                total.exits[j] += after.exits[j] - prior.exits[j];
             }
         }
     }

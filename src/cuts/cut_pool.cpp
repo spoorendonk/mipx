@@ -253,6 +253,23 @@ std::vector<Index> CutPool::topByEfficacy(Index k) const {
     return indices;
 }
 
+std::vector<Index> CutPool::uninstalledByEfficacy() const {
+    std::vector<Index> indices;
+    for (Index i = 0; i < size(); ++i) {
+        const auto& [cut, installed, invalidated] = cuts_[i];
+        if (!installed && !invalidated && cut.isUnconditionalGlobal() &&
+            std::isfinite(cut.efficacy)) {
+            indices.push_back(i);
+        }
+    }
+    std::ranges::sort(indices, [this](Index a, Index b) {
+        const Real a_efficacy = cuts_[a].cut.efficacy;
+        const Real b_efficacy = cuts_[b].cut.efficacy;
+        return a_efficacy == b_efficacy ? a < b : a_efficacy > b_efficacy;
+    });
+    return indices;
+}
+
 std::vector<Index> CutPool::violatedByEfficacy(std::span<const Real> primals, Real min_violation,
                                                std::span<const Real> guide) const {
     std::vector<std::pair<Index, Real>> ranked;

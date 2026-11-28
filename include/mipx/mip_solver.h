@@ -977,7 +977,8 @@ private:
 
     /// Run cutting plane rounds at the root node.
     bool runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
-                          LpProblem* certificate_problem, Real cutoff);
+                          LpProblem* certificate_problem, Real cutoff, Real& incumbent,
+                          std::vector<Real>& best_solution, SolutionPool& solution_pool);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,

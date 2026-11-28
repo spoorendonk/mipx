@@ -47,6 +47,11 @@ struct CutRoundPolicy {
                                                 bool recheck_violation,
                                                 std::span<const Real> guide = {});
 
+/// Apply the existing family and age policy to fresh LP rows without rechecking
+/// their violation against the current point.
+[[nodiscard]] std::vector<Index> selectUninstalledRootCuts(const CutPool& pool,
+                                                           const CutRoundPolicy& policy);
+
 class CutManager {
 public:
     void setMode(CutEffortMode mode) { mode_ = mode; }

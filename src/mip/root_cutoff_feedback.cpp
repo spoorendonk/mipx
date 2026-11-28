@@ -36,9 +36,25 @@ LpResult backOutRootCutRound(DualSimplexSolver& lp, Index keep_rows,
     return restored;
 }
 
+LpResult tryScopedCutBounds(DualSimplexSolver& lp, std::span<const RootCutBound> staged_bounds) {
+    auto trial = lp;
+    for (const auto& bound : staged_bounds) {
+        trial.setColBounds(bound.col, bound.lower, bound.upper);
+    }
+    const auto result = trial.solve();
+    if (result.status == Status::Optimal) {
+        lp = std::move(trial);
+    }
+    return result;
+}
+
 RootCutoffFeedback::RootCutoffFeedback(const LpProblem& problem, Real cutoff) : cutoff_(cutoff) {
     objective_.load(problem);
     rc_fixer_.load(problem);
+}
+
+void RootCutoffFeedback::strengthenCutoff(Real cutoff) {
+    cutoff_ = std::min(cutoff_, cutoff);
 }
 
 LpResult RootCutoffFeedback::update(const LpProblem& rows, const DualSimplexSolver& lp,
@@ -122,11 +138,108 @@ LpResult RootCutoffFeedback::update(const LpProblem& rows, const DualSimplexSolv
         }
     }
 
+    return resolve(lp, lp_lower, lp_upper, std::move(lower), std::move(upper), deadline, stats);
+}
+
+LpResult RootCutoffFeedback::updateScheduled(const LpProblem& rows, const DualSimplexSolver& lp,
+                                             Int& visits_left, DomainPropagationWork& work,
+                                             PropagationScheduler& history, Deadline deadline,
+                                             MipCutStats& stats, double work_left,
+                                             const RootCutoffInference& inference) {
+    LpResult unchanged{Status::Optimal, lp.getObjective(), 0};
+    const double setup_work =
+        1e-6 * (static_cast<double>(rows.matrix.numNonzeros()) + rows.num_rows + rows.num_cols);
+    if (work_left <= setup_work || deadline.passed() || unchanged.objective >= cutoff_) {
+        primals_.clear();
+        return unchanged;
+    }
+    if (visits_left <= 0) {
+        const auto before = history.stats();
+        const Int scan_work = cutoffScanWork(rows.num_cols);
+        history.enqueue(PropagationProducer::Objective, scan_work);
+        history.enqueue(PropagationProducer::ReducedCost, scan_work);
+        if (!lower_.empty() || inference.first_new_row.value_or(rows.num_rows) < rows.num_rows) {
+            history.enqueue(PropagationProducer::Rows);
+        }
+        history.finish(PropagationExit::Budget);
+        stats.root_propagation_schedule.mergeDelta(history.stats(), before);
+        primals_.clear();
+        return unchanged;
+    }
+    unchanged.work_units = setup_work;
+
+    std::vector<Real> lp_lower(rows.num_cols);
+    std::vector<Real> lp_upper(rows.num_cols);
+    DomainPropagator domain;
+    domain.load(rows);
+    domain.setObjectiveCutoff(&objective_, cutoff_);
+    domain.setCliqueTable(inference.cliques);
+    domain.setImplicationGraph(inference.implications);
+    for (Index col = 0; col < rows.num_cols; ++col) {
+        lp.getColBounds(col, lp_lower[col], lp_upper[col]);
+        const Real lb = lower_.empty() ? lp_lower[col] : std::max(lp_lower[col], lower_[col]);
+        const Real ub = upper_.empty() ? lp_upper[col] : std::min(lp_upper[col], upper_[col]);
+        if (lb > ub) {
+            primals_.clear();
+            return unchanged;
+        }
+        if (lb > domain.getLower(col) || ub < domain.getUpper(col)) {
+            // A prior pass may have stopped with these wake-ups pending.
+            domain.setBound(col, lb, ub);
+        }
+    }
+
+    const ScheduledReducedCostInput reduced_cost{lp, rc_fixer_, cutoff_};
+    const auto previous = work;
+    const bool feasible =
+        domain.propagateScheduled(visits_left, work, stats.root_propagation_schedule,
+                                  {.sweep_rows = false,
+                                   .first_new_row = inference.first_new_row,
+                                   .deadline = &deadline,
+                                   .reduced_cost = &reduced_cost,
+                                   .history = &history});
+    stats.root_cutoff_objective_tightenings +=
+        static_cast<Int>(work.objective.tightenings - previous.objective.tightenings);
+    stats.root_cutoff_reduced_cost_tightenings +=
+        static_cast<Int>(work.reduced_cost.tightenings - previous.reduced_cost.tightenings);
+    stats.root_cutoff_row_tightenings +=
+        static_cast<Int>(work.rows.tightenings - previous.rows.tightenings);
+    if (!feasible) {
+        primals_.clear();
+        return unchanged;
+    }
+
+    std::vector<Real> lower(rows.num_cols);
+    std::vector<Real> upper(rows.num_cols);
+    for (Index col = 0; col < rows.num_cols; ++col) {
+        lower[col] = domain.getLower(col);
+        upper[col] = domain.getUpper(col);
+        if (lower[col] > upper[col]) {
+            primals_.clear();
+            return unchanged;
+        }
+    }
+    if (lower == lp_lower && upper == lp_upper) {
+        lower_.clear();
+        upper_.clear();
+        primals_.clear();
+        return unchanged;
+    }
+    auto result =
+        resolve(lp, lp_lower, lp_upper, std::move(lower), std::move(upper), deadline, stats);
+    result.work_units += setup_work;
+    return result;
+}
+
+LpResult RootCutoffFeedback::resolve(const DualSimplexSolver& lp, std::span<const Real> lp_lower,
+                                     std::span<const Real> lp_upper, std::vector<Real> lower,
+                                     std::vector<Real> upper, Deadline deadline,
+                                     MipCutStats& stats) {
     auto scoped_lp = lp;
     auto options = scoped_lp.getOptions();
     options.deadline = deadline;
     scoped_lp.setOptions(options);
-    for (Index col = 0; col < rows.num_cols; ++col) {
+    for (Index col = 0; col < lp.numCols(); ++col) {
         if (lower[col] > lp_lower[col] || upper[col] < lp_upper[col]) {
             scoped_lp.setColBounds(col, lower[col], upper[col]);
         }

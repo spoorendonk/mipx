@@ -1,13 +1,37 @@
 #include "mipx/clique_table.h"
 #include "mipx/deadline.h"
 #include "mipx/domain.h"
+#include "mipx/dual_simplex.h"
 #include "mipx/implication_graph.h"
+#include "mipx/reduced_cost_fixer.h"
 
 #include <algorithm>
 #include <deque>
 #include <utility>
 
 namespace mipx {
+
+bool DomainPropagator::propagateReducedCost(const ScheduledReducedCostInput& input) {
+    const auto& lp = input.lp;
+    std::vector<Real> lower(num_cols_);
+    std::vector<Real> upper(num_cols_);
+    for (Index col = 0; col < num_cols_; ++col) {
+        lp.getColBounds(col, lower[col], upper[col]);
+    }
+    std::vector<Index> changed;
+    RcFixingStats delta;
+    if (!input.fixer.applyLocalFixing(lp.getReducedCosts(), lp.getPrimalValues(), lp.getObjective(),
+                                      input.incumbent, lower, upper, changed, delta)) {
+        return false;
+    }
+    for (const Index col : changed) {
+        setBound(col, lower[col], upper[col]);
+        if (getLower(col) > getUpper(col)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWork& work,
                                           PropagationScheduleStats& stats,
@@ -24,26 +48,43 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
     };
     const Index first = inputs.first_new_row.value_or(num_rows_);
     Index next_sweep = !inputs.first_new_row && inputs.sweep_rows ? num_rows_ : 0;
+    const bool has_inference_seed = !inputs.first_new_row || !changes_.empty();
     const Index num_cliques = clique_table_ != nullptr ? clique_table_->numCliques() : 0;
-    PropagationScheduler scheduler;
+    const Int scan_work = cutoffScanWork(num_cols_);
+    bool objective_ready = objective_ != nullptr;
+    bool reduced_cost_ready =
+        inputs.reduced_cost != nullptr && inputs.reduced_cost->lp.getStatus() == Status::Optimal;
+    Int objective_passes = 0;
+    PropagationScheduler local_scheduler;
+    auto& scheduler = inputs.history != nullptr ? *inputs.history : local_scheduler;
+    const auto previous_stats = scheduler.stats();
+    const auto enqueueCutoffProducers = [&] {
+        if (objective_ready && objective_passes < kMaxObjectivePasses) {
+            scheduler.enqueue(Producer::Objective, scan_work);
+        }
+        if (reduced_cost_ready) {
+            scheduler.enqueue(Producer::ReducedCost, scan_work);
+        }
+    };
     // A setup stop reports requested producer scans. Some inputs have not
     // been inspected yet, so these counts are an upper bound on eligibility.
     const auto stopDuringSetup = [&](PropagationExit exit) {
         if (first < num_rows_ || next_sweep > 0 || !queue_.empty()) {
             scheduler.enqueue(Producer::Rows);
         }
-        if (!inputs.first_new_row && num_cliques > 0) {
+        if (has_inference_seed && num_cliques > 0) {
             scheduler.enqueue(Producer::Cliques);
         }
-        if (!inputs.first_new_row && implication_graph_ != nullptr &&
+        if (has_inference_seed && implication_graph_ != nullptr &&
             implication_graph_->numImplications() > 0) {
             scheduler.enqueue(Producer::Implications);
         }
         if (!inputs.inactive.empty()) {
             scheduler.enqueue(Producer::InactiveCuts);
         }
+        enqueueCutoffProducers();
         scheduler.finish(exit);
-        stats.merge(scheduler.stats());
+        stats.mergeDelta(scheduler.stats(), previous_stats);
         return true;
     };
     if (stopped()) {
@@ -70,13 +111,36 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
             cliques.push_back(clique);
         }
     };
-    if (!inputs.first_new_row && num_cliques > 0) {
-        const Index start = std::clamp(inputs.first_clique, Index{0}, num_cliques);
-        for (Index i = start; i < num_cliques && !poll(); ++i) {
-            enqueueClique(i);
+    const auto enqueueIncidentCliques = [&](Index col, Index visited_clique) {
+        for (const bool complemented : {false, true}) {
+            for (const Index clique : clique_table_->cliquesOf({col, complemented})) {
+                if (poll()) {
+                    return;
+                }
+                if (clique != visited_clique) {
+                    enqueueClique(clique);
+                }
+            }
         }
-        for (Index i = 0; i < start && !poll(); ++i) {
-            enqueueClique(i);
+    };
+    if (num_cliques > 0) {
+        if (inputs.first_new_row) {
+            // After importing or retaining bounds before a fresh LP, infer
+            // from the affected columns as well as the newly installed rows.
+            for (const auto& change : changes_) {
+                if (poll()) {
+                    break;
+                }
+                enqueueIncidentCliques(change.col, -1);
+            }
+        } else {
+            const Index start = std::clamp(inputs.first_clique, Index{0}, num_cliques);
+            for (Index i = start; i < num_cliques && !poll(); ++i) {
+                enqueueClique(i);
+            }
+            for (Index i = 0; i < start && !poll(); ++i) {
+                enqueueClique(i);
+            }
         }
     }
 
@@ -100,7 +164,14 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
             implications.push_back({col, edges});
         }
     };
-    if (!inputs.first_new_row && implication_graph_ != nullptr) {
+    if (inputs.first_new_row && implication_graph_ != nullptr) {
+        for (const auto& change : changes_) {
+            if (poll()) {
+                break;
+            }
+            enqueueImplications(change.col);
+        }
+    } else if (implication_graph_ != nullptr) {
         for (const Index col : implication_graph_->binaryVars()) {
             if (poll()) {
                 break;
@@ -154,6 +225,7 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
         if (!inactive.empty()) {
             scheduler.enqueue(Producer::InactiveCuts);
         }
+        enqueueCutoffProducers();
     };
     enqueueReadyProducers();
 
@@ -187,6 +259,7 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
         }
         const auto before = changes_.size();
         PropagationWork* metric;
+        Int charged = 1;
         Index visited_clique = -1;
         switch (*producer) {
             case Producer::Rows: {
@@ -245,6 +318,21 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
                 metric = &work.inactive_cuts;
                 break;
             }
+            case Producer::Objective:
+                ++objective_passes;
+                objective_ready = false;
+                feasible = propagateObjective(false);
+                metric = &work.objective;
+                charged = scan_work;
+                break;
+            case Producer::ReducedCost:
+                // Only a fresh LP or a stronger incumbent can reprice these
+                // bounds. Woken rows never reuse the duals as a new input.
+                reduced_cost_ready = false;
+                feasible = propagateReducedCost(*inputs.reduced_cost);
+                metric = &work.reduced_cost;
+                charged = scan_work;
+                break;
             case Producer::Count:
             default:
                 std::unreachable();
@@ -266,16 +354,7 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
                 continue;
             }
             if (num_cliques > 0) {
-                for (const bool complemented : {false, true}) {
-                    for (const Index clique : clique_table_->cliquesOf({col, complemented})) {
-                        if (poll()) {
-                            break;
-                        }
-                        if (clique != visited_clique) {
-                            enqueueClique(clique);
-                        }
-                    }
-                }
+                enqueueIncidentCliques(col, visited_clique);
             }
             enqueueImplications(col);
             if (!inactive_by_col.empty()) {
@@ -288,12 +367,15 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
             }
         }
         changed_cols.clear();
+        if (endpoints > 0) {
+            objective_ready = objective_ != nullptr;
+        }
         // As in the row-budget path, a visit that started is charged when a
         // deadline stops it partway through.
-        --visits_left;
-        ++metric->visits;
+        visits_left -= charged;
+        metric->visits += charged;
         metric->tightenings += endpoints;
-        scheduler.record(*producer, 1, endpoints);
+        scheduler.record(*producer, charged, endpoints);
         if (!feasible) {
             scheduler.enqueue(*producer);
             exit = PropagationExit::Contradiction;
@@ -302,7 +384,7 @@ bool DomainPropagator::propagateScheduled(Int& visits_left, DomainPropagationWor
         enqueueReadyProducers();
     }
     scheduler.finish(exit);
-    stats.merge(scheduler.stats());
+    stats.mergeDelta(scheduler.stats(), previous_stats);
     return feasible;
 }
 

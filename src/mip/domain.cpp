@@ -405,7 +405,7 @@ bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes,
     return true;
 }
 
-bool DomainPropagator::propagateObjective() {
+bool DomainPropagator::propagateObjective(bool follow_implications) {
     std::vector<ObjectivePropagator::BoundUpdate> updates;
     ObjectivePropagator::BoundUpdate crossing;
     const auto objective_row = objective_->row();
@@ -463,8 +463,8 @@ bool DomainPropagator::propagateObjective() {
             (void)checkCrossing(j);
         }
         enqueueColumn(j);
-        if (implication_graph_ != nullptr && col_type_[j] != VarType::Continuous &&
-            lower_[j] > upper_[j] - kTol) {
+        if (follow_implications && implication_graph_ != nullptr &&
+            col_type_[j] != VarType::Continuous && lower_[j] > upper_[j] - kTol) {
             if (!propagateImplications(j)) {
                 return false;
             }

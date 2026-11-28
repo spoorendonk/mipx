@@ -7,6 +7,7 @@
 #include "mipx/implication_graph.h"
 #include "mipx/mip_solver.h"
 #include "mipx/objective_propagator.h"
+#include "mipx/reduced_cost_fixer.h"
 
 #include <algorithm>
 #include <array>
@@ -723,6 +724,58 @@ TEST_CASE("Scheduled domain visits wake affected producers within the shared cap
             CHECK(dp.getUpper(3) == 0);
         }
     }
+}
+
+TEST_CASE("Scheduled objective revisits its own integer rounding", "[domain][cuts]") {
+    auto model =
+        makeProblem(2, 0, {}, {}, {}, {0.2, 0.0}, {2.0, 2.0}, std::vector(2, VarType::Integer));
+    model.obj = {1.0, 1.0};
+    ObjectivePropagator objective;
+    objective.load(model);
+    DomainPropagator domain;
+    domain.load(model);
+    domain.setObjectiveCutoff(&objective, 1.8);
+    PropagationScheduleStats stats;
+    DomainPropagationWork work;
+    Int visits_left = 2;
+    REQUIRE(domain.propagateScheduled(visits_left, work, stats, {}));
+    CHECK(domain.getLower(0) == 1.0);
+    CHECK(domain.getUpper(1) == 0.0);
+    CHECK(work.objective.visits == 2);
+    CHECK(visits_left == 0);
+}
+
+TEST_CASE("Scheduled cut work retains pending rows across a fresh LP", "[domain][cuts]") {
+    const auto model = makeProblem(2, 2, {{0, 0, -1}, {0, 1, 1}, {1, 0, 1}}, {0, 1}, {kInf, kInf},
+                                   {0, 0}, {1, 1}, std::vector(2, VarType::Binary));
+    DomainPropagator domain;
+    domain.load(model);
+    PropagationScheduleStats stats;
+    PropagationScheduler history;
+    DomainPropagationWork work;
+    Int before_solve = 1;
+    REQUIRE(domain.propagateScheduled(
+        before_solve, work, stats, {.sweep_rows = false, .first_new_row = 1, .history = &history}));
+    REQUIRE(domain.getLower(0) == 1.0);
+    REQUIRE(domain.getLower(1) == 0.0);
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    lp.setColBounds(0, 1.0, 1.0);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    ReducedCostFixer fixer;
+    fixer.load(model);
+    const ScheduledReducedCostInput prices{lp, fixer, 1.0};
+    Int after_solve = 5;
+    REQUIRE(domain.propagateScheduled(after_solve, work, stats,
+                                      {.sweep_rows = false,
+                                       .first_new_row = model.num_rows,
+                                       .reduced_cost = &prices,
+                                       .history = &history}));
+    CHECK(domain.getLower(1) == 1.0);
+    CHECK(work.rows.tightenings == 2);
+    CHECK(work.reduced_cost.visits == 1);
 }
 
 TEST_CASE("Scheduled propagation reports a stop before the first visit", "[domain]") {

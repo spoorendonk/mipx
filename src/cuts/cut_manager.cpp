@@ -7,12 +7,10 @@
 
 namespace mipx {
 
-std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
-                                  std::span<const Real> primals, bool recheck_violation,
-                                  std::span<const Real> guide) {
-    const auto ranked = recheck_violation
-                            ? pool.violatedByEfficacy(primals, kDefaultCutMinViolation, guide)
-                            : pool.topByEfficacy(policy.max_cuts_per_round);
+namespace {
+
+std::vector<Index> selectByFamily(const CutPool& pool, const CutRoundPolicy& policy,
+                                  std::span<const Index> ranked, bool check_age) {
     std::vector<Index> selected;
     std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};
     for (const Index index : ranked) {
@@ -21,7 +19,7 @@ std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& pol
         }
         const auto& cut = pool[index];
         const auto fi = static_cast<std::size_t>(cut.family);
-        if (!cut.isUnconditionalGlobal() || (!recheck_violation && cut.age > 0) ||
+        if (!cut.isUnconditionalGlobal() || (check_age && cut.age > 0) ||
             !policy.family_enabled[fi]) {
             continue;
         }
@@ -32,6 +30,21 @@ std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& pol
         ++selected_by_family[fi];
     }
     return selected;
+}
+
+}  // namespace
+
+std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
+                                  std::span<const Real> primals, bool recheck_violation,
+                                  std::span<const Real> guide) {
+    const auto ranked = recheck_violation
+                            ? pool.violatedByEfficacy(primals, kDefaultCutMinViolation, guide)
+                            : pool.topByEfficacy(policy.max_cuts_per_round);
+    return selectByFamily(pool, policy, ranked, !recheck_violation);
+}
+
+std::vector<Index> selectUninstalledRootCuts(const CutPool& pool, const CutRoundPolicy& policy) {
+    return selectByFamily(pool, policy, pool.uninstalledByEfficacy(), true);
 }
 
 void CutManager::setBaseLimits(Int max_rounds, Int max_cuts_per_round) {

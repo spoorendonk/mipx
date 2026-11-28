@@ -54,8 +54,19 @@ void addPropagationWork(PropagationWork& total, const PropagationWork& delta, bo
     }
 }
 
+void addPropagationWork(DomainPropagationWork& total, const DomainPropagationWork& delta,
+                        bool retained) {
+    addPropagationWork(total.rows, delta.rows, retained);
+    addPropagationWork(total.cliques, delta.cliques, retained);
+    addPropagationWork(total.implications, delta.implications, retained);
+    addPropagationWork(total.inactive_cuts, delta.inactive_cuts, retained);
+    addPropagationWork(total.objective, delta.objective, retained);
+    addPropagationWork(total.reduced_cost, delta.reduced_cost, retained);
+}
+
 void logPropagationSchedule(Logger& log, const char* phase, const PropagationScheduleStats& stats) {
-    constexpr std::array names{"implications", "cliques", "rows", "inactive_cuts"};
+    constexpr std::array names{"implications",  "cliques",   "rows",
+                               "inactive_cuts", "objective", "reduced_cost"};
     static_assert(names.size() == PropagationScheduleStats::kCount);
     for (std::size_t i = 0; i < names.size(); ++i) {
         const auto& producer = stats.producers[i];
@@ -1838,11 +1849,7 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     cut_stats_.tree_cuts_purged += cuts.tree_cuts_purged;
     cut_stats_.tree_cuts_revived += cuts.tree_cuts_revived;
     cut_stats_.tree_lp_delta += cuts.tree_lp_delta;
-    addPropagationWork(cut_stats_.tree_cut_propagation.rows, cuts.tree_cut_propagation.rows, true);
-    addPropagationWork(cut_stats_.tree_cut_propagation.cliques, cuts.tree_cut_propagation.cliques,
-                       true);
-    addPropagationWork(cut_stats_.tree_cut_propagation.implications,
-                       cuts.tree_cut_propagation.implications, true);
+    addPropagationWork(cut_stats_.tree_cut_propagation, cuts.tree_cut_propagation, true);
     cut_stats_.tree_cut_propagation_resolves += cuts.tree_cut_propagation_resolves;
     cut_stats_.tree_cut_propagation_backouts += cuts.tree_cut_propagation_backouts;
     cut_stats_.tree_cut_propagation_budget_exhaustions +=
@@ -3641,8 +3648,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
             Int visits_left = kTreeCutPropagationVisits;
             std::optional<LpProblem> propagation_model;
+            const bool scheduled_tree = propagate_tree_cuts && propagation_scheduler_enabled_;
+            const bool schedule_cutoff = scheduled_tree && std::isfinite(incumbent_snapshot) &&
+                                         (objective_propagator_.loaded() || rc_fixer_.loaded());
+            PropagationScheduler schedule_history;
+            bool retained_cutoff_bounds = false;
 
             for (Int round = 0; round < max_rounds; ++round) {
+                const Int round_start_visits = visits_left;
                 CutPool tree_pool;
                 CutSeparationStats tree_stats;
                 // A cut that substitutes a node-local row's logical holds only
@@ -3677,8 +3690,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     // A cut a separator marked local was derived from data that
                     // only holds in this subtree (a branched bound, a local cut
                     // row), so it can never be promoted however good it looks.
-                    promoted.push_back(serial_cuts && cut.isUnconditionalGlobal() &&
-                                       node.depth <= 2 && cut.efficacy >= 0.15);
+                    // A later tableau can also depend on retained cutoff bounds.
+                    promoted.push_back(serial_cuts && !retained_cutoff_bounds &&
+                                       cut.isUnconditionalGlobal() && node.depth <= 2 &&
+                                       cut.efficacy >= 0.15);
 
                     starts.push_back(static_cast<Index>(col_indices.size()));
                     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -3726,12 +3741,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 };
 
                 DomainPropagationWork propagation;
-                struct StagedBound {
-                    Index col;
-                    Real lower;
-                    Real upper;
-                };
-                std::vector<StagedBound> staged_bounds;
+                std::optional<DomainPropagator> working_domain;
+                std::vector<RootCutBound> staged_bounds;
                 bool feasible = true;
                 if (propagate_tree_cuts && visits_left > 0 && !deadline.passed()) {
                     if (!propagation_model) {
@@ -3760,7 +3771,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         // Branch and cutoff deductions are already in the reconstructed
                         // domain. Keep new bounds in this node's LP and trail, outside
                         // the global model and the independently checked proof rows.
-                        DomainPropagator dp;
+                        auto& dp = working_domain.emplace();
                         dp.load(domain_model);
                         if (cliquePropagationActive()) {
                             dp.setCliqueTable(&clique_table_);
@@ -3768,21 +3779,23 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         if (implication_graph_.numImplications() > 0) {
                             dp.setImplicationGraph(&implication_graph_);
                         }
-                        const Int before_visits = visits_left;
-                        feasible =
-                            propagation_scheduler_enabled_
-                                ? dp.propagateScheduled(visits_left, propagation,
+                        const Int before_visits =
+                            visits_left - (schedule_cutoff ? visits_left / 2 : 0);
+                        Int row_visits_left = before_visits;
+                        feasible = scheduled_tree ? dp.propagateScheduled(
+                                                        row_visits_left, propagation,
                                                         tree_cut_stats.tree_propagation_schedule,
                                                         {.inactive = {},
                                                          .sweep_rows = false,
                                                          .first_new_row = base_row,
-                                                         .deadline = &deadline})
-                                : dp.propagateNewRows(base_row, visits_left, propagation,
-                                                      &deadline);
+                                                         .deadline = &deadline,
+                                                         .history = &schedule_history})
+                                                  : dp.propagateNewRows(base_row, row_visits_left,
+                                                                        propagation, &deadline);
+                        visits_left -= before_visits - row_visits_left;
                         node_work_out +=
                             1e-6 * (static_cast<double>(domain_model.matrix.numNonzeros()) +
-                                    domain_model.num_rows + before_visits - visits_left);
-                        tree_cut_stats.tree_cut_propagation_budget_exhaustions += visits_left == 0;
+                                    domain_model.num_rows + before_visits - row_visits_left);
                         if (feasible) {
                             for (Index j = 0; j < problem_.num_cols; ++j) {
                                 const Real lb = dp.getLower(j);
@@ -3799,20 +3812,74 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
 
                 const Real prev_obj = node_obj_out;
+                const auto solveCutLp = [&] {
+                    auto result = lp.solve();
+                    node_iters_out += result.iterations;
+                    node_work_out += result.work_units;
+                    return result;
+                };
                 LpResult tree_result;
                 tree_result.status = Status::Infeasible;
                 if (feasible) {
-                    tree_result = lp.solve();
+                    tree_result = solveCutLp();
                     tree_cut_stats.tree_cut_propagation_resolves += !staged_bounds.empty();
                 }
-                node_iters_out += tree_result.iterations;
-                node_work_out += tree_result.work_units;
+                DomainPropagationWork cutoff_work;
+                bool cutoff_retained = false;
+                if (schedule_cutoff && working_domain && visits_left > 0 && !deadline.passed() &&
+                    tree_result.status == Status::Optimal &&
+                    tree_result.objective < pruneBound(incumbent_snapshot)) {
+                    // Hold the row worklist across the primary solve. The
+                    // initial allowance reserved work for the fresh prices.
+                    auto& dp = *working_domain;
+                    attachObjectiveCutoff(dp, incumbent_snapshot);
+                    const ScheduledReducedCostInput prices{lp, rc_fixer_, incumbent_snapshot};
+                    const Int before_visits = visits_left;
+                    cutoff_retained = dp.propagateScheduled(
+                        visits_left, cutoff_work, tree_cut_stats.tree_propagation_schedule,
+                        {.sweep_rows = false,
+                         .first_new_row = lp.numRows(),
+                         .deadline = &deadline,
+                         .reduced_cost = rc_fixer_.loaded() ? &prices : nullptr,
+                         .history = &schedule_history});
+                    node_work_out += 1e-6 * (before_visits - visits_left);
+                    const auto bounds_before_cutoff = staged_bounds.size();
+                    if (cutoff_retained) {
+                        for (Index col = 0; col < problem_.num_cols; ++col) {
+                            const Real lb = dp.getLower(col);
+                            const Real ub = dp.getUpper(col);
+                            Real lp_lower;
+                            Real lp_upper;
+                            lp.getColBounds(col, lp_lower, lp_upper);
+                            if (lb <= ub && (lb > lp_lower || ub < lp_upper)) {
+                                staged_bounds.push_back({col, lb, ub});
+                            }
+                        }
+                        const auto cutoff_bounds =
+                            std::span<const RootCutBound>{staged_bounds}.subspan(
+                                bounds_before_cutoff);
+                        if (!cutoff_bounds.empty()) {
+                            const auto trial = tryScopedCutBounds(lp, cutoff_bounds);
+                            ++tree_cut_stats.tree_cut_propagation_resolves;
+                            node_iters_out += trial.iterations;
+                            node_work_out += trial.work_units;
+                            cutoff_retained = trial.status == Status::Optimal;
+                            if (cutoff_retained) {
+                                tree_result = trial;
+                                retained_cutoff_bounds = true;
+                            } else {
+                                staged_bounds.resize(bounds_before_cutoff);
+                            }
+                        }
+                    }
+                }
                 if (propagate_tree_cuts) {
+                    tree_cut_stats.tree_cut_propagation_budget_exhaustions +=
+                        round_start_visits > 0 && visits_left == 0;
                     const bool retained = tree_result.status == Status::Optimal;
                     auto& work = tree_cut_stats.tree_cut_propagation;
-                    addPropagationWork(work.rows, propagation.rows, retained);
-                    addPropagationWork(work.cliques, propagation.cliques, retained);
-                    addPropagationWork(work.implications, propagation.implications, retained);
+                    addPropagationWork(work, propagation, retained);
+                    addPropagationWork(work, cutoff_work, cutoff_retained);
                     if (!retained) {
                         ++tree_cut_stats.tree_cut_propagation_backouts;
                         // A contradiction from a tentative domain has no checked proof.
@@ -3891,8 +3958,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     ++tree_cut_stats.tree_nodes_with_cuts;
                     return false;
                 }
-                if (frac_count == 0 ||
-                    (improvement < kCutImprovementTol && staged_bounds.empty())) {
+                if (frac_count == 0 || (scheduled_tree && visits_left == 0) ||
+                    (!scheduled_tree && improvement < kCutImprovementTol &&
+                     staged_bounds.empty())) {
                     break;
                 }
             }
@@ -7370,8 +7438,9 @@ MipResult MipSolver::solveMinimizationOnce() {
                 }
             }
             t0 = std::chrono::steady_clock::now();
-            const bool root_lp_changed = runCuttingPlanes(lp, total_lp_iters, total_work,
-                                                          root_certificate_problem_ptr, cutoff);
+            const bool root_lp_changed =
+                runCuttingPlanes(lp, total_lp_iters, total_work, root_certificate_problem_ptr,
+                                 cutoff, incumbent, best_solution, solution_pool);
             lp_stats_.root_cut_lp_seconds =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             // A failed round is backed out (to the LP the cuts started
@@ -8128,7 +8197,8 @@ MipResult MipSolver::solveMinimizationOnce() {
 }
 
 bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
-                                 LpProblem* certificate_problem, Real cutoff) {
+                                 LpProblem* certificate_problem, Real cutoff, Real& incumbent,
+                                 std::vector<Real>& best_solution, SolutionPool& solution_pool) {
     if (cut_effort_mode_ == CutEffortMode::Off) {
         return false;
     }
@@ -8237,7 +8307,8 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
     double cut_node_work = 0.0;
     Int propagation_visits_left = root_cut_propagation_row_budget_;
     const bool limit_propagation_visits = propagation_visits_left > 0;
-    auto recordPropagationWork = [&](Int visits, const DomainPropagationWork& work) {
+    auto recordPropagationWork = [&](Int visits, const DomainPropagationWork& work,
+                                     std::uint64_t cutoff_nonrow_work) {
         auto& stats = cut_stats_.root_cut_inference;
         stats.rows.visits += work.rows.visits;
         stats.cliques.visits += work.cliques.visits;
@@ -8245,7 +8316,7 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         stats.inactive_cuts.visits += work.inactive_cuts.visits;
         cut_stats_.root_cut_propagation_row_visits +=
             static_cast<std::uint64_t>(visits) - work.cliques.visits - work.implications.visits -
-            work.inactive_cuts.visits;
+            work.inactive_cuts.visits - cutoff_nonrow_work;
         if (!limit_propagation_visits || visits == 0) {
             return false;
         }
@@ -8258,7 +8329,11 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
     if (certificate_problem != nullptr && std::isfinite(cutoff)) {
         cutoff_feedback.emplace(problem_, cutoff);
     }
+    const bool scheduled_root = propagation_scheduler_enabled_ &&
+                                (propagate_base_rows || inactive_propagation || cutoff_feedback);
+    PropagationScheduler schedule_history;
     std::span<const Real> guide;
+    bool cutoff_changed = false;
 
     for (Int round = 0; round < max_cut_rounds_; ++round) {
         const auto policy = cut_manager.beginRound(round, true, 0, cut_node_work, total_work);
@@ -8330,7 +8405,7 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
             dst.strengthen_efficacy_gain += src.strengthen_efficacy_gain;
         }
 
-        if (new_cuts == 0 && !root_cut_recheck_ && !inactive_propagation) {
+        if (new_cuts == 0 && !root_cut_recheck_ && !inactive_propagation && !cutoff_changed) {
             break;
         }
         // Past the deadline the round's cuts are not added: the re-solve
@@ -8342,17 +8417,20 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
             break;
         }
 
-        const auto selected_indices =
-            new_cuts > 0 || root_cut_recheck_
-                ? selectRootCuts(pool, policy, primals, root_cut_recheck_, guide)
-                : std::vector<Index>{};
+        std::vector<Index> selected_indices;
+        if (root_cut_recheck_ || new_cuts > 0) {
+            selected_indices =
+                scheduled_root && !root_cut_recheck_
+                    ? selectUninstalledRootCuts(pool, policy)
+                    : selectRootCuts(pool, policy, primals, root_cut_recheck_, guide);
+        }
         const auto inactive_cuts =
             inactive_propagation && certificate_problem != nullptr
                 ? pool.inactiveGlobalCuts(std::min(policy.max_cuts_per_round,
                                                    std::max(1, certificate_problem->num_rows / 4)),
                                           selected_indices, &next_inactive_cut)
                 : std::vector<const Cut*>{};
-        if (selected_indices.empty() && inactive_cuts.empty()) {
+        if (selected_indices.empty() && inactive_cuts.empty() && !cutoff_changed) {
             break;
         }
         const bool propagate_root_cuts = propagate_base_rows || !inactive_cuts.empty();
@@ -8420,10 +8498,16 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         }
 
         proposed_bounds.clear();
-        const Int visit_limit = certificate_problem == nullptr ? 0
-                                : limit_propagation_visits ? std::min(certificate_problem->num_rows,
-                                                                      propagation_visits_left)
-                                                           : certificate_problem->num_rows;
+        const Int row_limit = certificate_problem != nullptr ? certificate_problem->num_rows : 0;
+        // A wide LP can cost more to scan than its row pass. Allow the two
+        // scans and an initial row visit after reserving the usual base pass,
+        // while still respecting the configured cumulative cap.
+        const Int cutoff_reserve =
+            scheduled_root && cutoff_feedback ? 2 * cutoffScanWork(lp.numCols()) + 1 : 0;
+        const Int base_reserve = propagate_root_cuts ? row_limit - row_limit / 2 : 0;
+        const Int round_limit = std::max(row_limit, base_reserve + cutoff_reserve);
+        const Int visit_limit =
+            limit_propagation_visits ? std::min(round_limit, propagation_visits_left) : round_limit;
         Int round_visits_left = visit_limit;
         DomainPropagationWork inference_work;
         if (propagate_root_cuts && certificate_problem != nullptr) {
@@ -8434,7 +8518,11 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
             // Leave any propagation contradiction to the regular cut solve
             // and its back-out path.
             // Reserve part of the same cap for rows woken by cutoff deductions.
-            const Int global_limit = cutoff_feedback ? visit_limit - visit_limit / 2 : visit_limit;
+            Int global_limit = cutoff_feedback ? visit_limit - visit_limit / 2 : visit_limit;
+            if (cutoff_reserve > 0) {
+                global_limit = std::min(
+                    {global_limit, base_reserve, std::max<Int>(1, visit_limit - cutoff_reserve)});
+            }
             Int global_visits_left = global_limit;
             if (root_cut_inference_enabled_) {
                 if (cliquePropagationActive()) {
@@ -8453,7 +8541,8 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
                                                           .first_clique = pre_round_cliques,
                                                           .sweep_rows = propagate_base_rows,
                                                           .first_new_row = std::nullopt,
-                                                          .deadline = &deadline});
+                                                          .deadline = &deadline,
+                                                          .history = &schedule_history});
             } else if (root_cut_inference_enabled_ || !inactive_cuts.empty()) {
                 feasible = propagator.propagateWithInactiveCuts(global_visits_left, inference_work,
                                                                 inactive_cuts, pre_round_cliques,
@@ -8479,8 +8568,9 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
                 }
             }
         }
-        if (cuts_this_round == 0 && proposed_bounds.empty()) {
-            recordPropagationWork(visit_limit - round_visits_left, inference_work);
+        const bool staged_lp_change = cuts_this_round > 0 || !proposed_bounds.empty();
+        if (!staged_lp_change && !cutoff_changed) {
+            recordPropagationWork(visit_limit - round_visits_left, inference_work, 0);
             // With no LP change, stop at this bounded window.
             break;
         }
@@ -8491,20 +8581,38 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         // basis (zero iterations unless the warm check falls back cold), and
         // the caller reads the root point from it, which must be optimal
         // (#240). Correctness over the limit, in that rare cold case.
-        setLpTimeLimit(lp, timeLeft());
-        auto result = lp.solve();
-        setLpTimeLimit(lp, -1.0);
+        LpResult result{Status::Optimal, lp.getObjective(), 0};
+        if (staged_lp_change) {
+            setLpTimeLimit(lp, timeLeft());
+            result = lp.solve();
+            setLpTimeLimit(lp, -1.0);
+        }
+        cutoff_changed = false;
         total_lp_iters += result.iterations;
         total_work += result.work_units;
         cut_node_work += result.work_units;
         guide = {};
+        DomainPropagationWork cutoff_work;
         if (result.status == Status::Optimal && cutoff_feedback) {
             const double work_left = std::min({cut_per_round_work_budget_ - result.work_units,
                                                cut_per_node_work_budget_ - cut_node_work,
                                                cut_global_work_budget_ - total_work});
+            const auto deadline = Deadline::after(timeLeft());
+            const RootCutoffInference scope{
+                .first_new_row = lp.numRows() - cuts_this_round,
+                .cliques = root_cut_inference_enabled_ && cliquePropagationActive() ? &clique_table_
+                                                                                    : nullptr,
+                .implications =
+                    root_cut_inference_enabled_ && implication_graph_.numImplications() > 0
+                        ? &implication_graph_
+                        : nullptr};
             const auto feedback =
-                cutoff_feedback->update(*certificate_problem, lp, round_visits_left,
-                                        Deadline::after(timeLeft()), cut_stats_, work_left);
+                scheduled_root
+                    ? cutoff_feedback->updateScheduled(*certificate_problem, lp, round_visits_left,
+                                                       cutoff_work, schedule_history, deadline,
+                                                       cut_stats_, work_left, scope)
+                    : cutoff_feedback->update(*certificate_problem, lp, round_visits_left, deadline,
+                                              cut_stats_, work_left);
             total_lp_iters += feedback.iterations;
             total_work += feedback.work_units;
             cut_node_work += feedback.work_units;
@@ -8514,7 +8622,9 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         }
         auto& inference = cut_stats_.root_cut_inference;
         const bool propagation_budget_exhausted =
-            recordPropagationWork(visit_limit - round_visits_left, inference_work);
+            recordPropagationWork(visit_limit - round_visits_left, inference_work,
+                                  cutoff_work.objective.visits + cutoff_work.reduced_cost.visits +
+                                      cutoff_work.cliques.visits + cutoff_work.implications.visits);
 
         if (result.status != Status::Optimal) {
             clique_table_.truncate(pre_round_cliques);
@@ -8582,7 +8692,7 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
             inference.implications.tightenings += inference_work.implications.tightenings;
             inference.inactive_cuts.tightenings += inference_work.inactive_cuts.tightenings;
         }
-        if (root_cut_recheck_ || inactive_propagation) {
+        if (root_cut_recheck_ || inactive_propagation || scheduled_root) {
             pool.markInstalled(selected_indices);
         }
         total_cuts += cuts_this_round;
@@ -8612,6 +8722,16 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         }
 
         const auto new_primals = lp.getPrimalValues();
+        if (scheduled_root && !guide.empty()) {
+            const Real candidate = heuristic_detail::computeObjective(problem_, guide);
+            if (candidate < incumbent && isAcceptableIncumbent(guide)) {
+                incumbent = candidate;
+                best_solution.assign(guide.begin(), guide.end());
+                solution_pool.submit({best_solution, incumbent}, "root_cutoff_feedback", 0);
+                cutoff_feedback->strengthenCutoff(candidate);
+                cutoff_changed = true;
+            }
+        }
         pool.ageAll(new_primals, 1e-4, guide);
         pool.purge(10, inactive_propagation ? &next_inactive_cut : nullptr);
 
@@ -8630,7 +8750,15 @@ bool MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, dou
         if (propagation_budget_exhausted || result.work_units > cut_per_round_work_budget_) {
             break;
         }
-        if (cuts_this_round > 0) {
+        const bool retained_cutoff_bounds =
+            !guide.empty() &&
+            (cutoff_work.rows.tightenings > 0 || cutoff_work.objective.tightenings > 0 ||
+             cutoff_work.reduced_cost.tightenings > 0 || cutoff_work.cliques.tightenings > 0 ||
+             cutoff_work.implications.tightenings > 0);
+        if (scheduled_root && (cuts_this_round > 0 || !proposed_bounds.empty() ||
+                               retained_cutoff_bounds || cutoff_changed)) {
+            stagnation_rounds = 0;
+        } else if (cuts_this_round > 0) {
             stagnation_rounds = improvement < kCutImprovementTol ? stagnation_rounds + 1 : 0;
             if (stagnation_rounds >= 2) {
                 break;

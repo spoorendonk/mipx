@@ -99,6 +99,9 @@ public:
     /// Return indices of the top-k cuts by efficacy.
     [[nodiscard]] std::vector<Index> topByEfficacy(Index k) const;
 
+    /// Rank uninstalled cuts by insertion efficacy, breaking ties by index.
+    [[nodiscard]] std::vector<Index> uninstalledByEfficacy() const;
+
     /// Rank uninstalled cuts by their best efficacy across the given points.
     [[nodiscard]] std::vector<Index> violatedByEfficacy(std::span<const Real> primals,
                                                         Real min_violation,

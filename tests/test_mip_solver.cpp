@@ -1838,20 +1838,26 @@ TEST_CASE("MipSolver: inactive root pool deductions retain and roll back with th
 TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][cuts][domain]") {
     const bool pre_root = GENERATE(false, true);
     const Int row_budget = GENERATE(0, 1);
+    const bool scheduled = GENERATE(false, true);
+    const Int extra_columns = GENERATE(0, 128);
+    CAPTURE(pre_root, row_budget, scheduled, extra_columns);
     // Two independent fractional optima keep the LP below the incumbent
     // after a cut on either pair. The pricey fifth variable has reduced cost.
     LpProblem model;
-    model.num_cols = 5;
+    model.num_cols = 5 + extra_columns;
     model.obj = {-1.0, 0.0, -1.0, 0.0, -10.0};
+    model.obj.resize(model.num_cols, 0.0);
     model.obj_offset = 7.0;
     model.sense = Sense::Maximize;
-    model.col_lower.assign(5, 0.0);
+    model.col_lower.assign(model.num_cols, 0.0);
     model.col_upper.assign(5, 1.0);
+    model.col_upper.resize(model.num_cols, 0.0);
     model.col_type.assign(5, VarType::Binary);
+    model.col_type.resize(model.num_cols, VarType::Continuous);
     model.num_rows = 4;
     model.row_lower = {1.0, 0.0, 1.0, 0.0};
     model.row_upper.assign(4, kInf);
-    model.matrix = SparseMatrix(4, 5,
+    model.matrix = SparseMatrix(4, model.num_cols,
                                 {{0, 0, 1.0},
                                  {0, 1, 1.0},
                                  {1, 0, 1.0},
@@ -1868,6 +1874,7 @@ TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][
     solver.setSymmetryEnabled(false);
     solver.setRootCutoffFeedbackEnabled(true);
     solver.setRootCutPropagationRowBudget(row_budget);
+    solver.setPropagationSchedulerEnabled(scheduled);
     solver.setPreRootLpFreeEnabled(pre_root);
     solver.setMaxCutRounds(2);
     solver.setMaxCutsPerRound(1);
@@ -1882,15 +1889,81 @@ TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][
     CHECK(std::isfinite(solver.getPreRootStats().incumbent_at_root) == pre_root);
     const auto& stats = solver.getCutStats();
     CHECK(stats.root_rounds == (pre_root && row_budget == 1 ? 1 : 2));
+    const bool run_scans = scheduled && pre_root && row_budget == 0;
     CHECK(stats.root_cutoff_feedbacks == (pre_root ? 1 : 0));
-    CHECK(stats.root_cutoff_reduced_cost_tightenings == (pre_root ? 1 : 0));
-    CHECK(stats.root_cutoff_objective_tightenings == 0);
+    CHECK(stats.root_cutoff_reduced_cost_tightenings == (pre_root && !scheduled ? 1 : 0));
+    // Cheap-first scheduling lets the objective row reach the priced column
+    // first. Under a one-visit cap, only the new cut row runs.
+    CHECK(stats.root_cutoff_objective_tightenings == (run_scans ? 1 : 0));
     CHECK(stats.root_cutoff_resolves_backed_out == 0);
     if (!pre_root || row_budget == 1) {
         CHECK(stats.root_cut_propagation_row_visits == (pre_root ? 1 : 0));
         CHECK(stats.root_cut_propagation_budget_exhaustions == (pre_root ? 1 : 0));
     }
+    const auto& producers = stats.root_propagation_schedule.producers;
+    const auto& objective = producers[static_cast<std::size_t>(PropagationProducer::Objective)];
+    const auto& prices = producers[static_cast<std::size_t>(PropagationProducer::ReducedCost)];
+    const auto objective_calls = extra_columns > 0 ? 1U : 2U;
+    CHECK(objective.calls == (run_scans ? objective_calls : 0U));
+    CHECK(prices.calls == (run_scans ? 1U : 0U));
+    if (run_scans && extra_columns > 0) {
+        CHECK(prices.work > static_cast<std::uint64_t>(model.num_rows));
+    }
+    if (scheduled && pre_root && row_budget == 1) {
+        const auto budget = static_cast<std::size_t>(PropagationExit::Budget);
+        CHECK(objective.exits[budget] == 1);
+        CHECK(prices.exits[budget] == 1);
+    }
     CHECK(solver.getExactRefinementStats().certificate_passed);
+}
+
+TEST_CASE("MipSolver: scheduled cut rounds make progress at a flat objective",
+          "[mip][cuts][domain]") {
+    const bool scheduled = GENERATE(false, true);
+    const bool recheck = GENERATE(false, true);
+    CAPTURE(scheduled, recheck);
+    // Each row yields x + y >= 1. The family cap admits only one row per
+    // round. Without rechecking, extra pairs let separation discover fresh
+    // cuts on each pass. Every feasible LP point has the same cost.
+    LpProblem model;
+    model.num_rows = recheck ? 3 : 9;
+    model.num_cols = 2 * model.num_rows;
+    model.obj.assign(model.num_cols, 0.0);
+    model.col_lower.assign(model.num_cols, 0.0);
+    model.col_upper.assign(model.num_cols, 1.0);
+    model.col_type.assign(model.num_cols, VarType::Binary);
+    model.row_lower.assign(model.num_rows, 0.5);
+    model.row_upper.assign(model.num_rows, kInf);
+    std::vector<Triplet> coefficients;
+    for (Index row = 0; row < model.num_rows; ++row) {
+        coefficients.push_back({row, 2 * row, 1.0});
+        coefficients.push_back({row, 2 * row + 1, 1.0});
+    }
+    model.matrix = SparseMatrix(model.num_rows, model.num_cols, coefficients);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setNumThreads(1);
+    solver.setRootCutPropagationEnabled(true);
+    solver.setPropagationSchedulerEnabled(scheduled);
+    solver.setRootCutRecheck(recheck);
+    solver.setMaxCutsPerRound(1);
+    solver.setMaxCutRounds(4);
+    solver.setCutEffortMode(CutEffortMode::Conservative);
+    for (Int f = 1; f < static_cast<Int>(CutFamily::Count); ++f) {
+        const auto family = static_cast<CutFamily>(f);
+        solver.setCutFamilyEnabled(family, family == CutFamily::Gomory);
+    }
+    solver.load(model);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 0.0);
+    CHECK(result.best_bound == 0.0);
+    CHECK(solver.getCutStats().root_rounds == (scheduled ? 3 : 2));
+    CHECK(solver.getCutStats().root_cuts_added == (scheduled ? 3 : 2));
 }
 
 TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
