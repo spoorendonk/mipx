@@ -122,9 +122,10 @@ bool SeparatorManager::isEnabled(CutFamily family) const {
 
 Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
                                std::span<const Real> primals, CutPool& pool,
-                               CutSeparationStats& stats) {
+                               CutSeparationStats& stats, std::span<const Real> guide) {
     problem_ = &problem;
     Int total_added = 0;
+    const auto model_point = guide.empty() ? primals : guide;
 
     auto runFamily = [&](CutFamily family, auto&& fn) {
         if (!isEnabled(family) || pastDeadline()) {
@@ -139,32 +140,34 @@ Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
     runFamily(CutFamily::Gomory,
               [&](CutFamilyStats& s) { return separateGomory(lp, problem, primals, pool, s); });
     runFamily(CutFamily::Mir,
-              [&](CutFamilyStats& s) { return separateMir(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateMir(problem, model_point, pool, s); });
     runFamily(CutFamily::Cover,
-              [&](CutFamilyStats& s) { return separateCover(problem, primals, pool, s); });
-    runFamily(CutFamily::ImpliedBound,
-              [&](CutFamilyStats& s) { return separateImpliedBound(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateCover(problem, model_point, pool, s); });
+    runFamily(CutFamily::ImpliedBound, [&](CutFamilyStats& s) {
+        return separateImpliedBound(problem, model_point, pool, s);
+    });
     runFamily(CutFamily::Clique,
-              [&](CutFamilyStats& s) { return separateClique(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateClique(problem, model_point, pool, s); });
     runFamily(CutFamily::ZeroHalf,
-              [&](CutFamilyStats& s) { return separateZeroHalf(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateZeroHalf(problem, model_point, pool, s); });
     runFamily(CutFamily::Mixing,
-              [&](CutFamilyStats& s) { return separateMixing(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateMixing(problem, model_point, pool, s); });
     runFamily(CutFamily::Cmir,
               [&](CutFamilyStats& s) { return separateCmir(lp, problem, primals, pool, s); });
     runFamily(CutFamily::StrongCg,
               [&](CutFamilyStats& s) { return separateStrongCg(lp, problem, primals, pool, s); });
-    runFamily(CutFamily::LiftedCover,
-              [&](CutFamilyStats& s) { return separateLiftedCover(problem, primals, pool, s); });
+    runFamily(CutFamily::LiftedCover, [&](CutFamilyStats& s) {
+        return separateLiftedCover(problem, model_point, pool, s);
+    });
     runFamily(CutFamily::ModK,
-              [&](CutFamilyStats& s) { return separateModK(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateModK(problem, model_point, pool, s); });
     runFamily(CutFamily::IntersectionCut, [&](CutFamilyStats& s) {
         return separateIntersectionCut(lp, problem, primals, pool, s);
     });
     runFamily(CutFamily::MultiRow,
               [&](CutFamilyStats& s) { return separateMultiRow(lp, problem, primals, pool, s); });
     runFamily(CutFamily::FlowCover,
-              [&](CutFamilyStats& s) { return separateFlowCover(problem, primals, pool, s); });
+              [&](CutFamilyStats& s) { return separateFlowCover(problem, model_point, pool, s); });
 
     return total_added;
 }

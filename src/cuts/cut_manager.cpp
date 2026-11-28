@@ -8,9 +8,10 @@
 namespace mipx {
 
 std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
-                                  std::span<const Real> primals, bool recheck_violation) {
+                                  std::span<const Real> primals, bool recheck_violation,
+                                  std::span<const Real> guide) {
     const auto ranked = recheck_violation
-                            ? pool.violatedByEfficacy(primals, kDefaultCutMinViolation)
+                            ? pool.violatedByEfficacy(primals, kDefaultCutMinViolation, guide)
                             : pool.topByEfficacy(policy.max_cuts_per_round);
     std::vector<Index> selected;
     std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};

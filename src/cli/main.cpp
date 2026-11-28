@@ -57,6 +57,7 @@ void printUsage(FILE* out) {
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
                  "[--root-cut-propagation-row-budget N] [--root-flow-cover] "
+                 "[--root-cutoff-feedback] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
                  "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
@@ -199,6 +200,7 @@ int main(int argc, char* argv[]) {
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
+    bool root_cutoff_feedback = false;
     mipx::Int root_cut_propagation_row_budget = 0;
     bool root_flow_cover = false;
     bool sos2_adjacent_intervals = false;
@@ -426,6 +428,8 @@ int main(int argc, char* argv[]) {
             root_cut_recheck = true;
         } else if (arg == "--root-cut-propagation") {
             root_cut_propagation = true;
+        } else if (arg == "--root-cutoff-feedback") {
+            root_cutoff_feedback = true;
         } else if (arg == "--root-cut-propagation-row-budget" && i + 1 < argc) {
             const std::string_view value = argv[++i];
             const auto end = value.data() + value.size();
@@ -863,6 +867,7 @@ int main(int argc, char* argv[]) {
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
+            solver.setRootCutoffFeedbackEnabled(root_cutoff_feedback);
             solver.setRootCutPropagationRowBudget(root_cut_propagation_row_budget);
             solver.setRootFlowCoverEnabled(root_flow_cover);
             solver.setProbingEnabled(probing_enabled);

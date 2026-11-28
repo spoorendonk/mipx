@@ -40,10 +40,12 @@ struct CutRoundPolicy {
 };
 
 /// Choose cuts for a root round. Rechecking uses current violation in place of
-/// insertion efficacy and age, and applies the quota after family caps.
+/// insertion efficacy and age, and applies the quota after family caps. When
+/// given a cutoff guide, recheck against both points.
 [[nodiscard]] std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
                                                 std::span<const Real> primals,
-                                                bool recheck_violation);
+                                                bool recheck_violation,
+                                                std::span<const Real> guide = {});
 
 class CutManager {
 public:

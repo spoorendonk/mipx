@@ -79,8 +79,9 @@ public:
     /// parallel to a pooled cut of at least its efficacy.
     bool addCut(Cut cut);
 
-    /// Age all cuts by one round. Mark active cuts (those within tol of binding).
-    void ageAll(std::span<const Real> primals, Real active_tol = 1e-4);
+    /// Age all cuts by one round. A cut near binding at either point stays active.
+    void ageAll(std::span<const Real> primals, Real active_tol = 1e-4,
+                std::span<const Real> guide = {});
 
     /// Remove cuts older than the given threshold.
     void purge(Int age_threshold = 10);
@@ -88,9 +89,10 @@ public:
     /// Return indices of the top-k cuts by efficacy.
     [[nodiscard]] std::vector<Index> topByEfficacy(Index k) const;
 
-    /// Rank uninstalled cuts by efficacy at this point, using the pool's minimum efficacy.
+    /// Rank uninstalled cuts by their best efficacy across the given points.
     [[nodiscard]] std::vector<Index> violatedByEfficacy(std::span<const Real> primals,
-                                                        Real min_violation) const;
+                                                        Real min_violation,
+                                                        std::span<const Real> guide = {}) const;
 
     /// Record that these cuts are now rows of the LP.
     void markInstalled(std::span<const Index> indices);
