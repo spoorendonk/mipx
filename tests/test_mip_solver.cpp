@@ -2268,12 +2268,17 @@ TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[m
     solver.setTreePresolveEnabled(false);
     solver.setStrongBranchingEnabled(false);
     solver.setConflictRayShorteningEnabled(true);
+    solver.setConflictBenchStats(true);
     solver.load(lp);
     const auto scan = solver.solve();
     const auto stats = solver.getConflictStats();
     REQUIRE(scan.status == Status::Infeasible);
     REQUIRE(stats.ray_reused > 0);
     CHECK(stats.watch_candidates == 0);
+    CHECK(stats.linear_clause_checks > 0);
+    CHECK(stats.linear_literal_checks >= stats.linear_clause_checks);
+    REQUIRE(stats.root_bound_before_tree.has_value());
+    CHECK_THAT(*stats.root_bound_before_tree, WithinAbs(0.0, 1e-9));
 
     solver.setConflictWatchesEnabled(true);
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -2290,6 +2295,8 @@ TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[m
         CHECK(watched_stats.ray_shortened == stats.ray_shortened);
         CHECK(watched_stats.ray_reused == stats.ray_reused);
         CHECK(watched_stats.watch_candidates > 0);
+        CHECK(watched_stats.linear_clause_checks == 0);
+        CHECK(watched_stats.linear_literal_checks == 0);
     }
 
     solver.setConflictsEnabled(false);

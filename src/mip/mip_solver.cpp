@@ -2066,12 +2066,30 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
             assert(match != conflict_pool_.end() && match->watch_id == *query.triggered);
         }
     } else {
-        match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
+        const auto triggers = [&](const ConflictClause& clause, const auto& check_literal) {
             return !clause.bound_scope &&
                    std::ranges::all_of(clause.literals, [&](const auto& lit) {
-                       return entails(lit, clause.tolerance());
+                       return check_literal(lit, clause.tolerance());
                    });
-        });
+        };
+        if (conflict_bench_stats_) {
+            std::uint64_t clause_checks = 0;
+            std::uint64_t literal_checks = 0;
+            const auto count_literal = [&](const ConflictLiteral& lit, Real tolerance) {
+                ++literal_checks;
+                return entails(lit, tolerance);
+            };
+            match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
+                clause_checks += !clause.bound_scope;
+                return triggers(clause, count_literal);
+            });
+            conflict_stats_.linear_clause_checks += clause_checks;
+            conflict_stats_.linear_literal_checks += literal_checks;
+        } else {
+            match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
+                return triggers(clause, entails);
+            });
+        }
     }
     if (match == conflict_pool_.end()) {
         return false;
@@ -6772,6 +6790,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     }
 
+    if (conflict_bench_stats_) {
+        conflict_stats_.root_bound_before_tree = log_obj_sign_ * root_bound;
+    }
     // Check if root solution is integer feasible.
     root_basis = lp.getBasis();
     // Snapshot the root relaxation's reduced costs *here*, next to the basis and
@@ -7035,6 +7056,10 @@ MipResult MipSolver::solveMinimizationOnce() {
         solveParallel(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
                       solution_pool, incumbent, best_solution, root_bound, elapsed);
     } else {
+        if (conflict_bench_stats_ && !queue.empty()) {
+            conflict_stats_.bound_conflict_learning_in_tree = boundConflictLearningActive();
+            conflict_stats_.reconvergence_cuts_in_tree = reconvergence_model.has_value();
+        }
         std::span<const Index> inference_col_mapping;
         if (directional_inference_enabled_ && did_presolve) {
             branch_inference_stats_.resize(original_problem.num_cols);

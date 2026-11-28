@@ -158,6 +158,11 @@ struct MipConflictStats {
     Int lp_cutoff_proofs_learned = 0;
     Int lp_combined_proofs_learned = 0;
     Int reconvergence_cuts_added = 0;
+    std::uint64_t linear_clause_checks = 0;
+    std::uint64_t linear_literal_checks = 0;
+    std::optional<Real> root_bound_before_tree = std::nullopt;
+    bool bound_conflict_learning_in_tree = false;
+    bool reconvergence_cuts_in_tree = false;
 };
 
 struct MipPreRootStats {
@@ -507,6 +512,8 @@ public:
     }
     /// Index learned path no-goods in the serial tree. Off by default.
     void setConflictWatchesEnabled(bool enabled) { conflict_watches_enabled_ = enabled; }
+    /// Collect extra comparison counters for serial conflict benchmarks.
+    void setConflictBenchStats(bool enabled) { conflict_bench_stats_ = enabled; }
 
     /// Record propagation explanations in the node domains (off by default).
     void setBoundReasonsEnabled(bool enabled) { bound_reasons_enabled_ = enabled; }
@@ -1007,6 +1014,7 @@ private:
     bool conflicts_enabled_ = true;
     bool conflict_activity_branching_enabled_ = false;
     bool conflict_watches_enabled_ = false;
+    bool conflict_bench_stats_ = false;
     bool bound_reasons_enabled_ = false;
     bool bound_conflict_learning_enabled_ = false;
     bool reconvergence_cuts_enabled_ = false;
