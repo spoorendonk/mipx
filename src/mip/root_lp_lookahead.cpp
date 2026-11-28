@@ -92,16 +92,26 @@ std::vector<ColumnBounds> pathBounds(const LpProblem& problem,
 void MipSolver::runRootLpLookahead(const DualSimplexOptions& root_options,
                                    std::span<const Real> root_primals,
                                    std::span<const BasisStatus> root_basis, Real root_objective,
-                                   Real incumbent) {
+                                   Real incumbent, const OverheadBudget::Phase& phase) {
     auto& stats = root_lp_lookahead_stats_;
-    const auto deadline = Deadline::after(timeLeft());
-    Int work_left = root_lp_lookahead_work_;
+    if (root_lp_lookahead_work_ == 0) {
+        stats.stop = RootLpLookaheadStop::WorkLimit;
+        return;
+    }
+    const auto& deadline = phase.deadline;
+    const auto deadline_stop =
+        phase.allowance_deadline ? RootLpLookaheadStop::Allowance : RootLpLookaheadStop::Deadline;
+    const bool shared_work_cap =
+        phase.work_left < static_cast<std::uint64_t>(root_lp_lookahead_work_);
+    Int work_left =
+        static_cast<Int>(std::min<std::uint64_t>(root_lp_lookahead_work_, phase.work_left));
     stats.stop = RootLpLookaheadStop::Exhausted;
     const auto stopped = [&]() {
         if (deadline.passed()) {
-            stats.stop = RootLpLookaheadStop::Deadline;
-        } else if (work_left == 0) {
-            stats.stop = RootLpLookaheadStop::WorkLimit;
+            stats.stop = deadline_stop;
+        } else if (work_left <= 0) {
+            stats.stop =
+                shared_work_cap ? RootLpLookaheadStop::Allowance : RootLpLookaheadStop::WorkLimit;
         }
         return stats.stop != RootLpLookaheadStop::Exhausted;
     };
@@ -115,6 +125,10 @@ void MipSolver::runRootLpLookahead(const DualSimplexOptions& root_options,
 
     DomainPropagator domain;
     domain.load(problem_, true);
+    if (!domain.prepareTimedPropagation(deadline)) {
+        stats.stop = deadline_stop;
+        return;
+    }
     const auto& trail = *domain.boundReasons();
     DualSimplexSolver lp;
     lp.setVerbose(false);

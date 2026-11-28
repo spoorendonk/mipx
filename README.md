@@ -114,13 +114,15 @@ Key options:
 | `--concurrent-root` | off | Race LP solvers at root |
 | `--quiet` | off | Suppress progress output |
 | `--probing` / `--no-probing` | off | Root probing in the solver (fixings, implications, variable bounds) |
-| `--probing-rounds <n>` / `--probing-probes <n>` / `--probing-time <s>` | 3 / 10000 / 30 | Rounds, probes per legacy round, and a time limit checked between pairs in both modes |
+| `--probing-rounds <n>` / `--probing-probes <n>` / `--probing-time <s>` | 3 / 10000 / 30 | Rounds, probes per legacy round, and a time limit checked between pairs. Systematic probing uses its pair and row caps when a deterministic root allowance is active |
 | `--systematic-probing` / `--no-systematic-probing` | off | Use a single checked root probing pass in column order. Learn binary fixings and implications and publish checked conflicts in serial search. Takes precedence over `--probing` |
 | `--systematic-probing-pairs <n>` / `--systematic-probing-rows <n>` | 128 / 10000 | Cap complete binary probe pairs and row visits per branch |
 | `--root-rapid-learning` / `--no-root-rapid-learning` | off | Search binary branches with row propagation before the root LP. Import checked global bounds, serial conflicts and validated incumbents. Stop after two consecutive eight-node blocks yield no new facts |
 | `--root-rapid-learning-nodes <n>` / `--root-rapid-learning-rows <n>` | 128 / 20000 | Cap search nodes and total row visits. A zero cap skips the stage |
 | `--root-lp-lookahead` / `--no-root-lp-lookahead` | off | Probe shallow paths after the first optimal root LP. Use qualified LP gains for pseudocosts and first-pass propagation for serial inference history when inference scoring or coverage is enabled. Publish independently checked global propagation conflicts to the serial tree |
 | `--root-lp-lookahead-depth <n>` / `--root-lp-lookahead-work <n>` | 2 / 20000 | Explore two levels, or three with depth `3`, subject to the solve deadline. Share one work allowance across propagation and proof row visits, LP starts and simplex iterations. A zero work cap skips the stage |
+| `--root-learning-allowance <fraction> <work>` | off | Share an allowance across enabled systematic probing, rapid learning and LP look-ahead. With a finite solve limit use its fraction in [0, 1], capped by remaining time. With an infinite limit charge one unit per probing pair or rapid-learning node, look-ahead row or proof visit, LP start and simplex iteration |
+| `--restart-overhead-allowance <fraction> <work>` | off | Cap cumulative serial restart preparation. With a finite solve limit use its fraction in [0, 1], capped by remaining time. With an infinite limit charge one unit per preparation and one per queued node or path bound visited while looking for an incumbent-compatible node. Skip counts are per-node eligibility checks |
 | `--presolve-probing` / `--no-presolve-probing` | off | Probing pass inside presolve |
 | `--presolve-probing-rounds <n>` / `--presolve-probing-probes <n>` / `--presolve-probing-time <s>` | 2 / 5000 / 5 | Its budget, per presolve call |
 | `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |

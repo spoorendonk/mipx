@@ -890,10 +890,17 @@ TEST_CASE("Systematic probing requires a completed proof to exclude a branch", "
     CHECK(engine.fixings().empty());
 
     config.systematic_rows_per_branch = 4;
-    engine.probe(model, graph, vb_store, config);
-    REQUIRE(engine.checkedConflicts().size() == 1);
-    REQUIRE(engine.fixings().size() == 1);
-    CHECK(engine.fixings().front() == std::pair{0, 0.0});
+    for (const bool timed : {false, true}) {
+        CAPTURE(timed);
+        config.deadline = timed ? Deadline::after(60) : Deadline{};
+        const auto completed = engine.probe(model, graph, vb_store, config);
+        CHECK_FALSE(completed.stopped_at_deadline);
+        REQUIRE(engine.checkedConflicts().size() == 1);
+        CHECK(engine.checkedConflicts().front().variable == 0);
+        CHECK_FALSE(engine.checkedConflicts().front().is_upper);
+        REQUIRE(engine.fixings().size() == 1);
+        CHECK(engine.fixings().front() == std::pair{0, 0.0});
+    }
 
     model.col_type[1] = VarType::SemiContinuous;
     const auto skipped = engine.probe(model, graph, vb_store, config);

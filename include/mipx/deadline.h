@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <optional>
 
 namespace mipx {
 
@@ -16,13 +17,14 @@ public:
     /// seconds < 0 (or NaN): none; 0 or more: that long from now. Above
     /// kNever (an infinite limit included) also none: the clock's duration
     /// would overflow.
-    [[nodiscard]] static Deadline after(double seconds) {
+    [[nodiscard]] static Deadline after(double seconds,
+                                        std::optional<Clock::time_point> start = std::nullopt) {
         constexpr double kNever = 1e9;  // ~32 years
         Deadline d;
         if (seconds >= 0.0 && seconds <= kNever) {
             d.set_ = true;
-            d.at_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(
-                                       std::chrono::duration<double>(seconds));
+            d.at_ = (start ? *start : Clock::now()) + std::chrono::duration_cast<Clock::duration>(
+                                                          std::chrono::duration<double>(seconds));
         }
         return d;
     }
@@ -50,6 +52,9 @@ public:
     [[nodiscard]] bool isSet() const { return set_; }
     /// The time has passed, or the stop flag is raised.
     [[nodiscard]] bool passed() const { return (set_ && Clock::now() >= at_) || stopped(); }
+    [[nodiscard]] bool passed(Clock::time_point now) const {
+        return (set_ && now >= at_) || stopped();
+    }
     /// The stop flag is raised, whatever the time.
     [[nodiscard]] bool stopped() const {
         return stop_ != nullptr && stop_->load(std::memory_order_relaxed);

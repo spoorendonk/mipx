@@ -36,6 +36,7 @@ void printUsage(FILE* out) {
                  "[--geometric-restarts|--no-geometric-restarts] "
                  "[--incumbent-guided-restarts|--no-incumbent-guided-restarts] "
                  "[--restart-branch-diversification|--no-restart-branch-diversification] "
+                 "[--restart-overhead-allowance FRACTION WORK] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
@@ -77,6 +78,7 @@ void printUsage(FILE* out) {
                  "[--root-rapid-learning-nodes N] [--root-rapid-learning-rows N] "
                  "[--root-lp-lookahead|--no-root-lp-lookahead] "
                  "[--root-lp-lookahead-depth 2|3] [--root-lp-lookahead-work N] "
+                 "[--root-learning-allowance FRACTION WORK] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
                  "[--presolve-probing-probes N] [--presolve-probing-time S] "
                  "[--clique-table|--no-clique-table] "
@@ -191,6 +193,8 @@ int main(int argc, char* argv[]) {
     bool geometric_restarts = false;
     bool incumbent_guided_restarts = false;
     bool restart_branch_diversification = false;
+    std::optional<mipx::MipOverheadLimit> restart_overhead_allowance;
+    std::optional<mipx::MipOverheadLimit> root_learning_allowance;
     bool bound_conflict_learning = false;
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
@@ -327,6 +331,30 @@ int main(int argc, char* argv[]) {
             restart_branch_diversification = true;
         } else if (arg == "--no-restart-branch-diversification") {
             restart_branch_diversification = false;
+        } else if (arg == "--restart-overhead-allowance" || arg == "--root-learning-allowance") {
+            if (i + 2 >= argc) {
+                std::fprintf(stderr, "%s requires a fraction in [0, 1] and a work limit\n",
+                             argv[i]);
+                return 1;
+            }
+            const char* fraction_text = argv[++i];
+            char* fraction_end = nullptr;
+            const double fraction = std::strtod(fraction_text, &fraction_end);
+            const std::string_view work_text = argv[++i];
+            std::uint64_t work_limit = 0;
+            const char* end = work_text.data() + work_text.size();
+            const auto [parsed, ec] = std::from_chars(work_text.data(), end, work_limit);
+            if (fraction_end == fraction_text || *fraction_end != '\0' ||
+                !std::isfinite(fraction) || fraction < 0.0 || fraction > 1.0 || ec != std::errc{} ||
+                parsed != end) {
+                std::fprintf(stderr,
+                             "%s requires a fraction in [0, 1] and an unsigned work limit\n",
+                             argv[i - 2]);
+                return 1;
+            }
+            auto& allowance = arg == "--restart-overhead-allowance" ? restart_overhead_allowance
+                                                                    : root_learning_allowance;
+            allowance = mipx::MipOverheadLimit{fraction, work_limit};
         } else if (arg == "--bound-conflict-learning") {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
@@ -1008,6 +1036,8 @@ int main(int argc, char* argv[]) {
                 solver.setSystematicProbingRowsPerBranch(*systematic_probing_rows);
             }
             solver.setRootRapidLearningEnabled(root_rapid_learning);
+            solver.setRootLearningAllowance(root_learning_allowance);
+            solver.setRestartOverheadAllowance(restart_overhead_allowance);
             if (rapid_learning_nodes) {
                 solver.setRootRapidLearningMaxNodes(*rapid_learning_nodes);
             }
@@ -1146,20 +1176,26 @@ int main(int argc, char* argv[]) {
             }
             if (systematic_probing) {
                 const auto& stats = solver.getProbingStats();
+                const char* allowance_report = "";
+                if (root_learning_allowance) {
+                    allowance_report = stats.stopped_by_learning_allowance ? " allowance_stop=1"
+                                                                           : " allowance_stop=0";
+                }
                 log.log(
                     "Systematic probing: down=%d up=%d rows=%llu fixings=%d implications=%d "
-                    "conflicts=%d tree_fixings=%llu tree_cutoffs=%llu\n",
+                    "conflicts=%d tree_fixings=%llu tree_cutoffs=%llu%s\n",
                     stats.branches_probed[0], stats.branches_probed[1],
                     static_cast<unsigned long long>(stats.row_visits), stats.fixings_found,
                     stats.implications_found, stats.checked_conflicts_published,
                     static_cast<unsigned long long>(stats.tree_implication_fixings),
-                    static_cast<unsigned long long>(stats.tree_implication_cutoffs));
+                    static_cast<unsigned long long>(stats.tree_implication_cutoffs),
+                    allowance_report);
             }
             if (root_rapid_learning) {
                 const auto& stats = solver.getRapidLearningStats();
                 constexpr auto stops =
                     std::array{"not-run",  "exhausted", "node-limit", "row-limit",
-                               "no-yield", "deadline",  "infeasible"};
+                               "no-yield", "deadline",  "infeasible", "allowance"};
                 log.log(
                     "Root rapid learning: stop=%s nodes=%d rows=%d empty_blocks=%d "
                     "bounds=%llu conflicts=%d incumbents=%d rejected_proofs=%llu "
@@ -1175,7 +1211,8 @@ int main(int argc, char* argv[]) {
             }
             if (root_lp_lookahead) {
                 const auto& stats = solver.getRootLpLookaheadStats();
-                constexpr auto stops = std::array{"not-run", "exhausted", "work-limit", "deadline"};
+                constexpr auto stops =
+                    std::array{"not-run", "exhausted", "work-limit", "deadline", "allowance"};
                 mipx::Int gains = 0;
                 mipx::Int depth = 0;
                 for (const auto& sample : stats.samples) {
@@ -1190,6 +1227,22 @@ int main(int argc, char* argv[]) {
                     stats.lp_solves, stats.lp_iterations, gains, stats.conflicts_imported,
                     stats.proofs_rejected, stats.duplicate_conflicts,
                     solver.getBranchingStats().root_branch_variable);
+            }
+            if (root_learning_allowance) {
+                const auto& usage = solver.getRootLearningUsage();
+                log.log("Root learning allowance: seconds=%.6f work=%llu\n", usage.seconds,
+                        static_cast<unsigned long long>(usage.work));
+            }
+            if (restart_overhead_allowance) {
+                const auto& usage = solver.getRestartOverheadUsage();
+                const auto& stats = solver.getRestartOverheadStats();
+                log.log(
+                    "Restart overhead allowance: seconds=%.6f work=%llu skipped_budget=%llu "
+                    "skipped_small_frontier=%llu skipped_recent_progress=%llu\n",
+                    usage.seconds, static_cast<unsigned long long>(usage.work),
+                    static_cast<unsigned long long>(stats.skipped_budget),
+                    static_cast<unsigned long long>(stats.skipped_small_frontier),
+                    static_cast<unsigned long long>(stats.skipped_recent_progress));
             }
             if (print_det_heur_gate) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",

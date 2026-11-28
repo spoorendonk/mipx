@@ -57,6 +57,10 @@ public:
     /// are local to this domain. A negative global_rows makes all rows global.
     void load(const LpProblem& problem, bool record_reasons = false, Index global_rows = -1);
 
+    /// Prepare the column index for a timed pass, polling its deadline during
+    /// the transpose. An unset deadline leaves column access lazy.
+    [[nodiscard]] bool prepareTimedPropagation(const Deadline& deadline) const;
+
     [[nodiscard]] const BoundReasonTrail* boundReasons() const {
         return reasons_ ? &*reasons_ : nullptr;
     }

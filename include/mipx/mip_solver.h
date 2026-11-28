@@ -8,6 +8,7 @@
 #include "mipx/core.h"
 #include "mipx/cut_manager.h"
 #include "mipx/cut_pool.h"
+#include "mipx/deadline.h"
 #include "mipx/domain.h"
 #include "mipx/dual_simplex.h"
 #include "mipx/exact_refinement.h"
@@ -270,6 +271,28 @@ struct MipSearchStats {
     Index first_restart_branch_variable = -1;
 };
 
+/// Finite solves use a fraction of the original solve limit, clipped to the
+/// remaining solve time. Unlimited solves use the deterministic work limit.
+struct MipOverheadLimit {
+    double time_fraction = 0.0;
+    std::uint64_t work_limit = 0;
+};
+
+/// Both counters are recorded when the allowance is enabled. Only the counter
+/// corresponding to the solve's limit determines when the phase stops.
+struct MipOverheadUsage {
+    double seconds = 0.0;
+    std::uint64_t work = 0;
+};
+
+/// Per-node eligibility checks skipped for each reason. A skip leaves restart
+/// history intact, so the same reason can apply at consecutive checks.
+struct MipRestartOverheadStats {
+    std::uint64_t skipped_budget = 0;
+    std::uint64_t skipped_small_frontier = 0;
+    std::uint64_t skipped_recent_progress = 0;
+};
+
 struct MipSerialNodePolicyStats {
     std::optional<NodePolicy> policy;
     Int nodes_selected = 0;
@@ -336,6 +359,7 @@ struct MipProbingStats {
     bool enabled = false;
     Int variables_probed = 0;
     bool systematic = false;
+    bool stopped_by_learning_allowance = false;
     std::array<Int, 2> branches_probed{};
     std::uint64_t row_visits = 0;
     std::uint64_t implication_candidates = 0;
@@ -358,7 +382,8 @@ enum class RapidLearningStop {
     RowLimit,
     NoYield,
     Deadline,
-    Infeasible
+    Infeasible,
+    Allowance
 };
 
 struct MipRapidLearningStats {
@@ -376,7 +401,7 @@ struct MipRapidLearningStats {
     std::uint64_t tree_conflict_cutoffs = 0;
 };
 
-enum class RootLpLookaheadStop { NotRun, Exhausted, WorkLimit, Deadline };
+enum class RootLpLookaheadStop { NotRun, Exhausted, WorkLimit, Deadline, Allowance };
 
 struct MipRootLpLookaheadSample {
     BranchDecision branch;  // Working column and depth.
@@ -674,6 +699,13 @@ public:
     void setRestartBranchDiversificationEnabled(bool enabled) {
         restart_branch_diversification_enabled_ = enabled;
     }
+    /// Limit optional serial restart preparation. Empty disables the allowance.
+    /// Throws std::invalid_argument unless the supplied fraction is in [0, 1].
+    void setRestartOverheadAllowance(std::optional<MipOverheadLimit> limit);
+    const MipOverheadUsage& getRestartOverheadUsage() const { return restart_overhead_.usage; }
+    const MipRestartOverheadStats& getRestartOverheadStats() const {
+        return restart_overhead_stats_;
+    }
     /// Opt in to exact-safe serial restarts on recent learned conflicts.
     /// Evidence decays by 0.995 per node, gains one per nonempty published
     /// conflict, and resets on any restart.
@@ -839,6 +871,11 @@ public:
         root_rapid_learning_row_budget_ = std::max<Int>(0, rows);
     }
     const MipRapidLearningStats& getRapidLearningStats() const { return rapid_learning_stats_; }
+    /// Share an allowance across systematic probing, rapid learning and LP look-ahead.
+    /// Empty disables the allowance.
+    /// Throws std::invalid_argument unless the supplied fraction is in [0, 1].
+    void setRootLearningAllowance(std::optional<MipOverheadLimit> limit);
+    const MipOverheadUsage& getRootLearningUsage() const { return root_learning_overhead_.usage; }
     void setRootLpLookaheadEnabled(bool enabled) { root_lp_lookahead_enabled_ = enabled; }
     void setRootLpLookaheadDepth(Int depth) { root_lp_lookahead_depth_ = std::clamp(depth, 2, 3); }
     void setRootLpLookaheadWork(Int work) { root_lp_lookahead_work_ = std::max<Int>(0, work); }
@@ -1093,15 +1130,39 @@ private:
     /// dp.propagate(), counting what the objective row did in it.
     bool propagateNode(DomainPropagator& dp);
 
+    struct OverheadBudget {
+        using Clock = Deadline::Clock;
+        struct Phase {
+            Clock::time_point started;
+            Deadline deadline;
+            std::uint64_t work_left;
+            bool allowance_deadline;
+
+            bool canStart() const { return work_left > 0 && !deadline.passed(); }
+        };
+
+        std::optional<MipOverheadLimit> limit;
+        MipOverheadUsage usage;
+        double time_allowance = kInf;
+        bool timed = false;
+
+        void setLimit(std::optional<MipOverheadLimit> new_limit);
+        void reset(double solve_limit);
+        double secondsLeft(double global_left) const;
+        Phase start(double global_left, Clock::time_point now) const;
+        void charge(const Phase& phase, Clock::time_point now, std::uint64_t work);
+    };
+
     /// Run root probing and populate implication graph / variable bounds.
     /// Returns true if probing proved the problem infeasible.
-    [[nodiscard]] bool runRootProbing();
+    [[nodiscard]] bool runRootProbing(const OverheadBudget::Phase* phase);
     [[nodiscard]] bool runRootRapidLearning(SolutionPool& solutions, const LpProblem* loaded,
-                                            const Presolver* postsolve);
+                                            const Presolver* postsolve,
+                                            const OverheadBudget::Phase& phase);
     void runRootLpLookahead(const DualSimplexOptions& root_options,
                             std::span<const Real> root_primals,
                             std::span<const BasisStatus> root_basis, Real root_objective,
-                            Real incumbent);
+                            Real incumbent, const OverheadBudget::Phase& phase);
 
     [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
@@ -1156,7 +1217,7 @@ private:
     // deadline every stage of the solve runs against (#336).
     std::chrono::steady_clock::time_point solve_start_ = std::chrono::steady_clock::now();
     // Seconds left before the deadline, at least 0.
-    [[nodiscard]] double timeLeft() const;
+    [[nodiscard]] double timeLeft(Deadline::Clock::time_point now = Deadline::Clock::now()) const;
     Real gap_tol_ = 1e-4;
     bool verbose_ = true;
     bool presolve_ = true;
@@ -1223,6 +1284,8 @@ private:
     bool geometric_restarts_enabled_ = false;
     bool incumbent_guided_restarts_enabled_ = false;
     bool restart_branch_diversification_enabled_ = false;
+    OverheadBudget restart_overhead_;
+    MipRestartOverheadStats restart_overhead_stats_;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
     Int conflict_restart_threshold_ = 0;
@@ -1313,6 +1376,7 @@ private:
     ImplicationGraph implication_graph_;
     VariableBoundStore vb_store_;
     MipProbingStats probing_stats_{};
+    OverheadBudget root_learning_overhead_;
     bool root_rapid_learning_enabled_ = false;
     Int root_rapid_learning_max_nodes_ = 128;
     Int root_rapid_learning_row_budget_ = 20000;

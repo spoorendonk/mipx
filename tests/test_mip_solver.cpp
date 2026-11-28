@@ -24,6 +24,7 @@ using mipx::test::buildSlowRootSetCover;
 namespace mipx::test {
 struct MipSolverRestartAccess {
     static const auto& conflictScores(const MipSolver& solver) { return solver.conflict_scores_; }
+    static auto overheadBudget() { return MipSolver::OverheadBudget{}; }
 };
 }  // namespace mipx::test
 
@@ -3361,6 +3362,105 @@ TEST_CASE("Root LP look-ahead warms a real root split within a deterministic wor
         CHECK(solver.getBranchingStats().root_branch_variable == 0);
     }
 
+    solver.setRootLpLookaheadWork(20000);
+    solver.setSystematicProbingEnabled(true);
+    solver.setSystematicProbingMaxPairs(1);
+    solver.setRootRapidLearningEnabled(true);
+    solver.setRootRapidLearningMaxNodes(1);
+    solver.setTimeLimit(kInf);
+    const auto& probing = solver.getProbingStats();
+    const auto& rapid = solver.getRapidLearningStats();
+
+    // Each stage draws from the same pool. A local limit can leave the
+    // remaining work for a later stage, even if that stage runs out mid-probe.
+    solver.setRootLearningAllowance(MipOverheadLimit{0.0, 6});
+    check_optimal();
+    CHECK(probing.variables_probed == 1);
+    CHECK_FALSE(probing.stopped_by_learning_allowance);
+    CHECK(rapid.nodes == 1);
+    CHECK(rapid.stop == RapidLearningStop::NodeLimit);
+    CHECK(stats.stop == RootLpLookaheadStop::Allowance);
+    CHECK(stats.row_visits == 3);
+    CHECK(stats.lp_solves == 1);
+    CHECK(stats.lp_iterations == 0);
+    CHECK(solver.getRootLearningUsage().work == 6);
+
+    solver.setSystematicProbingMaxPairs(3);
+    solver.setRootLearningAllowance(MipOverheadLimit{0.0, 1});
+    check_optimal();
+    CHECK(probing.variables_probed == 1);
+    CHECK(probing.stopped_by_learning_allowance);
+    CHECK(rapid.nodes == 0);
+    CHECK(rapid.stop == RapidLearningStop::Allowance);
+    CHECK(stats.stop == RootLpLookaheadStop::Allowance);
+    CHECK(stats.samples.empty());
+    CHECK(solver.getRootLearningUsage().work == 1);
+
+    solver.setSystematicProbingMaxPairs(1);
+    solver.setRootRapidLearningMaxNodes(100);
+    solver.setRootLearningAllowance(MipOverheadLimit{0.0, 2});
+    check_optimal();
+    CHECK(probing.variables_probed == 1);
+    CHECK(rapid.nodes == 1);
+    CHECK(rapid.stop == RapidLearningStop::Allowance);
+    CHECK(stats.stop == RootLpLookaheadStop::Allowance);
+    CHECK(stats.samples.empty());
+    CHECK(solver.getRootLearningUsage().work == 2);
+
+    for (const double time_limit : {kInf, 60.0}) {
+        CAPTURE(time_limit);
+        solver.setTimeLimit(time_limit);
+        solver.setRootLearningAllowance(MipOverheadLimit{0.0, time_limit == kInf ? 0u : 100u});
+        check_optimal();
+        CHECK(probing.variables_probed == 0);
+        CHECK(probing.stopped_by_learning_allowance);
+        CHECK(rapid.nodes == 0);
+        CHECK(rapid.stop == RapidLearningStop::Allowance);
+        CHECK(stats.stop == RootLpLookaheadStop::Allowance);
+        CHECK(stats.samples.empty());
+        CHECK(solver.getRootLearningUsage().work == 0);
+        CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
+    }
+    solver.setTimeLimit(kInf);
+    solver.setRootLearningAllowance(MipOverheadLimit{0, 0});
+    solver.setRootRapidLearningMaxNodes(0);
+    solver.setRootLpLookaheadWork(0);
+    check_optimal();
+    CHECK(rapid.stop == RapidLearningStop::NodeLimit);
+    CHECK(stats.stop == RootLpLookaheadStop::WorkLimit);
+    CHECK(solver.getRootLearningUsage().work == 0);
+
+    solver.setTimeLimit(60);
+    solver.setRootRapidLearningMaxNodes(1);
+    solver.setRootLpLookaheadWork(20000);
+    solver.setRootLearningAllowance(std::nullopt);
+    check_optimal();
+    REQUIRE(stats.stop == RootLpLookaheadStop::Exhausted);
+    REQUIRE_FALSE(stats.samples.empty());
+    const auto unrestricted = stats;
+    solver.setRootLearningAllowance(MipOverheadLimit{1, 0});
+    check_optimal();
+    CHECK_FALSE(probing.stopped_by_learning_allowance);
+    CHECK(probing.variables_probed == 1);
+    CHECK(rapid.stop == RapidLearningStop::NodeLimit);
+    CHECK(rapid.nodes == 1);
+    CHECK(stats.stop == unrestricted.stop);
+    CHECK(stats.row_visits == unrestricted.row_visits);
+    CHECK(stats.lp_solves == unrestricted.lp_solves);
+    CHECK(stats.lp_iterations == unrestricted.lp_iterations);
+    REQUIRE(stats.samples.size() == unrestricted.samples.size());
+    for (std::size_t i = 0; i < stats.samples.size(); ++i) {
+        CHECK(stats.samples[i].lp_status == unrestricted.samples[i].lp_status);
+        CHECK(stats.samples[i].gain_per_unit == unrestricted.samples[i].gain_per_unit);
+    }
+    CHECK(solver.getRootLearningUsage().work ==
+          static_cast<std::uint64_t>(2 + stats.row_visits + stats.lp_solves + stats.lp_iterations));
+
+    solver.setTimeLimit(kInf);
+    solver.setRootLearningAllowance(std::nullopt);
+    solver.setSystematicProbingEnabled(false);
+    solver.setRootRapidLearningEnabled(false);
+
     // With x0 = 1, propagation rounds x1's upper bound to 0, while the
     // pure-path LP still takes x1 = 0.5. The down branch can yield an LP
     // gain but has no first-pass inference of its own.
@@ -3932,6 +4032,78 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(policy_stats.nodes_selected == pinned.nodes - 1);
 }
 
+TEST_CASE("MipSolver: overhead accounting uses the earlier scripted deadline", "[mip][overhead]") {
+    using namespace std::chrono_literals;
+    const Deadline::Clock::time_point start{};
+    auto budget = test::MipSolverRestartAccess::overheadBudget();
+    budget.setLimit(MipOverheadLimit{0.25, 3});
+    budget.reset(20);
+
+    const auto first = budget.start(19, start + 1s);
+    CHECK(first.allowance_deadline);
+    CHECK_FALSE(first.deadline.passed(start + 6s - 1ms));
+    CHECK(first.deadline.passed(start + 6s));
+    CHECK(first.work_left > 3);
+    budget.charge(first, start + 3s, 7);
+
+    // Ordinary search between charges leaves three seconds of allowance.
+    const auto later = budget.start(7, start + 13s);
+    CHECK(later.allowance_deadline);
+    CHECK_FALSE(later.deadline.passed(start + 16s - 1ms));
+    CHECK(later.deadline.passed(start + 16s));
+    budget.charge(later, start + 15s, 1);
+    CHECK(budget.secondsLeft(5) == 1);
+    CHECK(budget.secondsLeft(0) == 0);
+
+    // A separate solve reaches the global deadline with allowance left.
+    auto clipped_budget = budget;
+    const auto clipped = clipped_budget.start(0.5, start + 19500ms);
+    CHECK_FALSE(clipped.allowance_deadline);
+    CHECK_FALSE(clipped.deadline.passed(start + 20s - 1ms));
+    CHECK(clipped.deadline.passed(start + 20s));
+    clipped_budget.charge(clipped, start + 20s, 2);
+    CHECK(clipped_budget.usage.seconds == 4.5);
+    CHECK(clipped_budget.usage.work == 10);
+    const auto tied = budget.start(1, start + 19s);
+    CHECK_FALSE(tied.allowance_deadline);
+    CHECK(tied.deadline.passed(start + 20s));
+
+    const auto last = budget.start(4, start + 16s);
+    CHECK(last.allowance_deadline);
+    CHECK_FALSE(last.deadline.passed(start + 17s - 1ms));
+    CHECK(last.deadline.passed(start + 17s));
+    budget.charge(last, start + 17s, 1);
+    CHECK(budget.usage.seconds == 5);
+    CHECK(budget.usage.work == 9);
+    CHECK(budget.start(3, start + 17s).deadline.passed(start + 17s));
+
+    budget.reset(20);
+    CHECK(budget.usage.seconds == 0);
+    CHECK(budget.usage.work == 0);
+    CHECK(budget.secondsLeft(20) == 5);
+
+    budget.reset(kInf);
+    const auto unlimited = budget.start(kInf, start);
+    CHECK_FALSE(unlimited.deadline.isSet());
+    CHECK(unlimited.work_left == 3);
+    budget.charge(unlimited, start + 50s, 2);
+    const auto remaining = budget.start(kInf, start + 60s);
+    CHECK(remaining.work_left == 1);
+    budget.charge(remaining, start + 120s, 1);
+    CHECK(budget.start(kInf, start + 120s).work_left == 0);
+    CHECK(budget.usage.work == 3);
+
+    budget.setLimit(std::nullopt);
+    budget.reset(20);
+    const auto disabled = budget.start(4, start);
+    CHECK_FALSE(disabled.allowance_deadline);
+    CHECK(disabled.work_left > 3);
+    CHECK(disabled.deadline.passed(start + 4s));
+    budget.charge(disabled, start + 1s, 10);
+    CHECK(budget.usage.seconds == 0);
+    CHECK(budget.usage.work == 0);
+}
+
 TEST_CASE("MipSolver: geometric serial restart spacing starts fresh on every solve",
           "[mip][search]") {
     MipSolver solver;
@@ -3955,31 +4127,110 @@ TEST_CASE("MipSolver: geometric serial restart spacing starts fresh on every sol
     // prevents another loop iteration, so the first restart needs limit 10.
     constexpr std::array<std::pair<Int, Int>, 6> cases{
         {{9, 0}, {10, 1}, {25, 1}, {26, 2}, {57, 2}, {58, 3}}};
-    for (const auto& [limit, expected_restarts] : cases) {
-        CAPTURE(limit);
-        solver.setNodeLimit(limit);
-        const auto result = solver.solve();
-        REQUIRE(result.status == Status::NodeLimit);
-        CHECK(result.nodes == limit);
-        CHECK(solver.getSearchStats().restarts == expected_restarts);
-        CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+    solver.setTimeLimit(kInf);
+    for (const bool capped : {false, true}) {
+        if (capped) {
+            solver.setRestartOverheadAllowance(MipOverheadLimit{0.0, 2});
+        }
+        for (const auto& [limit, expected_restarts] : cases) {
+            CAPTURE(capped, limit);
+            solver.setNodeLimit(limit);
+            const auto result = solver.solve();
+            REQUIRE(result.status == Status::NodeLimit);
+            CHECK(result.nodes == limit);
+            const Int funded = capped ? std::min(expected_restarts, 2) : expected_restarts;
+            CHECK(solver.getSearchStats().restarts == funded);
+            CHECK(solver.getRestartOverheadUsage().work ==
+                  static_cast<std::uint64_t>(capped ? funded : 0));
+            CHECK((solver.getRestartOverheadStats().skipped_budget > 0) ==
+                  (capped && expected_restarts > 2));
+            CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+        }
     }
 
     solver.setNodeLimit(baseline.nodes + 1);
     const auto spaced = solver.solve();
     CHECK(spaced.status == baseline.status);
     CHECK(spaced.nodes == baseline.nodes);
-    CHECK(solver.getSearchStats().restarts >= 3);
+    CHECK(solver.getSearchStats().restarts == 2);
+    CHECK(solver.getRestartOverheadUsage().work == 2);
+    CHECK(solver.getRestartOverheadStats().skipped_budget > 0);
     CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
 
     solver.setRestartControls(8, baseline.nodes);
     CHECK(solver.solve().status == baseline.status);
     CHECK(solver.getSearchStats().restarts == 0);
+    CHECK(solver.getRestartOverheadStats().skipped_small_frontier > 0);
+    CHECK(solver.getRestartOverheadStats().skipped_budget == 0);
+    CHECK(solver.getRestartOverheadUsage().work == 0);
 
     solver.setRestartControls(8, 2);
     solver.setSearchProfile(SearchProfile::Stable);
     CHECK(solver.solve().status == baseline.status);
     CHECK(solver.getSearchStats().restarts == 0);
+}
+
+TEST_CASE("MipSolver: an incumbent improvement preserves spent restart work", "[mip][overhead]") {
+    LpProblem lp;
+    lp.num_cols = 12;
+    lp.num_rows = 3;
+    lp.obj = {-16, -3, -8, -16, -18, -12, -19, -9, -8, -1, -18, -16};
+    lp.col_lower.assign(lp.num_cols, 0);
+    lp.col_upper.assign(lp.num_cols, 1);
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.row_lower.assign(lp.num_rows, -kInf);
+    lp.row_upper = {52.5, 51.5, 44.5};
+    constexpr Real weights[3][12] = {{2, 14, 4, 12, 4, 17, 10, 17, 15, 17, 3, 5},
+                                     {19, 10, 20, 13, 11, 3, 16, 1, 17, 11, 6, 11},
+                                     {11, 11, 9, 11, 12, 2, 17, 14, 1, 2, 6, 15}};
+    std::vector<Triplet> entries;
+    for (Index row = 0; row < lp.num_rows; ++row) {
+        for (Index col = 0; col < lp.num_cols; ++col) {
+            entries.push_back({row, col, weights[row][col]});
+        }
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(entries));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setTimeLimit(kInf);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setRestartsEnabled(true);
+    solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    solver.setRestartControls(8, 2);
+    solver.setGapTolerance(0);
+    solver.setRestartOverheadAllowance(MipOverheadLimit{0, 1});
+    solver.load(lp);
+
+    // The first restart spends the allowance before the tree improves the
+    // root incumbent. Later progress changes eligibility, but adds no work.
+    solver.setNodeLimit(10);
+    const auto early = solver.solve();
+    REQUIRE(early.status == Status::NodeLimit);
+    REQUIRE_FALSE(early.solution.empty());
+    CHECK(solver.getSerialNodePolicyStats().incumbents_accepted == 0);
+    CHECK(solver.getSearchStats().restarts == 1);
+    CHECK(solver.getRestartOverheadUsage().work == 1);
+    const auto first_skips = solver.getRestartOverheadStats();
+    CHECK(first_skips.skipped_budget == 0);
+
+    solver.setNodeLimit(std::numeric_limits<Int>::max());
+    const auto complete = solver.solve();
+    REQUIRE(complete.status == Status::Optimal);
+    CHECK(complete.objective == -72);
+    CHECK(complete.best_bound == -72);
+    CHECK(complete.objective < early.objective);
+    CHECK(solver.getSerialNodePolicyStats().incumbents_accepted > 0);
+    CHECK(solver.getSearchStats().restarts == 1);
+    CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+    CHECK(solver.getRestartOverheadUsage().work == 1);
+    CHECK(solver.getRestartOverheadStats().skipped_budget > first_skips.skipped_budget);
+    CHECK(solver.getRestartOverheadStats().skipped_recent_progress >
+          first_skips.skipped_recent_progress);
 }
 
 TEST_CASE("MipSolver: seeded branch diversification starts with actual serial restarts",
@@ -4133,6 +4384,21 @@ TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
     CHECK(solver.getBranchingStats().pseudocost_hits == branching.pseudocost_hits);
     CHECK(solver.getBranchingStats().strong_branch_probes == branching.strong_branch_probes);
 
+    solver.setTimeLimit(kInf);
+    solver.setRestartOverheadAllowance(MipOverheadLimit{0.0, 1});
+    const auto capped = solver.solve();
+    CHECK(capped.status == baseline.status);
+    CHECK(capped.objective == baseline.objective);
+    CHECK(capped.best_bound == baseline.best_bound);
+    CHECK(capped.nodes == baseline.nodes);
+    CHECK(solver.getSearchStats().restarts == 1);
+    CHECK(solver.getSearchStats().conflict_restarts == 1);
+    CHECK(solver.getRestartOverheadUsage().work == 1);
+    CHECK(solver.getRestartOverheadStats().skipped_budget > 0);
+    CHECK(solver.getRestartOverheadStats().skipped_recent_progress == 0);
+    CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+    solver.setRestartOverheadAllowance(std::nullopt);
+
     // The incumbent's path is already closed when the conflict restarts in
     // this fixture. Enabling guidance therefore leaves the traversal intact.
     solver.setIncumbentGuidedRestartsEnabled(true);
@@ -4254,6 +4520,69 @@ TEST_CASE("MipSolver: serial restarts prefer an incumbent-compatible path", "[mi
     CHECK(guided.best_bound == baseline.best_bound);
     CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
     CHECK(solver.getLpStats().warm_starts > 8);
+
+    const auto guided_stats = stats;
+    solver.setTimeLimit(60);
+    solver.setRestartOverheadAllowance(MipOverheadLimit{1, 0});
+    const auto funded = solver.solve();
+    CHECK(funded.status == guided.status);
+    CHECK(funded.objective == guided.objective);
+    CHECK(funded.best_bound == guided.best_bound);
+    CHECK(funded.nodes == guided.nodes);
+    CHECK(stats.restarts == guided_stats.restarts);
+    CHECK(stats.incumbent_restart_promotions == guided_stats.incumbent_restart_promotions);
+    CHECK(solver.getRestartOverheadStats().skipped_budget == 0);
+    CHECK(solver.getRestartOverheadUsage().work > static_cast<std::uint64_t>(stats.restarts));
+    solver.setRestartOverheadAllowance(std::nullopt);
+
+    solver.setRestartsEnabled(false);
+    const auto ordinary = solver.solve();
+    REQUIRE(ordinary.status == Status::Optimal);
+    REQUIRE(ordinary.objective == baseline.objective);
+    solver.setRestartsEnabled(true);
+
+    // One unit prepares the restart and one visits a queued node. The scan
+    // cannot finish, so the next node is picked by the ordinary queue policy.
+    solver.setTimeLimit(kInf);
+    solver.setRestartOverheadAllowance(MipOverheadLimit{0.0, 2});
+    const auto check_interrupted = [&] {
+        const auto interrupted = solver.solve();
+        REQUIRE(interrupted.status == ordinary.status);
+        CHECK(interrupted.objective == ordinary.objective);
+        CHECK(interrupted.best_bound == ordinary.best_bound);
+        CHECK(interrupted.nodes == ordinary.nodes);
+        CHECK(interrupted.lp_iterations == ordinary.lp_iterations);
+        CHECK(stats.restarts == 0);
+        CHECK(stats.incumbent_restart_selections == 0);
+        CHECK(stats.incumbent_restart_no_match == 0);
+        CHECK(stats.restart_nodes_dropped == 0);
+        CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
+        CHECK(solver.getRestartOverheadUsage().work == 2);
+        CHECK(solver.getRestartOverheadStats().skipped_budget > 0);
+        CHECK(solver.getRestartOverheadStats().skipped_recent_progress > 0);
+    };
+    check_interrupted();
+    const auto skipped = solver.getRestartOverheadStats();
+    check_interrupted();
+    CHECK(solver.getRestartOverheadStats().skipped_budget == skipped.skipped_budget);
+    CHECK(solver.getRestartOverheadStats().skipped_recent_progress ==
+          skipped.skipped_recent_progress);
+
+    for (const double time_limit : {kInf, 60.0}) {
+        CAPTURE(time_limit);
+        solver.setTimeLimit(time_limit);
+        solver.setRestartOverheadAllowance(MipOverheadLimit{0.0, time_limit == kInf ? 0u : 100u});
+        const auto blocked = solver.solve();
+        CHECK(blocked.status == ordinary.status);
+        CHECK(blocked.objective == ordinary.objective);
+        CHECK(blocked.best_bound == ordinary.best_bound);
+        CHECK(blocked.nodes == ordinary.nodes);
+        CHECK(stats.restarts == 0);
+        CHECK(solver.getRestartOverheadUsage().work == 0);
+        CHECK(solver.getRestartOverheadStats().skipped_budget > 0);
+    }
+    solver.setTimeLimit(kInf);
+    solver.setRestartOverheadAllowance(std::nullopt);
 
     auto infeasible = buildSearchStagnationMip();
     std::vector<Triplet> with_clique;

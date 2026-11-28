@@ -89,6 +89,21 @@ TEST_CASE("DomainPropagator: explicit row budget charges the contradictory visit
     CHECK(row_visits_left == 1);
 }
 
+TEST_CASE("DomainPropagator: timed column preparation can stop before propagation", "[domain]") {
+    const auto problem = makeProblem(2, 1, {{0, 0, 1}, {0, 1, 1}}, {-kInf}, {1}, {0, 0}, {1, 1},
+                                     {VarType::Binary, VarType::Binary});
+    DomainPropagator propagator;
+    propagator.load(problem);
+    CHECK_FALSE(propagator.prepareTimedPropagation(Deadline::after(0)));
+
+    const auto deadline = Deadline::after(60);
+    REQUIRE(propagator.prepareTimedPropagation(deadline));
+    propagator.setBranchBound(0, false, 1, 1);
+    Int rows_left = 4;
+    REQUIRE(propagator.propagateWithRowBudget(rows_left, &deadline));
+    CHECK(propagator.getUpper(1) == 0);
+}
+
 TEST_CASE("DomainPropagator: explicit row budget preserves deductions from a partial pass",
           "[domain]") {
     const auto problem =
