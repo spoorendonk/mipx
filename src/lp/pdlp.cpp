@@ -579,7 +579,16 @@ void PdlpSolver::clearWarmStart() {
     has_warm_start_ = false;
 }
 
+// A model edit defers the scaling to the next solve() (#442): a batch of
+// edits costs one rebuild, not one per call. The getters read the original
+// model and the last solution, so only the basis goes now, as before.
+void PdlpSolver::invalidateScaled() {
+    basis_.clear();
+    scaled_stale_ = true;
+}
+
 void PdlpSolver::buildScaledProblem() {
+    scaled_stale_ = false;
     basis_.clear();
     const Index m = original_.num_rows;
     const Index n = original_.num_cols;
@@ -1024,6 +1033,9 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
 // ---------------------------------------------------------------------------
 
 LpResult PdlpSolver::solve() {
+    if (loaded_ && scaled_stale_) {
+        buildScaledProblem();
+    }
     basis_.clear();
     if (!options_.crossover) {
         return solvePdhg();
@@ -3115,7 +3127,7 @@ void PdlpSolver::addRows(std::span<const Index> starts, std::span<const Index> i
         original_.row_names.push_back("");
     }
     original_.num_rows += rows_to_add;
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::removeRows(std::span<const Index> rows) {
@@ -3140,7 +3152,7 @@ void PdlpSolver::removeRows(std::span<const Index> rows) {
         }
         --original_.num_rows;
     }
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::setColBounds(Index col, Real lower, Real upper) {
@@ -3150,7 +3162,7 @@ void PdlpSolver::setColBounds(Index col, Real lower, Real upper) {
         return;
     original_.col_lower[col] = lower;
     original_.col_upper[col] = upper;
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::setObjective(std::span<const Real> obj) {
@@ -3159,7 +3171,7 @@ void PdlpSolver::setObjective(std::span<const Real> obj) {
     if (static_cast<Index>(obj.size()) != original_.num_cols)
         return;
     original_.obj.assign(obj.begin(), obj.end());
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::addCols(std::span<const Index> starts, std::span<const Index> indices,
@@ -3172,7 +3184,7 @@ void PdlpSolver::addCols(std::span<const Index> starts, std::span<const Index> i
         return;
     }
     appendColumns(original_, starts, indices, values, obj, lower, upper);
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::removeCols(std::span<const Index> cols) {
@@ -3184,7 +3196,7 @@ void PdlpSolver::removeCols(std::span<const Index> cols) {
         return;
     }
     removeColumns(original_, sorted);
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::setRowBounds(Index row, Real lower, Real upper) {
@@ -3193,7 +3205,7 @@ void PdlpSolver::setRowBounds(Index row, Real lower, Real upper) {
     }
     original_.row_lower[row] = lower;
     original_.row_upper[row] = upper;
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 void PdlpSolver::setColObjective(Index col, Real cost) {
@@ -3201,7 +3213,7 @@ void PdlpSolver::setColObjective(Index col, Real cost) {
         return;
     }
     original_.obj[col] = cost;
-    buildScaledProblem();
+    invalidateScaled();
 }
 
 }  // namespace mipx

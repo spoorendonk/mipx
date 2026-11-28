@@ -153,6 +153,8 @@ public:
                  std::span<const Real> lower, std::span<const Real> upper) override;
     void removeCols(std::span<const Index> cols) override;
 
+    // The model edits above and below defer the scaling to the next solve(),
+    // so a batch of them costs one rebuild (#442).
     void setColBounds(Index col, Real lower, Real upper) override;
     void setRowBounds(Index row, Real lower, Real upper) override;
     void setObjective(std::span<const Real> obj) override;
@@ -179,6 +181,7 @@ public:
 private:
     LpResult solvePdhg();
     void buildScaledProblem();
+    void invalidateScaled();
     void buildTransposeCSR();
     void refreshPreconditioner(Real primal_weight);
     Real estimateSpectralNorm() const;
@@ -190,6 +193,7 @@ private:
     PdlpOptions options_{};
     LpProblem original_;
     bool loaded_ = false;
+    bool scaled_stale_ = false;  // an edit since the last buildScaledProblem()
 
     Real obj_sign_ = 1.0;
     SparseMatrix scaled_a_{0, 0};

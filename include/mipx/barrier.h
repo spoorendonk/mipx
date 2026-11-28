@@ -171,6 +171,10 @@ public:
                  std::span<const Real> lower, std::span<const Real> upper) override;
     void removeCols(std::span<const Index> cols) override;
 
+    // The model edits above and below defer the presolve and standard-form
+    // build to the next solve(), so a batch of them costs one (#442). Until
+    // then the duals and reduced costs read as zeros, and the diagnostics
+    // below (standardForm*, usedDualization) describe the last transform.
     void setColBounds(Index col, Real lower, Real upper) override;
     void setRowBounds(Index row, Real lower, Real upper) override;
     void setObjective(std::span<const Real> obj) override;
@@ -240,6 +244,7 @@ private:
     void useDualForm(DualForm form);
     bool buildStandardForm();
     void rebuildTransform();
+    void invalidateTransform();
     void clearTransformedSolution();
     BarrierIpmOutcome solveStandardForm(std::vector<Real>& z, std::vector<Real>& y,
                                         std::vector<Real>& s, Int& iters);
@@ -256,6 +261,7 @@ private:
     bool loaded_ = false;
     bool transformed_ok_ = false;
     bool transformed_infeasible_ = false;
+    bool transform_stale_ = false;  // an edit since the last rebuildTransform()
     bool dualized_ = false;
 
     SparseMatrix aeq_{0, 0};

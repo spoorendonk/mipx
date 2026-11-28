@@ -532,3 +532,78 @@ TEST_CASE("Column changes: barrier and PDLP solve the changed LP", "[column_chan
         CHECK_THAT(r.objective, WithinRel(expect, 1e-4));
     }
 }
+
+// Barrier and PDLP edits defer their rebuild to solve() (#442): a batch of
+// cost, bound and column edits on a kept solver solves as a fresh load of the
+// edited LP, to the iteration.
+TEST_CASE("Column changes: batched barrier and PDLP edits solve as a fresh load",
+          "[column_changes]") {
+    const Network net = gridNetwork(3, 3);
+    DualSimplexSolver simplex;
+    const CgRun run = runColumnGeneration(net, simplex);
+    const Index k = numCommodities(net);
+    const LpProblem& base = run.master;
+
+    LpProblem edited = base;
+    for (Index j = 0; j < edited.num_cols; j += 2) {
+        edited.obj[j] *= 1.25;
+    }
+    edited.row_upper[k] = 0.75 * net.cap[0];
+    edited.col_upper[k] = 0.5;
+    const std::vector<Index> drop = {k + 1};
+    removeColumns(edited, sortedColumnSet(edited.num_cols, drop));
+
+    const auto edit = [&](LpSolver& s) {
+        for (Index j = 0; j < base.num_cols; j += 2) {
+            s.setColObjective(j, base.obj[j] * 1.25);
+        }
+        s.setRowBounds(k, base.row_lower[k], 0.75 * net.cap[0]);
+        s.setColBounds(k, base.col_lower[k], 0.5);
+        s.removeCols(drop);
+    };
+    const auto check = [&](LpSolver& kept, LpSolver& fresh, bool barrier) {
+        kept.load(base);
+        REQUIRE(kept.solve().status == Status::Optimal);
+        edit(kept);
+        if (barrier) {
+            // Nothing of the last solve's duals is read against the edited
+            // LP. (PDLP keeps its last solution until the next solve.)
+            const auto m = static_cast<std::size_t>(edited.num_rows);
+            const auto n = static_cast<std::size_t>(edited.num_cols);
+            CHECK(kept.getDualValues() == std::vector<Real>(m, 0.0));
+            CHECK(kept.getReducedCosts() == std::vector<Real>(n, 0.0));
+            CHECK(kept.getPrimalValues().size() == n);
+        }
+        const LpResult a = kept.solve();
+        fresh.load(edited);
+        const LpResult b = fresh.solve();
+        REQUIRE(b.status == Status::Optimal);
+        CHECK(a.status == b.status);
+        CHECK(a.objective == b.objective);
+        CHECK(a.iterations == b.iterations);
+        CHECK(kept.getPrimalValues() == fresh.getPrimalValues());
+    };
+
+    SECTION("barrier, presolve on and off") {
+        for (const bool presolve : {true, false}) {
+            BarrierOptions o;
+            o.verbose = false;
+            o.presolve = presolve;
+            BarrierSolver kept;
+            BarrierSolver fresh;
+            kept.setOptions(o);
+            fresh.setOptions(o);
+            check(kept, fresh, true);
+            CHECK(kept.getReducedCosts() == fresh.getReducedCosts());
+        }
+    }
+    SECTION("PDLP") {
+        PdlpOptions o;
+        o.verbose = false;
+        PdlpSolver kept;
+        PdlpSolver fresh;
+        kept.setOptions(o);
+        fresh.setOptions(o);
+        check(kept, fresh, false);
+    }
+}

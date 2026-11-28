@@ -10,6 +10,8 @@
 // Output: one CSV line per (solve, arm) on stdout, or to --csv FILE:
 //   seq,arm,status,objective,recorded,rel_err,iterations,seconds,reloaded
 // --dual-stats-csv FILE writes pivot counts for the dual arms separately.
+// --edit-csv FILE times dual-warm's edit calls per op (#442):
+//   after,arm,op,items,basic,seconds
 // Exit 0 when every solve of every arm matches the recorded status and
 // objective (relative to max(1, |recorded|), within --rel-tol, 1e-6, or for
 // pdlp --pdlp-rel-tol, 1e-4), 1 when one does not, 2 on a usage or format
@@ -26,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -153,6 +156,7 @@ struct Options {
     Real pdlp_rel_tol = 1e-4;
     std::string csv;
     std::string dual_stats_csv;
+    std::string edit_csv;
 };
 
 DualSimplexOptions dualOptions(const Options& o) {
@@ -199,8 +203,56 @@ std::unique_ptr<LpSolver> coldSolver(ArmKind kind, const Options& opt) {
     return p;
 }
 
+const char* opName(lpseq::OpKind k) {
+    using lpseq::OpKind;
+    switch (k) {
+        case OpKind::AddCols:
+            return "add_cols";
+        case OpKind::DelCols:
+            return "del_cols";
+        case OpKind::AddRows:
+            return "add_rows";
+        case OpKind::DelRows:
+            return "del_rows";
+        case OpKind::ColBounds:
+            return "col_bounds";
+        case OpKind::RowBounds:
+            return "row_bounds";
+        case OpKind::ColCosts:
+            return "col_costs";
+        case OpKind::Coeffs:
+            return "coeffs";
+        case OpKind::Solve:
+            break;
+    }
+    return "solve";
+}
+
+// --edit-csv: the time of each warm solver's edit calls for one op (#442),
+// outside the solve timer. after = the seq of the last solve ("-" before the
+// first), items = the columns, rows or entries the op changes, basic = for
+// del_cols the deleted columns that were basic (read before the call, untimed).
+struct EditLog {
+    std::ostream* out = nullptr;
+    std::string after = "-";
+};
+
+std::size_t opItems(const lpseq::Op& op) {
+    using lpseq::OpKind;
+    switch (op.kind) {
+        case OpKind::AddCols:
+        case OpKind::AddRows:
+            return op.starts.size();
+        case OpKind::DelCols:
+        case OpKind::DelRows:
+            return op.indices.size();
+        default:
+            return op.at.size();
+    }
+}
+
 // Apply a change to the mirror and to every warm solver.
-void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms) {
+void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms, EditLog& log) {
     using lpseq::OpKind;
     switch (op.kind) {
         case OpKind::AddCols:
@@ -240,6 +292,16 @@ void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms) {
             continue;
         }
         DualSimplexSolver& s = *arm.warm;
+        std::size_t basic = 0;
+        if (log.out != nullptr && op.kind == OpKind::DelCols) {
+            const auto basis = s.getBasis();
+            for (const int j : op.indices) {
+                if (static_cast<std::size_t>(j) < basis.size() && basis[j] == BasisStatus::Basic) {
+                    ++basic;
+                }
+            }
+        }
+        const auto t0 = std::chrono::steady_clock::now();
         switch (op.kind) {
             case OpKind::AddCols:
                 s.addCols(op.starts, op.indices, op.values, op.cost, op.lower, op.upper);
@@ -273,6 +335,12 @@ void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms) {
                 break;
             case OpKind::Solve:
                 break;
+        }
+        if (log.out != nullptr) {
+            const double secs =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            *log.out << std::format("{},{},{},{},{},{:.9f}\n", log.after, arm.name, opName(op.kind),
+                                    opItems(op), basic, secs);
         }
     }
 }
@@ -346,6 +414,17 @@ int run(const Options& opt) {
                       "primal_bound_perturbation_activations\n";
     }
 
+    std::ofstream edit_csv;
+    EditLog log;
+    if (!opt.edit_csv.empty()) {
+        edit_csv.open(opt.edit_csv);
+        if (!edit_csv) {
+            lpseq::fail(opt.edit_csv + ": cannot write");
+        }
+        edit_csv << "after,arm,op,items,basic,seconds\n";
+        log.out = &edit_csv;
+    }
+
     std::ifstream ops(opt.dir + "/ops.txt");
     if (!ops) {
         lpseq::fail(opt.dir + "/ops.txt: cannot open");
@@ -355,7 +434,7 @@ int run(const Options& opt) {
     lpseq::Op op;
     while (lpseq::readOp(ops, lp.num_rows, lp.num_cols, op)) {
         if (op.kind != lpseq::OpKind::Solve) {
-            apply(op, lp, arms);
+            apply(op, lp, arms, log);
             if (op.kind == lpseq::OpKind::AddCols) {
                 added_columns += op.starts.size();
             }
@@ -402,6 +481,13 @@ int run(const Options& opt) {
             }
         }
         added_columns = 0;
+        log.after = op.seq;
+    }
+    if (edit_csv.is_open()) {
+        edit_csv.close();
+        if (!edit_csv) {
+            lpseq::fail(opt.edit_csv + ": write failed");
+        }
     }
     if (dual_stats.is_open()) {
         dual_stats.close();
@@ -416,7 +502,8 @@ void usage() {
     std::cerr
         << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|barrier-hsd|pdlp]... "
            "[--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] "
-           "[--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] [--dual-stats-csv FILE]\n";
+           "[--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] [--dual-stats-csv FILE] "
+           "[--edit-csv FILE]\n";
 }
 
 }  // namespace
@@ -464,6 +551,8 @@ int main(int argc, char** argv) {
             opt.csv = argv[++i];
         } else if (a == "--dual-stats-csv" && i + 1 < argc) {
             opt.dual_stats_csv = argv[++i];
+        } else if (a == "--edit-csv" && i + 1 < argc) {
+            opt.edit_csv = argv[++i];
         } else if (!a.empty() && a[0] != '-' && opt.dir.empty()) {
             opt.dir = a;
         } else {

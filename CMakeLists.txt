@@ -196,6 +196,12 @@ if(MIPX_BUILD_CLI)
     target_link_libraries(mipx-presolve-bench PRIVATE mipx)
     mipx_set_compiler_flags(mipx-presolve-bench)
 
+    # Cost and bound edits on a kept barrier and PDLP solver, timed against
+    # the solve (#442).
+    add_executable(mipx-lp-edit-bench EXCLUDE_FROM_ALL tests/perf/lp_edit_bench.cpp)
+    target_link_libraries(mipx-lp-edit-bench PRIVATE mipx)
+    mipx_set_compiler_flags(mipx-lp-edit-bench)
+
     add_executable(mipx-root-heuristic-deadline-bench EXCLUDE_FROM_ALL
                    tests/perf/root_heuristic_deadline_bench.cpp)
     target_link_libraries(mipx-root-heuristic-deadline-bench PRIVATE mipx)

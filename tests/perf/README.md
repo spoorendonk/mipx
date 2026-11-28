@@ -615,6 +615,28 @@ excluding columns loaded from the initial snapshot. To measure warm primal
 pivots per added column, sum `primal_pivots` and `added_columns` over
 `dual-warm` solves with added columns and divide the totals.
 
+`--edit-csv FILE` (#442) times `dual-warm`'s edit calls, which the solve
+timer leaves out, one row per op:
+
+```text
+after,arm,op,items,basic,seconds
+```
+
+`after` is the seq of the last solve (`-` before the first), `items` the
+columns, rows or entries the op changes, and `basic`, for `del_cols`, how many
+of the deleted columns were basic (read before the call, outside its time).
+A basic deletion swaps in logicals on a fresh factorization, so it costs a
+refactorization more than a nonbasic one.
+
+`mipx-lp-edit-bench` (`EXCLUDE_FROM_ALL`; `cmake --build build --target
+mipx-lp-edit-bench`) does the same for the solvers the replay loads afresh:
+on a kept barrier (presolve on and off) and PDLP solver, rounds of cost and
+row-bound edits, each round's edits timed against its solve:
+
+```bash
+./build/mipx-lp-edit-bench LP.mps ROUNDS EDITS [barrier-p|barrier-np|pdlp]...
+```
+
 `tests/data/lpseq/grid1` is the sequence of the public CommaLab grid1 (cg on
 HiGHS simplex, 9 masters); ctest replays it on `dual-warm`, `dual-cold`,
 `barrier` and `pdlp` with primal Devex off and on. It also tests bound

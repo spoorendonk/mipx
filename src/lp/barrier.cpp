@@ -1926,7 +1926,26 @@ bool BarrierSolver::buildStandardForm() {
     return true;
 }
 
+// A model edit defers the transform to the next solve() (#442): a batch of
+// edits costs one presolve and standard-form build, not one per call. What
+// the getters read is invalidated here as the rebuild would on success:
+// no duals or reduced costs, the primal and basis kept unless their size no
+// longer fits the model.
+void BarrierSolver::invalidateTransform() {
+    transform_stale_ = true;
+    dual_orig_.clear();
+    dualized_reduced_costs_.clear();
+    reduced_costs_std_.clear();
+    if (static_cast<Index>(primal_orig_.size()) != original_.num_cols) {
+        primal_orig_.assign(static_cast<size_t>(original_.num_cols), 0.0);
+    }
+    if (static_cast<Index>(basis_orig_.size()) != original_.num_cols + original_.num_rows) {
+        basis_orig_.clear();
+    }
+}
+
 void BarrierSolver::rebuildTransform() {
+    transform_stale_ = false;
     presolve_active_ = false;
     dualized_ = false;
     dual_row_expr_.clear();
@@ -2011,6 +2030,10 @@ std::vector<Real> BarrierSolver::getDualValues() const {
 }
 
 std::vector<Real> BarrierSolver::getReducedCosts() const {
+    // The transform still describes the model before the edit.
+    if (transform_stale_) {
+        return std::vector<Real>(static_cast<size_t>(original_.num_cols), 0.0);
+    }
     if (dualized_) {
         if (!dualized_reduced_costs_.empty()) {
             return dualized_reduced_costs_;
@@ -2093,7 +2116,7 @@ void BarrierSolver::addRows(std::span<const Index> starts, std::span<const Index
         original_.row_names.push_back("");
     }
     original_.num_rows += rows_to_add;
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::removeRows(std::span<const Index> rows) {
@@ -2121,7 +2144,7 @@ void BarrierSolver::removeRows(std::span<const Index> rows) {
         }
         --original_.num_rows;
     }
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::setColBounds(Index col, Real lower, Real upper) {
@@ -2133,7 +2156,7 @@ void BarrierSolver::setColBounds(Index col, Real lower, Real upper) {
     }
     original_.col_lower[col] = lower;
     original_.col_upper[col] = upper;
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::setObjective(std::span<const Real> obj) {
@@ -2144,7 +2167,7 @@ void BarrierSolver::setObjective(std::span<const Real> obj) {
         return;
     }
     original_.obj.assign(obj.begin(), obj.end());
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::addCols(std::span<const Index> starts, std::span<const Index> indices,
@@ -2157,7 +2180,7 @@ void BarrierSolver::addCols(std::span<const Index> starts, std::span<const Index
         return;
     }
     appendColumns(original_, starts, indices, values, obj, lower, upper);
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::removeCols(std::span<const Index> cols) {
@@ -2169,7 +2192,7 @@ void BarrierSolver::removeCols(std::span<const Index> cols) {
         return;
     }
     removeColumns(original_, sorted);
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::setRowBounds(Index row, Real lower, Real upper) {
@@ -2178,7 +2201,7 @@ void BarrierSolver::setRowBounds(Index row, Real lower, Real upper) {
     }
     original_.row_lower[row] = lower;
     original_.row_upper[row] = upper;
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::setColObjective(Index col, Real cost) {
@@ -2186,7 +2209,7 @@ void BarrierSolver::setColObjective(Index col, Real cost) {
         return;
     }
     original_.obj[col] = cost;
-    rebuildTransform();
+    invalidateTransform();
 }
 
 void BarrierSolver::reconstructOriginalSolution(const std::vector<Real>& z,
@@ -3207,6 +3230,10 @@ LpResult BarrierSolver::solve() {
     used_gpu_ = false;
     used_algorithm_ = BarrierAlgorithm::Auto;
     used_homogeneous_ = false;
+    // The edits' deferred transform, outside the solve clock as load()'s is.
+    if (loaded_ && transform_stale_) {
+        rebuildTransform();
+    }
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {
         status_ = Status::Error;
