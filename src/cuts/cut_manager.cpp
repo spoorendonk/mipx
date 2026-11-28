@@ -95,7 +95,7 @@ CutRoundPolicy CutManager::beginRound(Int round, bool is_root, Index depth,
     Int enabled_families = 0;
     for (std::size_t fi = 0; fi < family_kpis_.size(); ++fi) {
         const CutFamily family = static_cast<CutFamily>(fi);
-        if (family == CutFamily::Unknown || family == CutFamily::Count)
+        if (family == CutFamily::Unknown || (!is_root && family == CutFamily::FlowCover))
             continue;
 
         bool enabled = false;
@@ -243,7 +243,7 @@ void CutManager::applyAutoAdjustments(bool is_root, Index depth, bool allow_carr
 
     // Safety valve: at least one family must remain enabled.
     bool any_enabled = false;
-    for (std::size_t fi = 1; fi + 1 < family_kpis_.size(); ++fi) {
+    for (std::size_t fi = 1; fi < family_kpis_.size(); ++fi) {
         any_enabled = any_enabled || family_kpis_[fi].enabled;
     }
     if (!any_enabled) {
@@ -254,7 +254,7 @@ void CutManager::applyAutoAdjustments(bool is_root, Index depth, bool allow_carr
 bool CutManager::conservativeFamilyEnabled(CutFamily family, bool is_root, Index depth) const {
     if (family == CutFamily::Gomory || family == CutFamily::Mir)
         return true;
-    if (is_root && family == CutFamily::Cover)
+    if (is_root && (family == CutFamily::Cover || family == CutFamily::FlowCover))
         return true;
     if (!is_root && depth <= 2 && family == CutFamily::Cover)
         return true;
@@ -278,7 +278,7 @@ std::string CutManager::summarizeState() const {
             oss << "auto";
             break;
     }
-    for (std::size_t fi = 1; fi + 1 < family_kpis_.size(); ++fi) {
+    for (std::size_t fi = 1; fi < family_kpis_.size(); ++fi) {
         const auto family = static_cast<CutFamily>(fi);
         const auto& kpi = family_kpis_[fi];
         oss << " " << cutFamilyName(family) << "=" << (kpi.enabled ? "on" : "off")

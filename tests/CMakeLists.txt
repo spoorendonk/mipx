@@ -22,6 +22,7 @@ add_executable(mipx-tests
     test_dual_bounds.cpp
     test_cuts.cpp
     test_cut_manager.cpp
+    flow_cover_test.cpp
     test_parallel.cpp
     test_symmetry.cpp
     test_barrier.cpp

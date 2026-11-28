@@ -148,6 +148,22 @@ def test_root_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
     assert result.objective == pytest.approx(1.0)
 
 
+def test_mip_solver_accepts_root_flow_cover_setting(tmp_path: Path) -> None:
+    path = tmp_path / "flow_cover.lp"
+    path.write_text(
+        "Minimize\n obj: x + n + p\nSubject To\n balance: y - n + p = 16\n"
+        " link: y - 753 x <= 0\nBinary\n x\nEnd\n"
+    )
+    solver = mipx.MipSolver()
+    solver.set_verbose(False)
+    solver.set_presolve(False)
+    solver.set_root_flow_cover_enabled(True)
+    solver.load(mipx.read_lp(str(path)))
+    result = solver.solve()
+    assert result.status == mipx.Status.Optimal
+    assert result.objective == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     "call",
     [

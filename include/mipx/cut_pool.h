@@ -26,6 +26,7 @@ enum class CutFamily : Int {
     ModK,
     IntersectionCut,
     MultiRow,
+    FlowCover,
     Count,
 };
 

@@ -38,6 +38,8 @@ const char* cutFamilyName(CutFamily family) {
             return "intersect";
         case CutFamily::MultiRow:
             return "multirow";
+        case CutFamily::FlowCover:
+            return "flowcover";
         case CutFamily::Unknown:
         case CutFamily::Count:
         default:

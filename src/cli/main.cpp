@@ -46,7 +46,7 @@ void printUsage(FILE* out) {
                  "[--directional-inference (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
-                 "[--root-cut-recheck] [--root-cut-propagation] "
+                 "[--root-cut-recheck] [--root-cut-propagation] [--root-flow-cover] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
                  "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
@@ -174,6 +174,7 @@ int main(int argc, char* argv[]) {
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
+    bool root_flow_cover = false;
     bool sos2_adjacent_intervals = false;
     bool sos2_native_branching = false;
     bool sos2_propagation = false;
@@ -341,6 +342,8 @@ int main(int argc, char* argv[]) {
             root_cut_recheck = true;
         } else if (arg == "--root-cut-propagation") {
             root_cut_propagation = true;
+        } else if (arg == "--root-flow-cover") {
+            root_flow_cover = true;
         } else if (arg == "--sos2-adjacent-intervals") {
             sos2_adjacent_intervals = true;
         } else if (arg == "--sos2-native-branching") {
@@ -746,6 +749,7 @@ int main(int argc, char* argv[]) {
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
+            solver.setRootFlowCoverEnabled(root_flow_cover);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {
                 solver.setProbingMaxRounds(*probing_rounds);

@@ -3080,7 +3080,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         const bool run_tree_rounds = aggressive || (conservative && (node.depth % 2 == 0));
         if (run_tree_rounds) {
             SeparatorManager tree_separators;
-            tree_separators.setConfig(cut_family_config_);
+            auto tree_config = cut_family_config_;
+            tree_config.flow_cover = false;
+            tree_separators.setConfig(tree_config);
             // problem_ carries the global bounds, so strengthened cuts stay
             // eligible for promotion.
             tree_separators.setStrengthenCuts(cut_strengthening_);
@@ -6949,6 +6951,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     cut_manager.setFamilyEnabled(CutFamily::ModK, cut_family_config_.mod_k);
     cut_manager.setFamilyEnabled(CutFamily::IntersectionCut, cut_family_config_.intersection_cut);
     cut_manager.setFamilyEnabled(CutFamily::MultiRow, cut_family_config_.multi_row);
+    cut_manager.setFamilyEnabled(CutFamily::FlowCover, cut_family_config_.flow_cover);
 
     auto userFamilyEnabled = [&](CutFamily family) -> bool {
         switch (family) {
@@ -6978,6 +6981,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 return cut_family_config_.intersection_cut;
             case CutFamily::MultiRow:
                 return cut_family_config_.multi_row;
+            case CutFamily::FlowCover:
+                return cut_family_config_.flow_cover;
             case CutFamily::Unknown:
             case CutFamily::Count:
             default:
@@ -7020,9 +7025,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         }
 
         // A family runs this round only when both the adaptive policy and the
-        // user configuration allow it. Every CutFamily value must appear here:
-        // CutFamilyConfig defaults to all-true, so a family left out would run
-        // unconditionally.
+        // user configuration allow it. Set every flag so its default never
+        // overrides the round's decision.
         auto familyEnabledThisRound = [&](CutFamily family) {
             return policy.family_enabled[static_cast<std::size_t>(family)] &&
                    userFamilyEnabled(family);
@@ -7041,6 +7045,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         round_config.mod_k = familyEnabledThisRound(CutFamily::ModK);
         round_config.intersection_cut = familyEnabledThisRound(CutFamily::IntersectionCut);
         round_config.multi_row = familyEnabledThisRound(CutFamily::MultiRow);
+        round_config.flow_cover = familyEnabledThisRound(CutFamily::FlowCover);
         separators.setConfig(round_config);
         separators.setMaxCutsPerFamily(std::max<Int>(1, policy.max_cuts_per_round));
 
@@ -7222,6 +7227,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                                total_work);
                 total_cuts = 0;
                 rounds_done = 0;
+                for (auto& family : total_family_stats.families) {
+                    family.installed = 0;
+                }
             }
             ++cut_stats_.root_rounds_backed_out;
             if (verbose_) {
@@ -7248,10 +7256,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             round_family_stats.families.begin(), round_family_stats.families.end(), 0.0,
             [](double acc, const CutFamilyStats& s) { return acc + s.time_seconds; });
 
-        // The counters were folded in right after separation; only the LP-delta
-        // attribution, which needs this round's selection, is left to add.
+        // The separation counters were folded in earlier. This round's selected
+        // rows now have a successful LP solve and count as installed.
         for (std::size_t fi = 0; fi < total_family_stats.families.size(); ++fi) {
             auto& src = round_family_stats.families[fi];
+            total_family_stats.families[fi].installed += selected_by_family[fi];
             if (selected_total > 0 && selected_by_family[fi] > 0) {
                 src.lp_delta += improvement * static_cast<Real>(selected_by_family[fi]) /
                                 static_cast<Real>(selected_total);
@@ -7313,10 +7322,10 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             const Real avg_eff =
                 (s.accepted > 0) ? s.efficacy_sum / static_cast<Real>(s.accepted) : 0.0;
             log_.log(
-                "  cuts[%s]: attempted=%d generated=%d accepted=%d "
+                "  cuts[%s]: attempted=%d generated=%d accepted=%d installed=%d "
                 "avg_eff=%.3e lp_delta=%.3e time=%.3fs\n",
-                cutFamilyName(family), s.attempted, s.generated, s.accepted, avg_eff, s.lp_delta,
-                s.time_seconds);
+                cutFamilyName(family), s.attempted, s.generated, s.accepted, s.installed, avg_eff,
+                s.lp_delta, s.time_seconds);
             if (s.strengthened > 0) {
                 log_.log("  strengthened[%s]: cuts=%d coefs=%d avg_eff_gain=%.3e\n",
                          cutFamilyName(family), s.strengthened, s.strengthened_coefs,

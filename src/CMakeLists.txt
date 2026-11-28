@@ -69,6 +69,7 @@ add_library(mipx STATIC
     cuts/separators.cpp
     cuts/cmir.cpp
     cuts/cut_strengthening.cpp
+    cuts/flow_cover.cpp
     cuts/intersection_cut.cpp
     cuts/lifted_covers.cpp
     cuts/mod_k.cpp

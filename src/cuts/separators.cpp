@@ -111,6 +111,8 @@ bool SeparatorManager::isEnabled(CutFamily family) const {
             return config_.intersection_cut;
         case CutFamily::MultiRow:
             return config_.multi_row;
+        case CutFamily::FlowCover:
+            return config_.flow_cover;
         case CutFamily::Unknown:
         case CutFamily::Count:
         default:
@@ -161,6 +163,8 @@ Int SeparatorManager::separate(DualSimplexSolver& lp, const LpProblem& problem,
     });
     runFamily(CutFamily::MultiRow,
               [&](CutFamilyStats& s) { return separateMultiRow(lp, problem, primals, pool, s); });
+    runFamily(CutFamily::FlowCover,
+              [&](CutFamilyStats& s) { return separateFlowCover(problem, primals, pool, s); });
 
     return total_added;
 }

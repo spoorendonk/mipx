@@ -31,6 +31,8 @@ struct CutFamilyStats {
     Int strengthened = 0;
     Int strengthened_coefs = 0;
     Real strengthen_efficacy_gain = 0.0;
+    // Rows added by successful cut rounds and still present at the end of the cut loop.
+    Int installed = 0;
 };
 
 struct CutSeparationStats {
@@ -61,6 +63,8 @@ struct CutFamilyConfig {
     // by single-row cuts (see intersection_cut.cpp); #221 decides.
     bool intersection_cut = false;
     bool multi_row = false;
+    // Root only. Separation needs globally valid rows and column bounds.
+    bool flow_cover = false;
 };
 
 class SeparatorManager {
@@ -80,12 +84,13 @@ public:
     /// pairwise row scan. The table must outlive the manager.
     void setCliqueTable(const CliqueTable* table) { clique_table_ = table; }
     /// Declare how many leading LP rows are valid in the whole tree, for the
-    /// families that substitute a row logical back into structural columns.
+    /// families that substitute a row logical back into structural columns,
+    /// and for singleton flow covers that require two global source rows.
     /// See GomorySeparator::setGlobalRowCount; negative means "only the rows of
     /// the LpProblem passed to separate()".
     void setGlobalRowCount(Index n) { global_row_count_ = n; }
     /// Declare rows inside that prefix as node-local; see
-    /// GomorySeparator::setLocalRows. Applies to every tableau family.
+    /// GomorySeparator::setLocalRows. Applies to tableau families and flow covers.
     void setLocalRows(std::vector<Index> rows) {
         std::ranges::sort(rows);
         gomory_.setLocalRows(rows);
@@ -152,6 +157,8 @@ private:
                                 CutFamilyStats& stats);
     Int separateMultiRow(DualSimplexSolver& lp, const LpProblem& problem,
                          std::span<const Real> primals, CutPool& pool, CutFamilyStats& stats);
+    Int separateFlowCover(const LpProblem& problem, std::span<const Real> primals, CutPool& pool,
+                          CutFamilyStats& stats);
 
     [[nodiscard]] bool isEnabled(CutFamily family) const;
 

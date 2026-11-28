@@ -92,6 +92,7 @@ Key options:
 | `--pre-lp-propagation-bounds` / `--no-pre-lp-propagation-bounds` | off | Apply bounded row deductions before simplex at depth-scheduled tree presolve nodes of all-discrete models in serial or opportunistic search |
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
 | `--root-cut-propagation` | off | Apply bounded row deductions from the root model and installed cuts during root cut rounds |
+| `--root-flow-cover` | off | Separate singleton signed flow covers from explicit on/off links and continuous balance rows at the root |
 | `--sos2-adjacent-intervals` | off | Linearize SOS2 with one binary per adjacent interval and a linear number of rows |
 | `--root-feasjump-restarts <n>` | 4 | Cap root feasibility-jump passes at 0 through 4, including the initial pass. Use 0 to skip the heuristic |
 | `--barrier` | off | Use barrier for root LP |

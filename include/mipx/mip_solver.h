@@ -393,6 +393,9 @@ public:
             case CutFamily::MultiRow:
                 cut_family_config_.multi_row = enabled;
                 break;
+            case CutFamily::FlowCover:
+                cut_family_config_.flow_cover = enabled;
+                break;
             case CutFamily::Unknown:
             case CutFamily::Count:
             default:
@@ -401,6 +404,8 @@ public:
     }
     void setCutFamilyConfig(const CutFamilyConfig& config) { cut_family_config_ = config; }
     [[nodiscard]] const CutFamilyConfig& getCutFamilyConfig() const { return cut_family_config_; }
+    /// Separate singleton signed flow covers at the root. Off by default.
+    void setRootFlowCoverEnabled(bool enabled) { cut_family_config_.flow_cover = enabled; }
     void setCutEffortMode(CutEffortMode mode) { cut_effort_mode_ = mode; }
     [[nodiscard]] CutEffortMode getCutEffortMode() const { return cut_effort_mode_; }
     void setCutWorkBudgets(double per_node, double per_round, double global) {
