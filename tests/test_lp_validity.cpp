@@ -37,6 +37,7 @@
 #include "mipx/dual_simplex.h"
 #include "mipx/mip_solver.h"
 #include "mipx/pdlp.h"
+#include "validity_rng.hpp"
 
 #include <algorithm>
 #include <catch2/catch_test_macros.hpp>
@@ -76,8 +77,8 @@ struct Generated {
 class Rng {
 public:
     explicit Rng(std::uint32_t seed) : gen_(seed) {}
-    Real uniform(Real lo, Real hi) { return std::uniform_real_distribution<Real>(lo, hi)(gen_); }
-    int pick(int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(gen_); }
+    Real uniform(Real lo, Real hi) { return test::validityReal(gen_, lo, hi); }
+    int pick(int lo, int hi) { return test::validityInt(gen_, lo, hi); }
     bool coin(Real p) { return uniform(0.0, 1.0) < p; }
     // A value with a few significant digits, so sums stay exact-ish.
     Real value(Real lo, Real hi) { return std::round(uniform(lo, hi) * 8.0) / 8.0; }
@@ -358,7 +359,8 @@ Generated generateUnbounded(Rng& rng, const Options& opt) {
     const int support = rng.pick(1, std::min<int>(3, n));
     for (int k = 0; k < support; ++k) {
         const Index j = rng.pick(0, n - 1);
-        r[j] = rng.value(0.25, 2.0) * (rng.coin(0.5) ? 1.0 : -1.0);
+        const Real magnitude = rng.value(0.25, 2.0);
+        r[j] = rng.coin(0.5) ? magnitude : -magnitude;
         if (lp.col_lower[j] == lp.col_upper[j]) {
             lp.col_lower[j] = -kInf;  // a fixed column cannot move; free it
             lp.col_upper[j] = kInf;

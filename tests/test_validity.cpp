@@ -25,6 +25,7 @@
 #include "mipx/reduced_cost_fixer.h"
 #include "mipx/symmetry.h"
 #include "mipx/variable_bounds.h"
+#include "validity_rng.hpp"
 
 #include <algorithm>
 #include <array>
@@ -497,8 +498,8 @@ struct ModelSpec {
 /// were drawn around (feasible unless a row's offset excludes it).
 LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
                       std::vector<Real>* anchor_out = nullptr) {
-    auto uniform = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
-    auto chance = [&](double p) { return std::uniform_real_distribution<double>(0, 1)(rng) < p; };
+    auto uniform = [&](int lo, int hi) { return test::validityInt(rng, lo, hi); };
+    auto chance = [&](double p) { return test::validityReal(rng, 0, 1) < p; };
     const std::vector<Real> int_coefs = {1, 2, 3, 5, 7, -1, -2, -3, -4, -7};
     const std::vector<Real> cont_coefs = {1, 2, 0.5, 1.5, -1, -2, -0.5, -3};
 
@@ -638,7 +639,8 @@ LpProblem randomModel(std::mt19937& rng, const ModelSpec& spec,
         if (spec.tiny_coefs && sym_src < 0 && chance(0.5)) {
             // A near-tolerance coefficient, on a column of the row or a new one.
             const Index j = uniform(0, lp.num_cols - 1);
-            const Real a = std::pow(10.0, -uniform(6, 9)) * (chance(0.5) ? 1.0 : -1.0);
+            const Real magnitude = std::pow(10.0, -uniform(6, 9));
+            const Real a = chance(0.5) ? magnitude : -magnitude;
             std::erase_if(row, [&](const auto& t) { return t.first == j; });
             row.push_back({j, a});
         }
@@ -1114,7 +1116,7 @@ void randomBox(const LpProblem& lp, std::mt19937& rng, std::vector<Real>& lower,
     lower = lp.col_lower;
     upper = lp.col_upper;
     for (Index j = 0; j < lp.num_cols; ++j) {
-        if (std::uniform_int_distribution<int>(0, 2)(rng) == 0) {
+        if (test::validityInt(rng, 0, 2) == 0) {
             continue;  // Some columns stay at their global bounds.
         }
         if (isIntegral(lp.col_type[j])) {
@@ -1122,16 +1124,15 @@ void randomBox(const LpProblem& lp, std::mt19937& rng, std::vector<Real>& lower,
             if (values.empty()) {
                 continue;
             }
-            std::uniform_int_distribution<int> pick(0, static_cast<int>(values.size()) - 1);
-            int a = pick(rng);
-            int b = pick(rng);
+            const int last = static_cast<int>(values.size()) - 1;
+            const int a = test::validityInt(rng, 0, last);
+            const int b = test::validityInt(rng, 0, last);
             lower[j] = values[std::min(a, b)];
             upper[j] = values[std::max(a, b)];
         } else if (std::isfinite(lp.col_lower[j]) && std::isfinite(lp.col_upper[j])) {
-            std::uniform_real_distribution<Real> frac(0.0, 0.5);
             const Real width = lp.col_upper[j] - lp.col_lower[j];
-            lower[j] = lp.col_lower[j] + frac(rng) * width;
-            upper[j] = lp.col_upper[j] - frac(rng) * width;
+            lower[j] = lp.col_lower[j] + test::validityReal(rng, 0.0, 0.5) * width;
+            upper[j] = lp.col_upper[j] - test::validityReal(rng, 0.0, 0.5) * width;
         }
     }
 }
@@ -2102,21 +2103,21 @@ struct ChainKnapsack {
 std::vector<ChainKnapsack> chainKnapsacks(const std::vector<int>& picks) {
     std::vector<ChainKnapsack> models;
     std::mt19937 rng(1);
-    std::uniform_int_distribution<int> val(-20000, 20000);
-    std::uniform_real_distribution<double> big(500.0, 1500.0);
-    std::uniform_real_distribution<double> small(0.5, 3.0);
+    const auto val = [&] { return static_cast<Real>(test::validityInt(rng, -20000, 20000)); };
+    const auto big = [&] { return test::validityReal(rng, 500.0, 1500.0); };
+    const auto small = [&] { return test::validityReal(rng, 0.5, 3.0); };
     constexpr auto I = VarType::Integer;
     for (int t = 0; t <= picks.back(); ++t) {
-        const Real xs[3] = {Real(val(rng)), Real(val(rng)), Real(val(rng))};
+        const Real xs[3] = {val(), val(), val()};
         const Index kc = t % 10;
         const Real kv = Real(t % 5);
         std::vector<std::vector<Real>> rows(4, std::vector<Real>(13, 0.0));
         std::vector<Real> rhs(3, 0.0);
         for (Index i = 0; i < 3; ++i) {
-            rows[i][kc] = big(rng);
+            rows[i][kc] = big();
             rhs[i] = rows[i][kc] * kv;
             for (Index j = 0; j < 3; ++j) {
-                rows[i][10 + j] = (j == i) ? small(rng) : big(rng);
+                rows[i][10 + j] = j == i ? small() : big();
                 rhs[i] += rows[i][10 + j] * xs[j];
             }
         }
@@ -2244,21 +2245,18 @@ std::vector<LargeTermModel> largeTermModels(int count) {
     constexpr Index n = 4;
     constexpr Index m = 2;
     std::mt19937 rng(2361);
-    std::uniform_real_distribution<double> coef(1e3, 1e5);
-    std::uniform_int_distribution<int> val(-20000, 20000);
-    std::uniform_int_distribution<int> cost(-3, 3);
     std::vector<LargeTermModel> models;
     for (int t = 0; t < count; ++t) {
         std::vector<Real> xs(n);
         for (auto& v : xs) {
-            v = val(rng);
+            v = test::validityInt(rng, -20000, 20000);
         }
         std::vector<std::vector<Real>> rows(m, std::vector<Real>(n));
         std::vector<Real> rhs(m);
         for (Index i = 0; i < m; ++i) {
             long double act = 0;
             for (Index j = 0; j < n; ++j) {
-                rows[i][j] = coef(rng) * (j % 2 == 1 ? -1 : 1);
+                rows[i][j] = test::validityReal(rng, 1e3, 1e5) * (j % 2 == 1 ? -1 : 1);
                 act += static_cast<long double>(rows[i][j]) * xs[j];
             }
             rhs[i] = static_cast<Real>(act);
@@ -2269,7 +2267,7 @@ std::vector<LargeTermModel> largeTermModels(int count) {
         for (Index j = 0; j < n; ++j) {
             lower[j] = xs[j] - 2;
             upper[j] = xs[j] + 2;
-            obj[j] = cost(rng);
+            obj[j] = test::validityInt(rng, -3, 3);
         }
         models.push_back({makeModel(Sense::Minimize, obj, lower, upper, std::vector<VarType>(n, I),
                                     rows, rhs, rhs),
@@ -2346,15 +2344,13 @@ TEST_CASE("Regression #236: propagation through a tiny coefficient keeps the exa
     // below the row's slack now bounds nothing.
     constexpr auto I = VarType::Integer;
     std::mt19937 rng(236);
-    std::uniform_real_distribution<double> mantissa(1.0, 10.0);
-    std::uniform_int_distribution<int> digit(1, 9);
-    std::uniform_int_distribution<int> exponent(7, 10);
-    std::uniform_int_distribution<int> target(1, 4);
+    const auto mantissa = [&] { return test::validityReal(rng, 1.0, 10.0); };
     for (int trial = 0; trial < 3000; ++trial) {
-        const Real k = std::floor(std::pow(10.0, mantissa(rng) / 2.0 + 1.0));
-        const Real c = digit(rng);
-        const Real a = mantissa(rng) * std::pow(10.0, -exponent(rng));
-        const Real t = target(rng);
+        const Real k = std::floor(std::pow(10.0, mantissa() / 2.0 + 1.0));
+        const Real c = test::validityInt(rng, 1, 9);
+        const Real coefficient_mantissa = mantissa();
+        const Real a = coefficient_mantissa * std::pow(10.0, -test::validityInt(rng, 7, 10));
+        const Real t = test::validityInt(rng, 1, 4);
         const LpProblem lp = makeModel(Sense::Minimize, {0, 1}, {k, 0}, {k, 5}, {I, I}, {{c, a}},
                                        {c * k + t * a}, {c * k + t * a});
         INFO(describe(lp));
