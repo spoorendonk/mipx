@@ -323,6 +323,31 @@ struct MipProbingStats {
     double time_seconds = 0.0;
 };
 
+enum class RapidLearningStop {
+    NotRun,
+    Exhausted,
+    NodeLimit,
+    RowLimit,
+    NoYield,
+    Deadline,
+    Infeasible
+};
+
+struct MipRapidLearningStats {
+    RapidLearningStop stop = RapidLearningStop::NotRun;
+    Int nodes = 0;
+    Int row_visits = 0;
+    Int empty_blocks = 0;
+    std::uint64_t bounds_imported = 0;
+    Int conflicts_imported = 0;
+    Int incumbents_imported = 0;
+    std::uint64_t proofs_rejected = 0;
+    Int duplicate_conflicts = 0;
+    Int incumbents_rejected = 0;
+    std::uint64_t tree_conflict_tightenings = 0;
+    std::uint64_t tree_conflict_cutoffs = 0;
+};
+
 /// Statistics for the root conflict graph / clique table.
 struct MipCliqueStats {
     bool enabled = false;
@@ -727,6 +752,16 @@ public:
         systematic_probing_rows_per_branch_ = std::max<Int>(1, rows);
     }
     const MipProbingStats& getProbingStats() const { return probing_stats_; }
+
+    /// Search a separate propagation-only tree over transformed binary columns.
+    void setRootRapidLearningEnabled(bool enabled) { root_rapid_learning_enabled_ = enabled; }
+    void setRootRapidLearningMaxNodes(Int nodes) {
+        root_rapid_learning_max_nodes_ = std::max<Int>(0, nodes);
+    }
+    void setRootRapidLearningRowBudget(Int rows) {
+        root_rapid_learning_row_budget_ = std::max<Int>(0, rows);
+    }
+    const MipRapidLearningStats& getRapidLearningStats() const { return rapid_learning_stats_; }
     /// Enable the root conflict graph / clique table. When on, cliques drive
     /// node domain propagation and maximal-clique separation at the root.
     void setCliqueTableEnabled(bool enabled) { clique_table_enabled_ = enabled; }
@@ -972,6 +1007,8 @@ private:
     /// Run root probing and populate implication graph / variable bounds.
     /// Returns true if probing proved the problem infeasible.
     [[nodiscard]] bool runRootProbing();
+    [[nodiscard]] bool runRootRapidLearning(
+        SolutionPool& solutions, const std::function<bool(const std::vector<Real>&)>& check_loaded);
 
     [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
@@ -984,6 +1021,7 @@ private:
         Int age = 0;
         Int hits = 0;
         bool ray_shortened = false;
+        bool rapid_learning = false;
         std::uint64_t watch_id = 0;
         std::optional<BoundReasonScope> bound_scope;
         Int lbd = 0;
@@ -993,7 +1031,13 @@ private:
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
-    enum class ConflictSource { BoundInfeasible, LpInfeasible, LpCutoff, RootProbe };
+    enum class ConflictSource {
+        BoundInfeasible,
+        LpInfeasible,
+        LpCutoff,
+        RootProbe,
+        RootRapidLearning
+    };
     void publishConflict(ConflictClause clause, ConflictSource source);
     void recordConflictCutoff(ConflictClause& clause);
 
@@ -1167,6 +1211,10 @@ private:
     ImplicationGraph implication_graph_;
     VariableBoundStore vb_store_;
     MipProbingStats probing_stats_{};
+    bool root_rapid_learning_enabled_ = false;
+    Int root_rapid_learning_max_nodes_ = 128;
+    Int root_rapid_learning_row_budget_ = 20000;
+    MipRapidLearningStats rapid_learning_stats_{};
 
     // Conflict graph / clique table, rebuilt at the root of every solve().
     bool clique_table_enabled_ = false;

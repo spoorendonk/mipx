@@ -918,6 +918,7 @@ TEST_CASE("Global contradiction checking rejects local rows and objective cutoff
     dp.setBranchBound(0, false, 1.0, 1);
     REQUIRE_FALSE(dp.propagate());
     CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
+    CHECK_FALSE(checkedGlobalBoundConflict(model, *dp.boundReasons(), premises));
 
     model.row_upper[0] = kInf;
     model.obj[0] = 1.0;
@@ -929,4 +930,154 @@ TEST_CASE("Global contradiction checking rejects local rows and objective cutoff
     REQUIRE_FALSE(dp.propagate());
     CHECK(dp.objectiveInfeasible());
     CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
+    CHECK_FALSE(checkedGlobalBoundConflict(model, *dp.boundReasons(), premises));
+}
+
+TEST_CASE("Rapid learning imports a two-decision conflict into the main tree",
+          "[probing][rapid-learning][mip]") {
+    // z is irrelevant. x=y=1 forces u=v=1 in the second row, then
+    // contradicts the first. u=v keeps both values of z within the yield
+    // window and produces a conflict when either x or y is 1 and u is 0.
+    // w has an independent global fixing.
+    auto model = makeProblem(6, 4,
+                             {{0, 1, 1},
+                              {0, 2, 1},
+                              {0, 3, 1},
+                              {0, 4, 1},
+                              {1, 1, -1},
+                              {1, 2, -1},
+                              {1, 3, 1},
+                              {1, 4, 1},
+                              {2, 5, 2},
+                              {3, 3, 1},
+                              {3, 4, -1}},
+                             {-kInf, 0, -kInf, 0}, {3, kInf, 1, 0}, std::vector<Real>(6, 0),
+                             std::vector<Real>(6, 1), std::vector<VarType>(6, VarType::Binary));
+    model.obj = {0, -3, -2, 0, 0, -0.25};
+    auto feasible = [](unsigned mask) {
+        const unsigned xy = ((mask >> 1) & 1u) + ((mask >> 2) & 1u);
+        const unsigned uv = ((mask >> 3) & 1u) + ((mask >> 4) & 1u);
+        return xy <= uv && xy + uv <= 3 && uv != 1 && (mask & 32u) == 0u;
+    };
+
+    ProbingEngine probing;
+    ImplicationGraph graph;
+    VariableBoundStore bounds;
+    ProbingConfig config;
+    config.systematic_rows_per_branch = 100;
+    config.learn_vubs = false;
+    const auto probe_stats = probing.probe(model, graph, bounds, config);
+    CHECK_FALSE(probe_stats.infeasible);
+    REQUIRE(probing.checkedConflicts().size() == 1);
+    CHECK(probing.checkedConflicts().front().variable == 5);
+
+    const std::array path{BranchDecision{0, 0, true, 1}, BranchDecision{1, 1, false, 2},
+                          BranchDecision{2, 1, false, 3}};
+    DomainPropagator domain;
+    domain.load(model, true);
+    for (const auto& branch : path) {
+        domain.setBranchBound(branch.variable, branch.is_upper, branch.bound, branch.level);
+    }
+    REQUIRE_FALSE(domain.propagate());
+    const auto proof = checkedGlobalBoundConflict(model, *domain.boundReasons(), path);
+    REQUIRE(proof);
+    REQUIRE(proof->size() == 2);
+    CHECK(std::ranges::none_of(*proof, [](const auto& branch) { return branch.variable == 0; }));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setGapTolerance(0);
+    std::vector<Real> observed;
+    solver.setIncumbentObserver([&](std::span<const Real> point, const std::string& source) {
+        if (source == "root_rapid_learning") {
+            observed.assign(point.begin(), point.end());
+        }
+    });
+    solver.load(model);
+    Real optimum = kInf;
+    for (unsigned mask = 0; mask < 64; ++mask) {
+        if (feasible(mask)) {
+            CHECK_FALSE(std::ranges::all_of(*proof, [&](const auto& branch) {
+                return ((mask >> branch.variable) & 1u) == branch.bound;
+            }));
+            optimum = std::min(optimum, -3.0 * ((mask >> 1) & 1u) - 2.0 * ((mask >> 2) & 1u));
+        }
+    }
+    REQUIRE(solver.solve().objective == optimum);
+    CHECK(solver.getRapidLearningStats().stop == RapidLearningStop::NotRun);
+    solver.setRootRapidLearningEnabled(true);
+    for (int run = 0; run < 2; ++run) {
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(result.objective == optimum);
+        CHECK(result.best_bound == optimum);
+        REQUIRE(observed.size() == 6);
+        CHECK(pointHoldsModel(model, observed));
+        observed.clear();
+        const auto& stats = solver.getRapidLearningStats();
+        CHECK(stats.bounds_imported == 1);
+        CHECK(stats.conflicts_imported == 3);
+        CHECK(stats.duplicate_conflicts > 0);
+        CHECK(stats.incumbents_imported > 0);
+        CHECK(stats.tree_conflict_tightenings + stats.tree_conflict_cutoffs > 0);
+    }
+    for (unsigned mask = 0; mask < 64; ++mask) {
+        auto fixed = model;
+        for (Index col = 0; col < fixed.num_cols; ++col) {
+            fixed.col_lower[col] = fixed.col_upper[col] = (mask >> col) & 1u;
+        }
+        solver.load(fixed);
+        CHECK(solver.solve().status == (feasible(mask) ? Status::Optimal : Status::Infeasible));
+    }
+}
+
+TEST_CASE("Rapid learning stops at its work caps and completed empty blocks",
+          "[probing][rapid-learning][mip]") {
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    auto model = makeProblem(20, 1, {{0, 0, 1}}, {-kInf}, {1}, std::vector<Real>(20, 0),
+                             std::vector<Real>(20, 1), std::vector<VarType>(20, VarType::Binary));
+    solver.load(model);
+    solver.setRootRapidLearningMaxNodes(3);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRapidLearningStats().stop == RapidLearningStop::NodeLimit);
+    CHECK(solver.getRapidLearningStats().nodes == 3);
+    CHECK(solver.getRapidLearningStats().empty_blocks == 0);
+    solver.setRootRapidLearningMaxNodes(128);
+    solver.setRootRapidLearningRowBudget(2);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRapidLearningStats().stop == RapidLearningStop::RowLimit);
+    CHECK(solver.getRapidLearningStats().row_visits == 2);
+    solver.setRootRapidLearningRowBudget(128);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRapidLearningStats().stop == RapidLearningStop::NoYield);
+    CHECK(solver.getRapidLearningStats().nodes == 16);
+    CHECK(solver.getRapidLearningStats().empty_blocks == 2);
+    solver.setRootRapidLearningMaxNodes(0);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRapidLearningStats().nodes == 0);
+    CHECK(solver.getRapidLearningStats().row_visits == 0);
+}
+
+TEST_CASE("Rapid learning rejects a propagated leaf that fails model validation",
+          "[probing][rapid-learning][mip]") {
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    auto model = makeProblem(3, 1, {{0, 1, 1}, {0, 2, 1}}, {0.5}, {0.5}, {0, 0, 0}, {1, 1, 1},
+                             {VarType::Binary, VarType::Continuous, VarType::Continuous});
+    solver.load(model);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(pointHoldsModel(model, result.solution));
+    CHECK(solver.getRapidLearningStats().incumbents_imported == 0);
+    CHECK(solver.getRapidLearningStats().incumbents_rejected == 2);
 }

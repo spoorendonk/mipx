@@ -68,6 +68,8 @@ void printUsage(FILE* out) {
                  "[--probing-time S] "
                  "[--systematic-probing|--no-systematic-probing] "
                  "[--systematic-probing-pairs N] [--systematic-probing-rows N] "
+                 "[--root-rapid-learning|--no-root-rapid-learning] "
+                 "[--root-rapid-learning-nodes N] [--root-rapid-learning-rows N] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
                  "[--presolve-probing-probes N] [--presolve-probing-time S] "
                  "[--clique-table|--no-clique-table] "
@@ -224,6 +226,9 @@ int main(int argc, char* argv[]) {
     bool systematic_probing = false;
     std::optional<mipx::Int> systematic_probing_pairs;
     std::optional<mipx::Int> systematic_probing_rows;
+    bool root_rapid_learning = false;
+    std::optional<mipx::Int> rapid_learning_nodes;
+    std::optional<mipx::Int> rapid_learning_rows;
     bool presolve_probing = false;
     std::optional<mipx::Int> presolve_probing_rounds;
     std::optional<mipx::Int> presolve_probing_probes;
@@ -374,6 +379,22 @@ int main(int argc, char* argv[]) {
             }
             (arg == "--systematic-probing-pairs" ? systematic_probing_pairs
                                                  : systematic_probing_rows) = count;
+        } else if (arg == "--root-rapid-learning") {
+            root_rapid_learning = true;
+        } else if (arg == "--no-root-rapid-learning") {
+            root_rapid_learning = false;
+        } else if ((arg == "--root-rapid-learning-nodes" || arg == "--root-rapid-learning-rows") &&
+                   i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const auto end = value.data() + value.size();
+            mipx::Int count = 0;
+            const auto [parsed, ec] = std::from_chars(value.data(), end, count);
+            if (ec != std::errc{} || parsed != end || count < 0) {
+                std::fprintf(stderr, "%s requires a nonnegative integer\n", arg.c_str());
+                return 1;
+            }
+            (arg == "--root-rapid-learning-nodes" ? rapid_learning_nodes : rapid_learning_rows) =
+                count;
         } else if (arg == "--presolve-probing") {
             presolve_probing = true;
         } else if (arg == "--no-presolve-probing") {
@@ -921,6 +942,13 @@ int main(int argc, char* argv[]) {
             if (systematic_probing_rows) {
                 solver.setSystematicProbingRowsPerBranch(*systematic_probing_rows);
             }
+            solver.setRootRapidLearningEnabled(root_rapid_learning);
+            if (rapid_learning_nodes) {
+                solver.setRootRapidLearningMaxNodes(*rapid_learning_nodes);
+            }
+            if (rapid_learning_rows) {
+                solver.setRootRapidLearningRowBudget(*rapid_learning_rows);
+            }
             solver.setCliqueTableEnabled(clique_table_enabled);
             if (plunge_depth || plunge_bound_quotient) {
                 // The setter takes both; whichever was not given keeps the
@@ -1050,6 +1078,24 @@ int main(int argc, char* argv[]) {
                     stats.implications_found, stats.checked_conflicts_published,
                     static_cast<unsigned long long>(stats.tree_implication_fixings),
                     static_cast<unsigned long long>(stats.tree_implication_cutoffs));
+            }
+            if (root_rapid_learning) {
+                const auto& stats = solver.getRapidLearningStats();
+                constexpr auto stops =
+                    std::array{"not-run",  "exhausted", "node-limit", "row-limit",
+                               "no-yield", "deadline",  "infeasible"};
+                log.log(
+                    "Root rapid learning: stop=%s nodes=%d rows=%d empty_blocks=%d "
+                    "bounds=%llu conflicts=%d incumbents=%d rejected_proofs=%llu "
+                    "duplicate_conflicts=%d rejected_incumbents=%d "
+                    "tree_tightenings=%llu tree_cutoffs=%llu\n",
+                    stops[static_cast<std::size_t>(stats.stop)], stats.nodes, stats.row_visits,
+                    stats.empty_blocks, static_cast<unsigned long long>(stats.bounds_imported),
+                    stats.conflicts_imported, stats.incumbents_imported,
+                    static_cast<unsigned long long>(stats.proofs_rejected),
+                    stats.duplicate_conflicts, stats.incumbents_rejected,
+                    static_cast<unsigned long long>(stats.tree_conflict_tightenings),
+                    static_cast<unsigned long long>(stats.tree_conflict_cutoffs));
             }
             if (print_det_heur_gate) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",

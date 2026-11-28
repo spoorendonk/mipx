@@ -1819,6 +1819,7 @@ MipSolver::ConflictClause MipSolver::acquireConflictClause() {
     clause.age = 0;
     clause.hits = 0;
     clause.ray_shortened = false;
+    clause.rapid_learning = false;
     clause.bound_scope.reset();
     clause.lbd = 0;
     return clause;
@@ -2050,8 +2051,9 @@ void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
     conflict_stats_.lp_infeasible_conflicts += source == ConflictSource::LpInfeasible;
     conflict_stats_.bound_infeasible_conflicts += source == ConflictSource::BoundInfeasible;
 
+    clause.rapid_learning = source == ConflictSource::RootRapidLearning;
     if (conflict_restart_threshold_ > 0 && !clause.literals.empty() &&
-        source != ConflictSource::RootProbe) {
+        source != ConflictSource::RootProbe && !clause.rapid_learning) {
         // One event per learned clause. Reuse improves branch scores but
         // does not make the same clause fresh restart evidence again.
         conflict_restart_activity_ += 1.0;
@@ -2159,6 +2161,7 @@ void MipSolver::recordConflictCutoff(ConflictClause& clause) {
     ++conflict_stats_.reused;
     conflict_stats_.ray_reused += clause.ray_shortened;
     ++conflict_stats_.pruned;
+    rapid_learning_stats_.tree_conflict_cutoffs += clause.rapid_learning;
     clause.age = 0;
     ++clause.hits;
     for (const auto& lit : clause.literals) {
@@ -2192,6 +2195,7 @@ bool MipSolver::propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff,
                 clause.age = 0;
                 ++clause.hits;
                 ++conflict_stats_.bound_conflict_tightenings;
+                rapid_learning_stats_.tree_conflict_tightenings += clause.rapid_learning;
                 lower[col] = lb;
                 upper[col] = ub;
                 lp.setColBounds(col, lb, ub);
@@ -2822,15 +2826,17 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     bool bound_conflict_tightened = false;
-    if (use_bound_conflicts || use_lp_proofs) {
+    const bool use_rapid_conflicts = use_conflicts && rapid_learning_stats_.conflicts_imported > 0;
+    if (use_bound_conflicts || use_lp_proofs || use_rapid_conflicts) {
         const auto before = touched_vars.size();
         if (!propagateBoundConflicts(lp, conflict_cutoff, current_lower, current_upper,
                                      touched_vars)) {
             return false;
         }
         bound_conflict_tightened = touched_vars.size() != before;
-        if (use_lp_proofs && bound_conflict_tightened && std::isfinite(conflict_cutoff)) {
-            // A later path fallback may depend on a cutoff-scoped unit bound.
+        if ((use_lp_proofs || use_rapid_conflicts) && bound_conflict_tightened &&
+            std::isfinite(conflict_cutoff)) {
+            // A later path fallback may depend on a cutoff-scoped clause or antecedent.
             fallback_scope = BoundReasonScope{.cutoff = conflict_cutoff};
         }
         if (bound_conflict_tightened && !applySos2Bounds()) {
@@ -5001,6 +5007,7 @@ MipResult MipSolver::solveMinimization() {
     if (native_sos2 && (node_limit_ <= 0 || time_limit_ <= 0.0)) {
         lp_stats_ = {};
         probing_stats_ = {};
+        rapid_learning_stats_ = {};
         implication_graph_ = {};
         vb_store_ = {};
         MipResult stopped;
@@ -5168,6 +5175,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
+    rapid_learning_stats_ = {};
     implication_graph_ = {};
     vb_store_ = {};
     clique_stats_ = {};
@@ -5657,6 +5665,36 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     }
 
+    SolutionPool solution_pool(problem_.sense);
+    observeIncumbents(solution_pool);
+    if (root_rapid_learning_enabled_ && !discrete_vars.empty()) {
+        if (!using_transformed_problem && saved_root_lower.empty()) {
+            saved_root_lower = problem_.col_lower;
+            saved_root_upper = problem_.col_upper;
+        }
+        const auto check_loaded = [&](const std::vector<Real>& point) {
+            const auto& loaded = using_transformed_problem ? original_problem : problem_;
+            return did_presolve ? pointHoldsModel(loaded, presolver.postsolve(point))
+                                : !using_transformed_problem || pointHoldsModel(loaded, point);
+        };
+        const bool infeasible = runRootRapidLearning(solution_pool, check_loaded);
+        total_work +=
+            (static_cast<double>(rapid_learning_stats_.row_visits) + rapid_learning_stats_.nodes) *
+            1e-6;
+        if (infeasible) {
+            MipResult result;
+            result.status = Status::Infeasible;
+            result.work_units = canonicalReportedWork(total_work);
+            result.time_seconds = elapsed();
+            restoreProblem();
+            return result;
+        }
+        if (auto best = solution_pool.bestSolution()) {
+            incumbent = best->objective;
+            best_solution = std::move(best->values);
+        }
+    }
+
     const bool pre_root_stage_enabled =
         (pre_root_lp_free_enabled_ || pre_root_lp_light_enabled_) && !discrete_vars.empty();
     if (pre_root_stage_enabled) {
@@ -5911,9 +5949,12 @@ MipResult MipSolver::solveMinimizationOnce() {
             constexpr uint64_t kNoFirstFeasibleWorkTick = std::numeric_limits<uint64_t>::max();
             std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
             SolutionPool pre_root_pool(problem_.sense);
+            if (incumbent < kInf) {
+                pre_root_pool.submit({best_solution, incumbent}, "root_rapid_learning", 0);
+            }
             observeIncumbents(pre_root_pool);
             Real deterministic_stage_incumbent = pre_root_pool.bestObjective();
-            std::vector<Real> deterministic_incumbent_values;
+            std::vector<Real> deterministic_incumbent_values = best_solution;
             const auto stage_start = std::chrono::steady_clock::now();
             auto stageElapsed = [&]() -> double {
                 return std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start)
@@ -6979,10 +7020,8 @@ MipResult MipSolver::solveMinimizationOnce() {
     // reduced costs prove nothing about root_primals and root_bound.
     const bool root_reduced_costs_valid = lp.getStatus() == Status::Optimal;
     HeuristicRuntimeConfig runtime_config = makeHeuristicRuntimeConfig();
-    SolutionPool solution_pool(problem_.sense);
-    observeIncumbents(solution_pool);
     HeuristicRuntime root_runtime(runtime_config);
-    if (incumbent < kInf && !best_solution.empty()) {
+    if (incumbent < solution_pool.bestObjective() && !best_solution.empty()) {
         solution_pool.submit({best_solution, incumbent}, "pre_root_stage", 0);
     }
 

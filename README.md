@@ -112,6 +112,8 @@ Key options:
 | `--probing-rounds <n>` / `--probing-probes <n>` / `--probing-time <s>` | 3 / 10000 / 30 | Rounds, probes per legacy round, and a time limit checked between pairs in both modes |
 | `--systematic-probing` / `--no-systematic-probing` | off | Use a single checked root probing pass in column order. Learn binary fixings and implications and publish checked conflicts in serial search. Takes precedence over `--probing` |
 | `--systematic-probing-pairs <n>` / `--systematic-probing-rows <n>` | 128 / 10000 | Cap complete binary probe pairs and row visits per branch |
+| `--root-rapid-learning` / `--no-root-rapid-learning` | off | Search binary branches with row propagation before the root LP. Import checked global bounds, serial conflicts and validated incumbents. Stop after two consecutive eight-node blocks yield no new facts |
+| `--root-rapid-learning-nodes <n>` / `--root-rapid-learning-rows <n>` | 128 / 20000 | Cap search nodes and total row visits. A zero cap skips the stage |
 | `--presolve-probing` / `--no-presolve-probing` | off | Probing pass inside presolve |
 | `--presolve-probing-rounds <n>` / `--presolve-probing-probes <n>` / `--presolve-probing-time <s>` | 2 / 5000 / 5 | Its budget, per presolve call |
 | `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |
