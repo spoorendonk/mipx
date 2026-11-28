@@ -1081,3 +1081,146 @@ TEST_CASE("Rapid learning rejects a propagated leaf that fails model validation"
     CHECK(solver.getRapidLearningStats().incumbents_imported == 0);
     CHECK(solver.getRapidLearningStats().incumbents_rejected == 2);
 }
+
+TEST_CASE("Rapid learning cannot use a nearly feasible point as a scaled objective cutoff",
+          "[probing][rapid-learning][mip]") {
+    // At least one binary is 1, so x >= 1. Propagation's continuous
+    // endpoint can sit just below 1 and still pass the ordinary tolerance.
+    auto model =
+        makeProblem(3, 3, {{0, 0, 1}, {0, 1, -1}, {1, 0, 1}, {1, 2, -1}, {2, 1, 2}, {2, 2, 2}},
+                    {0, 0, 1}, {kInf, kInf, kInf}, {0, 0, 0}, {2, 1, 1},
+                    {VarType::Continuous, VarType::Binary, VarType::Binary});
+    model.obj = {1e8, 0.1, 0.1};
+    model.obj_offset = -1e8;
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    solver.setGapTolerance(0);
+    solver.load(model);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(0.1, 1e-7));
+    CHECK_THAT(result.best_bound, WithinAbs(0.1, 1e-7));
+    CHECK(solver.getRapidLearningStats().incumbents_imported == 0);
+    CHECK(solver.getRapidLearningStats().incumbents_rejected > 0);
+}
+
+TEST_CASE("Rapid learning reports a certified incumbent in loaded columns after presolve",
+          "[probing][rapid-learning][mip]") {
+    // Presolve removes the fixed continuous column and its objective term.
+    // The odd cycle leaves a nontrivial binary problem.
+    auto model = makeProblem(6, 5,
+                             {{0, 0, 1},
+                              {0, 1, 1},
+                              {1, 1, 1},
+                              {1, 2, 1},
+                              {2, 2, 1},
+                              {2, 3, 1},
+                              {3, 3, 1},
+                              {3, 4, 1},
+                              {4, 4, 1},
+                              {4, 0, 1}},
+                             std::vector<Real>(5, -kInf), std::vector<Real>(5, 1),
+                             {0, 0, 0, 0, 0, 3}, {1, 1, 1, 1, 1, 3},
+                             {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Binary,
+                              VarType::Binary, VarType::Continuous});
+    model.obj = {-1, -1, -1, -1, -1, 2};
+    Presolver presolver;
+    const auto reduced = presolver.presolve(model);
+    CHECK(reduced.num_cols < model.num_cols);
+    REQUIRE(reduced.hasIntegers());
+
+    MipSolver solver;
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    std::vector<Real> observed;
+    solver.setIncumbentObserver([&](std::span<const Real> point, const std::string& source) {
+        if (source == "root_rapid_learning") {
+            observed.assign(point.begin(), point.end());
+        }
+    });
+    solver.load(model);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 4);
+    REQUIRE(solver.getRapidLearningStats().incumbents_imported > 0);
+    REQUIRE(observed.size() == 6);
+    CHECK(observed.back() == 3);
+    CHECK(pointHoldsModel(model, observed));
+}
+
+TEST_CASE("Rapid learning spends one allowance across native SOS2 unbounded confirmation",
+          "[probing][rapid-learning][mip]") {
+    auto model = makeProblem(5, 0, {}, {}, {}, {0.5, 0, 0, 0, 0}, {1, 1, 1, kInf, 1},
+                             {VarType::Continuous, VarType::Continuous, VarType::Continuous,
+                              VarType::Continuous, VarType::Binary});
+    model.obj = {0, 0, 0, -1, -1};
+    model.native_sos2 = {{0, 1, 2}};
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    solver.setRootRapidLearningMaxNodes(2);
+    std::vector<Real> observed;
+    solver.setIncumbentObserver([&](std::span<const Real> point, const std::string& source) {
+        if (source == "root_rapid_learning") {
+            observed.push_back(point[4]);
+        }
+    });
+    solver.load(model);
+    for (int run = 0; run < 2; ++run) {
+        // The second attempt minimizes zero, so if allowed to run rapid
+        // learning again it would visit the binary's other value first.
+        REQUIRE(solver.solve().status == Status::Unbounded);
+        const auto& stats = solver.getRapidLearningStats();
+        CHECK(stats.stop == RapidLearningStop::NodeLimit);
+        CHECK(stats.nodes == 2);
+        CHECK(stats.incumbents_imported == 1);
+        CHECK(observed == std::vector<Real>{1});
+        observed.clear();
+    }
+}
+
+TEST_CASE("Rapid learning charges dense proof checks to the propagation row allowance",
+          "[probing][rapid-learning][mip]") {
+    constexpr Index n = 32;
+    std::vector<Triplet> row;
+    for (Index col = 0; col < n; ++col) {
+        row.push_back({0, col, 1});
+    }
+    auto model = makeProblem(n, 1, std::move(row), {n}, {kInf}, std::vector<Real>(n, 0),
+                             std::vector<Real>(n, 1), std::vector<VarType>(n, VarType::Binary));
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    solver.setRootRapidLearningRowBudget(3);
+    solver.load(model);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    const auto& stats = solver.getRapidLearningStats();
+    CHECK(stats.stop == RapidLearningStop::RowLimit);
+    CHECK(stats.nodes == 1);
+    CHECK(stats.row_visits == 3);
+    CHECK(stats.bounds_imported < n);
+    CHECK(stats.proofs_rejected == 0);
+    CHECK(stats.incumbents_imported == 0);
+}
+
+TEST_CASE("Rapid learning charges candidate validation to the propagation row allowance",
+          "[probing][rapid-learning][mip]") {
+    const auto model = makeProblem(2, 1, {{0, 0, 1}, {0, 1, 1}}, {-kInf}, {1}, {0, 0}, {1, 1},
+                                   {VarType::Binary, VarType::Binary});
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootRapidLearningEnabled(true);
+    solver.setRootRapidLearningRowBudget(4);
+    solver.load(model);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    const auto& stats = solver.getRapidLearningStats();
+    CHECK(stats.stop == RapidLearningStop::RowLimit);
+    CHECK(stats.nodes == 3);
+    CHECK(stats.row_visits == 4);
+    CHECK(stats.incumbents_imported == 1);
+}

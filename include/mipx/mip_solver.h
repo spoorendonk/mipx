@@ -1001,8 +1001,8 @@ private:
     /// Run root probing and populate implication graph / variable bounds.
     /// Returns true if probing proved the problem infeasible.
     [[nodiscard]] bool runRootProbing();
-    [[nodiscard]] bool runRootRapidLearning(
-        SolutionPool& solutions, const std::function<bool(const std::vector<Real>&)>& check_loaded);
+    [[nodiscard]] bool runRootRapidLearning(SolutionPool& solutions, const LpProblem* loaded,
+                                            const Presolver* postsolve);
 
     [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
@@ -1207,6 +1207,7 @@ private:
     Int root_rapid_learning_max_nodes_ = 128;
     Int root_rapid_learning_row_budget_ = 20000;
     MipRapidLearningStats rapid_learning_stats_{};
+    bool rapid_learning_clauses_active_ = false;
 
     // Conflict graph / clique table, rebuilt at the root of every solve().
     bool clique_table_enabled_ = false;

@@ -1,4 +1,3 @@
-#include "../heuristics/common.h"
 #include "mipx/bound_conflict.h"
 #include "mipx/deadline.h"
 #include "mipx/mip_solver.h"
@@ -13,6 +12,92 @@ namespace {
 
 constexpr Int kNodesPerBlock = 8;
 constexpr Int kEmptyBlocksToStop = 2;
+
+// Use the sign of the exact addition residual (FastTwoSum) to widen only
+// when necessary. Exactly representable activities can certify equalities.
+Real directedAdd(Real a, Real b, bool upper) {
+    if (std::abs(a) < std::abs(b)) {
+        std::swap(a, b);
+    }
+    const Real sum = a + b;
+    if (!std::isfinite(sum)) {
+        return sum;
+    }
+    const Real error = b - (sum - a);
+    return (upper ? error > 0.0 : error < 0.0) ? std::nextafter(sum, upper ? kInf : -kInf) : sum;
+}
+
+struct ActivityInterval {
+    Real lower = 0.0;
+    Real upper = 0.0;
+
+    bool addProduct(Real coefficient, Real value) {
+        const Real product = coefficient * value;
+        if (!std::isfinite(product)) {
+            return false;
+        }
+        Real lo = product;
+        Real hi = product;
+        if (coefficient != 0.0 && value != 0.0 && std::abs(coefficient) != 1.0 &&
+            std::abs(value) != 1.0) {
+            // Near underflow the product residual can round to zero. Widen
+            // both sides where a product of two doubles can have bits below
+            // the smallest subnormal (2^-1074).
+            const bool residual_may_underflow = std::abs(product) < 0x1p-968;
+            const Real error = std::fma(coefficient, value, -product);
+            if (residual_may_underflow || error < 0.0) {
+                lo = std::nextafter(product, -kInf);
+            }
+            if (residual_may_underflow || error > 0.0) {
+                hi = std::nextafter(product, kInf);
+            }
+        }
+        lower = directedAdd(lower, lo, false);
+        upper = directedAdd(upper, hi, true);
+        return std::isfinite(lower) && std::isfinite(upper);
+    }
+};
+
+// LP tolerances alone cannot certify that a constructed point supplies a
+// cutoff: a small violation can buy a large apparent objective gain.
+std::optional<Real> checkedPointObjective(const LpProblem& model, std::span<const Real> point,
+                                          BoundProofBudget& budget) {
+    if (point.size() != static_cast<std::size_t>(model.num_cols) ||
+        !std::isfinite(model.obj_offset)) {
+        return std::nullopt;
+    }
+    ActivityInterval objective{model.obj_offset, model.obj_offset};
+    for (Index col = 0; col < model.num_cols; ++col) {
+        const Real value = point[col];
+        if (!std::isfinite(value) || value < model.col_lower[col] || value > model.col_upper[col] ||
+            (model.col_type[col] != VarType::Continuous && std::trunc(value) != value) ||
+            !objective.addProduct(model.obj[col], value)) {
+            return std::nullopt;
+        }
+    }
+    for (const auto& members : model.native_sos2) {
+        const auto [first, last] = sos2Support(model, members, point);
+        if (last - first > 1) {
+            return std::nullopt;
+        }
+    }
+    for (Index row = 0; row < model.num_rows; ++row) {
+        if (!budget.debitRow()) {
+            return std::nullopt;
+        }
+        ActivityInterval activity;
+        const auto sparse = model.matrix.row(row);
+        for (Index k = 0; k < sparse.size(); ++k) {
+            if (!activity.addProduct(sparse.values[k], point[sparse.indices[k]])) {
+                return std::nullopt;
+            }
+        }
+        if (activity.lower < model.row_lower[row] || activity.upper > model.row_upper[row]) {
+            return std::nullopt;
+        }
+    }
+    return objective.upper;
+}
 
 std::vector<Real> candidatePoint(const LpProblem& model, const DomainPropagator& domain) {
     std::vector<Real> point(model.num_cols);
@@ -34,8 +119,8 @@ std::vector<Real> candidatePoint(const LpProblem& model, const DomainPropagator&
 
 }  // namespace
 
-bool MipSolver::runRootRapidLearning(
-    SolutionPool& solutions, const std::function<bool(const std::vector<Real>&)>& check_loaded) {
+bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* loaded,
+                                     const Presolver* postsolve) {
     auto& stats = rapid_learning_stats_;
     const auto deadline = Deadline::after(timeLeft());
     if (deadline.passed()) {
@@ -62,6 +147,8 @@ bool MipSolver::runRootRapidLearning(
     }
 
     using BoundSide = std::pair<Index, bool>;
+    Int rows_left = root_rapid_learning_row_budget_;
+    BoundProofBudget budget{rows_left, deadline};
     std::map<BoundSide, Real> imported_bounds;
     std::set<std::vector<BoundSide>> imported_conflicts;
     const auto import_bound = [&](BoundEndpoint bound) {
@@ -84,8 +171,11 @@ bool MipSolver::runRootRapidLearning(
                 if (value == (upper ? problem_.col_upper[col] : problem_.col_lower[col])) {
                     continue;
                 }
-                if (checkGlobalBoundDeduction(problem_, trail, trail.current(col, upper))) {
+                if (checkGlobalBoundDeduction(problem_, trail, trail.current(col, upper),
+                                              &budget)) {
                     import_bound({col, upper, value});
+                } else if (budget.interrupted) {
+                    return;
                 } else {
                     ++stats.proofs_rejected;
                 }
@@ -94,18 +184,39 @@ bool MipSolver::runRootRapidLearning(
     };
     const auto import_point = [&]() {
         auto point = candidatePoint(problem_, domain);
-        if (!isAcceptableIncumbent(point) || !check_loaded(point)) {
+        auto objective = checkedPointObjective(problem_, point, budget);
+        std::vector<Real> mapped;
+        if (objective && loaded != nullptr) {
+            if (postsolve != nullptr) {
+                mapped = postsolve->postsolve(point);
+            }
+            const auto loaded_objective =
+                checkedPointObjective(*loaded, postsolve != nullptr ? mapped : point, budget);
+            if (loaded_objective) {
+                // Both objective representations include their own offset.
+                *objective = std::max(*objective, *loaded_objective);
+            } else {
+                objective.reset();
+            }
+        }
+        if (budget.interrupted || deadline.passed()) {
+            return;
+        }
+        if (!objective) {
             ++stats.incumbents_rejected;
             return;
         }
-        const Real obj = heuristic_detail::computeObjective(problem_, point);
-        if (!std::isfinite(obj)) {
-            ++stats.incumbents_rejected;
+        if (*objective >= solutions.bestObjective()) {
             return;
         }
-        if (obj < solutions.bestObjective() &&
-            solutions.submit({std::move(point), obj}, "root_rapid_learning", 0)) {
+        if (incumbent_observer_ && postsolve == nullptr) {
+            mapped = point;
+        }
+        if (solutions.submit({std::move(point), *objective}, "root_rapid_learning", 0)) {
             ++stats.incumbents_imported;
+            if (incumbent_observer_) {
+                incumbent_observer_(mapped, "root_rapid_learning");
+            }
         }
     };
 
@@ -131,9 +242,11 @@ bool MipSolver::runRootRapidLearning(
         return false;
     };
     const auto import_conflict = [&]() {
-        auto proof = checkedGlobalBoundConflict(problem_, trail, path);
+        auto proof = checkedGlobalBoundConflict(problem_, trail, path, &budget);
         if (!proof) {
-            ++stats.proofs_rejected;
+            if (!budget.interrupted) {
+                ++stats.proofs_rejected;
+            }
             return false;
         }
         if (proof->empty()) {
@@ -165,26 +278,35 @@ bool MipSolver::runRootRapidLearning(
         return false;
     };
 
-    Int rows_left = root_rapid_learning_row_budget_;
+    const auto out_of_work = [&]() {
+        if (deadline.passed()) {
+            stats.stop = RapidLearningStop::Deadline;
+            return true;
+        }
+        if (rows_left == 0) {
+            stats.stop = RapidLearningStop::RowLimit;
+            return true;
+        }
+        return false;
+    };
     std::uint64_t last_block_yield = 0;
     for (;;) {
+        ++stats.nodes;
+        const bool feasible =
+            !trail.contradiction() && domain.propagateWithRowBudget(rows_left, &deadline);
         if (deadline.passed()) {
             stats.stop = RapidLearningStop::Deadline;
             break;
         }
-        ++stats.nodes;
-        const bool feasible = !trail.contradiction() && domain.propagateWithRowBudget(rows_left);
-        stats.row_visits = root_rapid_learning_row_budget_ - rows_left;
         if (!feasible) {
             if (import_conflict()) {
                 stats.stop = RapidLearningStop::Infeasible;
-                return true;
+                break;
             }
         } else if (path.empty()) {
             import_root_bounds();
         }
-        if (rows_left == 0) {
-            stats.stop = RapidLearningStop::RowLimit;
+        if (out_of_work()) {
             break;
         }
 
@@ -195,6 +317,9 @@ bool MipSolver::runRootRapidLearning(
             });
             if (split == binaries.end()) {
                 import_point();
+                if (out_of_work()) {
+                    break;
+                }
             }
         }
         if (stats.nodes % kNodesPerBlock == 0) {
@@ -217,6 +342,10 @@ bool MipSolver::runRootRapidLearning(
             stats.stop = RapidLearningStop::Exhausted;
             break;
         }
+    }
+    stats.row_visits = root_rapid_learning_row_budget_ - rows_left;
+    if (stats.stop == RapidLearningStop::Infeasible) {
+        return true;
     }
 
     // Keep verification on the original root domain throughout the search.

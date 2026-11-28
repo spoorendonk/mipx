@@ -2826,7 +2826,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     bool bound_conflict_tightened = false;
-    const bool use_rapid_conflicts = use_conflicts && rapid_learning_stats_.conflicts_imported > 0;
+    const bool use_rapid_conflicts = use_conflicts && rapid_learning_clauses_active_;
     if (use_bound_conflicts || use_lp_proofs || use_rapid_conflicts) {
         const auto before = touched_vars.size();
         if (!propagateBoundConflicts(lp, conflict_cutoff, current_lower, current_upper,
@@ -4956,6 +4956,7 @@ MipResult MipSolver::solve() {
     branch_inference_coverage_stats_ = {};
     branch_cutoff_stats_.clear();
     serial_node_policy_stats_ = {};
+    rapid_learning_stats_ = {};
     if (!loaded_) {
         return {};
     }
@@ -4994,7 +4995,6 @@ MipResult MipSolver::solveMinimization() {
     if (native_sos2 && (node_limit_ <= 0 || time_limit_ <= 0.0)) {
         lp_stats_ = {};
         probing_stats_ = {};
-        rapid_learning_stats_ = {};
         implication_graph_ = {};
         vb_store_ = {};
         MipResult stopped;
@@ -5161,7 +5161,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
-    rapid_learning_stats_ = {};
+    rapid_learning_clauses_active_ = false;
     implication_graph_ = {};
     vb_store_ = {};
     clique_stats_ = {};
@@ -5652,18 +5652,16 @@ MipResult MipSolver::solveMinimizationOnce() {
     }
 
     SolutionPool solution_pool(problem_.sense);
-    observeIncumbents(solution_pool);
-    if (root_rapid_learning_enabled_ && !discrete_vars.empty()) {
+    if (root_rapid_learning_enabled_ && !discrete_vars.empty() &&
+        rapid_learning_stats_.stop == RapidLearningStop::NotRun) {
         if (!using_transformed_problem && saved_root_lower.empty()) {
             saved_root_lower = problem_.col_lower;
             saved_root_upper = problem_.col_upper;
         }
-        const auto check_loaded = [&](const std::vector<Real>& point) {
-            const auto& loaded = using_transformed_problem ? original_problem : problem_;
-            return did_presolve ? pointHoldsModel(loaded, presolver.postsolve(point))
-                                : !using_transformed_problem || pointHoldsModel(loaded, point);
-        };
-        const bool infeasible = runRootRapidLearning(solution_pool, check_loaded);
+        const bool infeasible = runRootRapidLearning(
+            solution_pool, using_transformed_problem ? &original_problem : nullptr,
+            did_presolve ? &presolver : nullptr);
+        rapid_learning_clauses_active_ = rapid_learning_stats_.conflicts_imported > 0;
         total_work +=
             (static_cast<double>(rapid_learning_stats_.row_visits) + rapid_learning_stats_.nodes) *
             1e-6;
@@ -5680,6 +5678,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             best_solution = std::move(best->values);
         }
     }
+    observeIncumbents(solution_pool);
 
     const bool pre_root_stage_enabled =
         (pre_root_lp_free_enabled_ || pre_root_lp_light_enabled_) && !discrete_vars.empty();

@@ -3,6 +3,7 @@
 #include "mipx/bound_reasons.h"
 #include "mipx/branch_decision.h"
 #include "mipx/cut_pool.h"
+#include "mipx/deadline.h"
 
 namespace mipx {
 
@@ -27,14 +28,30 @@ struct LearnedBoundConflict {
                                                  const BoundReasonTrail& trail,
                                                  std::span<const BranchDecision> premises);
 
+/// Allowance shared by propagation and its independent proof checker.
+struct BoundProofBudget {
+    Int& rows_left;
+    const Deadline& deadline;
+    bool interrupted = false;
+
+    [[nodiscard]] bool debitRow() {
+        if (rows_left <= 0 || deadline.passed()) {
+            interrupted = true;
+            return false;
+        }
+        --rows_left;
+        return true;
+    }
+};
+
 /// Return the branch premises used by a checked global contradiction.
 [[nodiscard]] std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
-    const LpProblem& model, const BoundReasonTrail& trail,
-    std::span<const BranchDecision> premises);
+    const LpProblem& model, const BoundReasonTrail& trail, std::span<const BranchDecision> premises,
+    BoundProofBudget* budget = nullptr);
 
 /// Check a deduction against the global model without branch premises.
 [[nodiscard]] bool checkGlobalBoundDeduction(const LpProblem& model, const BoundReasonTrail& trail,
-                                             BoundReasonId id);
+                                             BoundReasonId id, BoundProofBudget* budget = nullptr);
 
 /// Recheck a reconvergence clause using only the global model and return its
 /// binary inequality if the forbidden assignment can be ruled out.
