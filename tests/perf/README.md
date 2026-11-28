@@ -518,7 +518,7 @@ recorded status and objective.
 ./build/mipx-lpseq-replay tests/data/lpseq/grid1 \
     --arm dual-warm --arm dual-cold --arm barrier --arm barrier-hsd --arm pdlp \
     [--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] \
-    [--csv out.csv] [--dual-stats-csv dual.csv]
+    [--csv out.csv] [--dual-stats-csv dual.csv] [--refactor-csv refactor.csv]
 ```
 
 The version 1 format is implemented in [`lpseq_format.h`](lpseq_format.h).
@@ -593,6 +593,20 @@ seq,arm,added_columns,dual_pivots,primal_pivots,primal_degenerate_pivots,primal_
 excluding columns loaded from the initial snapshot. To measure warm primal
 pivots per added column, sum `primal_pivots` and `added_columns` over
 `dual-warm` solves with added columns and divide the totals.
+
+`--refactor-csv FILE` (#517) writes one row per solve and dual arm with the
+solve's basis factorizations by trigger, the fields of
+`DualSimplexSolver::RefactorStats` (see its comments in `dual_simplex.h`):
+
+```text
+seq,arm,iterations,cold_start,start,update_limit,update_cost,growth,pivot_rejected,pivot_mismatch,empty_ratio_test,no_bfrt_group,ray_guard,singular_recovery,degenerate_stall,bfrt_high_flip,stall_restart,cold_restore,unscaled_cleanup,edits
+```
+
+`start` counts each pass's first factorization (a warm solve's cold retry
+and the unscaled clean-up's re-solve add one), `cold_start` is 1 when a pass
+started from a crash basis, and `edits` counts the factorizations the edit
+calls since the previous solve made (`removeCols` swapping a basic column
+out).
 
 `--edit-csv FILE` (#442) times `dual-warm`'s edit calls, which the solve
 timer leaves out, one row per op (none for `coeffs`, whose reload the solve

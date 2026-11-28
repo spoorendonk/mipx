@@ -505,6 +505,44 @@ public:
     };
     [[nodiscard]] const DegeneracyStats& getDegeneracyStats() const { return degeneracy_stats_; }
 
+    /// Basis factorizations of the most recent solve() by what asked for
+    /// them (#517), summed over all of its passes (cold retry, unscaled
+    /// clean-up included). Each counts an attempt, so one that fails or
+    /// throws is counted too. edits counts those of the edit calls since
+    /// the solve before it (removeCols swapping a basic column out).
+    struct RefactorStats {
+        // Each pass's first factorization of the basis it starts from: the
+        // warm basis after the edits, or a cold start's crash basis.
+        Int start = 0;
+        // Scheduled: the LU's update count reached lu_update_limit, or its
+        // Forrest-Tomlin updates cost twice the base factors (small bases).
+        Int update_limit = 0;
+        Int update_cost = 0;
+        // Numerical trouble: an updated U entry passed the growth limit; a
+        // pivot too small on use; row and column pivots that disagree; an
+        // empty ratio test on a dual-infeasible basis; no BFRT group; the
+        // primal ray guard on updated factors; a singular basis replaced by
+        // a crash basis.
+        Int growth = 0;
+        Int pivot_rejected = 0;
+        Int pivot_mismatch = 0;
+        Int empty_ratio_test = 0;
+        Int no_bfrt_group = 0;
+        Int ray_guard = 0;
+        Int singular_recovery = 0;
+        // Adaptive: a degenerate pivot streak, consecutive high-flip BFRT
+        // iterations, a stall restart from a crash basis.
+        Int degenerate_stall = 0;
+        Int bfrt_high_flip = 0;
+        Int stall_restart = 0;
+        // After the loop: the warm point put back after a cold retry that
+        // stopped on a limit, and the unscaled clean-up's scaled basis.
+        Int cold_restore = 0;
+        Int unscaled_cleanup = 0;
+        Int edits = 0;
+    };
+    [[nodiscard]] const RefactorStats& getRefactorStats() const { return refactor_stats_; }
+
 private:
     friend class BarrierSolver;
     friend class MipSolver;
@@ -537,9 +575,11 @@ private:
     // Compute dual values and reduced costs.
     void computeDuals();
 
-    // Refactorize the basis.
+    // Refactorize the basis, counting it in refactor_stats_ under @p trigger
+    // (#517); the no-deadline form is an edit call's, counted in
+    // pending_edit_refactors_ until the next solve().
     void refactorize();
-    [[nodiscard]] bool refactorize(const Deadline& deadline);
+    [[nodiscard]] bool refactorize(const Deadline& deadline, Int RefactorStats::* trigger);
 
     // Scaling.
     [[nodiscard]] bool computeScaling(const Deadline& deadline = {});
@@ -736,6 +776,8 @@ private:
     // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
     AdaptiveHarrisStats adaptive_harris_stats_{};
     DegeneracyStats degeneracy_stats_{};
+    RefactorStats refactor_stats_{};
+    Int pending_edit_refactors_ = 0;  // edit calls' since the last solve()
     // Hyper-sparse row-price (#131) path tracking and density history,
     // reset each solve().
     RowPriceStats row_price_stats_{};

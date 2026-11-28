@@ -2543,12 +2543,12 @@ void SparseLU::updateFromFtranColumn(Index pivot_pos, std::span<const Real> tran
     ++num_updates_;
 }
 
-bool SparseLU::needsRefactorization() const {
+SparseLU::RefactorReason SparseLU::refactorReason() const {
     if (num_updates_ >= max_updates_) {
-        return true;
+        return RefactorReason::UpdateLimit;
     }
     if (max_u_entry_ > kGrowthLimit) {
-        return true;
+        return RefactorReason::Growth;
     }
     // Cost-based trigger: refactor when accumulated FT update overhead
     // dominates the base FTRAN/BTRAN cost. Each pivot adds roughly one
@@ -2566,10 +2566,10 @@ bool SparseLU::needsRefactorization() const {
             static_cast<uint64_t>(eta_index_.size()) + static_cast<uint64_t>(u_col_.size());
         const uint64_t ft_cost = static_cast<uint64_t>(ft_index_.size()) + ft_dense_nnz_;
         if (base_cost > 0 && ft_cost > 2 * base_cost) {
-            return true;
+            return RefactorReason::UpdateCost;
         }
     }
-    return false;
+    return RefactorReason::None;
 }
 
 // --------------------------------------------------------------------------

@@ -92,8 +92,16 @@ public:
     void setSolveKernel(SolveKernel kernel) { solve_kernel_ = kernel; }
     [[nodiscard]] SolveKernel solveKernel() const { return solve_kernel_; }
 
+    /// Why a refactorization is needed, the first of the tests that holds
+    /// (#517): the update count reached its limit, an updated U entry passed
+    /// the growth limit, or the Forrest-Tomlin updates cost more than twice
+    /// the base factors (small bases only).
+    enum class RefactorReason : uint8_t { None, UpdateLimit, Growth, UpdateCost };
+    [[nodiscard]] RefactorReason refactorReason() const;
     /// Check if refactorization is needed.
-    [[nodiscard]] bool needsRefactorization() const;
+    [[nodiscard]] bool needsRefactorization() const {
+        return refactorReason() != RefactorReason::None;
+    }
     [[nodiscard]] Index numUpdates() const { return num_updates_; }
     [[nodiscard]] Index dimension() const { return dim_; }
     void setMaxUpdates(Index limit) { max_updates_ = std::max<Index>(1, limit); }

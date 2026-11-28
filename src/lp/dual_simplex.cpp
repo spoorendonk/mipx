@@ -54,6 +54,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #if defined(__AVX2__)
@@ -154,6 +155,24 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
     for (std::size_t i = 0; i < dst.size(); ++i) {
         dst[i] += alpha * src[i];
     }
+}
+
+// The counter of a refactorization the loop schedules (#517): the LU's own
+// reason, or, when it has none, the degenerate-stall rule.
+Int DualSimplexSolver::RefactorStats::* refactorTrigger(SparseLU::RefactorReason reason) {
+    using Reason = SparseLU::RefactorReason;
+    using Stats = DualSimplexSolver::RefactorStats;
+    switch (reason) {
+        case Reason::UpdateLimit:
+            return &Stats::update_limit;
+        case Reason::UpdateCost:
+            return &Stats::update_cost;
+        case Reason::Growth:
+            return &Stats::growth;
+        case Reason::None:
+            break;
+    }
+    return &Stats::degenerate_stall;
 }
 
 }  // namespace
@@ -845,10 +864,13 @@ void DualSimplexSolver::computeDuals() {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::refactorize() {
-    static_cast<void>(refactorize({}));
+    ++pending_edit_refactors_;
+    factors_available_ = false;
+    factors_available_ = lu_.factorizeUntil(augmented_, basis_, {});
 }
 
-bool DualSimplexSolver::refactorize(const Deadline& deadline) {
+bool DualSimplexSolver::refactorize(const Deadline& deadline, Int RefactorStats::* trigger) {
+    ++(refactor_stats_.*trigger);
     // Build the basis matrix: for each basis position i, the column of [A | -I].
     // We need a SparseMatrix whose column j is the basis_[j] column of [A | -I].
     // SparseLU::factorize(matrix, basis_cols) extracts columns basis_cols[i] from matrix.
@@ -878,6 +900,8 @@ LpResult DualSimplexSolver::solve() {
     dse_fallback_stats_ = DseFallbackStats{};
     degeneracy_stats_ = DegeneracyStats{};
     basis_start_stats_ = {};
+    refactor_stats_ = RefactorStats{};
+    refactor_stats_.edits = std::exchange(pending_edit_refactors_, 0);
     bool checked = false;
     LpResult res = solveWithColdFallback(deadline, checked);
     res = cleanUpUnscaled(res, deadline, checked);
@@ -979,7 +1003,7 @@ LpResult DualSimplexSolver::solveWithColdFallback(const Deadline& deadline, bool
     // The factors are the cold run's; getTableauRow (cut separation) reads
     // them against the restored basis.
     try {
-        has_basis_ = refactorize(deadline);
+        has_basis_ = refactorize(deadline, &RefactorStats::cold_restore);
     } catch (const std::runtime_error&) {
         has_basis_ = false;
         return cold;
@@ -1477,7 +1501,8 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
             reconcileNonbasicStatus(k);
         }
         try {
-            has_basis_ = buildBasisMatrixSource(deadline) && refactorize(deadline);
+            has_basis_ = buildBasisMatrixSource(deadline) &&
+                         refactorize(deadline, &RefactorStats::unscaled_cleanup);
         } catch (const std::runtime_error&) {
             has_basis_ = false;
         }
@@ -1797,9 +1822,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
     // The row whose repair pivot was rejected as numerically zero on fresh
     // factors, or -1. Cleared by the next basis change.
     Index repair_rejected_row = -1;
-    const auto factorBasis = [&]() -> bool {
+    const auto factorBasis = [&](Int RefactorStats::* trigger) -> bool {
         try {
-            if (refactorize(deadline)) {
+            if (refactorize(deadline, trigger)) {
                 return true;
             }
         } catch (const std::runtime_error&) {
@@ -1808,7 +1833,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             repair_rejected_row = -1;
             setupCrashBasis();
             try {
-                if (refactorize(deadline)) {
+                if (refactorize(deadline, &RefactorStats::singular_recovery)) {
                     return true;
                 }
             } catch (const std::runtime_error&) {
@@ -1822,7 +1847,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
 
     // Barrier crossover can request lower fill for its warm start. Later
     // simplex refactorizations use the usual pivot search.
-    const bool start_factored = factorBasis();
+    const bool start_factored = factorBasis(&RefactorStats::start);
     lu_.setLowFillPivotSearch(false);
     if (!start_factored) {
         has_basis_ = false;
@@ -2949,7 +2974,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             clearCostShifts();
             ++basis_epoch;
             setupCrashBasis();
-            if (!factorBasis()) {
+            if (!factorBasis(&RefactorStats::stall_restart)) {
                 break;
             }
             computePrimals();
@@ -3588,7 +3613,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
                 if (ray_gain >= -kRayGainRelTol * ray_mag) {
                     if (lu_.numUpdates() > 0 &&
                         guard_priced[static_cast<std::size_t>(entering_p)] < 0) {
-                        if (!factorBasis()) {
+                        if (!factorBasis(&RefactorStats::ray_guard)) {
                             break;
                         }
                         computePrimals();
@@ -3659,7 +3684,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             // |alpha| < kPivotTol, but values can drift after LU updates between
             // selection and use. Refactorize and retry on degeneracy.
             if (std::abs(pivot_elem) < (repair_pivot_p ? kRepairPivotTol : kPivotTol)) {
-                if (!factorBasis()) {
+                if (!factorBasis(&RefactorStats::pivot_rejected)) {
                     break;
                 }
                 computePrimals();
@@ -3784,7 +3809,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             countStallPivot(primal_step_degenerate);
             saturatingIncrement(primal_feasible_pivots_since_refactor);
 
-            bool should_refactorize = lu_.needsRefactorization();
+            const SparseLU::RefactorReason lu_reason = lu_.refactorReason();
+            bool should_refactorize = lu_reason != SparseLU::RefactorReason::None;
             const bool primal_progress_stalled =
                 !primal_progress_gate_enabled ||
                 primal_feasible_dual_stall_pivots >= primal_feasible_progress_window;
@@ -3798,7 +3824,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             }
 
             if (should_refactorize) {
-                if (!factorBasis()) {
+                if (!factorBasis(refactorTrigger(lu_reason))) {
                     break;
                 }
                 computePrimals();
@@ -4117,7 +4143,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
                 break;
             }
 
-            if (!factorBasis()) {
+            if (!factorBasis(&RefactorStats::empty_ratio_test)) {
                 break;
             }
             computePrimals();
@@ -4280,7 +4306,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         }
         if (!groups_ok) {
             // HiGHS rebuilds when no group forms; refactorize and choose again.
-            if (!factorBasis()) {
+            if (!factorBasis(&RefactorStats::no_bfrt_group)) {
                 break;
             }
             computePrimals();
@@ -4385,7 +4411,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             }
             undoBoundFlips();
             // Numerically degenerate pivot. Refactorize and retry.
-            if (!factorBasis()) {
+            if (!factorBasis(&RefactorStats::pivot_rejected)) {
                 break;
             }
             computePrimals();
@@ -4405,7 +4431,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             std::abs(pivot_element - alpha_entering) >
                 kAlphaTroubleTol * std::min(std::abs(pivot_element), std::abs(alpha_entering))) {
             undoBoundFlips();
-            if (!factorBasis()) {
+            if (!factorBasis(&RefactorStats::pivot_mismatch)) {
                 break;
             }
             computePrimals();
@@ -4721,7 +4747,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         countStallPivot(dual_step_primal_degenerate);
 
         // Check if refactorization needed.
-        bool should_refactorize = lu_.needsRefactorization();
+        const SparseLU::RefactorReason lu_reason = lu_.refactorReason();
+        bool should_refactorize = lu_reason != SparseLU::RefactorReason::None;
+        Int RefactorStats::* trigger = refactorTrigger(lu_reason);
         if (!should_refactorize && options_.enable_adaptive_refactorization &&
             degenerate_pivot_streak >= options_.adaptive_refactor_stall_pivots &&
             lu_.numUpdates() >= options_.adaptive_refactor_min_updates) {
@@ -4731,12 +4759,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         if (!should_refactorize && options_.enable_adaptive_harris && bfrt_high_flip_iters_ >= 3 &&
             lu_.numUpdates() >= 4) {
             should_refactorize = true;
+            trigger = &RefactorStats::bfrt_high_flip;
             bfrt_high_flip_iters_ = 0;
             ++adaptive_harris_stats_.bfrt_high_flip_refactors;
         }
 
         if (should_refactorize) {
-            if (!factorBasis()) {
+            if (!factorBasis(trigger)) {
                 break;
             }
             computePrimals();

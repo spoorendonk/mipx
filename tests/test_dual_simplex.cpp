@@ -160,6 +160,48 @@ TEST_CASE("DualSimplex: a primal pivot invalidates retained DSE weights",
     CHECK(Access::dseWeights(solver).empty());
 }
 
+TEST_CASE("DualSimplex: refactorizations are counted by trigger", "[dual_simplex][refactor]") {
+    const auto total = [](const DualSimplexSolver::RefactorStats& r) {
+        return r.start + r.update_limit + r.update_cost + r.growth + r.pivot_rejected +
+               r.pivot_mismatch + r.empty_ratio_test + r.no_bfrt_group + r.ray_guard +
+               r.singular_recovery + r.degenerate_stall + r.bfrt_high_flip + r.stall_restart +
+               r.cold_restore + r.unscaled_cleanup + r.edits;
+    };
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    auto options = dseRetentionOptions();
+    options.lu_update_limit = 1;
+    solver.setOptions(options);
+    solver.load(buildDseRetentionLP());
+    REQUIRE(solver.solve().status == Status::Optimal);
+    REQUIRE(solver.getDegeneracyStats().dual_pivots == 1);
+    // The crash basis's factorization, then the one pivot reaches the limit.
+    {
+        const auto& r = solver.getRefactorStats();
+        CHECK(r.start == 1);
+        CHECK(r.update_limit == 1);
+        CHECK(total(r) == 2);
+    }
+
+    // A warm solve with no pivot factorizes its start basis only, and the
+    // counters restart with it.
+    solver.setRowBounds(0, 3.0, 3.0);
+    REQUIRE(solver.solve().iterations == 0);
+    CHECK(solver.getRefactorStats().start == 1);
+    CHECK(total(solver.getRefactorStats()) == 1);
+
+    // Swapping a basic column out is an edit's factorization, counted by
+    // the next solve.
+    solver.addCols(std::array{Index{0}}, std::array{Index{0}}, std::array{1.0}, std::array{5.0},
+                   std::array{0.0}, std::array{kInf});
+    solver.removeCols(std::array{Index{0}});
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRefactorStats().edits >= 1);
+    CHECK(solver.getRefactorStats().start == 1);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getRefactorStats().edits == 0);
+}
+
 TEST_CASE("DualSimplex: warm DSE pricing survives weight overflow", "[dual_simplex][dse]") {
     using Access = mipx::test::DualSimplexPricingAccess;
     LpProblem lp;

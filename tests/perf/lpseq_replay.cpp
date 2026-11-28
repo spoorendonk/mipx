@@ -156,8 +156,29 @@ struct Options {
     Real pdlp_rel_tol = 1e-4;
     std::string csv;
     std::string dual_stats_csv;
+    std::string refactor_csv;
     std::string edit_csv;
 };
+
+// --refactor-csv: a dual arm's factorizations of one solve by trigger (#517),
+// DualSimplexSolver::RefactorStats in its field order. cold_start is 1 when a
+// pass started from a crash basis (a dual-warm solve's cold retry included).
+constexpr auto kRefactorCsvHeader =
+    "seq,arm,iterations,cold_start,start,update_limit,update_cost,growth,pivot_rejected,"
+    "pivot_mismatch,empty_ratio_test,no_bfrt_group,ray_guard,singular_recovery,"
+    "degenerate_stall,bfrt_high_flip,stall_restart,cold_restore,unscaled_cleanup,edits\n";
+
+void writeRefactorRow(std::ostream& out, const std::string& seq, const std::string& arm,
+                      Int iterations, const DualSimplexSolver& dual) {
+    const auto& r = dual.getRefactorStats();
+    out << seq << ',' << arm << ',' << iterations << ','
+        << (dual.basisStartStats().cold_start ? 1 : 0) << ',' << r.start << ',' << r.update_limit
+        << ',' << r.update_cost << ',' << r.growth << ',' << r.pivot_rejected << ','
+        << r.pivot_mismatch << ',' << r.empty_ratio_test << ',' << r.no_bfrt_group << ','
+        << r.ray_guard << ',' << r.singular_recovery << ',' << r.degenerate_stall << ','
+        << r.bfrt_high_flip << ',' << r.stall_restart << ',' << r.cold_restore << ','
+        << r.unscaled_cleanup << ',' << r.edits << '\n';
+}
 
 DualSimplexOptions dualOptions(const Options& o) {
     DualSimplexOptions d;
@@ -379,24 +400,40 @@ int run(const Options& opt) {
     }
 
     std::ofstream dual_stats;
-    if (!opt.dual_stats_csv.empty()) {
+    std::ofstream refactor_csv;
+    {
         namespace fs = std::filesystem;
-        const auto same_existing_file = [&]() {
-            return !opt.csv.empty() && fs::exists(opt.csv) && fs::exists(opt.dual_stats_csv) &&
-                   fs::equivalent(opt.csv, opt.dual_stats_csv);
+        const auto same_existing_file = [](const std::string& a, const std::string& b) {
+            return !a.empty() && !b.empty() && fs::exists(a) && fs::exists(b) &&
+                   fs::equivalent(a, b);
         };
-        constexpr auto kSameOutputFile = "--csv and --dual-stats-csv must name different files";
-        if (!opt.csv.empty() && (fs::weakly_canonical(fs::absolute(opt.csv)) ==
-                                     fs::weakly_canonical(fs::absolute(opt.dual_stats_csv)) ||
-                                 same_existing_file())) {
+        const auto same_file = [&](const std::string& a, const std::string& b) {
+            return !a.empty() && !b.empty() &&
+                   (fs::weakly_canonical(fs::absolute(a)) ==
+                        fs::weakly_canonical(fs::absolute(b)) ||
+                    same_existing_file(a, b));
+        };
+        constexpr auto kSameOutputFile =
+            "--csv, --dual-stats-csv and --refactor-csv must name different files";
+        if (same_file(opt.csv, opt.dual_stats_csv) || same_file(opt.csv, opt.refactor_csv) ||
+            same_file(opt.dual_stats_csv, opt.refactor_csv)) {
             lpseq::fail(kSameOutputFile);
         }
-        dual_stats.open(opt.dual_stats_csv);
-        if (!dual_stats) {
-            lpseq::fail(opt.dual_stats_csv + ": cannot write");
-        }
-        // A dangling symlink can start resolving to the stats file we just created.
-        if (same_existing_file()) {
+        const auto open = [&](std::ofstream& f, const std::string& path) {
+            if (path.empty()) {
+                return;
+            }
+            f.open(path);
+            if (!f) {
+                lpseq::fail(path + ": cannot write");
+            }
+        };
+        open(dual_stats, opt.dual_stats_csv);
+        open(refactor_csv, opt.refactor_csv);
+        // A dangling symlink can start resolving to a stats file we just created.
+        if (same_existing_file(opt.csv, opt.dual_stats_csv) ||
+            same_existing_file(opt.csv, opt.refactor_csv) ||
+            same_existing_file(opt.dual_stats_csv, opt.refactor_csv)) {
             lpseq::fail(kSameOutputFile);
         }
     }
@@ -414,6 +451,9 @@ int run(const Options& opt) {
     if (dual_stats.is_open()) {
         dual_stats << "seq,arm,added_columns,dual_pivots,primal_pivots,primal_degenerate_pivots,"
                       "primal_bound_perturbation_activations\n";
+    }
+    if (refactor_csv.is_open()) {
+        refactor_csv << kRefactorCsvHeader;
     }
 
     std::ofstream edit_csv;
@@ -481,6 +521,11 @@ int run(const Options& opt) {
                                << stats.primal_bound_perturbation_activations << '\n';
                 }
             }
+            if (refactor_csv.is_open()) {
+                if (const auto* dual = dynamic_cast<const DualSimplexSolver*>(s)) {
+                    writeRefactorRow(refactor_csv, op.seq, arm.name, r.iterations, *dual);
+                }
+            }
         }
         added_columns = 0;
         log.after = op.seq;
@@ -497,6 +542,12 @@ int run(const Options& opt) {
             lpseq::fail(opt.dual_stats_csv + ": write failed");
         }
     }
+    if (refactor_csv.is_open()) {
+        refactor_csv.close();
+        if (!refactor_csv) {
+            lpseq::fail(opt.refactor_csv + ": write failed");
+        }
+    }
     return all_match ? 0 : 1;
 }
 
@@ -505,7 +556,7 @@ void usage() {
         << "usage: mipx-lpseq-replay DIR [--arm dual-warm|dual-cold|barrier|barrier-hsd|pdlp]... "
            "[--barrier-ne dense|sparse] [--primal-devex] [--primal-bound-perturbation] "
            "[--rel-tol T] [--pdlp-rel-tol T] [--csv FILE] [--dual-stats-csv FILE] "
-           "[--edit-csv FILE]\n";
+           "[--refactor-csv FILE] [--edit-csv FILE]\n";
 }
 
 }  // namespace
@@ -553,6 +604,8 @@ int main(int argc, char** argv) {
             opt.csv = argv[++i];
         } else if (a == "--dual-stats-csv" && i + 1 < argc) {
             opt.dual_stats_csv = argv[++i];
+        } else if (a == "--refactor-csv" && i + 1 < argc) {
+            opt.refactor_csv = argv[++i];
         } else if (a == "--edit-csv" && i + 1 < argc) {
             opt.edit_csv = argv[++i];
         } else if (!a.empty() && a[0] != '-' && opt.dir.empty()) {

@@ -135,6 +135,7 @@ if(TARGET mipx-lpseq-replay)
             -DREPLAY=$<TARGET_FILE:mipx-lpseq-replay>
             "-DSEQUENCE=${PROJECT_SOURCE_DIR}/tests/data/lpseq/grid1"
             "-DSTATS=${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_dual_stats.csv"
+            "-DREFACTOR=${CMAKE_CURRENT_BINARY_DIR}/lpseq_grid1_refactor.csv"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/check_lpseq_dual_stats.cmake")
     # A hand-written sequence with known optima for the ops grid1 has none
     # of (bounds, costs, coefficients, an infeasible solve), and one whose
