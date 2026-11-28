@@ -38,6 +38,7 @@ void printUsage(FILE* out) {
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
                  "[--conflict-lp-proofs|--no-conflict-lp-proofs] "
+                 "[--print-conflict-bench-stats (serial)] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
@@ -176,6 +177,7 @@ int main(int argc, char* argv[]) {
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
     bool conflict_lp_proofs = false;
+    bool print_conflict_bench_stats = false;
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
@@ -296,6 +298,8 @@ int main(int argc, char* argv[]) {
             conflict_lp_proofs = true;
         } else if (arg == "--no-conflict-lp-proofs") {
             conflict_lp_proofs = false;
+        } else if (arg == "--print-conflict-bench-stats") {
+            print_conflict_bench_stats = true;
         } else if (arg == "--pre-lp-propagation") {
             pre_lp_propagation = true;
         } else if (arg == "--no-pre-lp-propagation") {
@@ -770,6 +774,8 @@ int main(int argc, char* argv[]) {
         if (lp.hasIntegers() || mipx::hasAdvancedModelFeatures(lp)) {
             // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
+            const bool collect_conflict_bench_stats =
+                print_conflict_bench_stats && num_threads <= 1;
             solver.setNumThreads(num_threads);
             if (time_limit >= 0.0) {
                 solver.setTimeLimit(time_limit);
@@ -818,6 +824,7 @@ int main(int argc, char* argv[]) {
             solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
             solver.setConflictLpProofsEnabled(conflict_lp_proofs);
+            solver.setConflictBenchStats(collect_conflict_bench_stats);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
@@ -939,6 +946,33 @@ int main(int argc, char* argv[]) {
             log.log("Nodes: %d\n", result.nodes);
             log.log("LP iterations: %d\n", result.lp_iterations);
             log.log("Work units: %.2f\n", result.work_units);
+            if (collect_conflict_bench_stats) {
+                const auto& stats = solver.getConflictStats();
+                log.log("Conflict bench bounds: sense=%s input_continuous_cols=%td final=%.17g\n",
+                        lp.sense == mipx::Sense::Minimize ? "min" : "max",
+                        std::ranges::count(lp.col_type, mipx::VarType::Continuous),
+                        result.best_bound);
+                log.log("Conflict bench tree: bound_learning=%d reconvergence=%d\n",
+                        stats.bound_conflict_learning_in_tree, stats.reconvergence_cuts_in_tree);
+                if (stats.root_bound_before_tree) {
+                    log.log("Conflict bench root bound: %.17g\n", *stats.root_bound_before_tree);
+                }
+                log.log(
+                    "Conflict bench counters: linear_clause_checks=%llu linear_literal_checks=%llu "
+                    "watch_candidates=%llu "
+                    "watch_body_scans=%llu watch_literal_checks=%llu lp_infeasible=%d "
+                    "cutoff=%d combined=%d learned_1uip=%d reconvergence=%d "
+                    "legacy_branch_overrides=%d conflict_restarts=%d\n",
+                    static_cast<unsigned long long>(stats.linear_clause_checks),
+                    static_cast<unsigned long long>(stats.linear_literal_checks),
+                    static_cast<unsigned long long>(stats.watch_candidates),
+                    static_cast<unsigned long long>(stats.watch_body_scans),
+                    static_cast<unsigned long long>(stats.watch_literal_checks),
+                    stats.lp_infeasible_conflicts, stats.lp_cutoff_proofs_learned,
+                    stats.lp_combined_proofs_learned, stats.bound_conflicts_learned,
+                    stats.reconvergence_cuts_added, stats.branch_score_overrides,
+                    solver.getSearchStats().conflict_restarts);
+            }
             if (print_det_heur_gate) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",
                         static_cast<unsigned long long>(
