@@ -1,5 +1,6 @@
 #include "mipx/bound_conflict.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iterator>
 #include <map>
@@ -72,7 +73,22 @@ std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail&
         contradiction->source == BoundReasonSource::Opaque) {
         return std::nullopt;
     }
+    return analyzeBoundConflict(trail, contradiction->supports, contradiction->scope);
+}
 
+std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail& trail,
+                                                         const BoundReasonSupports& supports,
+                                                         BoundReasonScope scope) {
+    for (const auto id : supports.ids()) {
+        const auto& reason = trail.reason(id);
+        if (reason.scope.node_local || reason.source == BoundReasonSource::Opaque) {
+            return std::nullopt;
+        }
+        scope.cutoff = std::min(scope.cutoff, reason.scope.cutoff);
+    }
+    if (scope.node_local) {
+        return std::nullopt;
+    }
     Frontier frontier;
     std::set<std::pair<Int, BoundReasonId>> by_level;
     const auto add = [&](BoundReasonId id) {
@@ -92,7 +108,7 @@ std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail&
         }
         by_level.emplace(reason.level, id);
     };
-    for (const auto id : contradiction->supports.ids()) {
+    for (const auto id : supports.ids()) {
         add(id);
     }
 
@@ -123,7 +139,7 @@ std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail&
     }
 
     LearnedBoundConflict result;
-    result.scope = contradiction->scope;
+    result.scope = scope;
     // This also discharges deductions from model bounds alone at level zero.
     // A bound imported as a decision at level zero still needs a premise.
     for (auto it = frontier.begin(); it != frontier.end();) {

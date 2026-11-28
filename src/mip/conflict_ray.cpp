@@ -57,27 +57,39 @@ Wide minimumProduct(Interval coefficient, Real lower, Real upper) {
     return result == kWideInf ? 0.0L : result;
 }
 
-}  // namespace
-
-bool shortenConflictWithRay(const LpProblem& global_rows, std::span<const Real> ray,
-                            std::span<const Index> local_rows, std::span<const Real> global_lower,
-                            std::span<const Real> global_upper, std::vector<BranchDecision>& path) {
+bool shortenConflictWithProof(const LpProblem& global_rows, std::span<const Real> weights,
+                              std::span<const Index> local_rows, std::span<const Real> global_lower,
+                              std::span<const Real> global_upper, std::vector<BranchDecision>& path,
+                              std::optional<Real> cutoff) {
     const auto cols = static_cast<std::size_t>(global_rows.num_cols);
-    if (ray.empty() ||
-        ray.size() != static_cast<std::size_t>(global_rows.num_rows) + local_rows.size() ||
+    if ((!cutoff && weights.empty()) ||
+        weights.size() != static_cast<std::size_t>(global_rows.num_rows) + local_rows.size() ||
         global_lower.size() != cols || global_upper.size() != cols || path.empty()) {
         return false;
     }
 
-    // y^T A x <= beta for every point satisfying the rows. Enclose each
-    // product and sum, especially the coefficients left by cancellation.
+    // Each row contributes y*A*x <= y*side. In an objective proof add
+    // c*x <= cutoff - offset, so separation of the box proves a lower bound
+    // on the original objective. Enclose coefficients left by cancellation.
     std::vector<Interval> coefficients(cols);
     Interval beta;
     Wide row_magnitude = 0.0L;
+    if (cutoff) {
+        if (global_rows.sense != Sense::Minimize || global_rows.obj.size() != cols ||
+            !std::isfinite(*cutoff) || !std::isfinite(global_rows.obj_offset)) {
+            return false;
+        }
+        for (std::size_t j = 0; j < cols; ++j) {
+            coefficients[j] = {global_rows.obj[j], global_rows.obj[j]};
+        }
+        const Wide rhs = static_cast<Wide>(*cutoff) - global_rows.obj_offset;
+        beta = {down(rhs), up(rhs)};
+        row_magnitude = std::abs(rhs);
+    }
     std::size_t local = 0;
     Index row = 0;
-    for (Index i = 0; i < static_cast<Index>(ray.size()); ++i) {
-        const Real y = ray[i];
+    for (Index i = 0; i < static_cast<Index>(weights.size()); ++i) {
+        const Real y = cutoff ? -weights[i] : weights[i];
         if (local < local_rows.size() && i == local_rows[local]) {
             if (y != 0.0) {
                 return false;
@@ -199,6 +211,60 @@ bool shortenConflictWithRay(const LpProblem& global_rows, std::span<const Real> 
     }
     path.resize(kept);
     return true;
+}
+
+}  // namespace
+
+bool shortenConflictWithRay(const LpProblem& global_rows, std::span<const Real> ray,
+                            std::span<const Index> local_rows, std::span<const Real> global_lower,
+                            std::span<const Real> global_upper, std::vector<BranchDecision>& path) {
+    return shortenConflictWithProof(global_rows, ray, local_rows, global_lower, global_upper, path,
+                                    std::nullopt);
+}
+
+bool shortenConflictWithCutoff(const LpProblem& global_rows, std::span<const Real> dual,
+                               std::span<const Index> local_rows, Real cutoff,
+                               std::vector<BranchDecision>& path) {
+    return shortenConflictWithProof(global_rows, dual, local_rows, global_rows.col_lower,
+                                    global_rows.col_upper, path, cutoff);
+}
+
+std::optional<LearnedBoundConflict> checkCombinedLpConflict(
+    const LpProblem& global_rows, std::span<const Real> weights, std::span<const Index> local_rows,
+    const BoundReasonTrail& trail, BoundReasonScope scope, bool objective_proof) {
+    std::vector<BranchDecision> bounds;
+    for (Index col = 0; col < global_rows.num_cols; ++col) {
+        for (const bool is_upper : {false, true}) {
+            const auto id = trail.current(col, is_upper);
+            if (id == kNoBoundReason) {
+                continue;
+            }
+            const auto& reason = trail.reason(id);
+            if (reason.source == BoundReasonSource::Model || reason.scope.node_local ||
+                reason.source == BoundReasonSource::Opaque ||
+                !(scope.cutoff <= reason.scope.cutoff)) {
+                continue;
+            }
+            bounds.push_back({col, reason.endpoint.value, is_upper, reason.level});
+        }
+    }
+    const auto cutoff = objective_proof ? std::optional<Real>{scope.cutoff} : std::nullopt;
+    if (!shortenConflictWithProof(global_rows, weights, local_rows, global_rows.col_lower,
+                                  global_rows.col_upper, bounds, cutoff)) {
+        return std::nullopt;
+    }
+
+    std::vector<BoundReasonId> supports;
+    bool uses_propagation = false;
+    for (const auto& bound : bounds) {
+        const auto id = trail.current(bound.variable, bound.is_upper);
+        uses_propagation |= trail.reason(id).source != BoundReasonSource::Branch;
+        supports.push_back(id);
+    }
+    if (!uses_propagation) {
+        return std::nullopt;
+    }
+    return analyzeBoundConflict(trail, BoundReasonSupports(std::move(supports)), scope);
 }
 
 }  // namespace mipx

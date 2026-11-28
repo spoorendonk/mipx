@@ -150,6 +150,8 @@ struct MipConflictStats {
     Int bound_conflict_subsumed = 0;
     Int bound_conflict_tightenings = 0;
     Int bound_conflict_cutoffs = 0;
+    Int lp_cutoff_proofs_learned = 0;
+    Int lp_combined_proofs_learned = 0;
 };
 
 struct MipPreRootStats {
@@ -501,6 +503,9 @@ public:
     void setConflictRayShorteningEnabled(bool enabled) {
         conflict_ray_shortening_enabled_ = enabled;
     }
+    /// Learn from checked LP cutoff and combined proofs in the serial tree.
+    /// Off by default.
+    void setConflictLpProofsEnabled(bool enabled) { conflict_lp_proofs_enabled_ = enabled; }
     /// Turn strong branching off: branching then rests on pseudocosts alone,
     /// learned from the tree. Mainly for tests and experiments.
     void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
@@ -816,9 +821,17 @@ private:
     void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes, bool lp_infeasible,
                                const DualSimplexSolver* lp = nullptr,
                                const LpProblem* global_rows = nullptr,
-                               std::span<const Index> local_rows = {});
+                               std::span<const Index> local_rows = {},
+                               std::optional<BoundReasonScope> scope = std::nullopt);
     void learnPropagationConflict(const std::vector<BranchDecision>& path,
-                                  const DomainPropagator& dp);
+                                  const DomainPropagator& dp,
+                                  std::optional<BoundReasonScope> fallback_scope);
+    bool learnLpConflictProof(const std::vector<BranchDecision>& path, const DualSimplexSolver& lp,
+                              const LpProblem& global_rows, std::span<const Index> local_rows,
+                              Real cutoff, Status status);
+    [[nodiscard]] bool lpConflictProofsActive() const {
+        return conflict_lp_proofs_enabled_ && conflicts_enabled_ && num_threads_ <= 1;
+    }
     [[nodiscard]] bool boundConflictLearningActive() const {
         return bound_conflict_learning_enabled_ && conflicts_enabled_ && num_threads_ <= 1 &&
                model_continuous_vars_ == 0;
@@ -892,7 +905,8 @@ private:
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
-    void publishConflict(ConflictClause clause, bool lp_infeasible);
+    enum class ConflictSource { BoundInfeasible, LpInfeasible, LpCutoff };
+    void publishConflict(ConflictClause clause, ConflictSource source);
     void recordConflictCutoff(ConflictClause& clause);
 
     // Problem data.
@@ -957,6 +971,7 @@ private:
     bool bound_reasons_enabled_ = false;
     bool bound_conflict_learning_enabled_ = false;
     bool conflict_ray_shortening_enabled_ = false;
+    bool conflict_lp_proofs_enabled_ = false;
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;
     bool directional_inference_enabled_ = false;

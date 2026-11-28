@@ -18,6 +18,10 @@ struct LearnedBoundConflict {
 [[nodiscard]] std::optional<LearnedBoundConflict> analyzeBoundConflict(
     const BoundReasonTrail& trail);
 
+/// Resolve the bound premises of an independently checked contradiction.
+[[nodiscard]] std::optional<LearnedBoundConflict> analyzeBoundConflict(
+    const BoundReasonTrail& trail, const BoundReasonSupports& supports, BoundReasonScope scope);
+
 struct BoundConflictInference {
     // An engaged inference without a tightening cuts off the domain.
     std::optional<BoundEndpoint> tightening;

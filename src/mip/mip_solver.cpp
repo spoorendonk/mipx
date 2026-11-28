@@ -1806,27 +1806,11 @@ void MipSolver::ageConflictPool() {
     conflict_stats_.purged += purged;
 }
 
-void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
-                                      bool lp_infeasible, const DualSimplexSolver* lp,
-                                      const LpProblem* global_rows,
-                                      std::span<const Index> local_rows) {
-    if (bound_changes.empty()) {
-        return;
-    }
+namespace {
 
-    ConflictClause clause = acquireConflictClause();
-    if (clause.literals.capacity() < bound_changes.size()) {
-        clause.literals.reserve(bound_changes.size());
-    }
-    for (const auto& bc : bound_changes) {
-        clause.literals.push_back({bc.variable, bc.bound, bc.is_upper});
-    }
-    if (clause.literals.empty()) {
-        return;
-    }
-
-    std::sort(clause.literals.begin(), clause.literals.end(),
-              [](const ConflictLiteral& a, const ConflictLiteral& b) {
+void coalesceConflictPath(std::vector<BranchDecision>& literals) {
+    std::sort(literals.begin(), literals.end(),
+              [](const BranchDecision& a, const BranchDecision& b) {
                   if (a.variable != b.variable) {
                       return a.variable < b.variable;
                   }
@@ -1837,21 +1821,33 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
               });
 
     std::size_t write = 0;
-    for (const auto& lit : clause.literals) {
-        if (write > 0 && clause.literals[write - 1].variable == lit.variable &&
-            clause.literals[write - 1].is_upper == lit.is_upper) {
-            if (lit.is_upper) {
-                clause.literals[write - 1].bound =
-                    std::min(clause.literals[write - 1].bound, lit.bound);
-            } else {
-                clause.literals[write - 1].bound =
-                    std::max(clause.literals[write - 1].bound, lit.bound);
+    for (const auto& lit : literals) {
+        if (write > 0 && literals[write - 1].variable == lit.variable &&
+            literals[write - 1].is_upper == lit.is_upper) {
+            if (!lit.is_upper) {
+                literals[write - 1] = lit;
             }
             continue;
         }
-        clause.literals[write++] = lit;
+        literals[write++] = lit;
     }
-    clause.literals.resize(write);
+    literals.resize(write);
+}
+
+}  // namespace
+
+void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
+                                      bool lp_infeasible, const DualSimplexSolver* lp,
+                                      const LpProblem* global_rows,
+                                      std::span<const Index> local_rows,
+                                      std::optional<BoundReasonScope> scope) {
+    if (bound_changes.empty()) {
+        return;
+    }
+    ConflictClause clause = acquireConflictClause();
+    clause.literals.assign(bound_changes.begin(), bound_changes.end());
+    coalesceConflictPath(clause.literals);
+    clause.bound_scope = scope;
 
     conflict_stats_.minimized_literals += std::max<Int>(
         0, static_cast<Int>(bound_changes.size()) - static_cast<Int>(clause.literals.size()));
@@ -1868,11 +1864,13 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
             }
         }
     }
-    publishConflict(std::move(clause), lp_infeasible);
+    publishConflict(std::move(clause),
+                    lp_infeasible ? ConflictSource::LpInfeasible : ConflictSource::BoundInfeasible);
 }
 
 void MipSolver::learnPropagationConflict(const std::vector<BranchDecision>& path,
-                                         const DomainPropagator& dp) {
+                                         const DomainPropagator& dp,
+                                         std::optional<BoundReasonScope> fallback_scope) {
     if (boundConflictLearningActive() && dp.boundReasons() != nullptr) {
         if (auto learned = analyzeBoundConflict(*dp.boundReasons())) {
             ConflictClause clause = acquireConflictClause();
@@ -1882,20 +1880,84 @@ void MipSolver::learnPropagationConflict(const std::vector<BranchDecision>& path
             conflict_stats_.bound_conflict_subsumed +=
                 static_cast<Int>(learned->removed_literals.size());
             ++conflict_stats_.bound_conflicts_learned;
-            publishConflict(std::move(clause), false);
+            publishConflict(std::move(clause), ConflictSource::BoundInfeasible);
             return;
         }
     }
-    learnConflictFromNode(path, false);
+    learnConflictFromNode(path, false, nullptr, nullptr, {}, fallback_scope);
 }
 
-void MipSolver::publishConflict(ConflictClause clause, bool lp_infeasible) {
-    ++conflict_stats_.learned;
-    if (lp_infeasible) {
-        ++conflict_stats_.lp_infeasible_conflicts;
-    } else {
-        ++conflict_stats_.bound_infeasible_conflicts;
+bool MipSolver::learnLpConflictProof(const std::vector<BranchDecision>& path,
+                                     const DualSimplexSolver& lp, const LpProblem& global_rows,
+                                     std::span<const Index> local_rows, Real cutoff,
+                                     Status status) {
+    if (path.empty()) {
+        return false;
     }
+    const bool objective_proof = status == Status::Optimal;
+    const auto weights = objective_proof ? lp.getDualValues() : lp.getDualRay();
+    // A promoted tree cut may depend on incumbent-restricted root bounds,
+    // so a proof using the tree rows can be scoped even when it uses a ray.
+    const BoundReasonScope scope{.cutoff = cutoff};
+    if (objective_proof) {
+        auto literals = path;
+        coalesceConflictPath(literals);
+        if (shortenConflictWithCutoff(global_rows, weights, local_rows, cutoff, literals)) {
+            ConflictClause clause = acquireConflictClause();
+            clause.literals = std::move(literals);
+            clause.bound_scope = scope;
+            ++conflict_stats_.lp_cutoff_proofs_learned;
+            publishConflict(std::move(clause), ConflictSource::LpCutoff);
+            return true;
+        }
+    } else if (weights.empty()) {
+        return false;
+    }
+
+    // Use the persistent box from before incumbent-dependent fixings. Replay
+    // the decisions, so bound changes made only in the node LP cannot silently
+    // stand in as premises. As with 1-UIP, activity deductions are used only
+    // in the all-discrete tree.
+    if (model_continuous_vars_ != 0) {
+        return false;
+    }
+    DomainPropagator replay;
+    replay.load(global_rows, true);
+    if (implication_graph_.numImplications() > 0) {
+        replay.setImplicationGraph(&implication_graph_);
+    }
+    if (cliquePropagationActive()) {
+        replay.setCliqueTable(&clique_table_);
+    }
+    if (objective_propagator_.loaded() && std::isfinite(cutoff)) {
+        replay.setObjectiveCutoff(&objective_propagator_, cutoff);
+    }
+    for (const auto& decision : path) {
+        replay.setBranchBound(decision.variable, decision.is_upper, decision.bound, decision.level);
+    }
+    if (!replay.propagate()) {
+        return false;
+    }
+    auto learned = checkCombinedLpConflict(global_rows, weights, local_rows, *replay.boundReasons(),
+                                           scope, objective_proof);
+    if (!learned) {
+        return false;
+    }
+    ConflictClause clause = acquireConflictClause();
+    clause.literals = std::move(learned->literals);
+    clause.bound_scope = learned->scope;
+    clause.lbd = learned->lbd;
+    ++conflict_stats_.lp_combined_proofs_learned;
+    conflict_stats_.lp_cutoff_proofs_learned += objective_proof;
+    publishConflict(std::move(clause),
+                    objective_proof ? ConflictSource::LpCutoff : ConflictSource::LpInfeasible);
+    return true;
+}
+
+void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
+    ++conflict_stats_.learned;
+    conflict_stats_.lp_infeasible_conflicts += source == ConflictSource::LpInfeasible;
+    conflict_stats_.bound_infeasible_conflicts += source == ConflictSource::BoundInfeasible;
 
     for (const auto& lit : clause.literals) {
         if (lit.variable >= 0 && lit.variable < static_cast<Index>(conflict_scores_.size())) {
@@ -1949,7 +2011,7 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
         conflict_stats_.watch_body_scans += query.body_scans;
         conflict_stats_.watch_literal_checks += query.literal_checks;
         if (query.triggered) {
-            if (boundConflictLearningActive()) {
+            if (boundConflictLearningActive() || lpConflictProofsActive()) {
                 match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
                     return !clause.bound_scope && clause.watch_id == *query.triggered;
                 });
@@ -2393,6 +2455,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // Like tree presolve, leave mixed-continuous activity bounds out of the
     // node LP until that path has been hardened.
     const bool use_bound_conflicts = boundConflictLearningActive();
+    const bool use_lp_proofs = lpConflictProofsActive() && node_scratch.conflict_global_rows;
+    const Real conflict_cutoff = objectivePropagationCutoff(incumbent_snapshot);
+    std::optional<BoundReasonScope> fallback_scope;
     const bool record_reasons = bound_reasons_enabled_ || use_bound_conflicts;
     const auto reason_path = record_reasons ? std::span<const BranchDecision>(node.bound_changes)
                                             : std::span<const BranchDecision>{};
@@ -2401,11 +2466,33 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     std::vector<Index> temp_local_rows;
     ScopedRowRemoval local_row_guard(lp, temp_local_rows);
-    auto learnLpConflict = [&]() {
-        if (use_conflicts) {
-            learnConflictFromNode(node.bound_changes, true, &lp, node_scratch.conflict_global_rows,
-                                  temp_local_rows);
+    const auto learnPathConflict = [&]() {
+        learnConflictFromNode(node.bound_changes, false, nullptr, nullptr, {}, fallback_scope);
+    };
+    const auto learnCheckedLpConflict = [&](Status status) {
+        return use_lp_proofs &&
+               learnLpConflictProof(node.bound_changes, lp, *node_scratch.conflict_global_rows,
+                                    temp_local_rows, conflict_cutoff, status);
+    };
+    const auto learnLpInfeasibility = [&]() {
+        if (learnCheckedLpConflict(Status::Infeasible)) {
+            return;
         }
+        if (use_conflicts) {
+            learnConflictFromNode(
+                node.bound_changes, true, &lp,
+                conflict_ray_shortening_enabled_ ? node_scratch.conflict_global_rows : nullptr,
+                temp_local_rows, fallback_scope);
+        }
+    };
+    const auto cutoffNodeLp = [&](Real objective) {
+        if (!(incumbent_snapshot < kInf && objective >= pruneBound(incumbent_snapshot))) {
+            return false;
+        }
+        if (objective > conflict_cutoff) {
+            learnCheckedLpConflict(Status::Optimal);
+        }
+        return true;
     };
     struct RestoreIterationLimit {
         DualSimplexSolver& lp;
@@ -2435,7 +2522,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     std::vector<Index> symmetry_tightened;
     if (!enforceSymmetryBounds(current_lower, current_upper, &symmetry_tightened, &node_work_out)) {
         if (use_conflicts) {
-            learnConflictFromNode(node.bound_changes, false);
+            learnPathConflict();
         }
         node_stats.bound_apply_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -2496,7 +2583,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         Index j = vars[p];
         if (!keepCrossingWithinTolerance(node_lb[p], node_ub[p])) {
             if (use_conflicts) {
-                learnConflictFromNode(node.bound_changes, false);
+                learnPathConflict();
             }
             node_stats.bound_apply_seconds +=
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -2512,7 +2599,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     symmetry_tightened.clear();
     if (!enforceSymmetryBounds(current_lower, current_upper, &symmetry_tightened, &node_work_out)) {
         if (use_conflicts) {
-            learnConflictFromNode(node.bound_changes, false);
+            learnPathConflict();
         }
         node_stats.bound_apply_seconds +=
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -2538,7 +2625,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
         if (!rc_global_ok) {
             if (use_conflicts) {
-                learnConflictFromNode(node.bound_changes, false);
+                learnPathConflict();
             }
             node_stats.bound_apply_seconds +=
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -2600,13 +2687,17 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     bool bound_conflict_tightened = false;
-    if (use_bound_conflicts) {
+    if (use_bound_conflicts || use_lp_proofs) {
         const auto before = touched_vars.size();
-        if (!propagateBoundConflicts(lp, objectivePropagationCutoff(incumbent_snapshot),
-                                     current_lower, current_upper, touched_vars)) {
+        if (!propagateBoundConflicts(lp, conflict_cutoff, current_lower, current_upper,
+                                     touched_vars)) {
             return false;
         }
         bound_conflict_tightened = touched_vars.size() != before;
+        if (use_lp_proofs && bound_conflict_tightened && std::isfinite(conflict_cutoff)) {
+            // A later path fallback may depend on a cutoff-scoped unit bound.
+            fallback_scope = BoundReasonScope{.cutoff = conflict_cutoff};
+        }
         if (bound_conflict_tightened && !applySos2Bounds()) {
             return false;
         }
@@ -2668,7 +2759,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if (!feasible) {
             ++node_stats.pre_lp_propagation_pruned;
             if (use_conflicts) {
-                learnPropagationConflict(node.bound_changes, *propagator);
+                learnPropagationConflict(node.bound_changes, *propagator, fallback_scope);
             }
             propagator->popCheckpoint();
             return false;
@@ -2753,7 +2844,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     if (node_result.status == Status::Infeasible) {
-        learnLpConflict();
+        learnLpInfeasibility();
         return false;
     }
     if (node_result.status != Status::Optimal) {
@@ -2764,7 +2855,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     // Pruned by bound (check again with current incumbent).
-    if (incumbent_snapshot < kInf && node_result.objective >= pruneBound(incumbent_snapshot)) {
+    if (cutoffNodeLp(node_result.objective)) {
         return false;
     }
 
@@ -2872,7 +2963,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 ++tree_presolve_delta.infeasible;
                 flushTreePresolveStats();
                 if (use_conflicts) {
-                    learnPropagationConflict(node.bound_changes, dp);
+                    learnPropagationConflict(node.bound_changes, dp, fallback_scope);
                 }
                 return false;
             }
@@ -2909,7 +3000,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 if (!applyTightening(j, dp.getLower(j), dp.getUpper(j), false)) {
                     flushTreePresolveStats();
                     if (use_conflicts) {
-                        learnConflictFromNode(node.bound_changes, false);
+                        learnPathConflict();
                     }
                     return false;
                 }
@@ -2921,7 +3012,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 ++tree_presolve_delta.infeasible;
                 flushTreePresolveStats();
                 if (use_conflicts) {
-                    learnConflictFromNode(node.bound_changes, false);
+                    learnPathConflict();
                 }
                 return false;
             }
@@ -2955,7 +3046,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     ++tree_presolve_delta.infeasible;
                     flushTreePresolveStats();
                     if (use_conflicts) {
-                        learnConflictFromNode(node.bound_changes, false);
+                        learnPathConflict();
                     }
                     return false;
                 }
@@ -2971,7 +3062,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         ++tree_presolve_delta.infeasible;
                         flushTreePresolveStats();
                         if (use_conflicts) {
-                            learnPropagationConflict(node.bound_changes, dp);
+                            learnPropagationConflict(node.bound_changes, dp, fallback_scope);
                         }
                         return false;
                     }
@@ -2979,7 +3070,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                         if (!applyTightening(j, dp.getLower(j), dp.getUpper(j), false)) {
                             flushTreePresolveStats();
                             if (use_conflicts) {
-                                learnConflictFromNode(node.bound_changes, false);
+                                learnPathConflict();
                             }
                             return false;
                         }
@@ -2992,7 +3083,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     ++tree_presolve_delta.infeasible;
                     flushTreePresolveStats();
                     if (use_conflicts) {
-                        learnConflictFromNode(node.bound_changes, false);
+                        learnPathConflict();
                     }
                     return false;
                 }
@@ -3025,7 +3116,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 if (refresh.status == Status::Infeasible) {
                     ++tree_presolve_delta.infeasible;
                     flushTreePresolveStats();
-                    learnLpConflict();
+                    learnLpInfeasibility();
                     return false;
                 }
                 if (refresh.status != Status::Optimal) {
@@ -3038,7 +3129,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
                 tree_presolve_delta.lp_delta += std::abs(prev_obj - node_obj_out);
-                if (incumbent_snapshot < kInf && node_obj_out >= pruneBound(incumbent_snapshot)) {
+                if (cutoffNodeLp(node_obj_out)) {
                     flushTreePresolveStats();
                     return false;
                 }
@@ -3082,7 +3173,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         if (!rc_feasible) {
             flushRcStats();
             if (use_conflicts) {
-                learnConflictFromNode(node.bound_changes, false);
+                learnPathConflict();
             }
             return false;
         }
@@ -3112,7 +3203,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (!propagateChild(rc_dp)) {
                 flushRcStats();
                 if (use_conflicts) {
-                    learnPropagationConflict(node.bound_changes, rc_dp);
+                    learnPropagationConflict(node.bound_changes, rc_dp, fallback_scope);
                 }
                 return false;
             }
@@ -3122,7 +3213,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 if (!keepCrossingWithinTolerance(lb, ub)) {
                     flushRcStats();
                     if (use_conflicts) {
-                        learnConflictFromNode(node.bound_changes, false);
+                        learnPathConflict();
                     }
                     return false;
                 }
@@ -3143,13 +3234,13 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             node_iters_out += refresh.iterations;
             node_work_out += refresh.work_units;
             if (refresh.status == Status::Infeasible) {
-                learnLpConflict();
+                learnLpInfeasibility();
                 return false;
             }
             if (refresh.status == Status::Optimal) {
                 node_obj_out = refresh.objective;
                 node_primals_out = lp.getPrimalValues();
-                if (incumbent_snapshot < kInf && node_obj_out >= pruneBound(incumbent_snapshot)) {
+                if (cutoffNodeLp(node_obj_out)) {
                     return false;
                 }
                 frac_count = 0;
@@ -3302,6 +3393,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 node_iters_out += tree_result.iterations;
                 node_work_out += tree_result.work_units;
                 if (tree_result.status != Status::Optimal) {
+                    if (tree_result.status == Status::Infeasible &&
+                        learnCheckedLpConflict(Status::Infeasible)) {
+                        cut_stats_.tree_nodes_with_cuts += tree_cut_ran;
+                        return false;
+                    }
                     break;
                 }
 
@@ -3311,6 +3407,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 cut_stats_.tree_lp_delta += improvement;
                 ++cut_stats_.tree_rounds;
                 tree_cut_ran = true;
+                if (node_obj_out > conflict_cutoff && learnCheckedLpConflict(Status::Optimal)) {
+                    ++cut_stats_.tree_nodes_with_cuts;
+                    return false;
+                }
                 if (improvement < kCutImprovementTol) {
                     break;
                 }
@@ -6391,7 +6491,8 @@ MipResult MipSolver::solveMinimizationOnce() {
     LpProblem* root_certificate_problem_ptr = nullptr;
     const bool check_conflict_rays =
         conflict_ray_shortening_enabled_ && conflicts_enabled_ && num_threads_ <= 1;
-    if (exact_refinement_mode_ != ExactRefinementMode::Off || check_conflict_rays) {
+    if (exact_refinement_mode_ != ExactRefinementMode::Off || check_conflict_rays ||
+        lpConflictProofsActive()) {
         root_certificate_problem = problem_;
         root_certificate_problem_ptr = &root_certificate_problem;
     }
@@ -6833,7 +6934,8 @@ MipResult MipSolver::solveMinimizationOnce() {
         solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
                     solution_pool, incumbent, best_solution, root_bound, elapsed,
                     inference_col_mapping,
-                    check_conflict_rays ? root_certificate_problem_ptr : nullptr);
+                    (check_conflict_rays || lpConflictProofsActive()) ? root_certificate_problem_ptr
+                                                                      : nullptr);
     }
 
     if (best_solution.empty()) {
@@ -7009,6 +7111,12 @@ MipResult MipSolver::solveMinimizationOnce() {
                 boundConflictLearningActive() ? "yes" : "no",
                 conflict_stats_.bound_conflicts_learned, conflict_stats_.bound_conflict_subsumed,
                 conflict_stats_.bound_conflict_tightenings, conflict_stats_.bound_conflict_cutoffs);
+        }
+        if (conflict_lp_proofs_enabled_) {
+            log_.log("Conflict LP proofs: active=%s cutoff=%d combined=%d\n",
+                     lpConflictProofsActive() ? "yes" : "no",
+                     conflict_stats_.lp_cutoff_proofs_learned,
+                     conflict_stats_.lp_combined_proofs_learned);
         }
         if (search_stats_.plunge_nodes > 0 || search_stats_.plunge_backtracks_bound > 0) {
             log_.log(

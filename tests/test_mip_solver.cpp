@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -2262,6 +2263,244 @@ TEST_CASE("MIP conflict ray recheck retains the path if a local row or bound is 
     REQUIRE(path.size() == 2);
     CHECK(path[0].variable == 0);
     CHECK(path[1].variable == 1);
+}
+
+TEST_CASE("A feasible child LP gives a checked objective cutoff clause", "[mip][conflicts]") {
+    LpProblem model;
+    model.num_cols = 3;
+    model.obj = {0.0, 0.0, 1.0};
+    model.obj_offset = 19.0;
+    model.col_lower = {0.0, 0.0, 0.0};
+    model.col_upper = {1.0, 1.0, 4.0};
+    model.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous};
+    model.num_rows = 1;
+    model.row_lower = {-kInf};
+    model.row_upper = {0.0};
+    model.matrix = SparseMatrix(1, 3, {{0, 0, 8192.0}, {0, 2, -4096.0}});
+    constexpr Real cutoff = 20.0;
+    const std::vector<BranchDecision> path{{0, 1.0, false, 1}, {1, 0.0, true, 2}};
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    lp.setColBounds(0, 1.0, 1.0);
+    lp.setColBounds(1, 0.0, 0.0);
+    const auto result = lp.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(21.0, 1e-8));
+    const auto dual = lp.getDualValues();
+
+    auto clause = path;
+    REQUIRE(shortenConflictWithCutoff(model, dual, {}, cutoff, clause));
+    REQUIRE(clause.size() == 1);
+    CHECK(clause.front().variable == 0);
+    CHECK(clause.front().bound == 1.0);
+    CHECK_FALSE(clause.front().is_upper);
+    const auto infer = [&](Real current_cutoff) {
+        return evaluateBoundConflict(clause, {.cutoff = cutoff}, model.col_lower, model.col_upper,
+                                     model.col_type, current_cutoff);
+    };
+    const auto unit = infer(19.5);
+    REQUIRE(unit);
+    REQUIRE(unit->tightening);
+    CHECK(unit->tightening->col == 0);
+    CHECK(unit->tightening->is_upper);
+    CHECK(unit->tightening->value == 0.0);
+    CHECK_FALSE(infer(20.5));
+    CHECK_FALSE(infer(kInf));
+
+    auto failed = path;
+    const Real invalid = GENERATE(1.0, 0.0, std::numeric_limits<Real>::quiet_NaN());
+    CHECK_FALSE(shortenConflictWithCutoff(model, std::array{invalid}, {}, cutoff, failed));
+    CHECK_FALSE(shortenConflictWithCutoff(model, dual, {}, result.objective, failed));
+    CHECK(failed.size() == path.size());
+
+    auto global = model;
+    global.num_rows = 0;
+    global.row_lower.clear();
+    global.row_upper.clear();
+    global.matrix = SparseMatrix(0, 3, {});
+    CHECK_FALSE(shortenConflictWithCutoff(global, dual, std::array<Index, 1>{0}, cutoff, failed));
+}
+
+TEST_CASE("A combined cutoff proof resolves two propagated bounds to their branch",
+          "[mip][conflicts]") {
+    // x=1 fixes a and b to 0 by integer propagation, while the LP alone
+    // permits a=b=0.5. Pricing either unproved endpoint at its global bound
+    // would lose the cutoff. z is unrelated.
+    LpProblem model;
+    model.num_cols = 4;
+    model.obj = {0.0, 0.0, -1.0, -1.0};
+    model.col_lower.assign(4, 0.0);
+    model.col_upper.assign(4, 1.0);
+    model.col_type.assign(4, VarType::Binary);
+    model.num_rows = 2;
+    model.row_lower.assign(2, -kInf);
+    model.row_upper.assign(2, 1.0);
+    model.matrix = SparseMatrix(2, 4, {{0, 0, 0.5}, {0, 2, 1.0}, {1, 0, 0.5}, {1, 3, 1.0}});
+    constexpr Real cutoff = -0.5;
+    std::vector<BranchDecision> path{{0, 1.0, false, 1}, {1, 0.0, true, 2}};
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    lp.setColBounds(0, 1.0, 1.0);
+    lp.setColBounds(1, 0.0, 0.0);
+    CHECK_THAT(lp.solve().objective, WithinAbs(-1.0, 1e-8));
+    lp.setColBounds(2, 0.0, 0.0);
+    lp.setColBounds(3, 0.0, 0.0);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    CHECK_THAT(lp.getObjective(), WithinAbs(0.0, 1e-8));
+    const auto dual = lp.getDualValues();
+    CHECK_FALSE(shortenConflictWithCutoff(model, dual, {}, cutoff, path));
+
+    enum class Reasons { Global, Local, Opaque, StrongerCutoff };
+    const auto reasons =
+        GENERATE(Reasons::Global, Reasons::Local, Reasons::Opaque, Reasons::StrongerCutoff);
+    constexpr Real stronger_cutoff = cutoff - 0.25;
+    auto replay_model = model;
+    CliqueTable clique;
+    DomainPropagator replay;
+    if (reasons == Reasons::StrongerCutoff) {
+        // The LP proof needs b<=0. Disable the row so the replay gets
+        // that bound from a cutoff-scoped clique.
+        replay_model.row_upper[1] = kInf;
+        auto packing = model;
+        packing.matrix = SparseMatrix(2, 4, {{1, 0, 1.0}, {1, 3, 1.0}});
+        ConflictGraph graph;
+        graph.build(packing);
+        clique.build(packing, graph);
+    }
+    replay.load(replay_model, true, reasons == Reasons::Local ? 1 : -1);
+    if (reasons == Reasons::StrongerCutoff) {
+        replay.setCliqueTable(&clique, {.cutoff = stronger_cutoff});
+    }
+    for (const auto& decision : path) {
+        replay.setBranchBound(decision.variable, decision.is_upper, decision.bound, decision.level);
+    }
+    if (reasons == Reasons::Opaque) {
+        replay.setBound(3, 0.0, 0.0);  // Imported without a reason.
+    }
+    REQUIRE(replay.propagate());
+    const auto learned =
+        checkCombinedLpConflict(model, dual, {}, *replay.boundReasons(), {.cutoff = cutoff}, true);
+    if (reasons != Reasons::Global) {
+        CHECK_FALSE(learned);
+        if (reasons == Reasons::StrongerCutoff) {
+            const auto& trail = *replay.boundReasons();
+            CHECK(trail.reason(trail.current(3, true)).source == BoundReasonSource::Clique);
+            const auto stronger =
+                checkCombinedLpConflict(model, dual, {}, trail, {.cutoff = stronger_cutoff}, true);
+            REQUIRE(stronger);
+            CHECK(stronger->scope.cutoff == stronger_cutoff);
+        }
+        return;
+    }
+    REQUIRE(learned);
+    REQUIRE(learned->literals.size() == 1);
+    CHECK(learned->literals[0].variable == 0);
+    CHECK(learned->literals[0].bound == 1.0);
+    CHECK_FALSE(learned->literals[0].is_upper);
+    CHECK(learned->scope.cutoff == cutoff);
+    CHECK(learned->lbd == 1);
+    REQUIRE(dual.size() == 2);
+    const std::array<Index, 1> local_row{2};
+    const auto& trail = *replay.boundReasons();
+    CHECK(checkCombinedLpConflict(model, std::array{dual[0], dual[1], 0.0}, local_row, trail,
+                                  {.cutoff = cutoff}, true));
+    CHECK_FALSE(checkCombinedLpConflict(model, std::array{dual[0], dual[1], -1.0}, local_row, trail,
+                                        {.cutoff = cutoff}, true));
+    CHECK_FALSE(checkCombinedLpConflict(model, std::array{1.0, 0.0}, {}, *replay.boundReasons(),
+                                        {.cutoff = cutoff}, true));
+}
+
+TEST_CASE("A Farkas conflict can need propagation as well as the LP rows", "[mip][conflicts]") {
+    // x=1 fixes a=b=0 by rounding. Neither of the sum rows can detect the
+    // resulting contradiction alone: p+q+r >= 2, p+q+r-a-b <= 1.
+    LpProblem model;
+    model.num_cols = 6;
+    model.obj.assign(6, 0.0);
+    model.col_lower.assign(6, 0.0);
+    model.col_upper.assign(6, 1.0);
+    model.col_type.assign(6, VarType::Binary);
+    model.num_rows = 4;
+    model.row_lower = {-kInf, -kInf, 2.0, -kInf};
+    model.row_upper = {1.0, 1.0, kInf, 1.0};
+    model.matrix = SparseMatrix(4, 6,
+                                {{0, 0, 0.5},
+                                 {0, 1, 1.0},
+                                 {1, 0, 0.5},
+                                 {1, 2, 1.0},
+                                 {2, 3, 1.0},
+                                 {2, 4, 1.0},
+                                 {2, 5, 1.0},
+                                 {3, 1, -1.0},
+                                 {3, 2, -1.0},
+                                 {3, 3, 1.0},
+                                 {3, 4, 1.0},
+                                 {3, 5, 1.0}});
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    lp.setColBounds(0, 1.0, 1.0);
+    REQUIRE(lp.solve().status == Status::Optimal);
+    lp.setColBounds(1, 0.0, 0.0);
+    lp.setColBounds(2, 0.0, 0.0);
+    REQUIRE(lp.solve().status == Status::Infeasible);
+    const auto ray = lp.getDualRay();
+    REQUIRE_FALSE(ray.empty());
+    std::vector<BranchDecision> path{{0, 1.0, false, 1}};
+    CHECK_FALSE(shortenConflictWithRay(model, ray, {}, model.col_lower, model.col_upper, path));
+
+    DomainPropagator replay;
+    replay.load(model, true);
+    replay.setBranchBound(0, false, 1.0, 1);
+    REQUIRE(replay.propagate());
+    const auto learned = checkCombinedLpConflict(model, ray, {}, *replay.boundReasons(), {}, false);
+    REQUIRE(learned);
+    REQUIRE(learned->literals.size() == 1);
+    CHECK(learned->literals.front().variable == 0);
+    CHECK(learned->literals.front().bound == 1.0);
+    CHECK_FALSE(learned->literals.front().is_upper);
+    CHECK(learned->scope.cutoff == kInf);
+}
+
+TEST_CASE("MipSolver learns from a feasible child above the incumbent", "[mip][conflicts]") {
+    // y >= 4*x - 2 and y >= 1 - 2*x give x=0.5 at the root. The x=0
+    // child gives the incumbent, while the x=1 child's feasible LP is worse.
+    LpProblem model;
+    model.num_cols = 2;
+    model.obj = {0.0, -1.0};
+    model.obj_offset = 19.0;
+    model.sense = Sense::Maximize;
+    model.col_lower = {0.0, 0.0};
+    model.col_upper = {1.0, 4.0};
+    model.col_type = {VarType::Binary, VarType::Continuous};
+    model.num_rows = 2;
+    model.row_lower = {-2.0, 1.0};
+    model.row_upper = {kInf, kInf};
+    model.matrix = SparseMatrix(2, 2, {{0, 0, -4.0}, {0, 1, 1.0}, {1, 0, 2.0}, {1, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(1);
+    solver.load(model);
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(18.0, 1e-8));
+    CHECK(solver.getConflictStats().lp_cutoff_proofs_learned == 0);
+
+    solver.setConflictLpProofsEnabled(true);
+    solver.setConflictWatchesEnabled(true);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == baseline.objective);
+    CHECK(solver.getConflictStats().lp_cutoff_proofs_learned == 1);
+    CHECK(solver.getConflictStats().lp_infeasible_conflicts == 0);
 }
 
 TEST_CASE("MIP conflict rays map a promoted row past an unused local row", "[mip][conflicts]") {

@@ -33,6 +33,7 @@ void printUsage(FILE* out) {
                  "[--conflict-watches|--no-conflict-watches] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
+                 "[--conflict-lp-proofs|--no-conflict-lp-proofs] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
@@ -165,6 +166,7 @@ int main(int argc, char* argv[]) {
     bool conflict_watches = false;
     bool bound_conflict_learning = false;
     bool conflict_ray_shortening = false;
+    bool conflict_lp_proofs = false;
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
@@ -258,6 +260,10 @@ int main(int argc, char* argv[]) {
             conflict_ray_shortening = true;
         } else if (arg == "--no-conflict-ray-shortening") {
             conflict_ray_shortening = false;
+        } else if (arg == "--conflict-lp-proofs") {
+            conflict_lp_proofs = true;
+        } else if (arg == "--no-conflict-lp-proofs") {
+            conflict_lp_proofs = false;
         } else if (arg == "--pre-lp-propagation") {
             pre_lp_propagation = true;
         } else if (arg == "--no-pre-lp-propagation") {
@@ -765,6 +771,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictWatchesEnabled(conflict_watches);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
+            solver.setConflictLpProofsEnabled(conflict_lp_proofs);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
@@ -827,6 +834,7 @@ int main(int argc, char* argv[]) {
             log.log(
                 "Run profile: mode=%s seed=%llu threads=%d search=%s "
                 "conflicts=%s conflict_ray_shortening=%s bound_conflict_learning_requested=%s "
+                "conflict_lp_proofs=%s "
                 "pre_lp_propagation=%s "
                 "pre_lp_propagation_bounds=%s "
                 "tree_presolve=%s tree_presolve_min_frac=%d "
@@ -836,13 +844,14 @@ int main(int argc, char* argv[]) {
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
                 conflict_ray_shortening && conflicts_enabled && num_threads <= 1 ? "on" : "off",
-                bound_conflict_learning ? "on" : "off", pre_lp_propagation ? "on" : "off",
-                pre_lp_propagation_bounds ? "on" : "off", tree_presolve_enabled ? "on" : "off",
-                tree_presolve_min_frac, tree_presolve_depth_frequency,
-                tree_presolve_auto ? "on" : "off", tree_cuts_enabled ? "on" : "off",
-                cut_strengthening ? "on" : "off", objective_propagation ? "on" : "off",
-                objective_integrality ? "on" : "off", tree_pseudocosts ? "on" : "off",
-                balanced_branch_score ? "on" : "off");
+                bound_conflict_learning ? "on" : "off",
+                conflict_lp_proofs && conflicts_enabled && num_threads <= 1 ? "on" : "off",
+                pre_lp_propagation ? "on" : "off", pre_lp_propagation_bounds ? "on" : "off",
+                tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
+                tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
+                tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
+                objective_propagation ? "on" : "off", objective_integrality ? "on" : "off",
+                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");
