@@ -13,7 +13,9 @@
 #include <memory>
 #endif
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
 #include <filesystem>
@@ -114,6 +116,82 @@ TEST_CASE("PdlpSolver: solves simple LP", "[pdlp]") {
     CHECK(x[0] >= -1e-6);
     CHECK(x[1] >= -1e-6);
     CHECK(x[0] + x[1] <= 4.0 + 1e-3);
+}
+
+TEST_CASE("PDLP crossover gives a basic optimum reusable by simplex", "[pdlp][crossover]") {
+    auto lp = buildSimpleLp();
+    lp.sense = GENERATE(Sense::Minimize, Sense::Maximize);
+    const Real cost = lp.sense == Sense::Minimize ? -1.0 : 1.0;
+    lp.obj = {cost, cost};
+    lp.obj_offset = 7.0;
+
+    PdlpSolver pdlp;
+    PdlpOptions opts;
+    opts.verbose = false;
+    opts.use_gpu = false;
+    pdlp.setOptions(opts);
+    pdlp.load(lp);
+    REQUIRE(pdlp.solve().status == Status::Optimal);
+    CHECK(pdlp.getBasis().empty());
+    CHECK_THAT(pdlp.getPrimalValues()[0], WithinAbs(2.0, 1e-6));
+
+    opts.crossover = true;
+    pdlp.setOptions(opts);
+    const auto crossed = pdlp.solve();
+    REQUIRE(crossed.status == Status::Optimal);
+    CHECK_THAT(crossed.objective, WithinAbs(7.0 + 4.0 * cost, 1e-12));
+    CHECK(pdlp.getObjective() == crossed.objective);
+    const auto basis = pdlp.getBasis();
+    REQUIRE(basis.size() == 3);
+    CHECK(std::count(basis.begin(), basis.end(), BasisStatus::Basic) == 1);
+    CHECK(basis[2] == BasisStatus::AtUpper);
+    const auto primal = pdlp.getPrimalValues();
+    CHECK_THAT(std::min(primal[0], primal[1]), WithinAbs(0.0, 1e-12));
+    CHECK_THAT(std::max(primal[0], primal[1]), WithinAbs(4.0, 1e-12));
+    CHECK_THAT(pdlp.getDualValues()[0], WithinAbs(-cost, 1e-12));
+    for (Real reduced_cost : pdlp.getReducedCosts()) {
+        CHECK_THAT(reduced_cost, WithinAbs(0.0, 1e-12));
+    }
+
+    DualSimplexSolver simplex;
+    simplex.load(lp);
+    simplex.setBasis(basis);
+    const auto warm = simplex.solve();
+    REQUIRE(warm.status == Status::Optimal);
+    CHECK(warm.iterations == 0);
+    CHECK_FALSE(simplex.basisStartStats().cold_start);
+    CHECK_FALSE(simplex.basisStartStats().singular_recovery);
+    CHECK(simplex.getPrimalValues() == primal);
+    CHECK(warm.objective == crossed.objective);
+
+    pdlp.setRowBounds(0, -kInf, 3.0);
+    CHECK(pdlp.getBasis().empty());
+    opts.max_solve_seconds = 0.0;
+    pdlp.setOptions(opts);
+    CHECK(pdlp.solve().status == Status::TimeLimit);
+    CHECK(pdlp.getBasis().empty());
+}
+
+TEST_CASE("PDLP crossover recovers a bounds-only basis", "[pdlp][crossover]") {
+    auto lp = buildBoundsOnlyLp();
+    PdlpSolver pdlp;
+    PdlpOptions opts;
+    opts.verbose = false;
+    pdlp.setOptions(opts);
+    pdlp.load(lp);
+    REQUIRE(pdlp.solve().status == Status::Optimal);
+    CHECK(pdlp.getReducedCosts() == lp.obj);
+    CHECK(pdlp.getBasis().empty());
+
+    opts.crossover = true;
+    pdlp.setOptions(opts);
+    const auto result = pdlp.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 1.0);
+    CHECK(pdlp.getBasis() == std::vector{BasisStatus::AtLower});
+    CHECK(pdlp.getReducedCosts() == lp.obj);
+    pdlp.load(lp);
+    CHECK(pdlp.getBasis().empty());
 }
 
 TEST_CASE("PDLP: restart gap and KKT error use their respective normalizations", "[pdlp]") {
@@ -499,9 +577,11 @@ TEST_CASE("PdlpSolver: linf norm mode solves simple LP", "[pdlp][linf]") {
 
 TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mip]") {
     auto lp = buildBranchingMip();
+    const bool presolve = GENERATE(true, false);
 
     MipSolver dual_solver;
     dual_solver.setVerbose(false);
+    dual_solver.setPresolve(presolve);
     dual_solver.setCutsEnabled(false);
     dual_solver.setRootLpPolicy(RootLpPolicy::DualDefault);
     dual_solver.load(lp);
@@ -509,6 +589,7 @@ TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mi
 
     MipSolver pdlp_solver;
     pdlp_solver.setVerbose(false);
+    pdlp_solver.setPresolve(presolve);
     pdlp_solver.setCutsEnabled(false);
     pdlp_solver.setRootLpPolicy(RootLpPolicy::PdlpRoot);
 
@@ -517,6 +598,7 @@ TEST_CASE("PDLP root policy: MIP objective matches dual root policy", "[pdlp][mi
 
     REQUIRE(dual_result.status == Status::Optimal);
     REQUIRE(pdlp_result.status == Status::Optimal);
+    CHECK(pdlp_solver.getLpStats().root_pdlp_crossover);
     CHECK_THAT(pdlp_result.objective, WithinAbs(dual_result.objective, 1e-4));
     CHECK(dual_result.work_units > 0.0);
     CHECK(pdlp_result.work_units > 0.0);

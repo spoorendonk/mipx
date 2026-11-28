@@ -20,6 +20,7 @@
 #endif
 
 #include "../heuristics/common.h"
+#include "../lp/lp_crossover.h"
 #include "conflict_ray.h"
 #include "mipx/barrier.h"
 #include "mipx/cut_pool.h"
@@ -5789,6 +5790,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         LpResult lp_result{};
         std::vector<Real> primals;
         std::vector<BasisStatus> basis;
+        std::optional<std::vector<Real>> pdlp_reduced_costs;
         std::string error_message;
         bool used_gpu = false;
         double seconds = 0.0;
@@ -5899,6 +5901,9 @@ MipResult MipSolver::solveMinimizationOnce() {
             solver.setOptions(opts);
             out.lp_result = solver.solve();
             out.primals = solver.getPrimalValues();
+            if (out.lp_result.status == Status::Optimal) {
+                out.pdlp_reduced_costs = solver.getReducedCosts();
+            }
             out.used_gpu = solver.usedGpu();
         }
         out.seconds =
@@ -5909,6 +5914,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     bool root_used_dual = true;
     std::vector<Real> root_primals;
     std::vector<BasisStatus> root_basis;
+    std::optional<std::vector<Real>> root_pdlp_reduced_costs;
     const char* root_backend_used = rootPolicyName(root_lp_policy_);
 
     auto t0 = std::chrono::steady_clock::now();
@@ -5932,9 +5938,10 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     } else if (root_lp_policy_ == RootLpPolicy::PdlpRoot) {
         root_used_dual = false;
-        const auto result = runRootBackend(RootBackend::Pdlp, nullptr);
+        auto result = runRootBackend(RootBackend::Pdlp, nullptr);
         root_result = result.lp_result;
-        root_primals = result.primals;
+        root_primals = std::move(result.primals);
+        root_pdlp_reduced_costs = std::move(result.pdlp_reduced_costs);
         root_lp_iters_total = root_result.iterations;
         root_lp_work_total = root_result.work_units;
         root_backend_used = "pdlp";
@@ -6006,9 +6013,8 @@ MipResult MipSolver::solveMinimizationOnce() {
             const auto& w = race_results[*winner];
             // Deterministic tie-break among equal-objective arms: prefer the
             // arm whose result gives the strongest B&B warm-start. Dual yields
-            // a simplex basis, Barrier a basis only after crossover, and PDLP
-            // none — so a lower backendWarmStartRank means a better warm start
-            // and avoids handing the search a basis-less root. This depends
+            // a simplex basis, Barrier can recover one in its solve, and PDLP
+            // can seed crossover after selection. This depends
             // only on the deterministic backend identity, never on wall-clock
             // time (which varies with machine load) nor on the per-backend
             // work_units magnitude (computed on incommensurable scales), so the
@@ -6041,6 +6047,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         root_result = selected.lp_result;
         root_primals = selected.primals;
         root_basis = selected.basis;
+        root_pdlp_reduced_costs = selected.pdlp_reduced_costs;
         lp_stats_.root_race_winner_seconds = selected.seconds;
         root_backend_used = backendName(selected.backend);
         switch (selected.backend) {
@@ -6170,16 +6177,45 @@ MipResult MipSolver::solveMinimizationOnce() {
                  root_backend_used, log_obj_sign_ * root_bound, root_result.iterations);
     }
 
-    // Dual simplex supports reliable warm-starts for node LPs only after at least one solve.
-    // In non-dual root mode, run one simplex solve to initialize basis state for the tree.
-    // If the barrier produced a basis via crossover, warm-start the sync solve with it.
+    // Initialize the tree's simplex state. A selected PDLP point seeds
+    // crossover directly in this solver, so its cleanup also initializes
+    // the cuts and node LPs. Barrier can supply a basis for the sync solve.
     if (!root_used_dual) {
-        if (!root_basis.empty() &&
-            static_cast<Index>(root_basis.size()) == lp.numCols() + lp.numRows()) {
-            lp.setBasis(root_basis);
+        LpResult sync;
+        if (root_pdlp_reduced_costs) {
+            const auto deadline = Deadline::after(timeLeft());
+            setLpDeadline(lp, deadline);
+            const auto candidate =
+                crossoverBasis(problem_, root_primals, *root_pdlp_reduced_costs, deadline);
+            if (!candidate) {
+                return rootTimeLimitResult();
+            }
+            sync = solveCrossoverBasis(lp, *candidate);
+            if (sync.status == Status::Optimal) {
+                const auto starts = lp.basisStartStats();
+                lp_stats_.root_pdlp_crossover = !starts.cold_start && !starts.singular_recovery;
+                if (verbose_ && lp_stats_.root_pdlp_crossover) {
+                    log_.log("Root PDLP crossover: %d simplex iterations.\n", sync.iterations);
+                }
+            } else {
+                // Confirm a contradiction to PDLP's optimum with the same
+                // cold solve used when no crossover basis was available.
+                total_lp_iters += sync.iterations;
+                total_work += sync.work_units;
+                if (!lp.loadUntil(problem_, deadline)) {
+                    return rootTimeLimitResult();
+                }
+                sync = lp.solve();
+            }
+            setLpDeadline(lp, {});
+        } else {
+            if (!root_basis.empty() &&
+                static_cast<Index>(root_basis.size()) == lp.numCols() + lp.numRows()) {
+                lp.setBasis(root_basis);
+            }
+            setLpTimeLimit(lp, timeLeft());
+            sync = lp.solve();
         }
-        setLpTimeLimit(lp, timeLeft());
-        auto sync = lp.solve();
         total_lp_iters += sync.iterations;
         total_work += sync.work_units;
         if (sync.status != Status::Optimal && sync.status != Status::Infeasible &&

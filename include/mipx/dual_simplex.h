@@ -497,10 +497,12 @@ public:
 
 private:
     friend class BarrierSolver;
+    friend class MipSolver;
+    friend class PdlpSolver;
     friend struct test::DualSimplexPricingAccess;
 
-    // Barrier's crossover load shares the solve deadline. A stopped load
-    // leaves the solver unloaded.
+    // A crossover load shares its caller's solve deadline. A stopped load
+    // leaves the simplex solver unloaded.
     [[nodiscard]] bool loadUntil(const LpProblem& problem, const Deadline& deadline);
 
     // Total number of variables = num_cols (structural) + num_rows (slacks).

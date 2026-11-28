@@ -110,6 +110,10 @@ struct PdlpOptions {
     // Measure the restart FPE baseline at the epoch's first projected PDHG
     // step. By default the first convergence check supplies the baseline.
     bool restart_first_step_anchor = false;
+
+    // Try to recover an optimal simplex basis after PDHG converges, using the
+    // remaining time budget. If cleanup fails, keep the PDHG solution.
+    bool crossover = false;
 };
 
 struct PdlpRestartStats {
@@ -135,7 +139,9 @@ public:
     std::vector<Real> getDualValues() const override;
     std::vector<Real> getReducedCosts() const override;
 
+    /// The last solve's recovered basis, if crossover succeeded.
     std::vector<BasisStatus> getBasis() const override;
+    /// PDHG warm starts take primal and dual vectors via setWarmStart().
     void setBasis(std::span<const BasisStatus> basis) override;
 
     void addRows(std::span<const Index> starts, std::span<const Index> indices,
@@ -171,6 +177,7 @@ public:
     [[nodiscard]] static bool gpuAvailable();
 
 private:
+    LpResult solvePdhg();
     void buildScaledProblem();
     void buildTransposeCSR();
     void refreshPreconditioner(Real primal_weight);
@@ -210,6 +217,7 @@ private:
 
     std::vector<Real> primal_orig_;
     std::vector<Real> dual_orig_;
+    std::vector<BasisStatus> basis_;
     Status status_ = Status::Error;
     Real objective_ = 0.0;
     Int iterations_ = 0;

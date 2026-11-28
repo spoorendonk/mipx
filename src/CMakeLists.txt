@@ -7,6 +7,7 @@ add_library(mipx STATIC
     lp/rank_revealing_lu.cpp
     lp/dual_simplex.cpp
     lp/exact_refinement.cpp
+    lp/lp_crossover.cpp
     lp/barrier.cpp
     lp/barrier_dual.cpp
     lp/barrier_cpu.cpp

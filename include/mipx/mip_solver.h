@@ -89,6 +89,7 @@ struct MipLpStats {
     Int root_race_dual_wins = 0;
     Int root_race_barrier_wins = 0;
     Int root_race_pdlp_wins = 0;
+    bool root_pdlp_crossover = false;  // the tree reused the PDLP crossover solve
     /// Node LPs that ended without a verdict (neither Optimal nor
     /// Infeasible: Error, an iteration limit, or Unbounded) and were
     /// re-solved cold. One the MIP's time limit stopped is not (#351).

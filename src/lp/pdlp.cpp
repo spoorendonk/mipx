@@ -1,5 +1,7 @@
 #include "mipx/pdlp.h"
 
+#include "lp_crossover.h"
+#include "mipx/dual_simplex.h"
 #include "pdlp_residual.h"
 #include "pdlp_restart.h"
 #include "pdlp_sum.h"
@@ -578,6 +580,7 @@ void PdlpSolver::clearWarmStart() {
 }
 
 void PdlpSolver::buildScaledProblem() {
+    basis_.clear();
     const Index m = original_.num_rows;
     const Index n = original_.num_cols;
 
@@ -1021,6 +1024,49 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
 // ---------------------------------------------------------------------------
 
 LpResult PdlpSolver::solve() {
+    basis_.clear();
+    if (!options_.crossover) {
+        return solvePdhg();
+    }
+
+    const auto deadline = Deadline::after(options_.max_solve_seconds);
+    const auto stop = deadline.orStop(options_.stop_flag);
+    auto result = solvePdhg();
+    if (result.status != Status::Optimal || stop.passed()) {
+        return result;
+    }
+    const auto basis = crossoverBasis(original_, primal_orig_, getReducedCosts(), stop);
+    if (!basis) {
+        return result;
+    }
+
+    DualSimplexSolver simplex;
+    auto options = simplex.getOptions();
+    options.deadline = deadline;
+    options.stop_flag = options_.stop_flag;
+    simplex.setOptions(options);
+    simplex.setVerbose(false);
+    if (!simplex.loadUntil(original_, stop)) {
+        return result;
+    }
+    const auto cleanup = solveCrossoverBasis(simplex, *basis);
+    result.iterations += cleanup.iterations;
+    result.work_units += cleanup.work_units;
+    const auto starts = simplex.basisStartStats();
+    if (cleanup.status == Status::Optimal && !starts.cold_start && !starts.singular_recovery) {
+        basis_ = simplex.getBasis();
+        primal_orig_ = simplex.getPrimalValues();
+        dual_orig_ = simplex.getDualValues();
+        // PDLP reports y in the convention c + A^T y.
+        for (auto& y : dual_orig_) {
+            y = -y;
+        }
+        objective_ = result.objective = cleanup.objective;
+    }
+    return result;
+}
+
+LpResult PdlpSolver::solvePdhg() {
     restart_stats_ = {};
     if (!loaded_) {
         status_ = Status::Error;
@@ -1975,7 +2021,7 @@ LpResult PdlpSolver::solveGpu() {
             ~ResetFallback() { flag = false; }
         } reset{gpu_fallback_};
         gpu_fallback_ = true;
-        return solve();
+        return solvePdhg();
     }
 
     // Pointers into arena.
@@ -3012,6 +3058,9 @@ std::vector<Real> PdlpSolver::getDualValues() const {
 }
 
 std::vector<Real> PdlpSolver::getReducedCosts() const {
+    if (status_ == Status::Optimal && original_.num_rows == 0) {
+        return original_.obj;
+    }
     std::vector<Real> rc(static_cast<size_t>(original_.num_cols), 0.0);
     if (!loaded_ || dual_orig_.empty())
         return rc;
@@ -3025,7 +3074,7 @@ std::vector<Real> PdlpSolver::getReducedCosts() const {
 }
 
 std::vector<BasisStatus> PdlpSolver::getBasis() const {
-    return {};
+    return basis_;
 }
 
 void PdlpSolver::setBasis(std::span<const BasisStatus> basis) {
@@ -3050,6 +3099,7 @@ void PdlpSolver::addRows(std::span<const Index> starts, std::span<const Index> i
     if (static_cast<Index>(starts.size()) != rows_to_add + 1)
         return;
 
+    basis_.clear();
     for (Index r = 0; r < rows_to_add; ++r) {
         Index s = starts[r];
         Index e = starts[r + 1];
