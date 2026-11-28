@@ -42,6 +42,7 @@ void printUsage(FILE* out) {
                  "[--objective-integrality|--no-objective-integrality] "
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
+                 "[--directional-inference (serial tree)] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
@@ -162,6 +163,7 @@ int main(int argc, char* argv[]) {
     bool objective_integrality = false;
     bool tree_pseudocosts = true;
     bool balanced_branch_score = false;
+    bool directional_inference = false;
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
@@ -305,6 +307,8 @@ int main(int argc, char* argv[]) {
             balanced_branch_score = true;
         } else if (arg == "--no-balanced-branch-score") {
             balanced_branch_score = false;
+        } else if (arg == "--directional-inference") {
+            directional_inference = true;
         } else if (arg == "--cut-strengthening") {
             cut_strengthening = true;
         } else if (arg == "--no-cut-strengthening") {
@@ -709,6 +713,7 @@ int main(int argc, char* argv[]) {
             solver.setObjectiveIntegralityEnabled(objective_integrality);
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
             solver.setBalancedBranchScore(balanced_branch_score);
+            solver.setDirectionalInferenceEnabled(directional_inference);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
@@ -809,6 +814,31 @@ int main(int argc, char* argv[]) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",
                         static_cast<unsigned long long>(
                             solver.getSearchStats().det_heur_gate_openings));
+            }
+            if (directional_inference) {
+                const auto& columns = solver.getBranchInferenceStats();
+                const auto report = [&](const char* direction, auto member) {
+                    mipx::MipDirectionalInferenceStats total;
+                    for (const auto& column : columns) {
+                        const auto& stats = column.*member;
+                        total.samples += stats.samples;
+                        total.tightened_columns += stats.tightened_columns;
+                        total.cutoffs += stats.cutoffs;
+                        total.skipped += stats.skipped;
+                    }
+                    const double mean = total.samples == 0
+                                            ? 0.0
+                                            : static_cast<double>(total.tightened_columns) /
+                                                  static_cast<double>(total.samples);
+                    log.log(
+                        "Directional inference %s: samples=%llu mean=%.6f "
+                        "cutoffs=%llu skipped=%llu\n",
+                        direction, static_cast<unsigned long long>(total.samples), mean,
+                        static_cast<unsigned long long>(total.cutoffs),
+                        static_cast<unsigned long long>(total.skipped));
+                };
+                report("down", &mipx::MipBranchInferenceStats::down);
+                report("up", &mipx::MipBranchInferenceStats::up);
             }
             log.log("Time: %.2fs\n", result.time_seconds);
         } else {

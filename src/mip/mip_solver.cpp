@@ -2232,6 +2232,40 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     node_work_out = 0.0;
     int_inf_out = -1;
     ++node_stats.nodes_solved;
+    MipDirectionalInferenceStats* inference = nullptr;
+    if (node_scratch.branch_inference != nullptr && node.branch.variable >= 0) {
+        const auto mapping = node_scratch.branch_inference_col_mapping;
+        const Index col = mapping.empty() ? node.branch.variable : mapping[node.branch.variable];
+        auto& stats = (*node_scratch.branch_inference)[col];
+        inference = node.branch.is_upper ? &stats.down : &stats.up;
+        ++inference->skipped;
+    }
+    const auto propagateChild = [&](DomainPropagator& dp, bool pre_lp = false) {
+        auto& input = node_scratch.propagation_input_bounds;
+        if (inference != nullptr) {
+            input.resize(problem_.num_cols);
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                input[j] = {dp.getLower(j), dp.getUpper(j)};
+            }
+        }
+        const bool feasible = pre_lp ? dp.propagate(problem_.num_rows) : propagateNode(dp);
+        if (inference != nullptr) {
+            --inference->skipped;
+            if (feasible) {
+                ++inference->samples;
+                for (Index j = 0; j < problem_.num_cols; ++j) {
+                    if (j != node.branch.variable &&
+                        (dp.getLower(j) > input[j].first || dp.getUpper(j) < input[j].second)) {
+                        ++inference->tightened_columns;
+                    }
+                }
+            } else {
+                ++inference->cutoffs;
+            }
+            inference = nullptr;  // Only the first pass at this child is measured.
+        }
+        return feasible;
+    };
     const bool use_conflicts = conflicts_enabled_ && num_threads_ <= 1;
     if (use_conflicts) {
         ageConflictPool();
@@ -2463,7 +2497,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         const Int before_rows = propagator->numTightened();
         // Deductions made within the row visit budget hold even if the
         // propagator stops before reaching a fixpoint.
-        const bool feasible = propagator->propagate(problem_.num_rows);
+        const bool feasible = propagateChild(*propagator, true);
         if (feasible && apply_pre_lp_bounds && propagator->numTightened() > before_rows) {
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 const Real lb = std::max(current_lower[j], propagator->getLower(j));
@@ -2679,7 +2713,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
             }
 
-            if (!propagateNode(dp)) {
+            if (!propagateChild(dp)) {
                 ++tree_presolve_delta.infeasible;
                 flushTreePresolveStats();
                 if (use_conflicts) {
@@ -2920,7 +2954,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     rc_dp.setBound(j, current_lower[j], current_upper[j]);
                 }
             }
-            if (!propagateNode(rc_dp)) {
+            if (!propagateChild(rc_dp)) {
                 flushRcStats();
                 if (use_conflicts) {
                     learnConflictFromNode(node.bound_changes, false);
@@ -3315,7 +3349,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                             Int& total_lp_iters, double& total_work,
                             HeuristicRuntime& heuristic_runtime, SolutionPool& solution_pool,
                             Real& incumbent, std::vector<Real>& best_solution, Real root_bound,
-                            const std::function<double()>& elapsed) {
+                            const std::function<double()>& elapsed,
+                            std::span<const Index> branch_inference_col_mapping) {
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
     std::vector<Index> root_symmetry_tightened;
@@ -3337,6 +3372,13 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     touched_vars.reserve(problem_.num_cols);
     NodeWorkStats node_stats;
     NodeScratch node_scratch;
+    if (directional_inference_enabled_) {
+        if (branch_inference_col_mapping.empty()) {
+            branch_inference_stats_.resize(problem_.num_cols);
+        }
+        node_scratch.branch_inference = &branch_inference_stats_;
+        node_scratch.branch_inference_col_mapping = branch_inference_col_mapping;
+    }
     Int rins_calls = 0;
     Int rins_solves = 0;
     Int rins_found = 0;
@@ -4301,7 +4343,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
     total_lp_iters += root_result.iterations;
     total_work += root_result.work_units;
     solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, heuristic_runtime,
-                solution_pool, incumbent, best_solution, root_bound, elapsed);
+                solution_pool, incumbent, best_solution, root_bound, elapsed, {});
 }
 #endif
 
@@ -4320,6 +4362,7 @@ void negateObjective(LpProblem& problem) {
 }  // namespace
 
 MipResult MipSolver::solve() {
+    branch_inference_stats_.clear();
     if (!loaded_) {
         return {};
     }
@@ -6491,8 +6534,14 @@ MipResult MipSolver::solveMinimizationOnce() {
         solveParallel(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
                       solution_pool, incumbent, best_solution, root_bound, elapsed);
     } else {
+        std::span<const Index> inference_col_mapping;
+        if (directional_inference_enabled_ && did_presolve) {
+            branch_inference_stats_.resize(original_problem.num_cols);
+            inference_col_mapping = presolver.colMapping();
+        }
         solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
-                    solution_pool, incumbent, best_solution, root_bound, elapsed);
+                    solution_pool, incumbent, best_solution, root_bound, elapsed,
+                    inference_col_mapping);
     }
 
     if (best_solution.empty()) {

@@ -1961,6 +1961,7 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
     CHECK(baseline_stats.pre_lp_propagation_pruned == 0);
 
     solver.setPreLpPropagationEnabled(true);
+    solver.setDirectionalInferenceEnabled(true);
     for (int repeat = 0; repeat < 2; ++repeat) {
         const auto screened = solver.solve();
         REQUIRE(screened.status == Status::Optimal);
@@ -1972,6 +1973,15 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
         const auto& stats = solver.getLpStats();
         CHECK(stats.pre_lp_propagation_calls == 2);
         CHECK(stats.pre_lp_propagation_pruned == 1);
+        const auto& inference = solver.getBranchInferenceStats();
+        REQUIRE(inference.size() == 3);
+        // The root chooses y for branching. Its down side implies x=-1.
+        CHECK(inference[1].down.cutoffs == 1);
+        CHECK(inference[1].down.samples == 0);
+        CHECK(inference[1].down.tightened_columns == 0);
+        CHECK(inference[1].down.skipped == 0);
+        CHECK(inference[1].up.cutoffs == 0);
+        CHECK(inference[1].up.samples == 1);
         CHECK(stats.warm_starts + stats.cold_starts ==
               baseline_stats.warm_starts + baseline_stats.cold_starts - 1);
         CHECK(solver.getConflictStats().bound_infeasible_conflicts == 1);
@@ -1982,12 +1992,85 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
     }
 
     solver.setPreLpPropagationEnabled(false);
+    solver.setDirectionalInferenceEnabled(false);
     const auto explicitly_off = solver.solve();
     CHECK(explicitly_off.status == baseline.status);
     CHECK(explicitly_off.objective == baseline.objective);
     CHECK(explicitly_off.nodes == baseline.nodes);
     CHECK(explicitly_off.lp_iterations == baseline.lp_iterations);
     CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+    CHECK(solver.getBranchInferenceStats().empty());
+}
+
+TEST_CASE("MipSolver: directional inference counts distinct columns at the first pass",
+          "[mip][domain]") {
+    // The root takes x=0.5, y=z=0. Down fixes x=0 and tightens both sides of y.
+    // Up fixes x=1 and tightens z from below. Each direction infers one column.
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {1.0, 1.5, 0.2};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Continuous, VarType::Continuous};
+    lp.num_rows = 3;
+    lp.row_lower = {0.5, -kInf, -0.5};
+    lp.row_upper = {kInf, 0.75, kInf};
+    lp.matrix = SparseMatrix(
+        3, 3, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, -0.5}, {1, 1, 1.0}, {2, 0, -1.0}, {2, 2, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setNumThreads(1);
+    solver.setPreLpPropagationEnabled(true);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    REQUIRE(baseline.nodes == 3);
+    CHECK(solver.getBranchInferenceStats().empty());
+    CHECK(solver.getBranchingStats().strong_branch_probes == 2);
+
+    solver.setDirectionalInferenceEnabled(true);
+    const auto measured = solver.solve();
+    CHECK(measured.status == baseline.status);
+    CHECK(measured.objective == baseline.objective);
+    CHECK(measured.solution == baseline.solution);
+    CHECK(measured.nodes == baseline.nodes);
+    CHECK(measured.lp_iterations == baseline.lp_iterations);
+    CHECK(measured.work_units == baseline.work_units);
+    const auto& inference = solver.getBranchInferenceStats();
+    REQUIRE(inference.size() == 3);
+    for (const auto& direction : {inference[0].down, inference[0].up}) {
+        CHECK(direction.samples == 1);
+        CHECK(direction.tightened_columns == 1);
+        CHECK(direction.cutoffs == 0);
+        CHECK(direction.skipped == 0);
+    }
+    for (Index j : {1, 2}) {
+        CHECK(inference[j].down.samples == 0);
+        CHECK(inference[j].up.samples == 0);
+    }
+
+    solver.setPreLpPropagationEnabled(false);
+    const auto skipped = solver.solve();
+    REQUIRE(skipped.status == Status::Optimal);
+    REQUIRE(skipped.nodes == 3);
+    REQUIRE(inference.size() == 3);
+    for (const auto& direction : {inference[0].down, inference[0].up}) {
+        CHECK(direction.samples == 0);
+        CHECK(direction.tightened_columns == 0);
+        CHECK(direction.cutoffs == 0);
+        CHECK(direction.skipped == 1);
+    }
+
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2}, {}, "sos2"}};
+    solver.setSos2NativeBranching(true);
+    solver.setNodeLimit(0);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getBranchInferenceStats().empty());
 }
 
 TEST_CASE("MipSolver: pre-LP propagation leaves an inconclusive node LP intact", "[mip][domain]") {
