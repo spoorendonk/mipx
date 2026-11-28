@@ -1483,6 +1483,64 @@ TEST_CASE("MipSolver: a backed-out root cut batch discards its propagated bounds
     }
 }
 
+TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][cuts][domain]") {
+    const bool pre_root = GENERATE(false, true);
+    const Int row_budget = GENERATE(0, 1);
+    // Two independent fractional optima keep the LP below the incumbent
+    // after a cut on either pair. The pricey fifth variable has reduced cost.
+    LpProblem model;
+    model.num_cols = 5;
+    model.obj = {-1.0, 0.0, -1.0, 0.0, -10.0};
+    model.obj_offset = 7.0;
+    model.sense = Sense::Maximize;
+    model.col_lower.assign(5, 0.0);
+    model.col_upper.assign(5, 1.0);
+    model.col_type.assign(5, VarType::Binary);
+    model.num_rows = 4;
+    model.row_lower = {1.0, 0.0, 1.0, 0.0};
+    model.row_upper.assign(4, kInf);
+    model.matrix = SparseMatrix(4, 5,
+                                {{0, 0, 1.0},
+                                 {0, 1, 1.0},
+                                 {1, 0, 1.0},
+                                 {1, 1, -1.0},
+                                 {2, 2, 1.0},
+                                 {2, 3, 1.0},
+                                 {3, 2, 1.0},
+                                 {3, 3, -1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootCutoffFeedbackEnabled(true);
+    solver.setRootCutPropagationRowBudget(row_budget);
+    solver.setPreRootLpFreeEnabled(pre_root);
+    solver.setMaxCutRounds(2);
+    solver.setMaxCutsPerRound(1);
+    solver.setCutEffortMode(CutEffortMode::Conservative);
+    solver.setRootCutRecheck(true);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    solver.load(model);
+
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(5.0, 1e-8));
+    CHECK(std::isfinite(solver.getPreRootStats().incumbent_at_root) == pre_root);
+    const auto& stats = solver.getCutStats();
+    CHECK(stats.root_rounds == (pre_root && row_budget == 1 ? 1 : 2));
+    CHECK(stats.root_cutoff_feedbacks == (pre_root ? 1 : 0));
+    CHECK(stats.root_cutoff_reduced_cost_tightenings == (pre_root ? 1 : 0));
+    CHECK(stats.root_cutoff_objective_tightenings == 0);
+    CHECK(stats.root_cutoff_resolves_backed_out == 0);
+    if (!pre_root || row_budget == 1) {
+        CHECK(stats.root_cut_propagation_row_visits == (pre_root ? 1 : 0));
+        CHECK(stats.root_cut_propagation_budget_exhaustions == (pre_root ? 1 : 0));
+    }
+    CHECK(solver.getExactRefinementStats().certificate_passed);
+}
+
 TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
           "[mip][heuristics]") {
     auto lp = buildRootFractionalHeuristicMip();

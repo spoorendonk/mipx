@@ -196,25 +196,15 @@ bool CutPool::addCut(Cut cut) {
     return true;
 }
 
-void CutPool::ageAll(std::span<const Real> primals, Real active_tol) {
+void CutPool::ageAll(std::span<const Real> primals, Real active_tol, std::span<const Real> guide) {
     for (auto& entry : cuts_) {
         auto& cut = entry.cut;
-        const Real activity = cutLhs(cut, primals);
-
-        // Check if the cut is active (binding).
-        bool active = false;
-        if (cut.upper < std::numeric_limits<Real>::infinity()) {
-            if (std::abs(activity - cut.upper) <= active_tol) {
-                active = true;
-            }
-        }
-        if (cut.lower > -std::numeric_limits<Real>::infinity()) {
-            if (std::abs(activity - cut.lower) <= active_tol) {
-                active = true;
-            }
-        }
-
-        if (active) {
+        auto nearBinding = [&](std::span<const Real> point) {
+            const Real activity = cutLhs(cut, point);
+            return (cut.upper < kInf && std::abs(activity - cut.upper) <= active_tol) ||
+                   (cut.lower > -kInf && std::abs(activity - cut.lower) <= active_tol);
+        };
+        if (nearBinding(primals) || (!guide.empty() && nearBinding(guide))) {
             cut.age = 0;
         } else {
             ++cut.age;
@@ -241,15 +231,17 @@ std::vector<Index> CutPool::topByEfficacy(Index k) const {
     return indices;
 }
 
-std::vector<Index> CutPool::violatedByEfficacy(std::span<const Real> primals,
-                                               Real min_violation) const {
+std::vector<Index> CutPool::violatedByEfficacy(std::span<const Real> primals, Real min_violation,
+                                               std::span<const Real> guide) const {
     std::vector<std::pair<Index, Real>> ranked;
     for (Index i = 0; i < size(); ++i) {
         const auto& [cut, installed] = cuts_[i];
         if (installed) {
             continue;
         }
-        const Real violation = cutViolation(cut, primals);
+        const Real violation = guide.empty()
+                                   ? cutViolation(cut, primals)
+                                   : std::max(cutViolation(cut, primals), cutViolation(cut, guide));
         if (violation < min_violation) {
             continue;
         }

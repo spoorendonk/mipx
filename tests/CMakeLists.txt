@@ -43,6 +43,7 @@ add_executable(mipx-tests
     test_clique_table.cpp
     test_binary_columns.cpp
     test_reduced_cost_fixer.cpp
+    test_root_cutoff_feedback.cpp
     test_objective_integrality.cpp
     test_objective_propagator.cpp
     test_validity.cpp
