@@ -5675,6 +5675,22 @@ MipResult MipSolver::solveMinimizationOnce() {
             log_.log("Rapid bench phase: name=%s seconds=%.9g\n", name, elapsed() - start);
         }
     };
+    bool bench_incumbent_seen = false;
+    // The final result still goes through the loaded-model checks after postsolve.
+    const auto record_bench_incumbent = [&](Real objective, const char* source) {
+        if (rapid_learning_bench_stats_ && !bench_incumbent_seen) {
+            bench_incumbent_seen = true;
+            log_.log("Rapid bench working incumbent: source=%s seconds=%.9g value=%.17g\n", source,
+                     elapsed(), log_obj_sign_ * objective);
+        }
+    };
+    const auto observe_bench_incumbents = [&](SolutionPool& pool) {
+        if (rapid_learning_bench_stats_) {
+            pool.setObserver([&](const HeuristicSolution& point, const std::string& source) {
+                record_bench_incumbent(point.objective, source.c_str());
+            });
+        }
+    };
     auto canonicalReportedWork = [&](double work_units) -> double { return work_units; };
 
     // Print banner before presolve (uses original problem dimensions).
@@ -5941,10 +5957,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         if (incumbent_observer_ && isAcceptableIncumbent(result.solution)) {
             incumbent_observer_(result.solution, "presolve");
         }
-        if (rapid_learning_bench_stats_) {
-            log_.log("Rapid bench incumbent: source=presolve seconds=%.9g value=%.17g\n",
-                     result.time_seconds, log_obj_sign_ * result.objective);
-        }
+        record_bench_incumbent(result.objective, "presolve");
         return result;
     }
 
@@ -5999,6 +6012,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         // it checked there, repaired with its integers fixed, or not at all.
         // The repair's work is the observer's, not the search's.
         pool.setObserver([&](const HeuristicSolution& solution, const std::string& source) {
+            record_bench_incumbent(solution.objective, source.c_str());
             const LpProblem& loaded =
                 using_transformed_problem && !problem_restored ? original_problem : problem_;
             std::vector<Real> x =
@@ -6052,6 +6066,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         result.time_seconds = elapsed();
         if (lr.status == Status::Optimal) {
             result.solution = lp.getPrimalValues();
+            record_bench_incumbent(result.objective, "presolve_lp");
             if (verbose_) {
                 std::fflush(stdout);
                 log_.log("\nOptimal: %.10e (%d iterations)\n", log_obj_sign_ * result.objective,
@@ -6142,19 +6157,8 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     }
 
-    bool bench_incumbent_seen = false;
-    const auto record_bench_incumbent = [&](const HeuristicSolution& point,
-                                            const std::string& source) {
-        if (!bench_incumbent_seen) {
-            bench_incumbent_seen = true;
-            log_.log("Rapid bench incumbent: source=%s seconds=%.9g value=%.17g\n", source.c_str(),
-                     elapsed(), log_obj_sign_ * point.objective);
-        }
-    };
     SolutionPool solution_pool(problem_.sense);
-    if (rapid_learning_bench_stats_) {
-        solution_pool.setObserver(record_bench_incumbent);
-    }
+    observe_bench_incumbents(solution_pool);
     if (root_rapid_learning_enabled_ && !discrete_vars.empty() &&
         rapid_learning_stats_.stop == RapidLearningStop::NotRun) {
         const double bench_start = bench_phase_start();
@@ -6447,9 +6451,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             constexpr uint64_t kNoFirstFeasibleWorkTick = std::numeric_limits<uint64_t>::max();
             std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
             SolutionPool pre_root_pool(problem_.sense);
-            if (rapid_learning_bench_stats_) {
-                pre_root_pool.setObserver(record_bench_incumbent);
-            }
+            observe_bench_incumbents(pre_root_pool);
             if (incumbent < kInf) {
                 pre_root_pool.submit({best_solution, incumbent}, "root_rapid_learning", 0);
             }

@@ -2,6 +2,7 @@ import pytest
 from run_instance_gate import Reference
 from run_mip_conflict_bench import (
     TERMINAL_WORK,
+    anchor_passes,
     check_reference,
     compare_anchor,
     parse_rapid_metrics,
@@ -80,7 +81,7 @@ def test_reference_check(
 def test_rapid_telemetry_keeps_first_incumbent_and_restart_spacing() -> None:
     log = """Rapid bench attempt: start
 Rapid bench phase: name=rapid_learning seconds=0.001
-Rapid bench incumbent: source=rounding seconds=0.1 value=22
+Rapid bench working incumbent: source=rounding seconds=0.1 value=22
 Rapid bench bound: node=128 lp_iters=162 seconds=0.12 value=19
 Rapid bench restart: node=128 conflict=1 spacing=127 required=96 open=50
 Root rapid learning: bounds=8 tree_cutoffs=4
@@ -93,7 +94,7 @@ Rapid bench summary: restarts=1 dropped=0 seconds=0.14
             "bounds": [{"node": "128", "lp_iters": "162", "seconds": "0.12", "value": "19"}],
             "restarts": [{"node": 128, "conflict": 1, "spacing": 127, "required": 96, "open": 50}],
             "phases_seconds": {"rapid_learning": 0.001},
-            "first_incumbent": {"source": "rounding", "seconds": "0.1", "value": "22"},
+            "first_working_incumbent": {"source": "rounding", "seconds": "0.1", "value": "22"},
         }
     ]
     with pytest.raises(ValueError, match="restart trace"):
@@ -121,3 +122,11 @@ def test_anchor_distinguishes_outcome_mismatches_from_wall_dependent_work() -> N
     assert compare_anchor(anchor, changed, "root-allowance")
     assert changed["anchor_check"] == "wall-dependent counters differ: nodes"
     assert not compare_anchor(anchor, {**changed, "final_bound": "9"}, "root-allowance")
+
+
+def test_full_anchor_requires_terminal_match() -> None:
+    limited: dict[str, object] = {"check": "consistent limit", "status": "Node limit"}
+    assert not anchor_passes(limited, "flugpl")
+    assert anchor_passes(limited, "pk1")
+    assert not anchor_passes({**limited, "status": "Time limit"}, "pk1")
+    assert anchor_passes({"check": "match", "status": "Optimal"}, "flugpl")

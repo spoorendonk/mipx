@@ -153,11 +153,11 @@ class RapidAttempt(TypedDict):
     bounds: list[dict[str, str]]
     restarts: list[dict[str, int]]
     phases_seconds: dict[str, float]
-    first_incumbent: dict[str, str] | None
+    first_working_incumbent: dict[str, str] | None
 
 
 def new_rapid_attempt() -> RapidAttempt:
-    return {"bounds": [], "restarts": [], "phases_seconds": {}, "first_incumbent": None}
+    return {"bounds": [], "restarts": [], "phases_seconds": {}, "first_working_incumbent": None}
 
 
 def parse_seconds(value: str) -> float:
@@ -182,8 +182,8 @@ def parse_rapid_attempts(lines: list[tuple[str, str]]) -> list[RapidAttempt]:
         elif label == "Rapid bench phase":
             phase = parse_fields(value)
             attempts[-1]["phases_seconds"][phase["name"]] = parse_seconds(phase["seconds"])
-        elif label == "Rapid bench incumbent":
-            attempts[-1]["first_incumbent"] = parse_fields(value)
+        elif label == "Rapid bench working incumbent":
+            attempts[-1]["first_working_incumbent"] = parse_fields(value)
     if not attempts:
         raise ValueError("missing rapid-learning bench attempt")
     return attempts
@@ -343,9 +343,9 @@ def search_trace(job: dict[str, object]) -> list[dict[str, object]]:
                 for event in attempt["bounds"]
             ],
             "restarts": attempt["restarts"],
-            "first_incumbent": {
+            "first_working_incumbent": {
                 key: value
-                for key, value in (attempt["first_incumbent"] or {}).items()
+                for key, value in (attempt["first_working_incumbent"] or {}).items()
                 if key != "seconds"
             },
         }
@@ -378,6 +378,14 @@ def compare_anchor(anchor: dict[str, object], result: dict[str, object], arm: st
     return False
 
 
+def anchor_passes(job: dict[str, object], name: str) -> bool:
+    return job["check"] == "match" or (
+        name in RAPID_SHORT_ANCHORS
+        and job["check"] == "consistent limit"
+        and job["status"] == "Node limit"
+    )
+
+
 def read_anchor_results(
     directory: Path, manifest: dict[str, object], jobs: list[str]
 ) -> dict[str, dict[str, object]]:
@@ -401,7 +409,7 @@ def read_anchor_results(
     with (directory / "results.jsonl").open(encoding="utf-8") as stream:
         results = {row["job"]: row for line in stream if (row := json.loads(line))}
     for job in jobs:
-        if job not in results or results[job]["check"] not in ("match", "consistent limit"):
+        if job not in results or not anchor_passes(results[job], results[job]["instance"]):
             raise SystemExit(f"Missing or failed anchor job: {job}")
     return results
 
@@ -484,8 +492,10 @@ def main() -> int:
                     rapid=rapid,
                 )
                 passed = result["check"] in ("match", "consistent limit")
-                if passed and args.anchor and result["status"] == "Time limit":
-                    result["check"] = "pre-lock anchor reached the time limit"
+                if passed and args.anchor and not anchor_passes(result, name):
+                    result["check"] = (
+                        f"pre-lock anchor did not finish as required ({result['status']})"
+                    )
                     passed = False
                 if passed and job in anchors:
                     passed = compare_anchor(anchors[job], result, arm)
