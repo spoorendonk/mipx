@@ -41,7 +41,7 @@ void printUsage(FILE* out) {
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--cut-strengthening|--no-cut-strengthening] "
-                 "[--root-cut-recheck] "
+                 "[--root-cut-recheck] [--sos2-adjacent-intervals] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
@@ -158,6 +158,7 @@ int main(int argc, char* argv[]) {
     bool balanced_branch_score = false;
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
+    bool sos2_adjacent_intervals = false;
     // Off by default in the solver; a numeric knob left unset keeps the
     // solver's own default, so a run without these flags is unchanged.
     bool probing_enabled = false;
@@ -293,6 +294,8 @@ int main(int argc, char* argv[]) {
             cut_strengthening = false;
         } else if (arg == "--root-cut-recheck") {
             root_cut_recheck = true;
+        } else if (arg == "--sos2-adjacent-intervals") {
+            sos2_adjacent_intervals = true;
         } else if (arg == "--presolve-forcing-rows") {
             presolve_forcing_rows = true;
         } else if (arg == "--no-presolve-forcing-rows") {
@@ -710,6 +713,7 @@ int main(int argc, char* argv[]) {
             solver.setExactRefinementRepairPasses(exact_repair_passes);
             solver.setExactRefinementRationalScale(exact_rational_scale);
             solver.setSearchProfile(search_profile);
+            solver.setSos2AdjacentIntervals(sos2_adjacent_intervals);
             solver.load(lp);
             auto result = solver.solve();
             const char* parallel_mode_name = (parallel_mode == mipx::ParallelMode::Deterministic)

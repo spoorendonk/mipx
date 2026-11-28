@@ -58,6 +58,38 @@ std::vector<Triplet> extractTriplets(const LpProblem& problem) {
     return trips;
 }
 
+void addSos2IntervalRows(LpProblem& out, std::vector<Triplet>& trips,
+                         const LpProblem::SosConstraint& sos, std::span<const Index> order) {
+    const std::string base =
+        sos.name.empty() ? "sos2_" + std::to_string(sos.vars[order.front()]) : sos.name;
+    std::vector<Index> selectors;
+    selectors.reserve(order.size() - 1);
+    for (std::size_t p = 0; p + 1 < order.size(); ++p) {
+        selectors.push_back(addColumn(out, 0.0, 0.0, 1.0, VarType::Binary,
+                                      base + "_interval_" + std::to_string(p)));
+    }
+    const std::vector<Real> ones(selectors.size(), 1.0);
+    addRow(out, trips, selectors, ones, -kInf, 1.0, base + "_select");
+
+    // With one selected interval, only its two endpoints can be nonzero.
+    // An empty support is also allowed, including when no interval is selected.
+    for (std::size_t p = 0; p < order.size(); ++p) {
+        const Index var = sos.vars[order[p]];
+        const Real neg_upper = -out.col_upper[var];
+        std::array<Index, 3> inds = {var, 0, 0};
+        const std::array<Real, 3> vals = {1.0, neg_upper, neg_upper};
+        std::size_t count = 1;
+        if (p > 0) {
+            inds[count++] = selectors[p - 1];
+        }
+        if (p < selectors.size()) {
+            inds[count++] = selectors[p];
+        }
+        addRow(out, trips, std::span(inds).first(count), std::span(vals).first(count), -kInf, 0.0,
+               base + "_" + std::to_string(p) + "_link");
+    }
+}
+
 }  // namespace
 
 void validateModelFeatures(const LpProblem& problem) {
@@ -168,6 +200,10 @@ bool roundIntegerBounds(LpProblem& problem, Real tol) {
 }
 
 LpProblem linearizeModelFeatures(const LpProblem& problem) {
+    return linearizeModelFeatures(problem, false);
+}
+
+LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_intervals) {
     validateModelFeatures(problem);
 
     if (!hasAdvancedModelFeatures(problem)) {
@@ -251,6 +287,12 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
     }
 
     for (const auto& sos : problem.sos_constraints) {
+        const bool use_intervals =
+            sos2_adjacent_intervals && sos.type == LpProblem::SosConstraint::Type::Sos2;
+        if (use_intervals && sos.vars.size() <= 2) {
+            continue;  // Every support of this set already satisfies SOS2.
+        }
+
         std::vector<Index> order(sos.vars.size());
         std::iota(order.begin(), order.end(), 0);
         if (!sos.weights.empty()) {
@@ -259,6 +301,11 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
                     return sos.weights[a] < sos.weights[b];
                 return sos.vars[a] < sos.vars[b];
             });
+        }
+
+        if (use_intervals) {
+            addSos2IntervalRows(out, trips, sos, order);
+            continue;
         }
 
         std::vector<Index> y(order.size(), -1);

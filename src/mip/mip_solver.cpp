@@ -1372,7 +1372,7 @@ std::optional<HeuristicSolution> runLpLightDiving(const LpProblem& problem,
 
 void MipSolver::load(const LpProblem& problem) {
     if (hasAdvancedModelFeatures(problem)) {
-        problem_ = linearizeModelFeatures(problem);
+        problem_ = linearizeModelFeatures(problem, sos2_adjacent_intervals_);
     } else {
         problem_ = problem;
     }

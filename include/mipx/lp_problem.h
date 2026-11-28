@@ -73,6 +73,9 @@ void validateModelFeatures(const LpProblem& problem);
 /// Linearize SOS/indicator/semi features into core row/bound form.
 LpProblem linearizeModelFeatures(const LpProblem& problem);
 
+/// Optionally use adjacent interval selectors for SOS2 sets.
+LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_intervals);
+
 /// Round the bounds of each Integer and Binary column in to the nearest
 /// integers inside them (within @p tol), so no reduction or search step ever
 /// fixes such a column at a fractional bound. Returns false when some column's

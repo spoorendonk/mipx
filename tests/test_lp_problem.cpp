@@ -1,3 +1,4 @@
+#include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/lp_problem.h"
 #include "mipx/mip_solver.h"
@@ -905,6 +906,94 @@ TEST_CASE("Feature linearization: SOS1 and SOS2", "[lp_problem][features]") {
     REQUIRE(sos2_result.status == Status::Optimal);
     CHECK_THAT(sos2_result.objective, WithinAbs(-5.0, 1e-6));
     CHECK(sos2_result.work_units > 0.0);
+}
+
+TEST_CASE("SOS2 interval selectors preserve support and tighten the LP", "[lp_problem][features]") {
+    LpProblem lp;
+    lp.num_cols = 5;
+    lp.obj = {-1.0, 0.0, -0.5, 0.0, -0.25};
+    lp.col_lower.assign(5, 0.0);
+    lp.col_upper = {1.0, 1.0, 2.0, 1.0, 4.0};
+    lp.col_type.assign(5, VarType::Continuous);
+    lp.matrix = SparseMatrix(0, lp.num_cols);
+    // Weight ties put 3 before 4, so 0, 2 and 4 are mutually nonadjacent.
+    lp.sos_constraints.push_back({
+        .type = LpProblem::SosConstraint::Type::Sos2,
+        .vars = {4, 0, 3, 2, 1},
+        .weights = {2.0, 0.0, 2.0, 1.0, 0.0},
+        .name = "sos",
+    });
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setSos2AdjacentIntervals(true);
+
+    SECTION("The interval relaxation excludes fractional nonadjacent activity") {
+        auto pairwise = linearizeModelFeatures(lp);
+        auto intervals = linearizeModelFeatures(lp, true);
+        CHECK(pairwise.num_cols == 10);
+        CHECK(pairwise.num_rows == 12);
+        CHECK(intervals.num_cols == 9);
+        CHECK(intervals.num_rows == 6);
+        CHECK(intervals.matrix.numNonzeros() == 17);
+        auto relax = [](LpProblem model) {
+            model.col_type.assign(model.num_cols, VarType::Continuous);
+            DualSimplexSolver simplex;
+            simplex.setVerbose(false);
+            simplex.load(model);
+            auto result = simplex.solve();
+            REQUIRE(result.status == Status::Optimal);
+            return result.objective;
+        };
+        CHECK_THAT(relax(pairwise), WithinAbs(-1.5, 1e-6));
+        CHECK_THAT(relax(intervals), WithinAbs(-1.0, 1e-6));
+
+        solver.load(lp);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.0, 1e-6));
+        CHECK(result.solution.size() == 9);
+    }
+
+    SECTION("Two adjacent members can both have positive lower bounds") {
+        lp.col_lower[2] = 1.0;
+        lp.col_lower[3] = 0.5;
+        solver.load(lp);
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.0, 1e-6));
+        CHECK(result.solution[3] >= 0.5);
+        CHECK_THAT(result.solution[4], WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("Forcing two nonadjacent members is infeasible") {
+        lp.col_lower[2] = 1.0;
+        lp.col_lower[4] = 1.0;
+        solver.load(lp);
+        CHECK(solver.solve().status == Status::Infeasible);
+    }
+
+    SECTION("All members can be zero") {
+        lp.obj.assign(lp.num_cols, 1.0);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("Sets with one or two members need no auxiliary rows or columns") {
+        lp.sos_constraints.front().weights.clear();
+        for (const auto& vars : {std::vector<Index>{4}, std::vector<Index>{4, 0}}) {
+            CAPTURE(vars.size());
+            lp.sos_constraints.front().vars = vars;
+            const auto intervals = linearizeModelFeatures(lp, true);
+            CHECK(intervals.num_rows == 0);
+            CHECK(intervals.num_cols == lp.num_cols);
+            solver.load(lp);
+            auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            CHECK_THAT(result.objective, WithinAbs(-3.0, 1e-6));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

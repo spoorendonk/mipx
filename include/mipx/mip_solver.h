@@ -278,6 +278,8 @@ public:
     MipResult solve();
 
     // Parameter setters.
+    /// Use adjacent interval selectors when linearizing SOS2 sets on subsequent loads.
+    void setSos2AdjacentIntervals(bool enabled) { sos2_adjacent_intervals_ = enabled; }
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
@@ -746,6 +748,7 @@ private:
     Real log_obj_sign_ = 1.0;
 
     // Parameters.
+    bool sos2_adjacent_intervals_ = false;
     Int node_limit_ = 1000000;
     double time_limit_ = 3600.0;
     // Start of the current solveMinimizationOnce(): with time_limit_, the one

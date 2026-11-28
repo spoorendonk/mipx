@@ -170,6 +170,8 @@ NB_MODULE(_core, m) {
 
     nb::class_<MipSolver>(m, "MipSolver")
         .def(nb::init<>())
+        .def("set_sos2_adjacent_intervals", &MipSolver::setSos2AdjacentIntervals, "enabled"_a,
+             "Use adjacent interval selectors for SOS2 sets on subsequent loads.")
         .def("load", &MipSolver::load, "problem"_a)
         .def("solve", &MipSolver::solve)
         .def("set_node_limit", &MipSolver::setNodeLimit, "limit"_a)
@@ -197,7 +199,8 @@ NB_MODULE(_core, m) {
     const auto solve_file = [](const std::string& filename, mipx::Int node_limit, double time_limit,
                                double gap_tolerance, bool verbose, bool presolve, bool cuts,
                                mipx::Int threads, HeuristicRuntimeMode heuristic_mode,
-                               std::uint64_t heuristic_seed, mipx::ModelFormat format) {
+                               std::uint64_t heuristic_seed, mipx::ModelFormat format,
+                               bool sos2_adjacent_intervals) {
         auto model = mipx::readModel(filename, format);
         MipSolver solver;
         solver.setNodeLimit(node_limit);
@@ -209,6 +212,7 @@ NB_MODULE(_core, m) {
         solver.setNumThreads(threads);
         solver.setHeuristicMode(heuristic_mode);
         solver.setHeuristicSeed(heuristic_seed);
+        solver.setSos2AdjacentIntervals(sos2_adjacent_intervals);
         solver.load(model);
         return solver.solve();
     };
@@ -217,6 +221,7 @@ NB_MODULE(_core, m) {
           "gap_tolerance"_a = 1e-4, "verbose"_a = false, "presolve"_a = true, "cuts"_a = true,
           "threads"_a = 1, "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic,
           "heuristic_seed"_a = 1, "format"_a = mipx::ModelFormat::Auto,
+          "sos2_adjacent_intervals"_a = false,
           "Read a model file (see read_model) and solve it with default MIP settings.");
 
     // The historical name. It never implied MPS-only in practice -- it now
@@ -227,5 +232,5 @@ NB_MODULE(_core, m) {
           "gap_tolerance"_a = 1e-4, "verbose"_a = false, "presolve"_a = true, "cuts"_a = true,
           "threads"_a = 1, "heuristic_mode"_a = HeuristicRuntimeMode::Deterministic,
           "heuristic_seed"_a = 1, "format"_a = mipx::ModelFormat::Auto,
-          "Alias of solve_file, kept for compatibility.");
+          "sos2_adjacent_intervals"_a = false, "Alias of solve_file, kept for compatibility.");
 }

@@ -88,6 +88,7 @@ Key options:
 | `--presolve` / `--no-presolve` | on | Presolve reductions |
 | `--cuts` / `--no-cuts` | on | Cutting planes |
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
+| `--sos2-adjacent-intervals` | off | Linearize SOS2 with one binary per adjacent interval and a linear number of rows |
 | `--root-feasjump-restarts <n>` | 4 | Cap root feasibility-jump passes at 0 through 4, including the initial pass. Use 0 to skip the heuristic |
 | `--barrier` | off | Use barrier for root LP |
 | `--barrier-dualize off\|on\|auto` | off | With barrier, force the compact dual with `on` or compare estimated Newton-factor work in both orientations with `auto` |
@@ -134,6 +135,10 @@ Every reader checks that the file really is in the format it is read as and
 raises `mipx.ModelFormatError` (a `ValueError`) when it is not, rather than
 returning an empty model. `solve_mps` is the older name of `solve_file` and
 behaves identically: despite the name it reads `.lp` files as LP.
+
+Pass `sos2_adjacent_intervals=True` to `solve_file` or call
+`solver.set_sos2_adjacent_intervals(True)` before `solver.load(model)` to use
+adjacent interval selectors for SOS2 sets.
 
 ## Tests
 

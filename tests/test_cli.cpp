@@ -165,6 +165,15 @@ TEST_CASE("CLI: an MPS file's SOS sets reach the solver", "[cli][io]") {
     CHECK(run.mentions("Objective: 4.0000000000e+00"));
 }
 
+TEST_CASE("CLI: SOS2 adjacent intervals still enforce SOS1 and SOS2", "[cli][io]") {
+    const auto run =
+        runSolver("'" + testDataDir() + "/mps_sos.mps' --quiet --sos2-adjacent-intervals");
+
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Optimal"));
+    CHECK(run.mentions("Objective: 4.0000000000e+00"));
+}
+
 TEST_CASE("CLI: an MPS file's indicator constraints reach the solver", "[cli][io]") {
     const auto run = runSolver("'" + testDataDir() + "/mps_indicators.mps' --quiet");
 
