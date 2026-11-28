@@ -464,8 +464,8 @@ std::pair<BnbNode, BnbNode> initializeChildren(BnbNode parent) {
 
 std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val) {
     auto [left, right] = initializeChildren(std::move(parent));
-    left.branch = {branch_var, std::floor(branch_val), true};
-    right.branch = {branch_var, std::ceil(branch_val), false};
+    left.branch = {branch_var, std::floor(branch_val), true, left.depth};
+    right.branch = {branch_var, std::ceil(branch_val), false, right.depth};
     left.branch_value = right.branch_value = branch_val;
     left.bound_changes.push_back(left.branch);
     right.bound_changes.push_back(right.branch);
@@ -486,8 +486,8 @@ std::vector<BnbNode> createSos2Children(BnbNode parent, std::span<const Index> m
             }
             // Record both ends even when the node already has a zero bound:
             // temporary local tightenings need not carry over to its children.
-            child.bound_changes.push_back({j, 0.0, true});
-            child.bound_changes.push_back({j, 0.0, false});
+            child.bound_changes.push_back({j, 0.0, true, child.depth});
+            child.bound_changes.push_back({j, 0.0, false, child.depth});
         }
         child.lp_bound = bound;
         children.push_back(std::move(child));

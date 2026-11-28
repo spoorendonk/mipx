@@ -30,6 +30,7 @@ public:
         Index col = -1;
         Real new_lower = 0.0;
         Real new_upper = 0.0;
+        bool cutoff_is_upper = false;
     };
 
     void load(const LpProblem& problem);
@@ -38,14 +39,16 @@ public:
     void reset() { *this = ObjectivePropagator{}; }
 
     [[nodiscard]] bool loaded() const { return loaded_; }
+    [[nodiscard]] SparseVectorView row() const { return {obj_cols_, obj_vals_}; }
 
     /// Tighten the domain [lower, upper] against the cutoff. Each update holds
     /// the column's new bounds, rounded for integer columns, and is reported
     /// only when it moves a bound by more than the propagation tolerance.
     /// Returns false when the domain cannot hold a point better than the
-    /// cutoff, or when a tightening empties a column's domain.
+    /// cutoff, or when a tightening empties a column's domain. If requested,
+    /// crossing names the rejected tightening (col == -1 for activity cutoff).
     bool propagate(Real cutoff, std::span<const Real> lower, std::span<const Real> upper,
-                   std::vector<BoundUpdate>& updates) const;
+                   std::vector<BoundUpdate>& updates, BoundUpdate* crossing = nullptr) const;
 
     /// Tolerance for "the domain cannot improve on the incumbent", the one
     /// the node queue and processNode prune by.

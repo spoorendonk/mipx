@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mipx/branch_decision.h"
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
 #include "mipx/lp_solver.h"
@@ -10,13 +11,6 @@
 #include <vector>
 
 namespace mipx {
-
-/// A branching decision applied at a node.
-struct BranchDecision {
-    Index variable = -1;
-    Real bound = 0.0;
-    bool is_upper = false;
-};
 
 /// A node in the branch-and-bound tree.
 struct BnbNode {

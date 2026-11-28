@@ -444,10 +444,14 @@ std::vector<Clique> CliqueTable::cliquePartition(std::span<const Real> primals,
 }
 
 bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> upper,
-                            std::vector<BoundUpdate>& updates) const {
+                            std::vector<BoundUpdate>& updates, PropagationFailure* failure) const {
     updates.clear();
+    if (failure != nullptr) {
+        *failure = {};
+    }
 
-    for (const auto& clq : cliques_) {
+    for (Index clique = 0; clique < numCliques(); ++clique) {
+        const auto& clq = cliques_[clique];
         // Find which literal (if any) is fixed to 1.
         Index fixed_idx = -1;
         Index num_free = 0;
@@ -484,6 +488,12 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
             if (fixed_one) {
                 if (fixed_idx >= 0) {
                     // Two literals fixed to 1 -- infeasible.
+                    if (failure != nullptr) {
+                        *failure = {.clique = clique,
+                                    .fixed_one = fixed_idx,
+                                    .other_one = k,
+                                    .crossing = {}};
+                    }
                     return false;
                 }
                 fixed_idx = k;
@@ -493,6 +503,19 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
             }
         }
 
+        const auto addUpdate = [&](Index k, Real lb, Real ub) {
+            const BoundUpdate update{clq.literals[k].var, lb, ub, clique, fixed_idx, k};
+            if (lb > ub + 1e-8) {
+                if (failure != nullptr) {
+                    failure->clique = clique;
+                    failure->fixed_one = fixed_idx;
+                    failure->crossing = update;
+                }
+                return false;
+            }
+            updates.push_back(update);
+            return true;
+        };
         if (fixed_idx >= 0) {
             // One literal is fixed to 1: fix all others to 0.
             for (Index k = 0; k < static_cast<Index>(clq.literals.size()); ++k) {
@@ -510,17 +533,13 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
                 //   - complemented: set lb = 1
                 if (!lit.complemented) {
                     if (cur_ub > 1e-8) {
-                        Real new_ub = 0.0;
-                        if (cur_lb > new_ub + 1e-8)
+                        if (!addUpdate(k, cur_lb, 0.0))
                             return false;
-                        updates.push_back({lit.var, cur_lb, new_ub});
                     }
                 } else {
                     if (cur_lb < 1.0 - 1e-8) {
-                        Real new_lb = 1.0;
-                        if (new_lb > cur_ub + 1e-8)
+                        if (!addUpdate(k, 1.0, cur_ub))
                             return false;
-                        updates.push_back({lit.var, new_lb, cur_ub});
                     }
                 }
             }
@@ -532,20 +551,21 @@ bool CliqueTable::propagate(std::span<const Real> lower, std::span<const Real> u
                 Real cur_ub = upper[lit.var];
                 if (!lit.complemented) {
                     if (cur_lb < 1.0 - 1e-8) {
-                        if (1.0 > cur_ub + 1e-8)
+                        if (!addUpdate(last_free_idx, 1.0, cur_ub))
                             return false;
-                        updates.push_back({lit.var, 1.0, cur_ub});
                     }
                 } else {
                     if (cur_ub > 1e-8) {
-                        if (cur_lb > 0.0 + 1e-8)
+                        if (!addUpdate(last_free_idx, cur_lb, 0.0))
                             return false;
-                        updates.push_back({lit.var, cur_lb, 0.0});
                     }
                 }
             }
         } else if (num_free == 0 && clq.is_equality && fixed_idx < 0) {
             // All literals fixed to 0 in an equality clique -- infeasible.
+            if (failure != nullptr) {
+                failure->clique = clique;
+            }
             return false;
         }
     }

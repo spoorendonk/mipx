@@ -2029,6 +2029,30 @@ TEST_CASE("MipSolver: watched no-goods preserve age purging", "[mip][conflicts]"
     CHECK(watched_stats.watch_candidates > 0);
 }
 
+TEST_CASE("MipSolver: tracking bound reasons preserves pre-LP search", "[mip][reasons]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setPreLpPropagationEnabled(true);
+    solver.load(buildSearchStagnationMip());
+    const auto baseline = solver.solve();
+    const auto stats = solver.getLpStats();
+    REQUIRE(baseline.status == Status::Infeasible);
+    REQUIRE(stats.pre_lp_propagation_calls > 1);
+
+    solver.setBoundReasonsEnabled(true);
+    const auto recorded = solver.solve();
+    CHECK(recorded.status == baseline.status);
+    CHECK(recorded.nodes == baseline.nodes);
+    CHECK(recorded.lp_iterations == baseline.lp_iterations);
+    CHECK(solver.getLpStats().pre_lp_propagation_calls == stats.pre_lp_propagation_calls);
+    CHECK(solver.getLpStats().pre_lp_propagation_pruned == stats.pre_lp_propagation_pruned);
+}
+
 TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[mip][conflicts]") {
     // Minimizing x first branches on y=0.5. Both y children then take x=0.5.
     // The x>=1 child is LP-infeasible independently of y, so a ray-shortened

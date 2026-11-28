@@ -2315,6 +2315,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
         return feasible;
     };
+    const auto reason_path = bound_reasons_enabled_
+                                 ? std::span<const BranchDecision>(node.bound_changes)
+                                 : std::span<const BranchDecision>{};
     const bool use_conflicts = conflicts_enabled_ && num_threads_ <= 1;
     if (use_conflicts) {
         ageConflictPool();
@@ -2544,11 +2547,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         auto& propagator = node_scratch.pre_lp_propagator;
         if (!propagator) {
             propagator = std::make_unique<DomainPropagator>();
-            propagator->load(problem_);
+            propagator->load(problem_, bound_reasons_enabled_);
         }
         propagator->pushCheckpoint();
+        propagator->setReasonLevel(node.depth);
         for (Index j : touched_vars) {
-            propagator->setBound(j, current_lower[j], current_upper[j]);
+            propagator->setBound(j, current_lower[j], current_upper[j], reason_path);
         }
         const Int before_rows = propagator->numTightened();
         // Deductions made within the row visit budget hold even if the
@@ -2755,7 +2759,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
         if ((depth_gate || frac_gate) && !benefit_skip) {
             DomainPropagator dp;
-            dp.load(problem_);
+            dp.load(problem_, bound_reasons_enabled_);
             if (implication_graph_.numImplications() > 0) {
                 dp.setImplicationGraph(&implication_graph_);
             }
@@ -2766,10 +2770,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
             }
             attachObjectiveCutoff(dp, incumbent_snapshot);
+            dp.setReasonLevel(node.depth);
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
-                    dp.setBound(j, current_lower[j], current_upper[j]);
+                    dp.setBound(j, current_lower[j], current_upper[j], reason_path);
                 }
             }
 
@@ -2996,7 +3001,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             // propagation for this node before the LP is re-solved.
             ++rc_delta.propagation_triggers;
             DomainPropagator rc_dp;
-            rc_dp.load(problem_);
+            rc_dp.load(problem_, bound_reasons_enabled_);
             if (implication_graph_.numImplications() > 0) {
                 rc_dp.setImplicationGraph(&implication_graph_);
             }
@@ -3007,10 +3012,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
             }
             attachObjectiveCutoff(rc_dp, incumbent_snapshot);
+            rc_dp.setReasonLevel(node.depth);
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 if (current_lower[j] > problem_.col_lower[j] + 1e-9 ||
                     current_upper[j] < problem_.col_upper[j] - 1e-9) {
-                    rc_dp.setBound(j, current_lower[j], current_upper[j]);
+                    rc_dp.setBound(j, current_lower[j], current_upper[j], reason_path);
                 }
             }
             if (!propagateChild(rc_dp)) {
