@@ -275,6 +275,22 @@ struct PresolveStats {
     Real dependent_equation_seconds = 0.0;
 };
 
+/// One reduction's change count and time in PresolveStats.
+struct PresolveRuleStat {
+    const char* name;
+    Index PresolveStats::* changes;
+    Real PresolveStats::* seconds;
+};
+
+/// Every reduction's counters, in the order presolve runs them: the one list
+/// the CLI, the MIP solver's log and the presolve bench name them from, so a
+/// new reduction is printed everywhere once it is added here.
+std::span<const PresolveRuleStat> presolveRuleStats();
+
+/// "name=changes" for each reduction that changed something, in
+/// presolveRuleStats() order, space-separated; "none" when none did.
+std::string formatPresolveRuleChanges(const PresolveStats& stats);
+
 struct PresolveOptions {
     bool enable_forcing_rows = true;
     bool enable_dual_fixing = true;

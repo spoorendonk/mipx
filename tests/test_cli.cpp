@@ -344,14 +344,16 @@ TEST_CASE("CLI: --presolve-probing reaches presolve", "[cli]") {
     const auto toggled = runFeatures("--presolve-probing --no-presolve-probing");
 
     CHECK(on.exit_code == 0);
-    CHECK(on.mentions("probe=1]"));
-    // Without probing nothing in presolve fixes x4, so no reduction is logged.
-    CHECK_FALSE(off.mentions("probe=1]"));
-    CHECK_FALSE(toggled.mentions("probe=1]"));
+    // The rule list ends at "]" or goes on after a space.
+    CHECK((on.mentions("probing=1]") || on.mentions("probing=1 ")));
+    // Without probing nothing in presolve fixes x4, so no reduction is logged
+    // (a rule that changed nothing is not printed).
+    CHECK_FALSE(off.mentions("probing="));
+    CHECK_FALSE(toggled.mentions("probing="));
     // A one-probe, one-round budget does not reach x4, so nothing is fixed.
     CHECK_FALSE(runFeatures("--presolve-probing --presolve-probing-probes 1 "
                             "--presolve-probing-rounds 1")
-                    .mentions("probe=1]"));
+                    .mentions("probing="));
 }
 
 TEST_CASE("CLI: --clique-table reaches the solver", "[cli]") {

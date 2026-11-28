@@ -748,6 +748,26 @@ TEST_CASE("Presolve: statistics are tracked", "[presolve]") {
     CHECK(stats.cols_examined > 0);
 }
 
+TEST_CASE("Presolve: the rule summary names each rule that changed something", "[presolve]") {
+    PresolveStats stats;
+    CHECK(formatPresolveRuleChanges(stats) == "none");
+    stats.singleton_row_changes = 3;
+    stats.parallel_col_changes = 2;
+    stats.dependent_equation_changes = 1;
+    CHECK(formatPresolveRuleChanges(stats) ==
+          "singleton_row=3 parallel_col=2 dependent_equations=1");
+
+    // Every rule has a distinct name and its own counters.
+    const auto rules = presolveRuleStats();
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        for (std::size_t j = i + 1; j < rules.size(); ++j) {
+            CHECK(std::string(rules[i].name) != rules[j].name);
+            CHECK(rules[i].changes != rules[j].changes);
+            CHECK(rules[i].seconds != rules[j].seconds);
+        }
+    }
+}
+
 // =============================================================================
 // Tests: No reductions needed
 // =============================================================================

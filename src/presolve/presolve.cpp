@@ -348,7 +348,61 @@ Real forcingColValue(const PostsolveForcingCol& op, const std::vector<Real>& ful
     return limited ? x : 0.0;
 }
 
+// In the order presolve runs them.
+constexpr PresolveRuleStat kRuleStats[] = {
+    {"fixed_var", &PresolveStats::fixed_var_changes, &PresolveStats::fixed_var_seconds},
+    {"singleton_row", &PresolveStats::singleton_row_changes, &PresolveStats::singleton_row_seconds},
+    {"singleton_col", &PresolveStats::singleton_col_changes, &PresolveStats::singleton_col_seconds},
+    {"free_col_substitution", &PresolveStats::free_col_substitution_changes,
+     &PresolveStats::free_col_substitution_seconds},
+    {"doubleton_eq", &PresolveStats::doubleton_eq_changes, &PresolveStats::doubleton_eq_seconds},
+    {"forcing_row", &PresolveStats::forcing_row_changes, &PresolveStats::forcing_row_seconds},
+    {"dominated_row", &PresolveStats::dominated_row_changes, &PresolveStats::dominated_row_seconds},
+    {"duplicate_row", &PresolveStats::duplicate_row_changes, &PresolveStats::duplicate_row_seconds},
+    {"parallel_row", &PresolveStats::parallel_row_changes, &PresolveStats::parallel_row_seconds},
+    {"parallel_col", &PresolveStats::parallel_col_changes, &PresolveStats::parallel_col_seconds},
+    {"implied_equation", &PresolveStats::implied_equation_changes,
+     &PresolveStats::implied_equation_seconds},
+    {"activity_bound_tightening", &PresolveStats::activity_bound_tightening_changes,
+     &PresolveStats::activity_bound_tightening_seconds},
+    {"dominated_col", &PresolveStats::dominated_col_changes, &PresolveStats::dominated_col_seconds},
+    {"dual_fixing", &PresolveStats::dual_fixing_changes, &PresolveStats::dual_fixing_seconds},
+    {"empty_col", &PresolveStats::empty_col_changes, &PresolveStats::empty_col_seconds},
+    {"coeff_tightening", &PresolveStats::coeff_tightening_changes,
+     &PresolveStats::coeff_tightening_seconds},
+    {"aggregator", &PresolveStats::aggregator_changes, &PresolveStats::aggregator_seconds},
+    {"zero_cost_singleton", &PresolveStats::zero_cost_singleton_changes,
+     &PresolveStats::zero_cost_singleton_seconds},
+    {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
+    // HiGHS's bench calls the rule dependent_equations.
+    {"dependent_equations", &PresolveStats::dependent_equation_changes,
+     &PresolveStats::dependent_equation_seconds},
+    {"implied_bounds_relaxed", &PresolveStats::implied_bounds_relaxed,
+     &PresolveStats::implied_bounds_relaxed_seconds},
+};
+
 }  // namespace
+
+std::span<const PresolveRuleStat> presolveRuleStats() {
+    return kRuleStats;
+}
+
+std::string formatPresolveRuleChanges(const PresolveStats& stats) {
+    std::string out;
+    for (const PresolveRuleStat& rule : kRuleStats) {
+        const Index n = stats.*rule.changes;
+        if (n == 0) {
+            continue;
+        }
+        if (!out.empty()) {
+            out += ' ';
+        }
+        out += rule.name;
+        out += '=';
+        out += std::to_string(n);
+    }
+    return out.empty() ? "none" : out;
+}
 
 // =============================================================================
 // PostsolveStack
