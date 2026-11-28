@@ -11,6 +11,7 @@
 
 namespace mipx {
 
+class Deadline;
 class SparseMatrix;
 
 /// Sparse LU factorization with Markowitz pivoting and Forrest-Tomlin updates.
@@ -38,6 +39,11 @@ public:
     /// Factorize a square basis matrix (given as columns from constraint matrix).
     /// basis_cols[i] = column index in the original matrix for basis position i.
     void factorize(const SparseMatrix& matrix, std::span<const Index> basis_cols);
+
+    /// Like factorize(), but returns false if the deadline stops the build.
+    /// After false, factorize again before using the factors.
+    [[nodiscard]] bool factorizeUntil(const SparseMatrix& matrix, std::span<const Index> basis_cols,
+                                      const Deadline& deadline);
 
     /// Solve B*x = rhs in-place.
     void ftran(std::span<Real> rhs) const;
@@ -218,7 +224,7 @@ private:
     /// btf_block_start with the block boundaries.
     static Index detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
                            std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
-                           std::vector<Index>& btf_block_start);
+                           std::vector<Index>& btf_block_start, const Deadline& deadline);
 
     // --- FP32 mixed-precision solve helpers ---
 
@@ -248,7 +254,7 @@ private:
 
     /// Build FP32 copies of L and U factors from FP64 data.
     /// Returns false if element growth exceeds FP32 range.
-    bool buildFp32Factors();
+    bool buildFp32Factors(const Deadline& deadline);
 
     Index dim_ = 0;
     // Number of BTF diagonal blocks the last factorization was confined to

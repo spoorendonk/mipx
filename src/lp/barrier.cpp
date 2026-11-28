@@ -2683,6 +2683,9 @@ bool BarrierSolver::runCrossover(bool probe_infeasibility) {
     crossover_status_ = Status::Error;
     crossover_proved_infeasible_ = false;
     const auto deadline = deadline_.orStop(options_.stop_flag);
+    const auto stopped_status = [&] {
+        return deadline.remainingSeconds() == 0.0 ? Status::TimeLimit : Status::IterLimit;
+    };
     std::optional<std::vector<BasisStatus>> basis;
     if (!deadline.passed()) {
         auto reduced_costs = getReducedCosts();
@@ -2703,21 +2706,25 @@ bool BarrierSolver::runCrossover(bool probe_infeasibility) {
         }
     }
     if (!basis || deadline.passed()) {
-        crossover_status_ = deadline_.passed() ? Status::TimeLimit : Status::IterLimit;
+        crossover_status_ = stopped_status();
         return false;
     }
 
     // Phase 2: Basis cleanup using dual simplex.
+    crossover_stats_.attempted = true;
     DualSimplexSolver ds;
-    ds.load(original_);
-    ds.setVerbose(false);
-    ds.setBasis(*basis);
 
     DualSimplexOptions ds_opts;
     ds_opts.stop_flag = options_.stop_flag;
     ds_opts.enable_scaling = true;
-    ds_opts.max_solve_seconds = deadline_.remainingSeconds();  // -1: none (#275)
+    ds_opts.deadline = deadline_;
     ds.setOptions(ds_opts);
+    if (!ds.loadUntil(original_, deadline)) {
+        crossover_status_ = stopped_status();
+        return false;
+    }
+    ds.setVerbose(false);
+    ds.setBasis(*basis);
 
     const auto acceptBasis = [&](const DualSimplexSolver& simplex, const LpResult& result) {
         primal_orig_ = simplex.getPrimalValues();
@@ -2731,23 +2738,24 @@ bool BarrierSolver::runCrossover(bool probe_infeasibility) {
     // A cold dual simplex from the slack basis, within the time left and
     // 3 * (m + n) iterations: generous for a fresh LP, and a bound on its
     // runtime in a MIP node's context.
-    const auto solveCold = [&](DualSimplexSolver& cold) {
-        cold.load(original_);
+    const auto solveCold = [&](DualSimplexSolver& cold) -> LpResult {
+        DualSimplexOptions cold_opts;
+        cold_opts.stop_flag = options_.stop_flag;
+        cold_opts.deadline = deadline_;
+        cold.setOptions(cold_opts);
+        if (!cold.loadUntil(original_, deadline)) {
+            return {stopped_status(), 0.0, 0};
+        }
         cold.setVerbose(false);
         const Int dim_sum =
             static_cast<Int>(original_.num_rows) + static_cast<Int>(original_.num_cols);
         cold.setIterationLimit(3 * dim_sum);
-        DualSimplexOptions cold_opts;
-        cold_opts.stop_flag = options_.stop_flag;
-        cold_opts.max_solve_seconds = deadline_.remainingSeconds();
-        cold.setOptions(cold_opts);
         return cold.solve();
     };
     const auto proves = [&](const DualSimplexSolver& simplex, const LpResult& r) {
         return r.status == Status::Infeasible &&
                farkasRayProvesInfeasible(original_, simplex.getDualRay());
     };
-    crossover_stats_.attempted = true;
     auto result = ds.solve();
     const auto starts = ds.basisStartStats();
     crossover_stats_.singular_recovery = starts.singular_recovery;

@@ -72,6 +72,55 @@ namespace mipx {
 
 namespace {
 
+Status stoppedStatus(const Deadline& deadline) {
+    return deadline.remainingSeconds() == 0.0 ? Status::TimeLimit : Status::IterLimit;
+}
+
+// The input is already sorted by column within each row. Keep the merging
+// and zero removal of the triplet constructor without sorting a second time.
+template <typename MapValue>
+std::optional<SparseMatrix> copySimplexMatrix(const SparseMatrix& matrix, bool add_logicals,
+                                              const Deadline& deadline, MapValue map_value) {
+    if (deadline.passed()) {
+        return std::nullopt;
+    }
+    const Index rows = matrix.numRows();
+    const Index cols = matrix.numCols();
+    const Index entries = matrix.numNonzeros() + (add_logicals ? rows : 0);
+    std::vector<Index> starts(static_cast<std::size_t>(rows) + 1);
+    std::vector<Index> indices;
+    std::vector<Real> values;
+    indices.reserve(entries);
+    values.reserve(entries);
+    for (Index i = 0; i < rows; ++i) {
+        if (i % 64 == 0 && deadline.passed()) {
+            return std::nullopt;
+        }
+        const auto row = matrix.row(i);
+        for (Index k = 0; k < row.size();) {
+            const Index j = row.indices[k];
+            Real value = 0.0;
+            do {
+                if (k % 4096 == 0 && k != 0 && deadline.passed()) {
+                    return std::nullopt;
+                }
+                value += map_value(i, j, row.values[k++]);
+            } while (k < row.size() && row.indices[k] == j);
+            if (value != 0.0) {
+                indices.push_back(j);
+                values.push_back(value);
+            }
+        }
+        if (add_logicals) {
+            indices.push_back(cols + i);
+            values.push_back(-1.0);
+        }
+        starts[i + 1] = static_cast<Index>(values.size());
+    }
+    return SparseMatrix(rows, cols + (add_logicals ? rows : 0), std::move(values),
+                        std::move(indices), std::move(starts));
+}
+
 inline bool canUseSimd(const DualSimplexOptions& options, Index len) {
     return options.enable_simd_kernels && options.simd_min_length > 0 &&
            len >= options.simd_min_length;
@@ -114,6 +163,16 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::load(const LpProblem& problem) {
+    static_cast<void>(loadUntil(problem, {}));
+}
+
+bool DualSimplexSolver::loadUntil(const LpProblem& problem, const Deadline& deadline) {
+    loaded_ = false;
+    has_basis_ = false;
+    factors_available_ = false;
+    if (deadline.passed()) {
+        return false;
+    }
     dual_ray_.clear();
     primal_ray_.clear();
     num_cols_ = problem.num_cols;
@@ -137,8 +196,9 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 
     // Apply scaling.
     if (options_.enable_scaling) {
-        computeScaling();
-        applyScaling();
+        if (!computeScaling(deadline) || !applyScaling(deadline)) {
+            return false;
+        }
     } else {
         scaled_ = false;
         row_scale_.assign(num_rows_, 1.0);
@@ -148,7 +208,6 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     // [A | -I] is built where it is factorized (solveFromCurrentBasis).
     status_ = Status::Error;
     iterations_ = 0;
-    has_basis_ = false;
     basis_start_stats_ = {};
     nonbasic_pos_.clear();
     bound_perturb_active_ = false;
@@ -157,7 +216,8 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
-    loaded_ = true;
+    loaded_ = !deadline.passed();
+    return loaded_;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,12 +227,15 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 namespace {
 
 // Compute the ratio max|a_ij| / min|a_ij| over all nonzeros.
-Real coefficientRange(const SparseMatrix& A) {
+std::optional<Real> coefficientRange(const SparseMatrix& A, const Deadline& deadline) {
     Real absmax = 0.0;
     Real absmin = std::numeric_limits<Real>::infinity();
     auto vals = A.csr_values();
-    for (Real v : vals) {
-        Real a = std::abs(v);
+    for (std::size_t k = 0; k < vals.size(); ++k) {
+        if (k % 4096 == 0 && deadline.passed()) {
+            return std::nullopt;
+        }
+        Real a = std::abs(vals[k]);
         if (a > 1e-30) {
             absmax = std::max(absmax, a);
             absmin = std::min(absmin, a);
@@ -196,38 +259,47 @@ ScalingStrategy selectScalingStrategy(Real range) {
 
 }  // namespace
 
-void DualSimplexSolver::computeScaling() {
+bool DualSimplexSolver::computeScaling(const Deadline& deadline) {
+    if (deadline.passed()) {
+        return false;
+    }
     row_scale_.assign(num_rows_, 1.0);
     col_scale_.assign(num_cols_, 1.0);
 
     ScalingStrategy strategy = options_.scaling_strategy;
     if (strategy == ScalingStrategy::Auto) {
-        Real range = coefficientRange(matrix_);
-        strategy = selectScalingStrategy(range);
+        const auto range = coefficientRange(matrix_, deadline);
+        if (!range) {
+            return false;
+        }
+        strategy = selectScalingStrategy(*range);
     }
 
     switch (strategy) {
         case ScalingStrategy::Equilibration:
-            computeEquilibrationScaling();
+            scaled_ = computeEquilibrationScaling(deadline);
             break;
         case ScalingStrategy::GeometricMean:
-            computeGeometricMeanScaling();
+            scaled_ = computeGeometricMeanScaling(deadline);
             break;
         case ScalingStrategy::Ruiz:
-            computeRuizScaling();
+            scaled_ = computeRuizScaling(deadline);
             break;
         case ScalingStrategy::Auto:
             // Already resolved above; unreachable.
-            computeEquilibrationScaling();
+            scaled_ = computeEquilibrationScaling(deadline);
             break;
     }
 
-    scaled_ = true;
+    return scaled_;
 }
 
-void DualSimplexSolver::computeEquilibrationScaling() {
+bool DualSimplexSolver::computeEquilibrationScaling(const Deadline& deadline) {
     // Row scaling: max absolute value in each row.
     for (Index i = 0; i < num_rows_; ++i) {
+        if (i % 64 == 0 && deadline.passed()) {
+            return false;
+        }
         auto rv = matrix_.row(i);
         Real maxval = 0.0;
         for (Index k = 0; k < rv.size(); ++k) {
@@ -239,19 +311,29 @@ void DualSimplexSolver::computeEquilibrationScaling() {
     }
 
     // Column scaling: max absolute value in each column (after row scaling).
-    for (Index j = 0; j < num_cols_; ++j) {
-        auto cv = matrix_.col(j);
-        Real maxval = 0.0;
-        for (Index k = 0; k < cv.size(); ++k) {
-            maxval = std::max(maxval, std::abs(cv.values[k] * row_scale_[cv.indices[k]]));
+    std::vector<Real> col_max(static_cast<std::size_t>(num_cols_));
+    for (Index i = 0; i < num_rows_; ++i) {
+        if (i % 64 == 0 && deadline.passed()) {
+            return false;
         }
-        if (maxval > kZeroTol) {
-            col_scale_[j] = 1.0 / maxval;
+        const auto row = matrix_.row(i);
+        for (Index k = 0; k < row.size(); ++k) {
+            auto& maxval = col_max[row.indices[k]];
+            maxval = std::max(maxval, std::abs(row.values[k] * row_scale_[i]));
         }
     }
+    for (Index j = 0; j < num_cols_; ++j) {
+        if (j % 4096 == 0 && deadline.passed()) {
+            return false;
+        }
+        if (col_max[j] > kZeroTol) {
+            col_scale_[j] = 1.0 / col_max[j];
+        }
+    }
+    return true;
 }
 
-void DualSimplexSolver::computeGeometricMeanScaling() {
+bool DualSimplexSolver::computeGeometricMeanScaling(const Deadline& deadline) {
     const Int max_passes = options_.scaling_max_passes;
 
     // Work on CSR data to avoid repeated row() calls.
@@ -267,8 +349,14 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
     std::vector<Real> cs_min(num_cols_);
 
     for (Int pass = 0; pass < max_passes; ++pass) {
+        if (deadline.passed()) {
+            return false;
+        }
         // Row scaling: geometric mean of absolute nonzero values.
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             Real mx = 0.0;
             Real mn = std::numeric_limits<Real>::infinity();
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
@@ -285,6 +373,9 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
 
         // Apply row scaling to working values.
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 values[p] *= r[i];
             }
@@ -294,6 +385,9 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
         std::fill(cs_max.begin(), cs_max.end(), 0.0);
         std::fill(cs_min.begin(), cs_min.end(), std::numeric_limits<Real>::infinity());
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 Real a = std::abs(values[p]);
                 if (a > 1e-30) {
@@ -303,6 +397,9 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
             }
         }
         for (Index j = 0; j < num_cols_; ++j) {
+            if (j % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
             cs[j] = (cs_max[j] > 1e-30 && cs_min[j] < std::numeric_limits<Real>::infinity())
                         ? 1.0 / std::sqrt(cs_max[j] * cs_min[j])
                         : 1.0;
@@ -310,6 +407,9 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
 
         // Apply column scaling to working values.
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 values[p] *= cs[cols[p]];
             }
@@ -317,17 +417,26 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
 
         // Accumulate into overall scale factors.
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             row_scale_[i] *= r[i];
         }
         for (Index j = 0; j < num_cols_; ++j) {
+            if (j % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
             col_scale_[j] *= cs[j];
         }
 
         // Check convergence: if the range is close to 1, stop early.
         Real mx = 0.0;
         Real mn = std::numeric_limits<Real>::infinity();
-        for (Real v : values) {
-            Real a = std::abs(v);
+        for (std::size_t p = 0; p < values.size(); ++p) {
+            if (p % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
+            Real a = std::abs(values[p]);
             if (a > 1e-30) {
                 mx = std::max(mx, a);
                 mn = std::min(mn, a);
@@ -337,9 +446,10 @@ void DualSimplexSolver::computeGeometricMeanScaling() {
             break;
         }
     }
+    return true;
 }
 
-void DualSimplexSolver::computeRuizScaling() {
+bool DualSimplexSolver::computeRuizScaling(const Deadline& deadline) {
     const Int max_passes = options_.scaling_max_passes;
 
     // Work on CSR data directly, adapted from barrier.cpp Ruiz implementation.
@@ -353,8 +463,14 @@ void DualSimplexSolver::computeRuizScaling() {
     std::vector<Real> cs(num_cols_);
 
     for (Int pass = 0; pass < max_passes; ++pass) {
+        if (deadline.passed()) {
+            return false;
+        }
         // Row scaling: r_i = 1 / sqrt(max_j |A[i,j]|)
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             Real mx = 0.0;
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 mx = std::max(mx, std::abs(values[p]));
@@ -365,16 +481,25 @@ void DualSimplexSolver::computeRuizScaling() {
         // Column scaling: cs_j = 1 / sqrt(max_i |r_i * A[i,j]|)
         std::fill(cs.begin(), cs.end(), 0.0);
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 cs[cols[p]] = std::max(cs[cols[p]], std::abs(values[p]) * r[i]);
             }
         }
         for (Index j = 0; j < num_cols_; ++j) {
+            if (j % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
             cs[j] = (cs[j] > 1e-30) ? 1.0 / std::sqrt(cs[j]) : 1.0;
         }
 
         // Apply: A[i,j] *= r[i] * cs[j]
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index p = rows[i]; p < rows[i + 1]; ++p) {
                 values[p] *= r[i] * cs[cols[p]];
             }
@@ -382,17 +507,26 @@ void DualSimplexSolver::computeRuizScaling() {
 
         // Accumulate into overall scale factors.
         for (Index i = 0; i < num_rows_; ++i) {
+            if (i % 64 == 0 && deadline.passed()) {
+                return false;
+            }
             row_scale_[i] *= r[i];
         }
         for (Index j = 0; j < num_cols_; ++j) {
+            if (j % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
             col_scale_[j] *= cs[j];
         }
 
         // Early convergence check: stop when residual coefficient range is tight.
         Real mx = 0.0;
         Real mn = std::numeric_limits<Real>::infinity();
-        for (Real v : values) {
-            Real a = std::abs(v);
+        for (std::size_t p = 0; p < values.size(); ++p) {
+            if (p % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
+            Real a = std::abs(values[p]);
             if (a > 1e-30) {
                 mx = std::max(mx, a);
                 mn = std::min(mn, a);
@@ -402,27 +536,24 @@ void DualSimplexSolver::computeRuizScaling() {
             break;
         }
     }
+    return true;
 }
 
-void DualSimplexSolver::applyScaling() {
+bool DualSimplexSolver::applyScaling(const Deadline& deadline) {
     if (!scaled_) {
-        return;
+        return true;
     }
 
     // Scale the matrix: A' = R * A * C where R = diag(row_scale_), C = diag(col_scale_).
-    // We need to rebuild from triplets since we can't modify CSR in-place easily.
-    std::vector<Triplet> triplets;
-    triplets.reserve(matrix_.numNonzeros());
-    for (Index i = 0; i < num_rows_; ++i) {
-        auto rv = matrix_.row(i);
-        for (Index k = 0; k < rv.size(); ++k) {
-            Real val = rv.values[k] * row_scale_[i] * col_scale_[rv.indices[k]];
-            if (std::abs(val) > kZeroTol) {
-                triplets.push_back({i, rv.indices[k], val});
-            }
-        }
+    auto scaled = copySimplexMatrix(matrix_, false, deadline, [&](Index row, Index col, Real a) {
+        const Real val = a * row_scale_[row] * col_scale_[col];
+        return std::abs(val) > kZeroTol ? val : 0.0;
+    });
+    if (!scaled || deadline.passed()) {
+        return false;
     }
-    matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+    factors_available_ = false;
+    matrix_ = std::move(*scaled);
 
     // Scale bounds: row bounds *= row_scale, col bounds /= col_scale (since x = C * x').
     for (Index i = 0; i < num_rows_; ++i) {
@@ -449,6 +580,7 @@ void DualSimplexSolver::applyScaling() {
         // Objective: c^T x = c^T C x' = (C c)^T x'. So c'_j = c_j * col_scale_j.
         obj_[j] *= col_scale_[j];
     }
+    return true;
 }
 
 void DualSimplexSolver::unscaleResults() {
@@ -479,17 +611,14 @@ void DualSimplexSolver::unscaleResults() {
 //  Build augmented matrix [A | -I]
 // ---------------------------------------------------------------------------
 
-void DualSimplexSolver::buildBasisMatrixSource() {
-    std::vector<Triplet> triplets;
-    triplets.reserve(matrix_.numNonzeros() + num_rows_);
-    for (Index i = 0; i < num_rows_; ++i) {
-        auto rv = matrix_.row(i);
-        for (Index k = 0; k < rv.size(); ++k) {
-            triplets.push_back({i, rv.indices[k], rv.values[k]});
-        }
-        triplets.push_back({i, num_cols_ + i, -1.0});
+bool DualSimplexSolver::buildBasisMatrixSource(const Deadline& deadline) {
+    auto augmented =
+        copySimplexMatrix(matrix_, true, deadline, [](Index, Index, Real a) { return a; });
+    if (!augmented || deadline.passed()) {
+        return false;
     }
-    augmented_ = SparseMatrix(num_rows_, num_cols_ + num_rows_, std::move(triplets));
+    augmented_ = std::move(*augmented);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -690,12 +819,18 @@ void DualSimplexSolver::computeDuals() {
 // ---------------------------------------------------------------------------
 
 void DualSimplexSolver::refactorize() {
+    static_cast<void>(refactorize({}));
+}
+
+bool DualSimplexSolver::refactorize(const Deadline& deadline) {
     // Build the basis matrix: for each basis position i, the column of [A | -I].
     // We need a SparseMatrix whose column j is the basis_[j] column of [A | -I].
     // SparseLU::factorize(matrix, basis_cols) extracts columns basis_cols[i] from matrix.
     // So we need augmented_ to be [A | -I] and pass basis_ as basis_cols.
 
-    lu_.factorize(augmented_, basis_);
+    factors_available_ = false;
+    factors_available_ = lu_.factorizeUntil(augmented_, basis_, deadline);
+    return factors_available_;
 }
 
 // ---------------------------------------------------------------------------
@@ -703,20 +838,10 @@ void DualSimplexSolver::refactorize() {
 // ---------------------------------------------------------------------------
 
 LpResult DualSimplexSolver::solve() {
-    // The deadline is this solve's max_solve_seconds when it is the nearer
-    // limit (#351); every time check below then holds it. The caller's
-    // option is put back on every way out.
-    struct RestoreLimit {
-        double& slot;
-        double value;
-        ~RestoreLimit() { slot = value; }
-    } restore{options_.max_solve_seconds, options_.max_solve_seconds};
-    if (options_.deadline.isSet()) {
-        const double left = options_.deadline.remainingSeconds();
-        const double own = restore.value;
-        options_.max_solve_seconds = own < 0.0 ? left : std::min(own, left);
-    }
-    const auto start = std::chrono::steady_clock::now();
+    // The earlier of the two limits (#351) covers all passes and factorizations.
+    const auto deadline = Deadline::after(options_.max_solve_seconds)
+                              .limitBy(options_.deadline)
+                              .orStop(options_.stop_flag);
     // The row-price counters cover the whole call, cold retry and unscaled
     // clean-up included; each pass restarts only the density history.
     row_price_stats_ = RowPriceStats{};
@@ -724,8 +849,8 @@ LpResult DualSimplexSolver::solve() {
     degeneracy_stats_ = DegeneracyStats{};
     basis_start_stats_ = {};
     bool checked = false;
-    LpResult res = solveWithColdFallback(start, checked);
-    res = cleanUpUnscaled(res, start, checked);
+    LpResult res = solveWithColdFallback(deadline, checked);
+    res = cleanUpUnscaled(res, deadline, checked);
     // An Infeasible whose ray fails the getDualRay() contract in the model's
     // units is no proof: that check is the certificate, not stricter than it,
     // so #249's reason to leave a cold verdict unchecked does not apply. Of the
@@ -743,10 +868,9 @@ LpResult DualSimplexSolver::solve() {
     return res;
 }
 
-LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::time_point start,
-                                                  bool& checked) {
+LpResult DualSimplexSolver::solveWithColdFallback(const Deadline& deadline, bool& checked) {
     const bool warm = has_basis_;
-    LpResult res = solveFromCurrentBasis();
+    LpResult res = solveFromCurrentBasis(deadline);
     // A warm basis can carry the solve into a corner its tolerances cannot
     // see out of: ill-conditioned pivots after addRows left optima that miss
     // rows or optimality badly in the model's own units, and Farkas rows that
@@ -776,14 +900,8 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
         return withdrawVerdict(res, Status::IterLimit);
     }
     const Int iter_limit = iter_limit_;
-    const double time_limit = options_.max_solve_seconds;
-    if (time_limit >= 0.0) {
-        const double spent =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        if (spent >= time_limit) {
-            return withdrawVerdict(res, Status::TimeLimit);
-        }
-        options_.max_solve_seconds = time_limit - spent;
+    if (deadline.passed()) {
+        return withdrawVerdict(res, stoppedStatus(deadline));
     }
     // A cold run that stops on a limit has no verdict; the warm point is then
     // the better one to leave (strong branching reads IterLimit objectives),
@@ -799,9 +917,8 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     const bool dse_fell_back = dse_fell_back_;
     iter_limit_ = iter_limit - res.iterations;
     has_basis_ = false;
-    LpResult cold = solveFromCurrentBasis();
+    LpResult cold = solveFromCurrentBasis(deadline);
     iter_limit_ = iter_limit;
-    options_.max_solve_seconds = time_limit;
     cold.iterations += res.iterations;
     cold.work_units += res.work_units;
     iterations_ = cold.iterations;
@@ -824,12 +941,11 @@ LpResult DualSimplexSolver::solveWithColdFallback(std::chrono::steady_clock::tim
     // The factors are the cold run's; getTableauRow (cut separation) reads
     // them against the restored basis.
     try {
-        refactorize();
+        has_basis_ = refactorize(deadline);
     } catch (const std::runtime_error&) {
         has_basis_ = false;
         return cold;
     }
-    has_basis_ = true;
     res.status = cold.status;
     res.iterations = cold.iterations;
     res.work_units = cold.work_units;
@@ -1183,9 +1299,7 @@ bool DualSimplexSolver::primalHoldsUnscaled(bool tight) const {
 //
 // On default, with no option to turn it off (#313): it fires only on a
 // verdict the model's units refute.
-LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
-                                            std::chrono::steady_clock::time_point start,
-                                            bool checked) {
+LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadline, bool checked) {
     if (!scaled_ || !has_basis_) {
         return res;
     }
@@ -1217,14 +1331,8 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         return keep ? res : withdrawVerdict(res, Status::IterLimit);
     }
     const Int iter_limit = iter_limit_;
-    const double time_limit = options_.max_solve_seconds;
-    if (time_limit >= 0.0) {
-        const double spent =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        if (spent >= time_limit) {
-            return keep ? res : withdrawVerdict(res, Status::TimeLimit);
-        }
-        options_.max_solve_seconds = time_limit - spent;
+    if (deadline.passed()) {
+        return keep ? res : withdrawVerdict(res, stoppedStatus(deadline));
     }
     SparseMatrix matrix = matrix_;
     std::vector<Real> row_lower = row_lower_;
@@ -1253,16 +1361,17 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
         scaled_point = Point{primal_,   dual_,      reduced_cost_, var_status_,   basis_,
                              nonbasic_, basis_pos_, nonbasic_pos_, devex_weights_};
     }
-    unapplyScaling();
+    if (!unapplyScaling(deadline)) {
+        return keep ? res : withdrawVerdict(res, stoppedStatus(deadline));
+    }
     convertValues(true);
     row_scale_.assign(static_cast<std::size_t>(num_rows_), 1.0);
     col_scale_.assign(static_cast<std::size_t>(num_cols_), 1.0);
     scaled_ = false;
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     iter_limit_ = iter_limit - res.iterations;
-    LpResult clean = solveFromCurrentBasis();
+    LpResult clean = solveFromCurrentBasis(deadline);
     iter_limit_ = iter_limit;
-    options_.max_solve_seconds = time_limit;
 
     matrix_ = std::move(matrix);
     row_lower_ = std::move(row_lower);
@@ -1273,10 +1382,10 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     row_scale_ = std::move(row_scale);
     col_scale_ = std::move(col_scale);
     scaled_ = true;
+    factors_available_ = false;
     dse_fell_back_ = dse_fell_back;
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-    buildBasisMatrixSource();
     // A certified optimum refuted only absolutely is traded only for a point
     // that holds absolutely, with multipliers that hold (#304): the unscaled
     // factors can read an ill-conditioned basis's point worse.
@@ -1311,7 +1420,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
             reconcileNonbasicStatus(k);
         }
         try {
-            refactorize();
+            has_basis_ = buildBasisMatrixSource(deadline) && refactorize(deadline);
         } catch (const std::runtime_error&) {
             has_basis_ = false;
         }
@@ -1333,15 +1442,23 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res,
     return clean;
 }
 
-LpResult DualSimplexSolver::solveFromCurrentBasis() {
+LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
     dual_ray_.clear();
     primal_ray_.clear();
     if (!loaded_) {
         return {Status::Error, 0.0, 0};
     }
-
+    iterations_ = 0;
     // Rebuild augmented matrix as [A | -I] for correct basis representation.
-    buildBasisMatrixSource();
+    if (!buildBasisMatrixSource(deadline)) {
+        if (!has_basis_) {
+            dropBasis();
+        }
+        factors_available_ = false;
+        has_basis_ = false;
+        status_ = stoppedStatus(deadline);
+        return {status_, getObjective(), iterations_};
+    }
 
     // A warm basis may have been assembled by any route -- setBasis, repeated
     // setColBounds calls, or an earlier solve on this object whose bounds have
@@ -1356,7 +1473,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // Reset iteration counter and verdict for this solve call: every exit
     // below sets a status, and one that hits the iteration limit must not
     // report the previous solve's Optimal or Infeasible (#222).
-    iterations_ = 0;
     status_ = Status::Error;
     solve_start_ = std::chrono::steady_clock::now();
     bound_perturb_active_ = false;
@@ -1616,29 +1732,38 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         return guard_priced[static_cast<std::size_t>(k)] == basis_epoch;
     };
 
-    auto recoverFromSingularBasis = [&]() -> bool {
-        basis_start_stats_.singular_recovery = true;
-        ++basis_epoch;
-        setupCrashBasis();
+    // The row whose repair pivot was rejected as numerically zero on fresh
+    // factors, or -1. Cleared by the next basis change.
+    Index repair_rejected_row = -1;
+    const auto factorBasis = [&]() -> bool {
         try {
-            refactorize();
-            return true;
+            if (refactorize(deadline)) {
+                return true;
+            }
         } catch (const std::runtime_error&) {
-            status_ = Status::Error;
-            return false;
+            basis_start_stats_.singular_recovery = true;
+            ++basis_epoch;
+            repair_rejected_row = -1;
+            setupCrashBasis();
+            try {
+                if (refactorize(deadline)) {
+                    return true;
+                }
+            } catch (const std::runtime_error&) {
+                status_ = Status::Error;
+                return false;
+            }
         }
+        status_ = stoppedStatus(deadline);
+        return false;
     };
 
     // Factorize basis.
-    try {
-        refactorize();
-    } catch (const std::runtime_error&) {
-        if (!recoverFromSingularBasis()) {
-            has_basis_ = false;
-            work_.add(lu_.workUnits());
-            lu_.resetWorkUnits();
-            return {status_, getObjective(), iterations_, work_.units() - work_at_start};
-        }
+    if (!factorBasis()) {
+        has_basis_ = false;
+        work_.add(lu_.workUnits());
+        lu_.resetWorkUnits();
+        return {status_, getObjective(), iterations_, work_.units() - work_at_start};
     }
 
     // Compute primal and dual values from the basis.
@@ -2202,10 +2327,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     Int stall_cost_streak = 0;
     Int stall_cost_activations = 0;
     Int empty_candidate_retry_streak = 0;
-    // The row whose repair pivot (see the dual ratio test) was rejected as
-    // numerically zero on fresh factors, or -1; cleared by the next basis
-    // change.
-    Index repair_rejected_row = -1;
     // Passes of the main loop, and the pass on which the dual ratio test last
     // restored dual feasibility before pivoting. The pass right after a
     // repair does not repair again, so round-off cannot loop it; any pass
@@ -2615,17 +2736,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         double iter_work_start = work_.units();
         double iter_lu_work_start = lu_.workUnits().units();
 
-        if (options_.max_solve_seconds >= 0.0) {
-            double elapsed =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_)
-                    .count();
-            if (elapsed >= options_.max_solve_seconds) {
-                status_ = Status::TimeLimit;
-                break;
-            }
-        }
-        if (options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed)) {
-            status_ = Status::IterLimit;
+        if (deadline.passed()) {
+            status_ = stoppedStatus(deadline);
             break;
         }
 
@@ -2769,13 +2881,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             clearCostShifts();
             ++basis_epoch;
             setupCrashBasis();
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -3401,13 +3508,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 if (ray_gain >= -kRayGainRelTol * ray_mag) {
                     if (lu_.numUpdates() > 0 &&
                         guard_priced[static_cast<std::size_t>(entering_p)] < 0) {
-                        try {
-                            refactorize();
-                        } catch (const std::runtime_error&) {
-                            if (!recoverFromSingularBasis()) {
-                                break;
-                            }
-                            repair_rejected_row = -1;
+                        if (!factorBasis()) {
+                            break;
                         }
                         computePrimals();
                         computeDuals();
@@ -3477,13 +3579,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             // |alpha| < kPivotTol, but values can drift after LU updates between
             // selection and use. Refactorize and retry on degeneracy.
             if (std::abs(pivot_elem) < (repair_pivot_p ? kRepairPivotTol : kPivotTol)) {
-                try {
-                    refactorize();
-                } catch (const std::runtime_error&) {
-                    if (!recoverFromSingularBasis()) {
-                        break;
-                    }
-                    repair_rejected_row = -1;
+                if (!factorBasis()) {
+                    break;
                 }
                 computePrimals();
                 computeDuals();
@@ -3594,6 +3691,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 pivot_col_pattern);
 
             ++degeneracy_stats_.primal_pivots;
+            ++iterations_;
             if (primal_step_degenerate) {
                 ++degenerate_pivot_streak;
                 ++degeneracy_stats_.primal_degenerate_pivots;
@@ -3619,13 +3717,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
 
             if (should_refactorize) {
-                try {
-                    refactorize();
-                } catch (const std::runtime_error&) {
-                    if (!recoverFromSingularBasis()) {
-                        break;
-                    }
-                    repair_rejected_row = -1;
+                if (!factorBasis()) {
+                    break;
                 }
                 computePrimals();
                 computeDuals();
@@ -3646,7 +3739,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
             }
 
-            ++iterations_;
             continue;
         }
 
@@ -3944,13 +4036,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 break;
             }
 
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -4112,13 +4199,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         if (!groups_ok) {
             // HiGHS rebuilds when no group forms; refactorize and choose again.
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -4222,13 +4304,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             }
             undoBoundFlips();
             // Numerically degenerate pivot. Refactorize and retry.
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -4247,13 +4324,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             std::abs(pivot_element - alpha_entering) >
                 kAlphaTroubleTol * std::min(std::abs(pivot_element), std::abs(alpha_entering))) {
             undoBoundFlips();
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -4543,6 +4615,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             pivot_col_pattern);
 
         ++degeneracy_stats_.dual_pivots;
+        ++iterations_;
         const bool dual_step_primal_degenerate =
             std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol;
         if (dual_step_primal_degenerate) {
@@ -4571,13 +4644,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
 
         if (should_refactorize) {
-            try {
-                refactorize();
-            } catch (const std::runtime_error&) {
-                if (!recoverFromSingularBasis()) {
-                    break;
-                }
-                repair_rejected_row = -1;
+            if (!factorBasis()) {
+                break;
             }
             computePrimals();
             computeDuals();
@@ -4619,17 +4687,15 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 (work_.units() - iter_work_start) + (lu_.workUnits().units() - iter_lu_work_start);
             dse_total_work_ += iter_work;
         }
-
-        ++iterations_;
     }
 
-    if (iterations_ >= iter_limit_ && status_ != Status::Optimal && status_ != Status::Infeasible &&
-        status_ != Status::TimeLimit) {
+    if (factors_available_ && iterations_ >= iter_limit_ && status_ != Status::Optimal &&
+        status_ != Status::Infeasible && status_ != Status::TimeLimit) {
         status_ = Status::IterLimit;
     }
 
     clearBoundPerturbation();
-    if (snapNonbasicToBounds() && status_ != Status::Error) {
+    if (snapNonbasicToBounds() && factors_available_ && status_ != Status::Error) {
         // Stopped with nonbasics off their true bounds (a limit, a proof of
         // infeasibility): report the primals of the basis's vertex.
         computePrimals();
@@ -4640,14 +4706,14 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     if (costs_moved) {
         std::copy(obj_at_entry.begin(), obj_at_entry.end(), obj_.begin());
     }
-    if (stopped_shifted && status_ != Status::Error) {
+    if (stopped_shifted && factors_available_ && status_ != Status::Error) {
         // Stopped before the shifts or the perturbation came off (a limit,
         // an infeasibility proof): report duals for the true costs.
         computeDuals();
     }
 
-    // Preserve warm-start basis only when solve did not end in internal error.
-    has_basis_ = (status_ != Status::Error);
+    // Tableau reads need completed factors, even on a limit.
+    has_basis_ = factors_available_ && status_ != Status::Error;
 
     // Final iteration log (only if it wouldn't duplicate a periodic line).
     if (verbose_ && (iterations_ % kLogFrequency) != 0) {
@@ -4898,6 +4964,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     }
 
     // Ensure solution vectors are allocated.
+    factors_available_ = false;
     var_status_.resize(n);
     primal_.resize(n, 0.0);
     dual_.resize(num_rows_, 0.0);
@@ -5032,6 +5099,7 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     Index old_rows = num_rows_;
     Index old_vars = numVars();
     num_rows_ += num_new;
+    factors_available_ = false;
 
     // Extend row bounds.
     for (Index i = 0; i < num_new; ++i) {
@@ -5147,19 +5215,15 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     }
 }
 
-void DualSimplexSolver::unapplyScaling() {
-    {
-        std::vector<Triplet> triplets;
-        triplets.reserve(matrix_.numNonzeros());
-        for (Index i = 0; i < num_rows_; ++i) {
-            auto rv = matrix_.row(i);
-            for (Index k = 0; k < rv.size(); ++k) {
-                triplets.push_back(
-                    {i, rv.indices[k], rv.values[k] / (row_scale_[i] * col_scale_[rv.indices[k]])});
-            }
-        }
-        matrix_ = SparseMatrix(num_rows_, num_cols_, std::move(triplets));
+bool DualSimplexSolver::unapplyScaling(const Deadline& deadline) {
+    auto unscaled = copySimplexMatrix(matrix_, false, deadline, [&](Index row, Index col, Real a) {
+        return a / (row_scale_[row] * col_scale_[col]);
+    });
+    if (!unscaled || deadline.passed()) {
+        return false;
     }
+    factors_available_ = false;
+    matrix_ = std::move(*unscaled);
     for (Index i = 0; i < num_rows_; ++i) {
         if (row_lower_[i] != -kInf) {
             row_lower_[i] /= row_scale_[i];
@@ -5177,6 +5241,7 @@ void DualSimplexSolver::unapplyScaling() {
         }
         obj_[j] /= col_scale_[j];
     }
+    return true;
 }
 
 // Values move with their scales: x = cs x', s = s' / rs, y = rs y',
@@ -5217,10 +5282,10 @@ void DualSimplexSolver::rescaleKeepingBasis() {
         return;
     }
     // Back to the model's own units, then scaled afresh.
-    unapplyScaling();
+    static_cast<void>(unapplyScaling());
     convertValues(true);
-    computeScaling();
-    applyScaling();
+    static_cast<void>(computeScaling());
+    static_cast<void>(applyScaling());
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
 }
@@ -5288,6 +5353,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
     }
 
     num_rows_ = new_rows;
+    factors_available_ = false;
     row_lower_ = std::move(new_row_lower);
     row_upper_ = std::move(new_row_upper);
     if (scaled_) {
@@ -5432,6 +5498,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
 void DualSimplexSolver::dropBasis() {
     const Index new_vars = numVars();
     has_basis_ = false;
+    factors_available_ = false;
     basis_.assign(static_cast<std::size_t>(num_rows_), -1);
     basis_pos_.assign(static_cast<std::size_t>(new_vars), -1);
     nonbasic_.clear();
@@ -5572,7 +5639,7 @@ bool DualSimplexSolver::swapOutBasicColumns(std::span<const Index> cols) {
     if (positions.empty()) {
         return true;
     }
-    buildBasisMatrixSource();
+    static_cast<void>(buildBasisMatrixSource());
     try {
         refactorize();
     } catch (const std::runtime_error&) {
@@ -5743,6 +5810,9 @@ void DualSimplexSolver::setColObjective(Index col, Real cost) {
 void DualSimplexSolver::getTableauRow(Index basis_pos, std::vector<Real>& tableau_row) {
     Index nv = numVars();
     tableau_row.assign(static_cast<std::size_t>(nv), 0.0);
+    if (!has_basis_ || !factors_available_) {
+        return;
+    }
 
     // BTRAN: compute rho = B^{-T} * e_{basis_pos}.
     std::vector<Real> rho(static_cast<std::size_t>(num_rows_), 0.0);

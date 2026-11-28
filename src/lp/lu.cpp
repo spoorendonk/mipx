@@ -1,5 +1,6 @@
 #include "mipx/lu.h"
 
+#include "mipx/deadline.h"
 #include "mipx/sparse_matrix.h"
 
 #include <algorithm>
@@ -82,7 +83,7 @@ inline Real denseDot(const Real* a, std::span<const Real> x) {
 
 Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const Index> basis_cols,
                           std::vector<Index>& btf_row_perm, std::vector<Index>& btf_col_perm,
-                          std::vector<Index>& btf_block_start) {
+                          std::vector<Index>& btf_block_start, const Deadline& deadline) {
     // kBtfMinDim is the minimum dimension at which BTF detection is attempted.
     // BTF builds a matching + Tarjan SCC over the basis pattern; for small
     // bases the fixed cost (allocations + scans) outweighs any savings, since
@@ -100,6 +101,9 @@ Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const
     col_adj_rows.reserve(n * 4);  // heuristic
 
     for (Index j = 0; j < dim; ++j) {
+        if (j % 256 == 0 && deadline.passed()) {
+            return 0;
+        }
         auto colview = matrix.col(basis_cols[j]);
         for (Index k = 0; k < colview.size(); ++k) {
             Index row = colview.indices[k];
@@ -363,12 +367,23 @@ Index SparseLU::detectBTF(Index dim, const SparseMatrix& matrix, std::span<const
 // --------------------------------------------------------------------------
 
 void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basis_cols) {
+    static_cast<void>(factorizeUntil(matrix, basis_cols, {}));
+}
+
+bool SparseLU::factorizeUntil(const SparseMatrix& matrix, std::span<const Index> basis_cols,
+                              const Deadline& deadline) {
     static constexpr Index kFastPivotMinDim = 500;
     // Maximum columns to inspect per nnz bucket in the general Markowitz search.
     static constexpr Index kMaxColsPerBucket = 8;
     // Accept a pivot early if its Markowitz cost is at or below this fraction of dim.
     static constexpr Real kEarlyAcceptFraction = 0.05;
 
+    if (deadline.passed()) {
+        return false;
+    }
+    if (!basis_cols.empty() && !matrix.ensureCSC(deadline)) {
+        return false;
+    }
     dim_ = static_cast<Index>(basis_cols.size());
     num_updates_ = 0;
     max_u_entry_ = 0.0;
@@ -406,7 +421,10 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     std::vector<Index> btf_col_perm;
     std::vector<Index> btf_block_start;
     Index num_blocks =
-        detectBTF(dim_, matrix, basis_cols, btf_row_perm, btf_col_perm, btf_block_start);
+        detectBTF(dim_, matrix, basis_cols, btf_row_perm, btf_col_perm, btf_block_start, deadline);
+    if (deadline.passed()) {
+        return false;
+    }
     // detectBTF returns 0 when BTF is not applicable (too small, no perfect
     // matching, or a single SCC); in that case the whole basis is one block.
     // Block-wise elimination is opt-in (see setBtfBlockElimination): without it
@@ -601,6 +619,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     // Internal column j corresponds to basis_cols[col_order[j]].
     // Internal row index = row_map[original_row].
     for (Index j = 0; j < dim_; ++j) {
+        if (j % 256 == 0 && deadline.passed()) {
+            return false;
+        }
         auto colview = matrix.col(basis_cols[col_order[j]]);
         for (Index k = 0; k < colview.size(); ++k) {
             Index orig_row = colview.indices[k];
@@ -822,6 +843,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     rows_to_update.reserve(static_cast<std::size_t>(dim_));
 
     for (Index step = 0; step < dim_; ++step) {
+        if (deadline.passed()) {
+            return false;
+        }
         // Advance to the next BTF diagonal block once the current one is fully
         // eliminated. Block b spans exactly the elimination steps
         // [btf_block_start[b], btf_block_start[b+1]) because every step consumes
@@ -1086,7 +1110,11 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         eta_start_.push_back(static_cast<Index>(eta_index_.size()));
 
         // Update rows.
-        for (auto& [ri, mult] : rows_to_update) {
+        for (std::size_t r = 0; r < rows_to_update.size(); ++r) {
+            if (r % 32 == 0 && deadline.passed()) {
+                return false;
+            }
+            const auto [ri, mult] = rows_to_update[r];
             // Build a temporary col->entry index map for this row, reused across rows.
             row_touched_cols.clear();
             for (Index eidx = row_head[ri]; eidx >= 0;
@@ -1172,12 +1200,18 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
             old_to_new.assign(static_cast<std::size_t>(total_entries), -1);
             Index new_count = 0;
             for (Index e = 0; e < total_entries; ++e) {
+                if (e % 1024 == 0 && deadline.passed()) {
+                    return false;
+                }
                 if (e_alive[static_cast<std::size_t>(e)] != 0) {
                     old_to_new[static_cast<std::size_t>(e)] = new_count++;
                 }
             }
             // Compact arrays in-place.
             for (Index e = 0; e < total_entries; ++e) {
+                if (e % 1024 == 0 && deadline.passed()) {
+                    return false;
+                }
                 const Index ne = old_to_new[static_cast<std::size_t>(e)];
                 if (ne < 0) {
                     continue;
@@ -1228,14 +1262,21 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     // Remap U column indices from internal to elimination order.
     // u_col_ contains internal (BTF-reordered) column indices; convert to
     // original basis positions first, then to elimination order.
-    for (auto& c : u_col_) {
-        c = col_perm_inv_[col_to_orig[static_cast<std::size_t>(c)]];
+    for (std::size_t k = 0; k < u_col_.size(); ++k) {
+        if (k % 1024 == 0 && deadline.passed()) {
+            return false;
+        }
+        auto& col = u_col_[k];
+        col = col_perm_inv_[col_to_orig[static_cast<std::size_t>(col)]];
     }
 
     // U column-wise, for the hyper-sparse back substitution.
     ucol_start_.assign(static_cast<std::size_t>(dim_ + 1), 0);
-    for (Index c : u_col_) {
-        ++ucol_start_[static_cast<std::size_t>(c + 1)];
+    for (std::size_t k = 0; k < u_col_.size(); ++k) {
+        if (k % 1024 == 0 && deadline.passed()) {
+            return false;
+        }
+        ++ucol_start_[static_cast<std::size_t>(u_col_[k] + 1)];
     }
     for (Index j = 0; j < dim_; ++j) {
         ucol_start_[static_cast<std::size_t>(j + 1)] += ucol_start_[static_cast<std::size_t>(j)];
@@ -1245,6 +1286,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     {
         std::vector<Index> cursor(ucol_start_.begin(), ucol_start_.end() - 1);
         for (Index step = 0; step < dim_; ++step) {
+            if (step % 32 == 0 && deadline.passed()) {
+                return false;
+            }
             for (Index k = u_start_[step]; k < u_start_[step + 1]; ++k) {
                 const Index pos = cursor[static_cast<std::size_t>(u_col_[k])]++;
                 ucol_row_[static_cast<std::size_t>(pos)] = step;
@@ -1257,6 +1301,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     eta_target_.resize(eta_index_.size());
     eta_rev_start_.assign(static_cast<std::size_t>(dim_ + 1), 0);
     for (Index step = 0; step < dim_; ++step) {
+        if (step % 32 == 0 && deadline.passed()) {
+            return false;
+        }
         for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
             Index target = row_perm_inv_[eta_index_[k]];
             eta_target_[k] = target;
@@ -1270,6 +1317,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     eta_rev_src_.assign(eta_index_.size(), 0);
     std::vector<Index> rev_cursor = eta_rev_start_;
     for (Index step = 0; step < dim_; ++step) {
+        if (step % 32 == 0 && deadline.passed()) {
+            return false;
+        }
         for (Index k = eta_start_[step]; k < eta_start_[step + 1]; ++k) {
             Index target = eta_target_[k];
             Index pos = rev_cursor[static_cast<std::size_t>(target)]++;
@@ -1305,6 +1355,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
         prev_targets.clear();
 
         for (Index step = 0; step <= dim_; ++step) {
+            if (deadline.passed()) {
+                return false;
+            }
             bool extend_snode = false;
 
             if (step < dim_) {
@@ -1346,6 +1399,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
                     // Build the union of all target rows in this supernode.
                     union_targets.clear();
                     for (Index s = snode_start; s < step; ++s) {
+                        if (deadline.passed()) {
+                            return false;
+                        }
                         for (Index k = eta_start_[s]; k < eta_start_[s + 1]; ++k) {
                             union_targets.push_back(eta_target_[k]);
                         }
@@ -1373,6 +1429,9 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
                         // Build target -> panel_row map using the sorted union.
                         // Since union_targets is sorted, use binary search.
                         for (Index c = 0; c < snode_width; ++c) {
+                            if (deadline.passed()) {
+                                return false;
+                            }
                             Index s = snode_start + c;
                             for (Index k = eta_start_[s]; k < eta_start_[s + 1]; ++k) {
                                 Index target = eta_target_[k];
@@ -1406,7 +1465,7 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
 
     // Build FP32 copies of L and U factors if mixed-precision is enabled.
     if (mixed_precision_enabled_) {
-        mixed_precision_active_ = buildFp32Factors();
+        mixed_precision_active_ = buildFp32Factors(deadline);
         if (mixed_precision_active_) {
             ir_matrix_ = &matrix;
             ir_basis_cols_.assign(basis_cols.begin(), basis_cols.end());
@@ -1416,6 +1475,7 @@ void SparseLU::factorize(const SparseMatrix& matrix, std::span<const Index> basi
     }
     ir_step_ema_count_ = 0;
     ir_solves_count_ = 0;
+    return !deadline.passed();
 }
 
 // --------------------------------------------------------------------------
@@ -2516,26 +2576,35 @@ bool SparseLU::needsRefactorization() const {
 //  Mixed-precision FP32 support
 // --------------------------------------------------------------------------
 
-bool SparseLU::buildFp32Factors() {
+bool SparseLU::buildFp32Factors(const Deadline& deadline) {
     // Check element growth: if any factor entry exceeds FP32 safe range, bail out.
-    if (max_u_entry_ > kFp32GrowthLimit) {
+    if (deadline.passed() || max_u_entry_ > kFp32GrowthLimit) {
         return false;
     }
 
     // Build FP32 copies of L eta values.
     eta_value_f32_.resize(eta_value_.size());
     for (std::size_t i = 0; i < eta_value_.size(); ++i) {
+        if (i % 1024 == 0 && deadline.passed()) {
+            return false;
+        }
         eta_value_f32_[i] = static_cast<float>(eta_value_[i]);
     }
 
     // Build FP32 copies of U values.
     u_val_f32_.resize(u_val_.size());
     for (std::size_t i = 0; i < u_val_.size(); ++i) {
+        if (i % 1024 == 0 && deadline.passed()) {
+            return false;
+        }
         u_val_f32_[i] = static_cast<float>(u_val_[i]);
     }
     u_diag_f32_.resize(u_diag_.size());
     u_diag_inv_f32_.resize(u_diag_inv_.size());
     for (std::size_t i = 0; i < u_diag_.size(); ++i) {
+        if (i % 1024 == 0 && deadline.passed()) {
+            return false;
+        }
         u_diag_f32_[i] = static_cast<float>(u_diag_[i]);
         u_diag_inv_f32_[i] = static_cast<float>(u_diag_inv_[i]);
     }

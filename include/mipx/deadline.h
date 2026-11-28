@@ -27,6 +27,16 @@ public:
         return d;
     }
 
+    /// Keep this stop flag and use the earlier of the two wall-clock limits.
+    [[nodiscard]] Deadline limitBy(const Deadline& other) const {
+        Deadline d = *this;
+        if (other.set_ && (!d.set_ || other.at_ < d.at_)) {
+            d.set_ = true;
+            d.at_ = other.at_;
+        }
+        return d;
+    }
+
     /// This deadline, passed also once `*flag` is true: a caller's stop
     /// request (the MIP root race's), which the long loops then end on too.
     /// The flag must outlive the copy; nullptr adds none.

@@ -1,5 +1,7 @@
 #include "mipx/sparse_matrix.h"
 
+#include "mipx/deadline.h"
+
 #include <algorithm>
 #include <cstring>
 #include <mutex>
@@ -147,17 +149,24 @@ SparseVectorView SparseMatrix::row(Index i) const {
 
 SparseVectorView SparseMatrix::col(Index j) const {
     assert(j >= 0 && j < cols_);
-    if (!csc_valid_.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(csc_mutex_);
-        if (!csc_valid_.load(std::memory_order_relaxed)) {
-            buildCSC();
-            csc_valid_.store(true, std::memory_order_release);
-        }
-    }
+    static_cast<void>(ensureCSC({}));
     Index start = csc_col_starts_[j];
     Index end = csc_col_starts_[j + 1];
     return {std::span<const Index>(csc_row_indices_.data() + start, end - start),
             std::span<const Real>(csc_values_.data() + start, end - start)};
+}
+
+bool SparseMatrix::ensureCSC(const Deadline& deadline) const {
+    if (!csc_valid_.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(csc_mutex_);
+        if (!csc_valid_.load(std::memory_order_relaxed)) {
+            if (!buildCSC(deadline)) {
+                return false;
+            }
+            csc_valid_.store(true, std::memory_order_release);
+        }
+    }
+    return true;
 }
 
 Real SparseMatrix::coeff(Index i, Index j) const {
@@ -297,7 +306,10 @@ void SparseMatrix::removeRowStable(Index i) {
     --rows_;
 }
 
-void SparseMatrix::buildCSC() const {
+bool SparseMatrix::buildCSC(const Deadline& deadline) const {
+    if (deadline.passed()) {
+        return false;
+    }
     Index nnz = numNonzeros();
     csc_col_starts_.assign(cols_ + 1, 0);
     csc_row_indices_.resize(nnz);
@@ -305,26 +317,39 @@ void SparseMatrix::buildCSC() const {
 
     // Count entries per column.
     for (Index k = 0; k < nnz; ++k) {
+        if (k % 4096 == 0 && deadline.passed()) {
+            return false;
+        }
         ++csc_col_starts_[col_indices_[k] + 1];
     }
 
     // Prefix sum.
     for (Index j = 0; j < cols_; ++j) {
+        if (j % 4096 == 0 && deadline.passed()) {
+            return false;
+        }
         csc_col_starts_[j + 1] += csc_col_starts_[j];
     }
 
     // Fill CSC arrays.
     std::vector<Index> pos(csc_col_starts_.begin(), csc_col_starts_.end());
     for (Index i = 0; i < rows_; ++i) {
+        if (i % 4096 == 0 && deadline.passed()) {
+            return false;
+        }
         Index start = row_starts_[i];
         Index end = row_starts_[i + 1];
         for (Index k = start; k < end; ++k) {
+            if (k % 4096 == 0 && deadline.passed()) {
+                return false;
+            }
             Index j = col_indices_[k];
             Index p = pos[j]++;
             csc_row_indices_[p] = i;
             csc_values_[p] = values_[k];
         }
     }
+    return true;
 }
 
 void SparseMatrix::invalidateCSC() const {

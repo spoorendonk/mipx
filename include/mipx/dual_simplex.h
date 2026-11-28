@@ -368,6 +368,7 @@ public:
 
     /// Get a tableau row for basis position `basis_pos` in external (unscaled) space.
     /// Returns a dense vector of size num_cols + num_rows (structural + slacks).
+    /// If no factored basis is available, the vector is all zeros.
     /// The tableau row satisfies: x_i + sum_{j nonbasic} alpha_j * x_j = 0
     /// where the sum includes both structural and slack variables.
     void getTableauRow(Index basis_pos, std::vector<Real>& tableau_row);
@@ -488,11 +489,17 @@ public:
     [[nodiscard]] const DegeneracyStats& getDegeneracyStats() const { return degeneracy_stats_; }
 
 private:
+    friend class BarrierSolver;
+
+    // Barrier's crossover load shares the solve deadline. A stopped load
+    // leaves the solver unloaded.
+    [[nodiscard]] bool loadUntil(const LpProblem& problem, const Deadline& deadline);
+
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
 
     /// Build augmented_ = [A | -I], the matrix the basis is factorized from.
-    void buildBasisMatrixSource();
+    [[nodiscard]] bool buildBasisMatrixSource(const Deadline& deadline = {});
     /// Swap each basic column in @p cols for a row's logical (removeCols).
     /// False, with the basis unchanged in meaning, when it cannot be done.
     bool swapOutBasicColumns(std::span<const Index> cols);
@@ -510,29 +517,29 @@ private:
 
     // Refactorize the basis.
     void refactorize();
+    [[nodiscard]] bool refactorize(const Deadline& deadline);
 
     // Scaling.
-    void computeScaling();
-    void computeEquilibrationScaling();
-    void computeGeometricMeanScaling();
-    void computeRuizScaling();
-    void applyScaling();
+    [[nodiscard]] bool computeScaling(const Deadline& deadline = {});
+    [[nodiscard]] bool computeEquilibrationScaling(const Deadline& deadline);
+    [[nodiscard]] bool computeGeometricMeanScaling(const Deadline& deadline);
+    [[nodiscard]] bool computeRuizScaling(const Deadline& deadline);
+    [[nodiscard]] bool applyScaling(const Deadline& deadline = {});
     // The inverse of applyScaling(): the matrix, sides, bounds and objective
     // back in the model's units, with row_scale_/col_scale_ left as they were.
-    void unapplyScaling();
+    [[nodiscard]] bool unapplyScaling(const Deadline& deadline = {});
     // Move primal_, dual_ and reduced_cost_ between the scaled and the model's
     // units with the current row_scale_/col_scale_.
     void convertValues(bool to_model);
     void rescaleKeepingBasis();
-    LpResult solveFromCurrentBasis();
+    LpResult solveFromCurrentBasis(const Deadline& deadline);
     // solve() less the unscaled clean-up: a warm verdict that fails its check
     // gets a cold re-solve. `checked` says the verdict returned passed
     // verdictHolds(), so the clean-up need not run it again.
-    LpResult solveWithColdFallback(std::chrono::steady_clock::time_point start, bool& checked);
+    LpResult solveWithColdFallback(const Deadline& deadline, bool& checked);
     // An Optimal or Infeasible the model's units refute gets a re-solve of the
     // unscaled model from its basis (#307, #306, #305).
-    LpResult cleanUpUnscaled(LpResult res, std::chrono::steady_clock::time_point start,
-                             bool checked);
+    LpResult cleanUpUnscaled(LpResult res, const Deadline& deadline, bool checked);
     bool dualRayMeetsContract() const;
     bool optimumHoldsUnscaled() const;
     // `tight`: absolute, as pointViolation() reads a point (#304).
@@ -611,7 +618,8 @@ private:
     Int iterations_ = 0;
     Int iter_limit_ = 1000000;
     bool loaded_ = false;
-    bool has_basis_ = false;  // true after first solve or setBasis()
+    bool has_basis_ = false;          // true after first solve or setBasis()
+    bool factors_available_ = false;  // whether LU matches the installed basis
     bool verbose_ = true;
     BasisStartStats basis_start_stats_;
 

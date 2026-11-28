@@ -3,6 +3,7 @@
 #include "test_paths.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <cmath>
@@ -544,16 +545,50 @@ TEST_CASE("DualSimplex: a passed deadline stops the solve, its own limit kept",
 
     CHECK(solver.solve().status == Status::TimeLimit);
     CHECK(solver.getOptions().max_solve_seconds == 12.5);
+    CHECK_FALSE(solver.basisStartStats().singular_recovery);
 
-    // A far deadline, with no limit of the solver's own, lets it finish.
+    // Retrying on the same solver must build a basis after the stopped attempt.
     opts.max_solve_seconds = -1.0;
     opts.deadline = Deadline::after(3600.0);
     solver.setOptions(opts);
-    solver.clearBasis();
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
     CHECK(solver.getOptions().max_solve_seconds == -1.0);
+}
+
+TEST_CASE("DualSimplex: a stopped basis build can be retried", "[dual_simplex][time_limit]") {
+    const auto lp = buildTrivialLP();
+    std::atomic<bool> stop{false};
+    DualSimplexSolver solver;
+    auto opts = solver.getOptions();
+    opts.stop_flag = &stop;
+    solver.setOptions(opts);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    const auto saved_basis = solver.getBasis();
+    std::vector<Real> valid_tableau;
+    solver.getTableauRow(0, valid_tableau);
+    REQUIRE(std::ranges::any_of(valid_tableau, [](Real value) { return value != 0.0; }));
+
+    stop.store(true);
+    CHECK(solver.solve().status == Status::IterLimit);
+    CHECK_FALSE(solver.basisStartStats().singular_recovery);
+    std::vector<Real> tableau;
+    solver.getTableauRow(0, tableau);
+    REQUIRE(tableau.size() == static_cast<std::size_t>(lp.num_cols + lp.num_rows));
+    CHECK(std::ranges::all_of(tableau, [](Real value) { return value == 0.0; }));
+
+    solver.setBasis(saved_basis);
+    solver.getTableauRow(0, tableau);
+    CHECK(std::ranges::all_of(tableau, [](Real value) { return value == 0.0; }));
+
+    stop.store(false);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-6));
+    solver.getTableauRow(0, tableau);
+    CHECK(tableau == valid_tableau);
 }
 
 TEST_CASE("DualSimplex: primal-feasible guardrails tolerate non-positive options",

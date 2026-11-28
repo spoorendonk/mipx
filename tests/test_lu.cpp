@@ -1,3 +1,4 @@
+#include "mipx/deadline.h"
 #include "mipx/lu.h"
 #include "mipx/sparse_matrix.h"
 
@@ -100,7 +101,8 @@ TEST_CASE("SparseLU: small 3x3 system", "[lu]") {
 
     SparseLU lu;
     std::vector<Index> basis = {0, 1, 2};
-    lu.factorize(A, basis);
+    CHECK_FALSE(lu.factorizeUntil(A, basis, Deadline::after(0.0)));
+    REQUIRE(lu.factorizeUntil(A, basis, {}));
 
     // Solve Bx = b where b = [3, 5, 3].
     // The exact solution: x = [1, 1, 1] since B*[1,1,1] = [3, 5, 3].

@@ -11,6 +11,9 @@
 
 namespace mipx {
 
+class Deadline;
+class SparseLU;
+
 struct Triplet {
     Index row;
     Index col;
@@ -82,7 +85,9 @@ public:
     [[nodiscard]] std::span<const Index> csr_row_starts() const { return row_starts_; }
 
 private:
-    void buildCSC() const;
+    friend class SparseLU;
+    [[nodiscard]] bool ensureCSC(const Deadline& deadline) const;
+    [[nodiscard]] bool buildCSC(const Deadline& deadline) const;
     void invalidateCSC() const;
 
     Index rows_;
