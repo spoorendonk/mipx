@@ -730,11 +730,53 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
                   .selection_changes;
         }
     };
+    const auto diversify = [&](const Candidate& winner) {
+        const auto* restart = histories.restart_diversification;
+        if (restart == nullptr || restart->restart_index <= 0 || selection.variable != winner.var ||
+            !winner.pseudo_score.isFinite() || winner.pseudo_score.mantissa <= 0.0) {
+            return;
+        }
+
+        constexpr Real kPerturbation = 0.025;
+        const RankScore minimum_score = winner.pseudo_score.weightedBy(0.95);
+        const std::uint64_t phase_key =
+            restart->seed ^
+            (static_cast<std::uint64_t>(restart->restart_index) * 0x9e3779b97f4a7c15ULL) ^
+            (static_cast<std::uint64_t>(restart->node_id) * 0xbf58476d1ce4e5b9ULL);
+        Index selected = winner.var;
+        Real best_score = -kInf;
+        Int eligible = 0;
+        for (const auto& candidate : shortlist) {
+            if ((winner.reliable && !candidate.reliable) || !candidate.pseudo_score.isFinite() ||
+                candidate.pseudo_score < minimum_score) {
+                continue;
+            }
+            const Real gap = candidate.pseudo_score.gapFrom(winner.pseudo_score);
+            // SplitMix64 finalizer, using the upper 53 bits as a fraction.
+            std::uint64_t key =
+                phase_key + static_cast<std::uint64_t>(candidate.var) * 0x94d049bb133111ebULL;
+            key = (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            key = (key ^ (key >> 27)) * 0x94d049bb133111ebULL;
+            key ^= key >> 31;
+            const Real uniform = static_cast<Real>(key >> 11) * 0x1.0p-53;
+            const Real score = 1.0 - gap + kPerturbation * (2.0 * uniform - 1.0);
+            if (score > best_score || (score == best_score && candidate.var < selected)) {
+                selected = candidate.var;
+                best_score = score;
+            }
+            ++eligible;
+        }
+        if (eligible > 1) {
+            selection.restart_baseline = winner.var;
+            selection.variable = selected;
+        }
+    };
     if (best_reliable != nullptr) {
         selection.variable = best_reliable->var;
         selection.used_pseudocost = true;
         selection.used_reliable_pseudocost = true;
         observeHistories(best_reliable->pseudo_score);
+        diversify(*best_reliable);
         ++telemetry.pseudocost_uses;
         ++telemetry.pseudocost_hits;
         return selection;
@@ -752,6 +794,7 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     if (selection.variable >= 0) {
         selection.used_pseudocost = true;
         observeHistories(best_it->pseudo_score);
+        diversify(*best_it);
         ++telemetry.pseudocost_uses;
     }
     return selection;

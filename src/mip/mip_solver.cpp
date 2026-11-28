@@ -3945,13 +3945,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             const BranchCutoffComparison cutoff_comparison{
                 cutoff_history, mapping, branch_cutoff_comparison_stats_,
                 branch_cutoff_score_mode_ == BranchCutoffScoreMode::Score};
+            const BranchRestartDiversification diversification{heuristic_seed_,
+                                                               node_scratch.restart_index, node.id};
             const BranchSelectionHistories branch_histories{
                 history.empty() || node.depth == 0 ? nullptr : &coverage,
                 cutoff_history.empty() || node.depth == 0 ||
                         branch_cutoff_score_mode_ == BranchCutoffScoreMode::Off
                     ? nullptr
                     : &cutoff_comparison,
-                node_scratch.branch_dual_degeneracy};
+                node_scratch.branch_dual_degeneracy,
+                node_scratch.restart_index > 0 ? &diversification : nullptr};
             selection = branching_rule_.selectWithHistories(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
                 false, branching_stats_, activity, branch_histories);
@@ -3963,6 +3966,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
         Index baseline = selection.cutoff_baseline >= 0 ? selection.cutoff_baseline
                                                         : selection.inference_baseline;
+        Index restart_baseline = selection.restart_baseline;
         if (use_conflicts && !conflict_activity_branching_enabled_ && branch_var >= 0) {
             const Index overridden = selectConflictAwareBranchVariable(
                 node_primals_out, current_lower, current_upper, branch_var);
@@ -3971,6 +3975,23 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (baseline >= 0) {
                 baseline = selectConflictAwareBranchVariable(node_primals_out, current_lower,
                                                              current_upper, baseline);
+            }
+            if (restart_baseline >= 0) {
+                restart_baseline = selectConflictAwareBranchVariable(
+                    node_primals_out, current_lower, current_upper, restart_baseline);
+            }
+        }
+        if (restart_baseline >= 0) {
+            ++search_stats_.restart_branch_eligible;
+            search_stats_.restart_branch_last_phase = node_scratch.restart_index;
+            if (branch_var != restart_baseline) {
+                ++search_stats_.restart_branch_changes;
+                if (search_stats_.restart_branch_changes == 1) {
+                    search_stats_.first_restart_branch_phase = node_scratch.restart_index;
+                    search_stats_.first_restart_branch_node_id = node.id;
+                    search_stats_.first_restart_branch_baseline = restart_baseline;
+                    search_stats_.first_restart_branch_variable = branch_var;
+                }
             }
         }
         if (selection.inference_baseline >= 0) {
@@ -4159,6 +4180,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             queue.setPolicy(serial_node_policy_override_.value_or(NodePolicy::BestFirst));
             search_stats_.restart_nodes_dropped += open - queue.size();
             ++search_stats_.restarts;
+            if (restart_branch_diversification_enabled_) {
+                node_scratch.restart_index = search_stats_.restarts;
+            }
             if (geometric_restarts_enabled_) {
                 last_restart_node = nodes_explored;
                 constexpr Int max_nodes = std::numeric_limits<Int>::max();
@@ -5174,6 +5198,7 @@ MipResult MipSolver::solve() {
     branch_cutoff_comparison_stats_ = {};
     branch_dual_degeneracy_stats_ = {};
     serial_node_policy_stats_ = {};
+    search_stats_ = {};
     rapid_learning_stats_ = {};
     root_lp_lookahead_stats_ = {};
     branching_stats_ = {};
@@ -7757,6 +7782,16 @@ MipResult MipSolver::solveMinimizationOnce() {
                 search_stats_.incumbent_restart_promotions,
                 search_stats_.incumbent_restart_no_incumbent,
                 search_stats_.incumbent_restart_no_match);
+        }
+        if (restart_branch_diversification_enabled_) {
+            log_.log(
+                "Restart branching: eligible=%d changes=%d last_phase=%d first_phase=%d "
+                "node=%d baseline=%d selected=%d\n",
+                search_stats_.restart_branch_eligible, search_stats_.restart_branch_changes,
+                search_stats_.restart_branch_last_phase, search_stats_.first_restart_branch_phase,
+                search_stats_.first_restart_branch_node_id,
+                search_stats_.first_restart_branch_baseline,
+                search_stats_.first_restart_branch_variable);
         }
         if (tree_presolve_stats_.attempts > 0) {
             log_.log(

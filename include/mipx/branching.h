@@ -61,6 +61,8 @@ struct BranchingSelection {
     bool used_reliable_pseudocost = false;
     Index inference_baseline = -1;
     Index cutoff_baseline = -1;
+    /// Unperturbed pseudocost winner, if a competitive set was diversified.
+    Index restart_baseline = -1;
 };
 
 struct MipDirectionalInferenceStats {
@@ -158,10 +160,17 @@ struct BranchDualDegeneracyStats {
     void record(std::optional<LpDualDegeneracy> measurement);
 };
 
+struct BranchRestartDiversification {
+    std::uint64_t seed = 0;
+    Int restart_index = 0;
+    Int node_id = 0;
+};
+
 struct BranchSelectionHistories {
     const BranchInferenceCoverage* inference = nullptr;
     const BranchCutoffComparison* cutoff = nullptr;
     BranchDualDegeneracyStats* dual_degeneracy = nullptr;
+    const BranchRestartDiversification* restart_diversification = nullptr;
 };
 
 struct BranchingTelemetry {

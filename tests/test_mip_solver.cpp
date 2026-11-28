@@ -3924,6 +3924,98 @@ TEST_CASE("MipSolver: geometric serial restart spacing starts fresh on every sol
     CHECK(solver.getSearchStats().restarts == 0);
 }
 
+TEST_CASE("MipSolver: seeded branch diversification starts with actual serial restarts",
+          "[mip][search]") {
+    // Independent copies of the parity-with-escape row give the LP two
+    // fractional candidates and the integer problem a known optimum of two.
+    auto lp = buildSearchStagnationMipWithEscape();
+    const Index cols_per_row = lp.num_cols;
+    lp.num_rows = 2;
+    lp.num_cols *= 2;
+    lp.row_lower.resize(lp.num_rows, 4.5);
+    lp.row_upper.resize(lp.num_rows, 4.5);
+    lp.row_names.clear();
+    lp.col_names.clear();
+    lp.obj.resize(lp.num_cols, 0.0);
+    lp.obj.back() = 1.0;
+    lp.col_lower.resize(lp.num_cols, 0.0);
+    lp.col_upper.resize(lp.num_cols, 1.0);
+    lp.col_type.resize(lp.num_cols, VarType::Binary);
+    std::vector<Triplet> entries;
+    for (Index row = 0; row < lp.num_rows; ++row) {
+        for (Index col = 0; col < cols_per_row; ++col) {
+            entries.push_back({row, row * cols_per_row + col, col + 1 == cols_per_row ? 0.5 : 1.0});
+        }
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(entries));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setCutsEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setRestartsEnabled(true);
+    solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    solver.setRestartControls(8, 2);
+    solver.setGapTolerance(0.0);
+    solver.setHeuristicSeed(2);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    REQUIRE(baseline.objective == 2.0);
+    REQUIRE(solver.getSearchStats().restarts >= 2);
+    CHECK(solver.getSearchStats().restart_branch_eligible == 0);
+
+    solver.setRestartBranchDiversificationEnabled(true);
+    solver.setNodeLimit(9);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getSearchStats().restarts == 0);
+    CHECK(solver.getSearchStats().restart_branch_eligible == 0);
+    solver.setNodeLimit(std::numeric_limits<Int>::max());
+
+    const auto diversified = solver.solve();
+    const auto stats = solver.getSearchStats();
+    CHECK(diversified.status == baseline.status);
+    CHECK(diversified.objective == baseline.objective);
+    CHECK(diversified.best_bound == baseline.best_bound);
+    CHECK(stats.restart_branch_changes > 0);
+    CHECK(stats.first_restart_branch_phase > 0);
+    CHECK(stats.restart_branch_last_phase > stats.first_restart_branch_phase);
+    CHECK(stats.restart_branch_last_phase <= stats.restarts);
+    CHECK(stats.first_restart_branch_variable != stats.first_restart_branch_baseline);
+    CHECK(stats.restart_nodes_dropped == 0);
+    CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
+
+    const auto repeated = solver.solve();
+    const auto& again = solver.getSearchStats();
+    CHECK(repeated.status == diversified.status);
+    CHECK(repeated.objective == diversified.objective);
+    CHECK(repeated.best_bound == diversified.best_bound);
+    CHECK(repeated.nodes == diversified.nodes);
+    CHECK(again.restarts == stats.restarts);
+    CHECK(again.restart_branch_eligible == stats.restart_branch_eligible);
+    CHECK(again.restart_branch_changes == stats.restart_branch_changes);
+    CHECK(again.first_restart_branch_phase == stats.first_restart_branch_phase);
+    CHECK(again.first_restart_branch_node_id == stats.first_restart_branch_node_id);
+    CHECK(again.first_restart_branch_variable == stats.first_restart_branch_variable);
+
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2}, {}, "sos2"}};
+    solver.setSos2NativeBranching(true);
+    solver.setNodeLimit(0);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(again.restarts == 0);
+    CHECK(again.restart_branch_eligible == 0);
+    CHECK(again.restart_branch_changes == 0);
+    CHECK(again.restart_branch_last_phase == 0);
+    CHECK(again.first_restart_branch_phase == 0);
+    CHECK(again.first_restart_branch_node_id == -1);
+}
+
 TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
           "[mip][conflicts][search]") {
     MipSolver solver;

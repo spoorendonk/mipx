@@ -35,6 +35,7 @@ void printUsage(FILE* out) {
                  "[--conflict-restart-threshold N] "
                  "[--geometric-restarts|--no-geometric-restarts] "
                  "[--incumbent-guided-restarts|--no-incumbent-guided-restarts] "
+                 "[--restart-branch-diversification|--no-restart-branch-diversification] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
@@ -189,6 +190,7 @@ int main(int argc, char* argv[]) {
     mipx::Int conflict_restart_threshold = 0;
     bool geometric_restarts = false;
     bool incumbent_guided_restarts = false;
+    bool restart_branch_diversification = false;
     bool bound_conflict_learning = false;
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
@@ -320,6 +322,10 @@ int main(int argc, char* argv[]) {
             incumbent_guided_restarts = true;
         } else if (arg == "--no-incumbent-guided-restarts") {
             incumbent_guided_restarts = false;
+        } else if (arg == "--restart-branch-diversification") {
+            restart_branch_diversification = true;
+        } else if (arg == "--no-restart-branch-diversification") {
+            restart_branch_diversification = false;
         } else if (arg == "--bound-conflict-learning") {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
@@ -946,6 +952,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictRestartThreshold(conflict_restart_threshold);
             solver.setGeometricRestartsEnabled(geometric_restarts);
             solver.setIncumbentGuidedRestartsEnabled(incumbent_guided_restarts);
+            solver.setRestartBranchDiversificationEnabled(restart_branch_diversification);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
             solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);

@@ -260,6 +260,90 @@ TEST_CASE("Inference coverage only compares candidates on the winning pseudocost
     }
 }
 
+TEST_CASE("Restart diversification ranks only competitive pseudocost candidates",
+          "[branching][search]") {
+    const auto mode =
+        GENERATE(BranchScoreMode::LargerGain, BranchScoreMode::Balanced, BranchScoreMode::Product);
+    const Real challenger_cost = GENERATE(1.0, 0.995);
+    const Real scale = mode == BranchScoreMode::Product ? 1e200 : 100.0;
+    LpProblem lp;
+    lp.num_cols = 4;
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    const std::array<Real, 4> primals{0.5, 0.5, 0.5, 0.5};
+    DualSimplexSolver simplex;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setReliabilityThreshold(1);
+    branching.setScoreMode(mode);
+    branching.setPseudocostFallback(scale);
+    const std::array<Real, 3> relative_costs{1.0, challenger_cost, 0.94};
+    for (Index col = 0; col < static_cast<Index>(relative_costs.size()); ++col) {
+        branching.updatePseudoCost(col, false, scale * relative_costs[col]);
+        branching.updatePseudoCost(col, true, scale * relative_costs[col]);
+    }
+
+    BranchingTelemetry telemetry;
+    const auto select = [&](const BranchRestartDiversification* restart) {
+        return branching.selectWithHistories(simplex, lp, primals, lp.col_lower, lp.col_upper, 0.0,
+                                             false, telemetry, {},
+                                             {.restart_diversification = restart});
+    };
+
+    CHECK(select(nullptr).variable == 0);
+    BranchRestartDiversification restart{.seed = 2};
+    const auto pre_restart = select(&restart);
+    CHECK(pre_restart.variable == 0);
+    CHECK(pre_restart.restart_baseline == -1);
+
+    restart.restart_index = 1;
+    const auto changed = select(&restart);
+    REQUIRE(changed.variable == 1);
+    CHECK(select(&restart).variable == changed.variable);
+    CHECK(changed.restart_baseline == 0);
+    restart.seed = 0;
+    CHECK(select(&restart).variable == 0);
+    restart.restart_index = 2;
+    CHECK(select(&restart).variable == 1);
+    restart.restart_index = 1;
+    restart.seed = 3;
+    CHECK(select(&restart).variable == 0);  // Unreliable column 3 would otherwise win.
+    restart.restart_index = 2;
+    restart.node_id = 17;
+    restart.seed = 2;
+    CHECK(select(&restart).variable == 0);  // Column 2 has the best hash but is outside the band.
+    CHECK(branching.downReliability(0) == 1);
+    CHECK(branching.upReliability(1) == 1);
+    CHECK(branching.downReliability(3) == 0);
+}
+
+TEST_CASE("The restart diversification band includes its 95 percent boundary", "[branching]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    const std::array<Real, 2> primals{0.5, 0.5};
+    DualSimplexSolver simplex;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setReliabilityThreshold(1);
+    branching.updatePseudoCost(0, false, 2.0);
+    branching.updatePseudoCost(0, true, 2.0);
+    branching.updatePseudoCost(1, false, 1.9);
+    branching.updatePseudoCost(1, true, 1.9);
+    BranchingTelemetry telemetry;
+    const BranchRestartDiversification phase{.restart_index = 1};
+    const auto selected =
+        branching.selectWithHistories(simplex, lp, primals, lp.col_lower, lp.col_upper, 0.0, false,
+                                      telemetry, {}, {.restart_diversification = &phase});
+    CHECK(selected.variable == 0);
+    CHECK(selected.restart_baseline == 0);
+}
+
 TEST_CASE("Inference picks a ready near tie only when the weaker direction improves",
           "[branching]") {
     const Real scale = GENERATE(1e-8, 1.0, 1e150);
@@ -293,16 +377,19 @@ TEST_CASE("Inference picks a ready near tie only when the weaker direction impro
     BranchingTelemetry telemetry;
     BranchInferenceCoverageStats stats;
     const BranchInferenceCoverage coverage{history, {}, stats, true};
-    const auto select = [&](const BranchInferenceCoverage* observation) {
-        return branching.selectWithInferenceCoverage(solver, lp, primals, lp.col_lower,
-                                                     lp.col_upper, 0.0, false, telemetry, {},
-                                                     observation);
+    const BranchRestartDiversification restart{.seed = 2, .restart_index = 1};
+    const auto select = [&](const BranchInferenceCoverage* observation,
+                            const BranchRestartDiversification* phase = nullptr) {
+        return branching.selectWithHistories(
+            solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry, {},
+            {.inference = observation, .restart_diversification = phase});
     };
     auto& path = reliability_threshold == 1 ? stats.reliable : stats.fallback;
     REQUIRE(select(nullptr).variable == 0);
-    const auto preferred = select(&coverage);
+    const auto preferred = select(&coverage, &restart);
     REQUIRE(preferred.variable == 2);
     REQUIRE(preferred.inference_baseline == 0);
+    CHECK(preferred.restart_baseline == -1);
     REQUIRE(path.selection_changes == 1);
     stats.recordArbitration(preferred, 1, 1);  // The override replaces the proposal.
     stats.recordArbitration(preferred, 2, 2);  // The baseline would choose it anyway.
@@ -355,9 +442,11 @@ TEST_CASE("Smoothed weaker child cutoff rates rank ready pseudocost near ties", 
     BranchingTelemetry telemetry;
     BranchCutoffComparisonStats stats;
     BranchCutoffComparison cutoff{history, columns, stats};
-    const auto select = [&] {
+    const BranchRestartDiversification restart{.seed = 2, .restart_index = 1};
+    const auto select = [&](const BranchRestartDiversification* phase = nullptr) {
         return branching.selectWithHistories(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0,
-                                             false, telemetry, activity, {.cutoff = &cutoff});
+                                             false, telemetry, activity,
+                                             {.cutoff = &cutoff, .restart_diversification = phase});
     };
     const auto& path = reliability_threshold == 1 ? stats.reliable : stats.fallback;
     CHECK(select().variable == 0);
@@ -366,9 +455,10 @@ TEST_CASE("Smoothed weaker child cutoff rates rank ready pseudocost near ties", 
     CHECK(path.selection_changes == 0);
 
     cutoff.select_by_cutoff = true;
-    const auto preferred = select();
+    const auto preferred = select(&restart);
     REQUIRE(preferred.variable == 1);
     REQUIRE(preferred.cutoff_baseline == 0);
+    CHECK(preferred.restart_baseline == -1);
     CHECK(path.selection_changes == 1);
     stats.recordArbitration(preferred, 1, 1);
     CHECK(path.surviving_changes == 0);

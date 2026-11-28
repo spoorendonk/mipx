@@ -257,6 +257,13 @@ struct MipSearchStats {
     Int first_incumbent_restart_promoted_id = -1;
     Int first_incumbent_restart_policy_id = -1;
     Real first_incumbent_restart_pool_objective = kInf;
+    Int restart_branch_eligible = 0;
+    Int restart_branch_changes = 0;
+    Int restart_branch_last_phase = 0;
+    Int first_restart_branch_phase = 0;
+    Int first_restart_branch_node_id = -1;
+    Index first_restart_branch_baseline = -1;
+    Index first_restart_branch_variable = -1;
 };
 
 struct MipSerialNodePolicyStats {
@@ -657,6 +664,10 @@ public:
     void setIncumbentGuidedRestartsEnabled(bool enabled) {
         incumbent_guided_restarts_enabled_ = enabled;
     }
+    /// Diversify close pseudocost decisions only after actual serial restarts.
+    void setRestartBranchDiversificationEnabled(bool enabled) {
+        restart_branch_diversification_enabled_ = enabled;
+    }
     /// Opt in to exact-safe serial restarts on recent learned conflicts.
     /// Evidence decays by 0.995 per node, gains one per nonempty published
     /// conflict, and resets on any restart.
@@ -899,6 +910,7 @@ private:
         std::span<MipBranchInferenceStats> branch_inference_history;
         std::span<MipBranchCutoffStats> branch_cutoff_history;
         BranchDualDegeneracyStats* branch_dual_degeneracy = nullptr;
+        Int restart_index = 0;
         std::span<const Index> branch_history_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
         LpProblem* conflict_global_rows = nullptr;
@@ -1201,6 +1213,7 @@ private:
     bool restarts_enabled_ = false;
     bool geometric_restarts_enabled_ = false;
     bool incumbent_guided_restarts_enabled_ = false;
+    bool restart_branch_diversification_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
     Int conflict_restart_threshold_ = 0;
