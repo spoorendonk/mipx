@@ -424,6 +424,47 @@ TEST_CASE("PdlpSolver: combines dual row and column totals after cancellation", 
     CHECK(result.objective == large * large);
 }
 
+TEST_CASE("PdlpSolver: a scaled maximization meets the objective accuracy at Optimal", "[pdlp]") {
+    // Found by the libc++ validity stream (#424, #429). The optimum is
+    // 2.078125 at (0.025, 387.5). PDLP stopped Optimal at 2.0777 with
+    // x2 = 387.54: the slack of row 4, priced by its dual, was cancelled in
+    // the gap by the free column's reduced cost times x2.
+    LpProblem lp;
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 2;
+    lp.num_rows = 5;
+    lp.obj_offset = -7.875;
+    lp.obj = {553.125, -0.01};
+    lp.col_lower = {-kInf, -kInf};
+    lp.col_upper = {0.025000000000000001, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.row_lower = {-kInf, 25000, -31.25, -kInf, 0.00038750000000000004};
+    lp.row_upper = {250, kInf, -31.25, kInf, kInf};
+    lp.matrix = SparseMatrix(5, 2,
+                             {{0, 0, 10000},
+                              {1, 0, 1000000},
+                              {2, 0, -1250},
+                              {3, 0, 46250},
+                              {4, 1, 1.0000000000000002e-06}});
+
+    PdlpOptions options;
+    options.use_gpu = false;
+    options.verbose = false;
+    options.max_iter = 20000;
+    options.polish_max_iter = 20000;
+    PdlpSolver solver;
+    solver.setOptions(options);
+    solver.load(lp);
+    const auto result = solver.solve();
+    INFO("status " << static_cast<int>(result.status) << " objective " << result.objective);
+    // Optimal here, within 5e-6 (Linux, libstdc++). The issue allows a limit
+    // status when the accuracy is not reached, so another platform's
+    // rounding may stop at IterLimit, never at an inaccurate Optimal.
+    CHECK((result.status == Status::Optimal || result.status == Status::IterLimit));
+    if (result.status == Status::Optimal)
+        CHECK(std::abs(result.objective - 2.078125) <= 1e-4 * 2.078125);
+}
+
 TEST_CASE("PdlpSolver: max_solve_seconds enforces time limit", "[pdlp][time_limit]") {
     auto lp = buildSimpleLp();
 

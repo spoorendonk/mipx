@@ -924,9 +924,15 @@ Real PdlpSolver::estimateSpectralNorm() const {
 //     violations into the objective. forplan's rows held to 6e-6 of their
 //     terms, and its duals made that an objective 7e-4 from the optimum.
 //     The reported objective is c^T x with the true c, so the reduced costs
-//     the column test allows move only the dual bound, which the gap
-//     already measures; pricing them by x as well rejected accurate points
-//     (modszk1, whose free columns sit far from zero).
+//     the column test allows move only the dual bound; pricing them by |x|
+//     as well rejected accurate points (modszk1, whose free columns sit far
+//     from zero). Their signed sum r^T x is in pobj - dobj, though, and can
+//     cancel the complementarity terms there: with r_U those reduced costs
+//     (zero elsewhere), dobj is the exact bound for c - r_U, so
+//     dobj + r_U^T x is the bound for c to first order, and the gap is held
+//     to it as well (#429: in the original objective's units, a free
+//     column's r^T x of -3.3e-4 hid a row slack priced at 4.7e-4, and
+//     Optimal came back 2e-4 relative off).
 // A row or column whose terms are all tiny would hold its round-off to its
 // own size (brandy: a reduced cost of 1e-14 against terms of 1e-14), so each
 // test also allows kPointFloor of the largest row's (column's) terms.
@@ -979,6 +985,7 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
 
     ConvergenceSum primal_objective;
     ConvergenceSum dual_cols;
+    ConvergenceSum unbounded_side;
     const Real col_floor = kPointFloor * infNorm(col_terms);
     for (Index j = 0; j < n; ++j) {
         primal_objective.add(cscaled_[j] * x[j]);
@@ -988,6 +995,7 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
         if ((grad > 0.0 && !isFinite(lb)) || (grad < 0.0 && !isFinite(ub))) {
             if (std::abs(grad) > options_.dual_tol * (col_terms[j] + col_floor))
                 return false;
+            unbounded_side.add(grad * x[j]);
         } else if (grad > 0.0) {
             dual_cols.add(grad * lb);
         } else if (grad < 0.0) {
@@ -1000,7 +1008,11 @@ bool PdlpSolver::acceptsPoint(std::span<const Real> x, std::span<const Real> y) 
     const Real pobj =
         primal_objective.scaledWithOffset(obj_sign_ * obj_unscale, original_.obj_offset);
     const Real dobj = dual_cols.scaledWithOffset(obj_sign_ * obj_unscale, original_.obj_offset);
-    return std::abs(pobj - dobj) + slack.value() * obj_unscale <=
+    dual_cols.merge(unbounded_side);
+    const Real dobj_first_order =
+        dual_cols.scaledWithOffset(obj_sign_ * obj_unscale, original_.obj_offset);
+    const Real gap = std::max(std::abs(pobj - dobj), std::abs(pobj - dobj_first_order));
+    return gap + slack.value() * obj_unscale <=
            options_.optimality_tol * (1.0 + std::abs(pobj) + std::abs(dobj));
 }
 
