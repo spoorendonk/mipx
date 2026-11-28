@@ -2053,6 +2053,79 @@ TEST_CASE("MipSolver: tracking bound reasons preserves pre-LP search", "[mip][re
     CHECK(solver.getLpStats().pre_lp_propagation_pruned == stats.pre_lp_propagation_pruned);
 }
 
+TEST_CASE("MipSolver: opt-in bound conflicts learn and tighten serial nodes", "[mip][conflicts]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.load(buildSearchStagnationMip());
+
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    CHECK(solver.getConflictStats().bound_conflicts_learned == 0);
+    CHECK(solver.getConflictStats().bound_conflict_tightenings == 0);
+
+    solver.setBoundConflictLearningEnabled(true);
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    const auto learned = solver.getConflictStats();
+    REQUIRE(learned.bound_conflicts_learned > 0);
+    CHECK(learned.bound_conflict_tightenings > 0);
+
+    solver.setConflictWatchesEnabled(true);
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    const auto watched = solver.getConflictStats();
+    CHECK(watched.bound_conflicts_learned == learned.bound_conflicts_learned);
+    CHECK(watched.bound_conflict_tightenings == learned.bound_conflict_tightenings);
+    CHECK(watched.bound_conflict_cutoffs == learned.bound_conflict_cutoffs);
+    CHECK(watched.pruned == learned.pruned);
+}
+
+TEST_CASE("MipSolver: bound conflicts preserve a feasible optimum", "[mip][conflicts]") {
+    // The escape column costs one. With escape fixed to zero the parity
+    // subproblem is infeasible. At escape = 1, four chosen binaries suffice.
+    auto lp = buildSearchStagnationMip();
+    const Index escape = lp.num_cols++;
+    lp.obj.push_back(1.0);
+    lp.col_lower.push_back(0.0);
+    lp.col_upper.push_back(1.0);
+    lp.col_type.push_back(VarType::Binary);
+    lp.col_names.emplace_back("escape");
+    std::vector<Triplet> row;
+    for (Index col = 0; col < escape; ++col) {
+        row.push_back({0, col, 1.0});
+    }
+    row.push_back({0, escape, 0.5});
+    lp.matrix = SparseMatrix(1, lp.num_cols, std::move(row));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.load(lp);
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(1.0, 1e-9));
+
+    solver.setBoundConflictLearningEnabled(true);
+    const auto learned = solver.solve();
+    REQUIRE(learned.status == Status::Optimal);
+    CHECK_THAT(learned.objective, WithinAbs(baseline.objective, 1e-9));
+    CHECK(solver.getConflictStats().bound_conflict_tightenings > 0);
+
+    lp.col_type[escape] = VarType::Continuous;
+    solver.load(lp);
+    const auto mixed = solver.solve();
+    REQUIRE(mixed.status == Status::Optimal);
+    CHECK_THAT(mixed.objective, WithinAbs(baseline.objective, 1e-9));
+    CHECK(solver.getConflictStats().bound_conflicts_learned == 0);
+    CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+}
+
 TEST_CASE("MipSolver: watched no-goods preserve serial reuse across solves", "[mip][conflicts]") {
     // Minimizing x first branches on y=0.5. Both y children then take x=0.5.
     // The x>=1 child is LP-infeasible independently of y, so a ray-shortened

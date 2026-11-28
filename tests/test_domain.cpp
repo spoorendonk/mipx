@@ -1,3 +1,4 @@
+#include "mipx/bound_conflict.h"
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
 #include "mipx/domain.h"
@@ -36,6 +37,170 @@ LpProblem makeProblem(Index num_cols, Index num_rows, std::vector<Triplet> tripl
 }
 
 }  // namespace
+
+TEST_CASE("Bound conflicts: first UIP, subsumption and sibling reuse", "[domain][conflicts]") {
+    // At level one a fixes r. At level two b fixes u, which forces p and q.
+    // The packing row forbids a = r = p = q = 1. Column d is irrelevant.
+    // A model row fixes the packing row's slack s before branching.
+    constexpr Index a = 0, r = 1, b = 2, u = 3, p = 4, q = 5, d = 6, s = 7;
+    const auto prob =
+        makeProblem(8, 6,
+                    {{0, a, 1},
+                     {0, r, -1},
+                     {1, b, 1},
+                     {1, u, -1},
+                     {2, u, 1},
+                     {2, p, -1},
+                     {3, u, 1},
+                     {3, q, -1},
+                     {4, a, 1},
+                     {4, r, 1},
+                     {4, p, 1},
+                     {4, q, 1},
+                     {4, s, -1},
+                     {5, s, 1}},
+                    std::vector<Real>(6, -kInf), {0, 0, 0, 0, 3, 0}, std::vector<Real>(8, 0),
+                    std::vector<Real>(8, 1), std::vector<VarType>(8, VarType::Binary));
+    DomainPropagator dp;
+    dp.load(prob, true);
+    REQUIRE(dp.propagate());
+    REQUIRE(dp.getUpper(s) == 0);
+    dp.setBranchBound(a, false, 1, 1);
+    REQUIRE(dp.propagate());
+    REQUIRE(dp.getLower(r) == 1);
+    dp.setBranchBound(d, true, 0, 2);
+    dp.setBranchBound(b, false, 1, 2);
+    REQUIRE_FALSE(dp.propagate());
+
+    const auto learned = analyzeBoundConflict(*dp.boundReasons());
+    REQUIRE(learned);
+    CHECK_FALSE(learned->scope.node_local);
+    CHECK(learned->scope.cutoff == kInf);
+    REQUIRE(learned->removed_literals.size() == 2);
+    CHECK(learned->removed_literals.front().variable == r);
+    CHECK_FALSE(learned->removed_literals.front().is_upper);
+    CHECK(learned->removed_literals.front().bound == 1);
+    CHECK(learned->removed_literals.front().level == 1);
+    CHECK(learned->removed_literals.back().variable == s);
+    CHECK(learned->removed_literals.back().is_upper);
+    CHECK(learned->removed_literals.back().bound == 0);
+    CHECK(learned->removed_literals.back().level == 0);
+    CHECK(learned->lbd == 2);
+    REQUIRE(learned->literals.size() == 2);
+    const auto& first = learned->literals[0];
+    const auto& uip = learned->literals[1];
+    CHECK(first.variable == a);
+    CHECK(first.bound == 1);
+    CHECK_FALSE(first.is_upper);
+    CHECK(first.level == 1);
+    CHECK(uip.variable == u);
+    CHECK(uip.bound == 1);
+    CHECK_FALSE(uip.is_upper);
+    CHECK(uip.level == 2);
+
+    auto lb = prob.col_lower;
+    const auto ub = prob.col_upper;
+    lb[a] = 1;
+    const auto evaluate = [&] {
+        return evaluateBoundConflict(learned->literals, learned->scope, lb, ub, prob.col_type);
+    };
+    const auto unit = evaluate();
+    REQUIRE(unit);
+    REQUIRE(unit->tightening);
+    CHECK(unit->tightening->col == u);
+    CHECK(unit->tightening->is_upper);
+    CHECK(unit->tightening->value == 0);
+    REQUIRE(unit->antecedents_before.size() == 1);
+    CHECK(unit->antecedents_before.front().variable == a);
+    CHECK(unit->antecedents_after.empty());
+
+    lb[u] = 1;
+    const auto cutoff = evaluate();
+    REQUIRE(cutoff);
+    CHECK_FALSE(cutoff->tightening);
+    CHECK(cutoff->antecedents_before.size() == 2);
+
+    for (unsigned mask = 0; mask < (1U << 8); ++mask) {
+        const auto bit = [mask](Index col) { return (mask >> col) & 1U; };
+        if (bit(a) <= bit(r) && bit(b) <= bit(u) && bit(u) <= bit(p) && bit(u) <= bit(q) &&
+            bit(s) == 0 && bit(a) + bit(r) + bit(p) + bit(q) <= 3 + bit(s)) {
+            CAPTURE(mask);
+            CHECK_FALSE((bit(a) == 1 && bit(u) == 1));
+            if (bit(a) == 1) {
+                CHECK(bit(u) <= unit->tightening->value);
+            }
+        }
+    }
+
+    // Importing an endpoint without its decision history makes the proof
+    // opaque. Even a later subsumption must not publish it across siblings.
+    dp.load(prob, true);
+    REQUIRE(dp.propagate());
+    dp.setReasonLevel(1);
+    dp.setBound(a, 1, 1);
+    REQUIRE(dp.propagate());
+    dp.setBranchBound(b, false, 1, 2);
+    REQUIRE_FALSE(dp.propagate());
+    CHECK_FALSE(analyzeBoundConflict(*dp.boundReasons()));
+}
+
+TEST_CASE("Bound conflicts: objective scope requires an equally strong cutoff",
+          "[domain][conflicts]") {
+    auto prob = makeProblem(2, 0, {}, {}, {}, {0, 0}, {1, 1}, std::vector(2, VarType::Binary));
+    prob.obj = {1, 1};
+    ObjectivePropagator objective;
+    objective.load(prob);
+    DomainPropagator dp;
+    dp.load(prob, true);
+    dp.setObjectiveCutoff(&objective, 1.5);
+    dp.setBranchBound(0, false, 1, 1);
+    dp.setBranchBound(1, false, 1, 2);
+    REQUIRE_FALSE(dp.propagate());
+    const auto learned = analyzeBoundConflict(*dp.boundReasons());
+    REQUIRE(learned);
+    CHECK(learned->scope.cutoff == 1.5);
+    CHECK_FALSE(learned->scope.node_local);
+
+    const std::vector<Real> lower = {1, 0};
+    const auto evaluate = [&](Real active_cutoff) {
+        return evaluateBoundConflict(learned->literals, learned->scope, lower, prob.col_upper,
+                                     prob.col_type, active_cutoff);
+    };
+    for (const Real active_cutoff : {1.25, 1.5}) {
+        const auto unit = evaluate(active_cutoff);
+        REQUIRE(unit);
+        REQUIRE(unit->tightening);
+        CHECK(unit->tightening->col == 1);
+        CHECK(unit->tightening->is_upper);
+        CHECK(unit->tightening->value == 0);
+        CHECK(unit->scope.cutoff == 1.5);
+    }
+    CHECK_FALSE(evaluate(2.5));  // Both ones are feasible here.
+    CHECK_FALSE(evaluate(kInf));
+}
+
+TEST_CASE("Bound conflicts: integer complement of a fractional upper endpoint",
+          "[domain][conflicts]") {
+    const std::vector<BranchDecision> literals = {{0, -1.5, true, 2}, {1, 3, false, 1}};
+    const std::vector<Real> lower = {-5, 3}, upper = {4, 7};
+    const std::vector<VarType> types = {VarType::Integer, VarType::Integer};
+    const auto unit = evaluateBoundConflict(literals, {}, lower, upper, types);
+    REQUIRE(unit);
+    REQUIRE(unit->tightening);
+    CHECK(unit->tightening->col == 0);
+    CHECK_FALSE(unit->tightening->is_upper);
+    CHECK(unit->tightening->value == -1);
+    CHECK(unit->antecedents_before.empty());
+    REQUIRE(unit->antecedents_after.size() == 1);
+    CHECK(unit->antecedents_after.front().variable == 1);
+
+    CHECK_FALSE(evaluateBoundConflict(literals, {}, std::vector<Real>{-1, 3}, upper, types));
+    CHECK_FALSE(evaluateBoundConflict(literals, {}, std::vector<Real>{-5, 2}, upper, types));
+    CHECK_FALSE(evaluateBoundConflict(literals, {}, lower, upper,
+                                      std::vector{VarType::Continuous, VarType::Integer}));
+    CHECK_FALSE(evaluateBoundConflict(literals, {}, lower, upper,
+                                      std::vector{VarType::SemiContinuous, VarType::Integer}));
+}
 
 TEST_CASE("Bound reasons: row antecedents survive tighter bounds and undo", "[domain][reasons]") {
     // -x + y <= 0. A reason for y's upper bound uses x's upper bound.

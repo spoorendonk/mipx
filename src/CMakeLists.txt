@@ -21,6 +21,7 @@ add_library(mipx STATIC
     io/model_reader.cpp
     io/solu_reader.cpp
     mip/bound_reasons.cpp
+    mip/bound_conflict.cpp
     mip/domain.cpp
     mip/implication_graph.cpp
     mip/variable_bounds.cpp

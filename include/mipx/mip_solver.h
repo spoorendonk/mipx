@@ -146,6 +146,10 @@ struct MipConflictStats {
     std::uint64_t watch_candidates = 0;
     std::uint64_t watch_body_scans = 0;
     std::uint64_t watch_literal_checks = 0;
+    Int bound_conflicts_learned = 0;
+    Int bound_conflict_subsumed = 0;
+    Int bound_conflict_tightenings = 0;
+    Int bound_conflict_cutoffs = 0;
 };
 
 struct MipPreRootStats {
@@ -488,6 +492,11 @@ public:
 
     /// Record propagation explanations in the node domains (off by default).
     void setBoundReasonsEnabled(bool enabled) { bound_reasons_enabled_ = enabled; }
+    /// Learn and propagate 1-UIP bound conflicts in the serial all-discrete tree.
+    /// Off by default.
+    void setBoundConflictLearningEnabled(bool enabled) {
+        bound_conflict_learning_enabled_ = enabled;
+    }
     /// Shorten serial tree no-goods with rechecked LP infeasibility rays. Off by default.
     void setConflictRayShorteningEnabled(bool enabled) {
         conflict_ray_shortening_enabled_ = enabled;
@@ -808,6 +817,14 @@ private:
                                const DualSimplexSolver* lp = nullptr,
                                const LpProblem* global_rows = nullptr,
                                std::span<const Index> local_rows = {});
+    void learnPropagationConflict(const std::vector<BranchDecision>& path,
+                                  const DomainPropagator& dp);
+    [[nodiscard]] bool boundConflictLearningActive() const {
+        return bound_conflict_learning_enabled_ && conflicts_enabled_ && num_threads_ <= 1 &&
+               model_continuous_vars_ == 0;
+    }
+    bool propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff, std::vector<Real>& lower,
+                                 std::vector<Real>& upper, std::vector<Index>& touched);
     bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
@@ -867,12 +884,16 @@ private:
         Int hits = 0;
         bool ray_shortened = false;
         std::uint64_t watch_id = 0;
+        std::optional<BoundReasonScope> bound_scope;
+        Int lbd = 0;
 
         /// Checked ray shortening proves the exact path endpoints.
         [[nodiscard]] Real tolerance() const { return ray_shortened ? 0.0 : 1e-9; }
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
+    void publishConflict(ConflictClause clause, bool lp_infeasible);
+    void recordConflictCutoff(ConflictClause& clause);
 
     // Problem data.
     LpProblem problem_;
@@ -934,6 +955,7 @@ private:
     bool conflicts_enabled_ = true;
     bool conflict_watches_enabled_ = false;
     bool bound_reasons_enabled_ = false;
+    bool bound_conflict_learning_enabled_ = false;
     bool conflict_ray_shortening_enabled_ = false;
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;
