@@ -3,6 +3,7 @@
 #include "test_paths.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -18,6 +19,23 @@ using Catch::Matchers::WithinULP;
 namespace fs = std::filesystem;
 
 using mipx::test::testDataDir;
+
+namespace mipx::test {
+struct DualSimplexPricingAccess {
+    static std::span<const Real> dseWeights(const DualSimplexSolver& solver) {
+        if (!solver.dse_weights_valid_) {
+            return {};
+        }
+        return solver.devex_weights_;
+    }
+
+    static Index pendingUpdates(const DualSimplexSolver& solver) { return solver.lu_.numUpdates(); }
+
+    static std::span<const Real> pricingWeights(const DualSimplexSolver& solver) {
+        return solver.devex_weights_;
+    }
+};
+}  // namespace mipx::test
 
 // ---------------------------------------------------------------------------
 // Helper: build a small LP manually
@@ -47,6 +65,140 @@ static LpProblem buildTrivialLP() {
     lp.matrix = SparseMatrix(1, 2, values, col_indices, row_starts);
 
     return lp;
+}
+
+static LpProblem buildDseRetentionLP() {
+    auto lp = buildTrivialLP();
+    lp.row_lower = lp.row_upper = {2.0};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 2.0}, {0, 1, 1.0}});
+    return lp;
+}
+
+static DualSimplexOptions dseRetentionOptions() {
+    DualSimplexOptions options;
+    options.retain_dse_weights = true;
+    options.pricing = PricingStrategy::SteepestEdge;
+    options.enable_scaling = false;
+    options.enable_cost_perturbation = false;
+    return options;
+}
+
+TEST_CASE("DualSimplex: retained DSE weights survive reinversion and bound changes",
+          "[dual_simplex][dse]") {
+    using Access = mipx::test::DualSimplexPricingAccess;
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    auto options = dseRetentionOptions();
+    options.lu_update_limit = 1;
+    solver.setOptions(options);
+    solver.load(buildDseRetentionLP());
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 1.0);
+    REQUIRE(solver.getDegeneracyStats().dual_pivots == 1);
+    REQUIRE(Access::pendingUpdates(solver) == 0);
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    // The all-slack weight was 1. The dual pivot (size 2) left 1 / 2^2.
+    REQUIRE(Access::dseWeights(solver)[0] == 0.25);
+
+    solver.setRowBounds(0, 3.0, 3.0);
+    result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 1.5);
+    CHECK(result.iterations == 0);
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    CHECK(Access::dseWeights(solver)[0] == 0.25);
+
+    solver.addRows(std::array{Index{0}}, std::array{Index{0}}, std::array{3.0}, std::array{-kInf},
+                   std::array{10.0});
+    result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 1.5);
+    CHECK(result.iterations == 0);
+    REQUIRE(Access::dseWeights(solver).size() == 2);
+    CHECK(Access::dseWeights(solver)[0] == 0.25);
+    CHECK(Access::dseWeights(solver)[1] == 1.0);
+}
+
+TEST_CASE("DualSimplex: a primal pivot invalidates retained DSE weights",
+          "[dual_simplex][dse][column_changes]") {
+    using Access = mipx::test::DualSimplexPricingAccess;
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.setOptions(dseRetentionOptions());
+    solver.load(buildDseRetentionLP());
+    REQUIRE(solver.solve().status == Status::Optimal);
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    CHECK(Access::dseWeights(solver)[0] == 0.25);
+
+    // A cheaper column, z, enters from a primal-feasible warm basis.
+    solver.addCols(std::array{Index{0}}, std::array{Index{0}}, std::array{4.0}, std::array{1.0},
+                   std::array{0.0}, std::array{kInf});
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    CHECK(Access::dseWeights(solver)[0] == 0.25);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 0.5);
+    REQUIRE(solver.getDegeneracyStats().primal_pivots == 1);
+    CHECK(Access::dseWeights(solver).empty());
+
+    // Tighten the new basic column's upper bound. The next dual pivot must
+    // start from unit weight and divide it by (2 / 4)^2.
+    solver.setColBounds(2, 0.0, 0.25);
+    result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 0.75);
+    REQUIRE(solver.getDegeneracyStats().dual_pivots == 1);
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    CHECK(Access::dseWeights(solver)[0] == 4.0);
+
+    solver.removeCols(std::array{Index{1}});  // no change to the basis matrix
+    REQUIRE(Access::dseWeights(solver).size() == 1);
+    CHECK(Access::dseWeights(solver)[0] == 4.0);
+    solver.removeCols(std::array{Index{0}});  // the remaining basic structural column
+    CHECK(Access::dseWeights(solver).empty());
+}
+
+TEST_CASE("DualSimplex: warm DSE pricing survives weight overflow", "[dual_simplex][dse]") {
+    using Access = mipx::test::DualSimplexPricingAccess;
+    LpProblem lp;
+    lp.num_rows = 2;
+    lp.num_cols = 4;
+    lp.obj = {0.0, 0.0, 0.0, 0.0};
+    lp.col_lower = {-kInf, -kInf, 0.0, 0.0};
+    lp.col_upper = {kInf, kInf, 0.0, 0.0};
+    lp.row_lower = lp.row_upper = {0.0, 0.0};
+    lp.matrix = SparseMatrix(
+        2, 4,
+        std::vector<Triplet>{
+            {0, 0, 2.0}, {1, 1, 2.0}, {0, 2, 2.0}, {1, 2, 32.0}, {0, 3, 32.0}, {1, 3, 2.0}});
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.setOptions(dseRetentionOptions());
+    solver.load(lp);
+    solver.setBasis(std::array{BasisStatus::Basic, BasisStatus::Basic, BasisStatus::Fixed,
+                               BasisStatus::Fixed, BasisStatus::Fixed, BasisStatus::Fixed});
+    REQUIRE(solver.solve().status == Status::Optimal);
+    solver.setIterationLimit(2);  // one warm pivot fits; re-crashing can take two
+
+    // Each solve takes one dual pivot to exchange a free basic variable and
+    // a fixed nonbasic one. Repeating the four bases amplifies the error of
+    // the unit initialization, even though the same small matrix is reused.
+    constexpr std::array<Index, 4> outgoing{0, 1, 2, 3};
+    constexpr std::array<Index, 4> incoming{2, 3, 0, 1};
+    bool discarded_weights = false;
+    for (int cycle = 0; cycle < 80; ++cycle) {
+        for (std::size_t step = 0; step < outgoing.size(); ++step) {
+            solver.setColBounds(outgoing[step], 1.0, 1.0);
+            solver.setColBounds(incoming[step], -kInf, kInf);
+            REQUIRE(solver.solve().status == Status::Optimal);
+            REQUIRE(solver.getDegeneracyStats().dual_pivots == 1);
+            discarded_weights |= Access::dseWeights(solver).empty();
+            REQUIRE(std::ranges::all_of(Access::pricingWeights(solver),
+                                        [](Real weight) { return std::isfinite(weight); }));
+        }
+    }
+    CHECK(discarded_weights);
 }
 
 // ---------------------------------------------------------------------------

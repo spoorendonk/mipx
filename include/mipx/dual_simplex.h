@@ -16,6 +16,10 @@
 
 namespace mipx {
 
+namespace test {
+struct DualSimplexPricingAccess;
+}
+
 /// Pricing strategy for the dual simplex CHUZR.
 enum class PricingStrategy : int {
     Devex = 0,         // Devex only (original behavior)
@@ -45,8 +49,8 @@ struct DualSimplexOptions {
     Real dse_fallback_cost_ratio = 0.20;
 
     // DSE weight initialization.
-    // Exact init (w_i = ||B^{-T} e_i||^2) requires m BTRANs and is repeated
-    // after every refactorization. Each per-refactor init costs O(m^2) work,
+    // Exact init (w_i = ||B^{-T} e_i||^2) requires m BTRANs and by default
+    // is repeated after every refactorization. Each exact init costs O(m^2) work,
     // which dominates total work on small/medium bases that solve in a few
     // hundred pivots. Default is approximate init (w_i = 1.0) — Goldfarb-Forrest
     // converges within O(m) pivots from this starting point, matching HiGHS/CLP.
@@ -281,6 +285,9 @@ struct DualSimplexOptions {
 
     // Optional cooperative stop flag for externally orchestrated solves.
     const std::atomic<bool>* stop_flag = nullptr;
+
+    // Keep DSE weights for the current basis across reinversions and warm solves.
+    bool retain_dse_weights = false;
 };
 
 class DualSimplexSolver : public LpSolver {
@@ -356,7 +363,7 @@ public:
     [[nodiscard]] Int getIterationLimit() const { return iter_limit_; }
     void getColBounds(Index col, Real& lower, Real& upper) const;
     void setVerbose(bool v) { verbose_ = v; }
-    void setOptions(const DualSimplexOptions& options) { options_ = options; }
+    void setOptions(const DualSimplexOptions& options);
     [[nodiscard]] const DualSimplexOptions& getOptions() const { return options_; }
 
     /// Access work unit counter (includes LU work).
@@ -490,6 +497,7 @@ public:
 
 private:
     friend class BarrierSolver;
+    friend struct test::DualSimplexPricingAccess;
 
     // Barrier's crossover load shares the solve deadline. A stopped load
     // leaves the solver unloaded.
@@ -624,7 +632,7 @@ private:
     BasisStartStats basis_start_stats_;
 
     // Pricing weights (one per basis position, size num_rows).
-    // When DSE is active, these hold exact steepest-edge weights w_i = ||B^{-1} e_i||^2.
+    // When DSE is active, these estimate steepest-edge weights w_i = ||B^{-T} e_i||^2.
     // When Devex is active, these hold approximate Devex weights.
     std::vector<Real> devex_weights_;
     Int devex_reset_count_ = 0;
@@ -642,12 +650,13 @@ private:
     static constexpr Real kPrimalDevexErrorRatio = 3.0;
 
     // DSE state.
-    bool dse_active_ = false;        // true when using DSE pricing
-    bool dse_fell_back_ = false;     // true once auto-fallback switched to Devex
-    Int dse_pivots_since_init_ = 0;  // pivots since last DSE weight init
-    double dse_btran_work_ = 0.0;    // cumulative DSE BTRAN work in window
-    double dse_total_work_ = 0.0;    // cumulative total iteration work in window
-    Int dse_window_pivots_ = 0;      // pivots counted in current window
+    bool dse_active_ = false;         // true when using DSE pricing
+    bool dse_fell_back_ = false;      // true once auto-fallback switched to Devex
+    bool dse_weights_valid_ = false;  // opted-in weights correspond to the current basis
+    Int dse_pivots_since_init_ = 0;   // pivots since last DSE weight init
+    double dse_btran_work_ = 0.0;     // cumulative DSE BTRAN work in window
+    double dse_total_work_ = 0.0;     // cumulative total iteration work in window
+    Int dse_window_pivots_ = 0;       // pivots counted in current window
 
     // Tolerances.
     static constexpr Real kPrimalTol = 1e-7;

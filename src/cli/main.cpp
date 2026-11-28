@@ -79,6 +79,7 @@ void printUsage(FILE* out) {
                  "[--dual-lu-update-limit N] "
                  "[--dual-lu-ft-drop-tol T] [--dual-dense-row-price] "
                  "[--dual-row-price-actual-work] "
+                 "[--dual-retain-dse-weights] "
                  "[--search-stable|--search-default|--search-aggressive] "
                  "[--root-heur-max-int-inf N] [--root-heur-max-int-vars N] "
                  "[--pdlp-opt-norm l2|linf] [--pdlp-restart-gap-decay F] "
@@ -213,6 +214,7 @@ int main(int argc, char* argv[]) {
     bool dual_dense_row_price = false;
     // Charges the row price its actual work (DualSimplexOptions::row_price_actual_work, #379).
     bool dual_row_price_actual_work = false;
+    bool dual_retain_dse_weights = false;
 
     // Parse optional arguments.
     for (int i = 2; i < argc; ++i) {
@@ -485,6 +487,8 @@ int main(int argc, char* argv[]) {
             dual_dense_row_price = true;
         } else if (arg == "--dual-row-price-actual-work") {
             dual_row_price_actual_work = true;
+        } else if (arg == "--dual-retain-dse-weights") {
+            dual_retain_dse_weights = true;
         } else if (arg == "--search-stable") {
             search_profile = mipx::SearchProfile::Stable;
             search_profile_explicit = true;
@@ -708,6 +712,7 @@ int main(int argc, char* argv[]) {
             solver.setRootPresolveOptions(presolve_opts);
             solver.setCutsEnabled(cuts_enabled);
             solver.setDualRowPriceActualWork(dual_row_price_actual_work);
+            solver.setDualRetainDseWeights(dual_retain_dse_weights);
             if (lp_mode == LpMode::Barrier) {
                 solver.setRootLpPolicy(mipx::RootLpPolicy::BarrierRoot);
             } else if (lp_mode == LpMode::Pdlp) {
@@ -1034,6 +1039,7 @@ int main(int argc, char* argv[]) {
                 }
                 dopts.force_dense_pivot_row = dual_dense_row_price;
                 dopts.row_price_actual_work = dual_row_price_actual_work;
+                dopts.retain_dse_weights = dual_retain_dse_weights;
                 if (seconds >= 0.0) {
                     dopts.max_solve_seconds = seconds;
                 }

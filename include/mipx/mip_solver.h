@@ -417,6 +417,7 @@ public:
     void setRootLpPolicy(RootLpPolicy policy) { root_lp_policy_ = policy; }
     /// Charge dual-simplex pivot-row assembly for the work it performs.
     void setDualRowPriceActualWork(bool enabled) { dual_row_price_actual_work_ = enabled; }
+    void setDualRetainDseWeights(bool enabled) { dual_retain_dse_weights_ = enabled; }
     void setBarrierAlgorithm(BarrierAlgorithm algo) { barrier_algorithm_ = algo; }
     void setBarrierOrdering(BarrierOrdering ord) { barrier_ordering_ = ord; }
     void setBarrierDualize(BarrierDualize mode) { barrier_dualize_ = mode; }
@@ -897,6 +898,7 @@ private:
     double cut_global_work_budget_ = 1.0e6;
     RootLpPolicy root_lp_policy_ = RootLpPolicy::DualDefault;
     bool dual_row_price_actual_work_ = false;
+    bool dual_retain_dse_weights_ = false;
     BarrierAlgorithm barrier_algorithm_ = BarrierAlgorithm::Auto;
     BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
     BarrierDualize barrier_dualize_ = BarrierDualize::Off;

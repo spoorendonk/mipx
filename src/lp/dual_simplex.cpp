@@ -162,6 +162,24 @@ inline void axpyInPlace(std::span<Real> dst, std::span<const Real> src, Real alp
 //  Load
 // ---------------------------------------------------------------------------
 
+void DualSimplexSolver::setOptions(const DualSimplexOptions& options) {
+    if (options_.retain_dse_weights &&
+        (!options.retain_dse_weights || options.pricing == PricingStrategy::Devex)) {
+        // The next solve may use the same vector for Devex.
+        if (dse_active_) {
+            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+            devex_reset_count_ = 0;
+            devex_clamp_row_ = -1;
+        }
+        dse_weights_valid_ = false;
+    }
+    if (options.dse_exact_init != options_.dse_exact_init ||
+        options.dse_exact_init_max_dim != options_.dse_exact_init_max_dim) {
+        dse_weights_valid_ = false;
+    }
+    options_ = options;
+}
+
 void DualSimplexSolver::load(const LpProblem& problem) {
     static_cast<void>(loadUntil(problem, {}));
 }
@@ -170,6 +188,7 @@ bool DualSimplexSolver::loadUntil(const LpProblem& problem, const Deadline& dead
     loaded_ = false;
     has_basis_ = false;
     factors_available_ = false;
+    dse_weights_valid_ = false;
     if (deadline.passed()) {
         return false;
     }
@@ -553,6 +572,7 @@ bool DualSimplexSolver::applyScaling(const Deadline& deadline) {
         return false;
     }
     factors_available_ = false;
+    dse_weights_valid_ = false;
     matrix_ = std::move(*scaled);
 
     // Scale bounds: row bounds *= row_scale, col bounds /= col_scale (since x = C * x').
@@ -678,6 +698,7 @@ void DualSimplexSolver::setupInitialBasis() {
     devex_weights_.assign(num_rows_, 1.0);
     devex_reset_count_ = 0;
     dse_active_ = false;
+    dse_weights_valid_ = false;
     dse_fell_back_ = false;
     dse_pivots_since_init_ = 0;
     dse_btran_work_ = 0.0;
@@ -828,6 +849,8 @@ bool DualSimplexSolver::refactorize(const Deadline& deadline) {
     // SparseLU::factorize(matrix, basis_cols) extracts columns basis_cols[i] from matrix.
     // So we need augmented_ to be [A | -I] and pass basis_ as basis_cols.
 
+    // LU applies its permutations internally. FTRAN/BTRAN still address the
+    // same basis positions, so a reinversion alone leaves DSE weights valid.
     factors_available_ = false;
     factors_available_ = lu_.factorizeUntil(augmented_, basis_, deadline);
     return factors_available_;
@@ -915,6 +938,12 @@ LpResult DualSimplexSolver::solveWithColdFallback(const Deadline& deadline, bool
     auto basis_pos = basis_pos_;
     auto nonbasic_pos = nonbasic_pos_;
     const bool dse_fell_back = dse_fell_back_;
+    const bool dse_active = dse_active_;
+    const bool dse_weights_valid = dse_weights_valid_;
+    std::vector<Real> dse_weights;
+    if (dse_weights_valid) {
+        dse_weights = devex_weights_;
+    }
     iter_limit_ = iter_limit - res.iterations;
     has_basis_ = false;
     LpResult cold = solveFromCurrentBasis(deadline);
@@ -938,6 +967,7 @@ LpResult DualSimplexSolver::solveWithColdFallback(const Deadline& deadline, bool
     primal_ray_.clear();
     status_ = cold.status;
     dse_fell_back_ = dse_fell_back;
+    dse_weights_valid_ = false;
     // The factors are the cold run's; getTableauRow (cut separation) reads
     // them against the restored basis.
     try {
@@ -945,6 +975,17 @@ LpResult DualSimplexSolver::solveWithColdFallback(const Deadline& deadline, bool
     } catch (const std::runtime_error&) {
         has_basis_ = false;
         return cold;
+    }
+    if (has_basis_ && options_.retain_dse_weights) {
+        if (dse_weights_valid) {
+            devex_weights_ = std::move(dse_weights);
+        } else {
+            std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+        }
+        dse_weights_valid_ = dse_weights_valid;
+        dse_active_ = dse_active;
+        devex_reset_count_ = 0;
+        devex_clamp_row_ = -1;
     }
     res.status = cold.status;
     res.iterations = cold.iterations;
@@ -1355,11 +1396,14 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
         // Put back with the point, so the next warm solve prices as it would
         // have without the clean-up.
         std::vector<Real> devex_weights;
+        bool dse_active;
+        bool dse_weights_valid;
     };
     std::optional<Point> scaled_point;
     if (primal_held) {
-        scaled_point = Point{primal_,   dual_,      reduced_cost_, var_status_,   basis_,
-                             nonbasic_, basis_pos_, nonbasic_pos_, devex_weights_};
+        scaled_point = Point{primal_,        dual_,       reduced_cost_,     var_status_,
+                             basis_,         nonbasic_,   basis_pos_,        nonbasic_pos_,
+                             devex_weights_, dse_active_, dse_weights_valid_};
     }
     if (!unapplyScaling(deadline)) {
         return keep ? res : withdrawVerdict(res, stoppedStatus(deadline));
@@ -1384,6 +1428,7 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
     scaled_ = true;
     factors_available_ = false;
     dse_fell_back_ = dse_fell_back;
+    dse_weights_valid_ = false;  // the clean-up's weights describe the unscaled matrix
     convertValues(false);
     std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
     // A certified optimum refuted only absolutely is traded only for a point
@@ -1408,6 +1453,10 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
         basis_pos_ = std::move(scaled_point->basis_pos);
         nonbasic_pos_ = std::move(scaled_point->nonbasic_pos);
         devex_weights_ = std::move(scaled_point->devex_weights);
+        dse_weights_valid_ = scaled_point->dse_weights_valid;
+        if (options_.retain_dse_weights) {
+            dse_active_ = scaled_point->dse_active;
+        }
         devex_clamp_row_ = kDevexClampAll;
         dual_ray_.clear();
         primal_ray_.clear();
@@ -1423,6 +1472,9 @@ LpResult DualSimplexSolver::cleanUpUnscaled(LpResult res, const Deadline& deadli
             has_basis_ = buildBasisMatrixSource(deadline) && refactorize(deadline);
         } catch (const std::runtime_error&) {
             has_basis_ = false;
+        }
+        if (!has_basis_) {
+            dse_weights_valid_ = false;
         }
     }
     if (restore) {
@@ -1456,6 +1508,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         }
         factors_available_ = false;
         has_basis_ = false;
+        dse_weights_valid_ = false;
         status_ = stoppedStatus(deadline);
         return {status_, getObjective(), iterations_};
     }
@@ -1761,6 +1814,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
     // Factorize basis.
     if (!factorBasis()) {
         has_basis_ = false;
+        dse_weights_valid_ = false;
         work_.add(lu_.workUnits());
         lu_.resetWorkUnits();
         return {status_, getObjective(), iterations_, work_.units() - work_at_start};
@@ -1781,15 +1835,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
     dse_total_work_ = 0.0;
     dse_window_pivots_ = 0;
 
-    // DSE weight initialization: set to 1.0 initially.
-    // The Goldfarb-Forrest update will refine them over subsequent pivots.
-    // Exact initialization (m BTRANs) is too expensive for large bases;
-    // starting from 1.0 converges within O(m) pivots in practice.
-    if (dse_active_) {
-        std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
-        devex_reset_count_ = 0;
-    }
-
     // Helper: initialize DSE weights.
     //
     // The exact initialization w_i = ||B^{-T} e_i||^2 requires m BTRANs and is
@@ -1806,6 +1851,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         if (!dse_active_) {
             return;
         }
+        // Preserve the fallback's per-refactor warmup policy.
+        dse_pivots_since_init_ = 0;
+        if (dse_weights_valid_) {
+            return;
+        }
         constexpr Index kExactInitMinDim = 50;
         if (options_.dse_exact_init && num_rows_ >= kExactInitMinDim &&
             num_rows_ <= options_.dse_exact_init_max_dim) {
@@ -1819,6 +1869,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
                 for (Index j = 0; j < num_rows_; ++j) {
                     norm_sq += ei[j] * ei[j];
                 }
+                if (options_.retain_dse_weights && !std::isfinite(norm_sq)) {
+                    // Fall back to the approximate initialization.
+                    std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+                    break;
+                }
                 devex_weights_[i] = std::max(kDualTol, norm_sq);
             }
         } else {
@@ -1826,7 +1881,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
         }
         devex_reset_count_ = 0;
-        dse_pivots_since_init_ = 0;
+        dse_weights_valid_ = options_.retain_dse_weights;
     };
     initDseWeights();
 
@@ -1834,6 +1889,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
     auto fallbackToDevex = [&]() {
         dse_active_ = false;
         dse_fell_back_ = true;
+        dse_weights_valid_ = false;
         std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
         devex_reset_count_ = 0;
     };
@@ -3031,6 +3087,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
         }
 
         // ---- CHUZR: Find leaving variable (Devex pricing) ----
+        // Reinitialize after an untracked pivot or an invalid weight update,
+        // even when there was no reinversion.
+        if (options_.retain_dse_weights && dse_active_ && !dse_weights_valid_ &&
+            !infeasible_rows.empty()) {
+            initDseWeights();
+        }
         Index leaving_row = -1;
         Real max_score = 0.0;
         Int current_pinf_count = 0;
@@ -3049,7 +3111,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             }
 
             if (viol > kPrimalTol) {
-                return viol * viol / devex_weights_[i];
+                const Real score = viol * viol / devex_weights_[i];
+                if (score == 0.0 && dse_active_ && options_.retain_dse_weights) {
+                    // A very large retained weight can underflow the score.
+                    // The violated row must still be eligible to leave.
+                    return std::numeric_limits<Real>::min();
+                }
+                return score;
             }
             return 0.0;
         };
@@ -3671,6 +3739,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             // Swap basis.
             ++basis_epoch;
             basis_[leaving_row_p] = entering_p;
+            dse_weights_valid_ = false;
             basis_pos_[entering_p] = leaving_row_p;
             repair_rejected_row = -1;
             basis_pos_[leaving_var_p] = -1;
@@ -4497,6 +4566,15 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
             const Real d_p_inv = 1.0 / d_p;
             const Real w_p = devex_weights_[leaving_row];
 
+            auto storeDseWeight = [&](Index i, Real weight) {
+                // Approximation errors can grow across many warm re-solves.
+                // Restart pricing before a nonfinite estimate hides a row.
+                if (dse_weights_valid_ && !std::isfinite(weight)) {
+                    dse_weights_valid_ = false;
+                }
+                devex_weights_[i] = std::max(kDualTol, weight);
+            };
+
             // A row with d_i == 0 keeps w_i exactly, which only clamps it to
             // kDualTol, and every weight but devex_clamp_row_ is already at
             // least that: the support of d plus that row give what a loop over
@@ -4505,8 +4583,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
                 const Real d_i = pivot_col[i];
                 const Real ratio = d_i * d_p_inv;
                 const Real v_i = dse_tau[i];
-                Real w_new = devex_weights_[i] - 2.0 * ratio * v_i + ratio * ratio * w_p;
-                devex_weights_[i] = std::max(kDualTol, w_new);
+                storeDseWeight(i, devex_weights_[i] - 2.0 * ratio * v_i + ratio * ratio * w_p);
             };
             std::size_t dse_rows = pivot_col_support.size();
             if (devex_clamp_row_ == kDevexClampAll) {
@@ -4528,7 +4605,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
                         std::max(kDualTol, devex_weights_[devex_clamp_row_]);
                 }
             }
-            devex_weights_[leaving_row] = std::max(kDualTol, w_p / (d_p * d_p));
+            storeDseWeight(leaving_row, w_p / (d_p * d_p));
+            if (options_.retain_dse_weights && !dse_weights_valid_) {
+                std::fill(devex_weights_.begin(), devex_weights_.end(), 1.0);
+            }
             // Every weight is now at least kDualTol.
             devex_clamp_row_ = -1;
 
@@ -4714,6 +4794,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis(const Deadline& deadline) {
 
     // Tableau reads need completed factors, even on a limit.
     has_basis_ = factors_available_ && status_ != Status::Error;
+    if (!has_basis_) {
+        dse_weights_valid_ = false;
+    }
 
     // Final iteration log (only if it wouldn't duplicate a periodic line).
     if (verbose_ && (iterations_ % kLogFrequency) != 0) {
@@ -4972,6 +5055,7 @@ void DualSimplexSolver::setBasis(std::span<const BasisStatus> basis) {
     devex_weights_.assign(num_rows_, 1.0);
     devex_reset_count_ = 0;
     dse_active_ = false;
+    dse_weights_valid_ = false;
     dse_pivots_since_init_ = 0;
     dse_btran_work_ = 0.0;
     dse_total_work_ = 0.0;
@@ -5172,6 +5256,8 @@ void DualSimplexSolver::addRows(std::span<const Index> starts, std::span<const I
     primal_.resize(new_total);
     reduced_cost_.resize(new_total, 0.0);
     dual_.resize(num_rows_, 0.0);
+    // With new logicals basic, B grows by a lower-left block and -I.
+    // The old rows of B^{-1} acquire only zeros in the new coordinates.
     devex_weights_.resize(num_rows_, 1.0);
 
     // With no basis to extend, resizing is all there is to do: pushing the new
@@ -5223,6 +5309,7 @@ bool DualSimplexSolver::unapplyScaling(const Deadline& deadline) {
         return false;
     }
     factors_available_ = false;
+    dse_weights_valid_ = false;
     matrix_ = std::move(*unscaled);
     for (Index i = 0; i < num_rows_; ++i) {
         if (row_lower_[i] != -kInf) {
@@ -5479,6 +5566,7 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
             }
             dual_.assign(static_cast<std::size_t>(num_rows_), 0.0);
             devex_weights_.assign(static_cast<std::size_t>(num_rows_), 1.0);
+            dse_weights_valid_ = false;
             devex_reset_count_ = 0;
             has_basis_ = true;
             return;
@@ -5499,6 +5587,7 @@ void DualSimplexSolver::dropBasis() {
     const Index new_vars = numVars();
     has_basis_ = false;
     factors_available_ = false;
+    dse_weights_valid_ = false;
     basis_.assign(static_cast<std::size_t>(num_rows_), -1);
     basis_pos_.assign(static_cast<std::size_t>(new_vars), -1);
     nonbasic_.clear();
@@ -5639,6 +5728,7 @@ bool DualSimplexSolver::swapOutBasicColumns(std::span<const Index> cols) {
     if (positions.empty()) {
         return true;
     }
+    dse_weights_valid_ = false;
     static_cast<void>(buildBasisMatrixSource());
     try {
         refactorize();

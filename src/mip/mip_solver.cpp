@@ -53,9 +53,10 @@ void setLpDeadline(DualSimplexSolver& lp, Deadline deadline) {
     lp.setOptions(opts);
 }
 
-void setLpRowPriceActualWork(DualSimplexSolver& lp, bool enabled) {
+void setLpPricingOptions(DualSimplexSolver& lp, bool row_price_actual_work, bool retain_dse) {
     auto opts = lp.getOptions();
-    opts.row_price_actual_work = enabled;
+    opts.row_price_actual_work = row_price_actual_work;
+    opts.retain_dse_weights = retain_dse;
     lp.setOptions(opts);
 }
 
@@ -808,10 +809,10 @@ struct LpLightGuide {
 // `seconds` bounds the solve (the MIP deadline's time left, #336); negative
 // means no limit.
 std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem, double seconds,
-                                              bool row_price_actual_work) {
+                                              bool row_price_actual_work, bool retain_dse) {
 #ifdef MIPX_HAS_LP_LIGHT
     DualSimplexSolver lp;
-    setLpRowPriceActualWork(lp, row_price_actual_work);
+    setLpPricingOptions(lp, row_price_actual_work, retain_dse);
     lp.load(problem);
     lp.setVerbose(false);
     setLpTimeLimit(lp, seconds);
@@ -829,14 +830,18 @@ std::optional<LpLightGuide> solveLpLightGuide(const LpProblem& problem, double s
     (void)problem;
     (void)seconds;
     (void)row_price_actual_work;
+    (void)retain_dse;
     return std::nullopt;
 #endif
 }
 
-std::optional<HeuristicSolution> runLpLightFpr(
-    const LpProblem& problem, std::span<const Index> discrete_vars,
-    std::span<const Real> lp_primals, std::span<const Real> reduced_costs, std::mt19937_64& rng,
-    Real incumbent, double& work_units, Deadline deadline, bool row_price_actual_work) {
+std::optional<HeuristicSolution> runLpLightFpr(const LpProblem& problem,
+                                               std::span<const Index> discrete_vars,
+                                               std::span<const Real> lp_primals,
+                                               std::span<const Real> reduced_costs,
+                                               std::mt19937_64& rng, Real incumbent,
+                                               double& work_units, Deadline deadline,
+                                               bool row_price_actual_work, bool retain_dse) {
     // Scylla-style LP-light FPR: LP-fractionality ranking + fix/propagate/repair,
     // with an in-repo mipx sub-MIP neighborhood polish step. The sub-MIP gets
     // the smaller of its own budget and the time `deadline` leaves (#355).
@@ -917,6 +922,7 @@ std::optional<HeuristicSolution> runLpLightFpr(
 
         MipSolver sub_solver;
         sub_solver.setDualRowPriceActualWork(row_price_actual_work);
+        sub_solver.setDualRetainDseWeights(retain_dse);
         sub_solver.setVerbose(false);
         sub_solver.setPresolve(false);
         sub_solver.setCutsEnabled(false);
@@ -2056,7 +2062,7 @@ std::optional<HeuristicSolution> MipSolver::completeIncumbent(const LpProblem& m
     }
     if (any_continuous) {
         DualSimplexSolver completion;
-        setLpRowPriceActualWork(completion, dual_row_price_actual_work_);
+        setLpPricingOptions(completion, dual_row_price_actual_work_, dual_retain_dse_weights_);
         completion.setVerbose(false);
         setLpDeadline(completion, deadline);
         completion.setIterationLimit(std::max<Int>(1000, 2 * (model.num_rows + model.num_cols)));
@@ -3845,7 +3851,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         active_workers.reserve(static_cast<std::size_t>(actual_threads));
         for (Int t = 0; t < actual_threads; ++t) {
             auto& worker_ctx = workers[static_cast<std::size_t>(t)];
-            setLpRowPriceActualWork(worker_ctx.lp, dual_row_price_actual_work_);
+            setLpPricingOptions(worker_ctx.lp, dual_row_price_actual_work_,
+                                dual_retain_dse_weights_);
             worker_ctx.lp.load(problem_);
             worker_ctx.lp.setVerbose(false);
             setLpDeadline(worker_ctx.lp, Deadline::after(timeLeft()));
@@ -4146,7 +4153,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     auto worker = [&](Int thread_id) {
         // Create thread-local LP solver by loading problem fresh.
         DualSimplexSolver local_lp;
-        setLpRowPriceActualWork(local_lp, dual_row_price_actual_work_);
+        setLpPricingOptions(local_lp, dual_row_price_actual_work_, dual_retain_dse_weights_);
         local_lp.load(problem_);
         local_lp.setVerbose(false);
         setLpDeadline(local_lp, Deadline::after(timeLeft()));
@@ -4462,7 +4469,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& /*root_lp*/, NodeQueue& q
     }
     // Need a mutable LP solver for serial path.
     DualSimplexSolver lp;
-    setLpRowPriceActualWork(lp, dual_row_price_actual_work_);
+    setLpPricingOptions(lp, dual_row_price_actual_work_, dual_retain_dse_weights_);
     lp.load(problem_);
     auto root_result = lp.solve();
     total_lp_iters += root_result.iterations;
@@ -5065,7 +5072,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
 
         DualSimplexSolver lp;
-        setLpRowPriceActualWork(lp, dual_row_price_actual_work_);
+        setLpPricingOptions(lp, dual_row_price_actual_work_, dual_retain_dse_weights_);
         lp.load(problem_);
         lp.setVerbose(verbose_);
         setLpTimeLimit(lp, timeLeft());
@@ -5165,7 +5172,8 @@ MipResult MipSolver::solveMinimizationOnce() {
 
         std::optional<LpLightGuide> lp_light_guide;
         if (pre_root_stats_.lp_light_available) {
-            lp_light_guide = solveLpLightGuide(problem_, timeLeft(), dual_row_price_actual_work_);
+            lp_light_guide = solveLpLightGuide(problem_, timeLeft(), dual_row_price_actual_work_,
+                                               dual_retain_dse_weights_);
             if (lp_light_guide.has_value()) {
                 pre_root_stats_.lp_light_lp_solves = 1;
                 pre_root_stats_.lp_light_lp_iterations = lp_light_guide->iterations;
@@ -5511,10 +5519,11 @@ MipResult MipSolver::solveMinimizationOnce() {
                         if (!run_lp_light_arms) {
                             break;
                         }
-                        out.candidate = runLpLightFpr(
-                            round_problem, discrete_vars, lp_light_primals, lp_light_reduced_costs,
-                            round_rng, incumbent_for_round, out.local_work,
-                            Deadline::after(timeLeft()), dual_row_price_actual_work_);
+                        out.candidate =
+                            runLpLightFpr(round_problem, discrete_vars, lp_light_primals,
+                                          lp_light_reduced_costs, round_rng, incumbent_for_round,
+                                          out.local_work, Deadline::after(timeLeft()),
+                                          dual_row_price_actual_work_, dual_retain_dse_weights_);
                         break;
                     }
                     case PreRootArm::LpLightDiving: {
@@ -5765,7 +5774,7 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     // Solve root LP.
     DualSimplexSolver lp;
-    setLpRowPriceActualWork(lp, dual_row_price_actual_work_);
+    setLpPricingOptions(lp, dual_row_price_actual_work_, dual_retain_dse_weights_);
     lp.load(problem_);
     lp.setVerbose(false);
 
@@ -5849,6 +5858,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             solver.setVerbose(false);
             auto opts = solver.getOptions();
             opts.row_price_actual_work = dual_row_price_actual_work_;
+            opts.retain_dse_weights = dual_retain_dse_weights_;
             opts.stop_flag = stop_flag;
             opts.max_solve_seconds = timeLeft();
             solver.setOptions(opts);
