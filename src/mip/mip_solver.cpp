@@ -6117,7 +6117,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         MipResult result;
         result.status = Status::Optimal;
         result.objective = incumbent;
-        result.best_bound = root_bound;
+        result.best_bound = native_sos2 ? std::min(root_bound, incumbent) : root_bound;
         result.gap = 0.0;
         result.nodes = 1;
         result.lp_iterations = total_lp_iters;

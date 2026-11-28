@@ -1185,24 +1185,57 @@ TEST_CASE("MPS export preserves SOS2 constraints in a lowered native model",
     lp.col_lower.assign(4, 0.0);
     lp.col_upper.assign(4, 1.0);
     lp.col_type.assign(4, VarType::Continuous);
-    lp.col_names = {"endpoint"};
+    lp.col_names = {"S2"};
+    lp.col_type[2] = VarType::Binary;
+    lp.col_upper[2] = 0.0;
     lp.num_rows = 1;
     lp.row_lower = {-kInf};
     lp.row_upper = {1.0};
     lp.matrix = SparseMatrix(1, lp.num_cols, {{0, 1, 1.0}});
-    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2, 3}, {}, "sos2"}};
+    lp.sos_constraints = {
+        {LpProblem::SosConstraint::Type::Sos2, {3, 1, 0, 2}, {4.0, 2.0, 1.0, 3.0}, "sos2"}};
+    auto expected = Status::Optimal;
+    SECTION("Weighted order and missing names survive the round trip") {}
+    SECTION("Generated names avoid collisions with supplied names") {
+        lp.col_names = {"C1"};
+        lp.row_names = {"R1"};
+        lp.num_rows = 2;
+        lp.row_lower.push_back(-kInf);
+        lp.row_upper.push_back(1.0);
+        lp.matrix = SparseMatrix(2, lp.num_cols, {{0, 1, 1.0}, {1, 2, 1.0}});
+    }
+    SECTION("Nonadjacent signed bounds remain infeasible") {
+        lp.col_lower[0] = lp.col_upper[0] = -5e-10;
+        lp.col_lower[3] = lp.col_upper[3] = -5e-10;
+        expected = Status::Infeasible;
+    }
     const auto native = linearizeModelFeatures(lp, Sos2Formulation::Native);
     const auto path = std::filesystem::temp_directory_path() /
                       ("mipx_native_sos2_" + std::to_string(::getpid()) + ".mps");
     writeMps(path.string(), native);
     const auto reread = readMps(path.string());
     std::filesystem::remove(path);
-    CHECK(std::ranges::find(reread.col_names, "endpoint") != reread.col_names.end());
-    CHECK(std::ranges::find(reread.col_names, "C3") != reread.col_names.end());
-    CHECK(std::ranges::find(reread.row_names, "R0") != reread.row_names.end());
-    const auto result = solveFeatureModel(reread);
-    REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-7));
+    if (lp.num_rows == 2) {
+        CHECK(reread.col_names == std::vector<std::string>{"C1", "C1_", "C2", "C3"});
+        CHECK(reread.row_names == std::vector<std::string>{"R1", "R1_"});
+    } else {
+        CHECK(reread.col_names == std::vector<std::string>{"S2", "C1", "C2", "C3"});
+        CHECK(reread.row_names == std::vector<std::string>{"R0"});
+    }
+    CHECK(reread.col_lower == lp.col_lower);
+    CHECK(reread.col_upper == lp.col_upper);
+    CHECK(reread.col_type == lp.col_type);
+    REQUIRE(reread.sos_constraints.size() == 1);
+    CHECK(reread.sos_constraints.front().vars == std::vector<Index>{0, 1, 2, 3});
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setSos2NativeBranching(true);
+    solver.load(reread);
+    const auto result = solver.solve();
+    REQUIRE(result.status == expected);
+    if (expected == Status::Optimal) {
+        CHECK_THAT(result.objective, WithinAbs(1.0, 1e-7));
+    }
 }
 
 TEST_CASE("Presolve stopped at its deadline returns an identity postsolve",

@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace mipx {
 
@@ -23,19 +25,47 @@ bool rangedAsGreater(Real lo, Real up) {
     return up - range != lo && lo + range == up;
 }
 
+std::vector<std::string> fillMpsNames(const std::vector<std::string>& supplied, Index count,
+                                      char prefix) {
+    std::unordered_set<std::string> reserved(supplied.begin(), supplied.end());
+    std::vector<std::string> names = supplied;
+    names.resize(count);
+    for (Index i = 0; i < count; ++i) {
+        if (names[i].empty()) {
+            auto name = std::format("{}{}", prefix, i);
+            while (!reserved.insert(name).second) {
+                name += '_';
+            }
+            names[i] = std::move(name);
+        }
+    }
+    return names;
+}
+
+std::string mpsName(const std::vector<std::string>& names, Index i, char prefix) {
+    return i < static_cast<Index>(names.size()) && !names[i].empty()
+               ? names[i]
+               : std::format("{}{}", prefix, i);
+}
+
 }  // namespace
 
 void writeMps(const std::string& filename, const LpProblem& input) {
     LpProblem linearized;
     const LpProblem* problem = &input;
-    if (!input.native_sos2.empty()) {
-        // Preserve the ordered sets with distinct row names in the MPS.
-        linearized = linearizeModelFeatures(input, Sos2Formulation::AdjacentIntervals);
-        problem = &linearized;
-    } else if (hasAdvancedModelFeatures(input)) {
-        linearized = linearizeModelFeatures(input);
+    if (hasAdvancedModelFeatures(input)) {
+        linearized = input.native_sos2.empty()
+                         ? linearizeModelFeatures(input)
+                         : linearizeModelFeatures(input, Sos2Formulation::Native);
         problem = &linearized;
     }
+    const bool native_sos2 = !problem->native_sos2.empty();
+    const auto native_cols = native_sos2 ? fillMpsNames(problem->col_names, problem->num_cols, 'C')
+                                         : std::vector<std::string>{};
+    const auto native_rows = native_sos2 ? fillMpsNames(problem->row_names, problem->num_rows, 'R')
+                                         : std::vector<std::string>{};
+    const auto& col_names = native_sos2 ? native_cols : problem->col_names;
+    const auto& row_names = native_sos2 ? native_rows : problem->row_names;
     std::ofstream out(filename);
     if (!out.is_open()) {
         throw std::runtime_error("Cannot open file for writing: " + filename);
@@ -51,8 +81,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
     // objective's coefficients and its constant.
     std::string obj_name = "obj";
     {
-        const std::unordered_set<std::string> taken(problem->row_names.begin(),
-                                                    problem->row_names.end());
+        const std::unordered_set<std::string> taken(row_names.begin(), row_names.end());
         // Unnamed rows are written as R<i>, which never starts with "obj".
         while (taken.contains(obj_name)) {
             obj_name += '_';
@@ -83,9 +112,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             // Ranged: written with RANGES, as L or G (see rangedAsGreater).
             sense = rangedAsGreater(lo, up) ? 'G' : 'L';
         }
-        const std::string& name = i < static_cast<Index>(problem->row_names.size())
-                                      ? problem->row_names[i]
-                                      : std::format("R{}", i);
+        const auto name = mpsName(row_names, i, 'R');
         out << " " << sense << "  " << name << '\n';
     }
 
@@ -105,13 +132,12 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             in_int = false;
         }
 
-        const std::string& col_name = j < static_cast<Index>(problem->col_names.size())
-                                          ? problem->col_names[j]
-                                          : std::format("C{}", j);
+        const auto col_name = mpsName(col_names, j, 'C');
 
-        // Objective coefficient.
-        if (j < static_cast<Index>(problem->obj.size()) && problem->obj[j] != 0.0) {
-            out << "    " << col_name << "  " << obj_name << "  " << problem->obj[j] << '\n';
+        // Declare even empty columns when an SOS section can reference them.
+        const Real cost = j < static_cast<Index>(problem->obj.size()) ? problem->obj[j] : 0.0;
+        if (native_sos2 || cost != 0.0) {
+            out << "    " << col_name << "  " << obj_name << "  " << cost << '\n';
         }
 
         // Matrix coefficients for this column.
@@ -119,9 +145,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         for (Index i = 0; i < problem->num_rows; ++i) {
             Real val = problem->matrix.coeff(i, j);
             if (val != 0.0) {
-                const std::string& row_name = i < static_cast<Index>(problem->row_names.size())
-                                                  ? problem->row_names[i]
-                                                  : std::format("R{}", i);
+                const auto row_name = mpsName(row_names, i, 'R');
                 out << "    " << col_name << "  " << row_name << "  " << val << '\n';
             }
         }
@@ -151,9 +175,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
             rhs = rangedAsGreater(lo, up) ? lo : up;
         }
         if (rhs != 0.0) {
-            const std::string& name = i < static_cast<Index>(problem->row_names.size())
-                                          ? problem->row_names[i]
-                                          : std::format("R{}", i);
+            const auto name = mpsName(row_names, i, 'R');
             out << "    rhs  " << name << "  " << rhs << '\n';
         }
     }
@@ -168,9 +190,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
                 out << "RANGES\n";
                 has_ranges = true;
             }
-            const std::string& name = i < static_cast<Index>(problem->row_names.size())
-                                          ? problem->row_names[i]
-                                          : std::format("R{}", i);
+            const auto name = mpsName(row_names, i, 'R');
             out << "    rng  " << name << "  " << (up - lo) << '\n';
         }
     }
@@ -183,9 +203,7 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         VarType type = j < static_cast<Index>(problem->col_type.size()) ? problem->col_type[j]
                                                                         : VarType::Continuous;
 
-        const std::string& col_name = j < static_cast<Index>(problem->col_names.size())
-                                          ? problem->col_names[j]
-                                          : std::format("C{}", j);
+        const auto col_name = mpsName(col_names, j, 'C');
 
         bool default_bounds = (lo == 0.0 && up == kInf);
         if (type == VarType::Binary) {
@@ -194,6 +212,10 @@ void writeMps(const std::string& filename, const LpProblem& input) {
                 has_bounds = true;
             }
             out << " BV bnd  " << col_name << '\n';
+            if (native_sos2 && (lo != 0.0 || up != 1.0)) {
+                out << " LO bnd  " << col_name << "  " << lo << '\n'
+                    << " UP bnd  " << col_name << "  " << up << '\n';
+            }
         } else if (lo == up) {
             if (!has_bounds) {
                 out << "BOUNDS\n";
@@ -218,6 +240,17 @@ void writeMps(const std::string& filename, const LpProblem& input) {
         }
     }
 
+    if (native_sos2) {
+        out << "SOS\n";
+        for (std::size_t i = 0; i < problem->native_sos2.size(); ++i) {
+            out << " S2 native_sos2_" << i << '\n';
+            const auto& members = problem->native_sos2[i];
+            // Explicit weights preserve order even if a member is named S1 or S2.
+            for (std::size_t position = 0; position < members.size(); ++position) {
+                out << "    " << col_names[members[position]] << "  " << position + 1 << '\n';
+            }
+        }
+    }
     out << "ENDATA\n";
 }
 

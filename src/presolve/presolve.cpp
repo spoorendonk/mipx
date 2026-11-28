@@ -54,6 +54,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
