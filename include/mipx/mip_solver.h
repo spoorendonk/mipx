@@ -349,6 +349,27 @@ struct MipRapidLearningStats {
     std::uint64_t tree_conflict_cutoffs = 0;
 };
 
+enum class RootLpLookaheadStop { NotRun, Exhausted, WorkLimit, Deadline };
+
+struct MipRootLpLookaheadSample {
+    BranchDecision branch;  // Working column and depth.
+    MipDirectionalInferenceStats inference;
+    std::optional<Status> lp_status;
+    std::optional<Real> gain_per_unit;
+};
+
+struct MipRootLpLookaheadStats {
+    RootLpLookaheadStop stop = RootLpLookaheadStop::NotRun;
+    Int row_visits = 0;
+    Int lp_solves = 0;
+    Int lp_iterations = 0;
+    double lp_work_units = 0.0;
+    Int conflicts_imported = 0;
+    Int proofs_rejected = 0;
+    Int duplicate_conflicts = 0;
+    std::vector<MipRootLpLookaheadSample> samples;
+};
+
 /// Statistics for the root conflict graph / clique table.
 struct MipCliqueStats {
     bool enabled = false;
@@ -776,6 +797,12 @@ public:
         root_rapid_learning_row_budget_ = std::max<Int>(0, rows);
     }
     const MipRapidLearningStats& getRapidLearningStats() const { return rapid_learning_stats_; }
+    void setRootLpLookaheadEnabled(bool enabled) { root_lp_lookahead_enabled_ = enabled; }
+    void setRootLpLookaheadDepth(Int depth) { root_lp_lookahead_depth_ = std::clamp(depth, 2, 3); }
+    void setRootLpLookaheadWork(Int work) { root_lp_lookahead_work_ = std::max<Int>(0, work); }
+    const MipRootLpLookaheadStats& getRootLpLookaheadStats() const {
+        return root_lp_lookahead_stats_;
+    }
     /// Enable the root conflict graph / clique table. When on, cliques drive
     /// node domain propagation and maximal-clique separation at the root.
     void setCliqueTableEnabled(bool enabled) { clique_table_enabled_ = enabled; }
@@ -1024,6 +1051,10 @@ private:
     [[nodiscard]] bool runRootProbing();
     [[nodiscard]] bool runRootRapidLearning(SolutionPool& solutions, const LpProblem* loaded,
                                             const Presolver* postsolve);
+    void runRootLpLookahead(const DualSimplexOptions& root_options,
+                            std::span<const Real> root_primals,
+                            std::span<const BasisStatus> root_basis, Real root_objective,
+                            Real incumbent);
 
     [[nodiscard]] bool enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                              std::vector<Index>* tightened_vars = nullptr,
@@ -1051,7 +1082,8 @@ private:
         LpInfeasible,
         LpCutoff,
         RootProbe,
-        RootRapidLearning
+        RootRapidLearning,
+        RootLpLookahead
     };
     void publishConflict(ConflictClause clause, ConflictSource source);
     void recordConflictCutoff(ConflictClause& clause);
@@ -1233,7 +1265,11 @@ private:
     Int root_rapid_learning_max_nodes_ = 128;
     Int root_rapid_learning_row_budget_ = 20000;
     MipRapidLearningStats rapid_learning_stats_{};
-    bool rapid_learning_clauses_active_ = false;
+    bool root_learning_clauses_active_ = false;
+    bool root_lp_lookahead_enabled_ = false;
+    Int root_lp_lookahead_depth_ = 2;
+    Int root_lp_lookahead_work_ = 20000;
+    MipRootLpLookaheadStats root_lp_lookahead_stats_{};
 
     // Conflict graph / clique table, rebuilt at the root of every solve().
     bool clique_table_enabled_ = false;

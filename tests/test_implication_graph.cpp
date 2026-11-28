@@ -913,6 +913,7 @@ TEST_CASE("Global contradiction checking rejects local rows and objective cutoff
     REQUIRE_FALSE(dp.propagate());
     CHECK(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
     CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), {}));
+    CHECK_FALSE(checkedGlobalBoundConflict(model, *dp.boundReasons(), {}));
 
     dp.load(model, true, 0);
     dp.setBranchBound(0, false, 1.0, 1);
@@ -931,6 +932,140 @@ TEST_CASE("Global contradiction checking rejects local rows and objective cutoff
     CHECK(dp.objectiveInfeasible());
     CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
     CHECK_FALSE(checkedGlobalBoundConflict(model, *dp.boundReasons(), premises));
+}
+
+TEST_CASE("Root LP look-ahead publishes only checked propagation conflicts",
+          "[mip][probing][root-lookahead]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setConflictsEnabled(true);
+    solver.setBoundConflictLearningEnabled(false);
+    solver.setNumThreads(1);
+    solver.setRootLpLookaheadEnabled(true);
+    solver.setGapTolerance(0);
+    const auto& stats = solver.getRootLpLookaheadStats();
+
+    auto checked = makeProblem(1, 1, {{0, 0, 1}}, {-kInf}, {0.5}, {0}, {1}, {VarType::Binary});
+    checked.obj = {-1};
+    solver.load(checked);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(result.objective == 0);
+    CHECK(result.best_bound == 0);
+    REQUIRE(stats.samples.size() == 2);
+    CHECK(stats.samples[1].inference.cutoffs == 1);
+    CHECK_FALSE(stats.samples[1].lp_status);
+    CHECK_FALSE(stats.samples[1].gain_per_unit);
+    CHECK(stats.conflicts_imported == 1);
+    CHECK(stats.proofs_rejected == 0);
+    CHECK(solver.getConflictStats().bound_conflict_cutoffs == 1);
+
+    // The allowance ends just before replaying the contradictory row.
+    const Int work_without_proof = stats.row_visits + stats.lp_solves + stats.lp_iterations - 1;
+    solver.setRootLpLookaheadWork(work_without_proof);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(stats.stop == RootLpLookaheadStop::WorkLimit);
+    CHECK(stats.row_visits + stats.lp_solves + stats.lp_iterations == work_without_proof);
+    REQUIRE(stats.samples.size() == 2);
+    CHECK(stats.samples[1].inference.cutoffs == 1);
+    CHECK(stats.conflicts_imported == 0);
+    solver.setRootLpLookaheadWork(20000);
+
+    // y + z = z + w = w + y = 1 fixes all three continuous variables to
+    // 0.5 in the LP. Interval propagation cannot derive this when x = 0.
+    auto lp_only = makeProblem(
+        4, 4,
+        {{0, 1, 1},
+         {0, 2, 1},
+         {1, 2, 1},
+         {1, 3, 1},
+         {2, 1, 1},
+         {2, 3, 1},
+         {3, 0, -2},
+         {3, 1, 1},
+         {3, 2, 1},
+         {3, 3, 1}},
+        {1, 1, 1, -kInf}, {1, 1, 1, 1.25}, {0, 0, 0, 0}, {1, 1, 1, 1},
+        {VarType::Binary, VarType::Continuous, VarType::Continuous, VarType::Continuous});
+    lp_only.obj = {1, 0, 0, 0};
+    solver.load(lp_only);
+    const auto lp_result = solver.solve();
+    REQUIRE(lp_result.status == Status::Optimal);
+    CHECK(lp_result.objective == 1);
+    CHECK(lp_result.best_bound == 1);
+    REQUIRE(stats.samples.size() == 2);
+    CHECK(stats.samples[0].inference.cutoffs == 0);
+    CHECK(stats.samples[0].lp_status == Status::Infeasible);
+    CHECK_FALSE(stats.samples[0].gain_per_unit);
+    CHECK(stats.conflicts_imported == 0);
+}
+
+TEST_CASE("Root LP look-ahead bound clauses coexist with watched tree no-goods",
+          "[mip][conflicts][root-lookahead]") {
+    // a branches first because its objective penalty is large. The LP
+    // requires 0.25 <= x <= 0.75, but row propagation cannot derive this:
+    // the three continuous pair sums jointly fix their sum at 1.5. On the
+    // first side of a, a ray proves a branch on x impossible independently
+    // of a. On the other side the resulting no-good is reused. The separate
+    // z <= 0.49 row supplies a checked scoped clause during root look-ahead.
+    auto model =
+        makeProblem(7, 8,
+                    {{0, 0, -1},
+                     {0, 3, 1},
+                     {1, 0, 1},
+                     {1, 3, 1},
+                     {2, 2, 1},
+                     {3, 4, 1},
+                     {3, 5, 1},
+                     {4, 5, 1},
+                     {4, 6, 1},
+                     {5, 4, 1},
+                     {5, 6, 1},
+                     {6, 1, -2},
+                     {6, 4, 1},
+                     {6, 5, 1},
+                     {6, 6, 1},
+                     {7, 1, 2},
+                     {7, 4, 1},
+                     {7, 5, 1},
+                     {7, 6, 1}},
+                    {-0.5, 0.5, -kInf, 1, 1, 1, -kInf, -kInf}, {kInf, kInf, 0.49, 1, 1, 1, 1, 3},
+                    {0, 0, 0, 0, 0, 0, 0}, {1, 1, 1, kInf, 1, 1, 1},
+                    {VarType::Binary, VarType::Binary, VarType::Binary, VarType::Continuous,
+                     VarType::Continuous, VarType::Continuous, VarType::Continuous});
+    model.obj = {0, 1, -0.1, 5, 0, 0, 0};
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setConflictsEnabled(true);
+    solver.setConflictRayShorteningEnabled(true);
+    solver.setRootLpLookaheadEnabled(true);
+    solver.setNumThreads(1);
+    solver.load(model);
+
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    REQUIRE(solver.getRootLpLookaheadStats().conflicts_imported > 0);
+    const auto scan = solver.getConflictStats();
+    REQUIRE(scan.ray_reused > 0);
+
+    solver.setConflictWatchesEnabled(true);
+    for (Int run = 0; run < 2; ++run) {
+        REQUIRE(solver.solve().status == Status::Infeasible);
+        const auto& watched = solver.getConflictStats();
+        CHECK(watched.watch_candidates > 0);
+        CHECK(watched.ray_reused == scan.ray_reused);
+        CHECK(watched.bound_conflict_cutoffs == scan.bound_conflict_cutoffs);
+    }
 }
 
 TEST_CASE("Rapid learning imports a two-decision conflict into the main tree",

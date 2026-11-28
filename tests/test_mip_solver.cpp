@@ -3082,6 +3082,142 @@ TEST_CASE("MipSolver: directional inference counts distinct columns at the first
     CHECK(solver.getBranchInferenceStats().empty());
 }
 
+TEST_CASE("Root LP look-ahead warms a real root split within a deterministic work cap",
+          "[mip][branching][root-lookahead]") {
+    // Each binary x has a continuous t >= abs(x - 0.5). All binaries are
+    // equally fractional at the root, but their directional LP gains differ.
+    LpProblem model;
+    model.num_cols = 6;
+    model.num_rows = 6;
+    model.obj = {0, 0, 0, 1, 3, 2};
+    model.col_lower.assign(6, 0);
+    model.col_upper = {1, 1, 1, kInf, kInf, kInf};
+    model.col_type = {VarType::Binary,     VarType::Binary,     VarType::Binary,
+                      VarType::Continuous, VarType::Continuous, VarType::Continuous};
+    model.row_lower = {-0.5, 0.5, -0.5, 0.5, -0.5, 0.5};
+    model.row_upper.assign(6, kInf);
+    std::vector<Triplet> rows;
+    for (Index col = 0; col < 3; ++col) {
+        rows.insert(rows.end(), {{2 * col, col, -1},
+                                 {2 * col, col + 3, 1},
+                                 {2 * col + 1, col, 1},
+                                 {2 * col + 1, col + 3, 1}});
+    }
+    model.matrix = SparseMatrix(6, 6, rows);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(1);
+    solver.setGapTolerance(0);
+    solver.load(model);
+
+    Real optimum = kInf;
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        auto fixed = model;
+        for (Index col = 0; col < 3; ++col) {
+            fixed.col_lower[col] = fixed.col_upper[col] = (mask >> col) & 1u;
+        }
+        DualSimplexSolver lp;
+        lp.setVerbose(false);
+        lp.load(fixed);
+        const auto result = lp.solve();
+        REQUIRE(result.status == Status::Optimal);
+        optimum = std::min(optimum, result.objective);
+    }
+    REQUIRE(optimum == 3);
+    const auto check_optimal = [&]() {
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(result.objective == optimum);
+        CHECK(result.best_bound == optimum);
+        REQUIRE(result.solution.size() == 6);
+        CHECK(pointHoldsModel(model, result.solution));
+    };
+    check_optimal();
+    CHECK(solver.getRootLpLookaheadStats().stop == RootLpLookaheadStop::NotRun);
+    CHECK(solver.getBranchingStats().root_branch_variable == 0);
+
+    solver.setRootLpLookaheadEnabled(true);
+    const auto& stats = solver.getRootLpLookaheadStats();
+    for (const Int depth : {2, 3}) {
+        solver.setRootLpLookaheadDepth(depth);
+        check_optimal();
+        REQUIRE(stats.stop == RootLpLookaheadStop::Exhausted);
+        REQUIRE(stats.samples.size() == (depth == 2 ? 12 : 28));
+        // At depth three the third column has enough samples in both
+        // directions to qualify as reliable.
+        CHECK(solver.getBranchingStats().root_branch_variable == (depth == 2 ? 1 : 2));
+        CHECK(stats.lp_solves == static_cast<Int>(stats.samples.size()));
+        for (std::size_t i = 0; i < stats.samples.size(); ++i) {
+            const auto& sample = stats.samples[i];
+            CAPTURE(i, depth, sample.branch.variable);
+            CHECK(sample.branch.level == (i < 4 ? 1 : i < 12 ? 2 : 3));
+            CHECK(sample.branch.is_upper == (i % 2 == 0));
+            CHECK(sample.branch.bound == (i % 2 == 0 ? 0 : 1));
+            if (i < 4) {
+                CHECK(sample.branch.variable == static_cast<Index>(i / 2));
+            }
+            CHECK(sample.inference.samples == 1);
+            CHECK(sample.inference.tightened_columns == 1);
+            REQUIRE(sample.lp_status == Status::Optimal);
+            REQUIRE(sample.gain_per_unit);
+            CHECK_THAT(*sample.gain_per_unit,
+                       WithinAbs(model.obj[sample.branch.variable + 3], 1e-12));
+        }
+    }
+
+    solver.setRootLpLookaheadWork(0);
+    check_optimal();
+    CHECK(stats.stop == RootLpLookaheadStop::WorkLimit);
+    CHECK(stats.samples.empty());
+    CHECK(solver.getBranchingStats().root_branch_variable == 0);
+
+    // The first branch visits its two incident rows, one of them twice
+    // after tightening t. A fourth unit starts an LP with zero pivots left.
+    for (const Int work : {3, 4}) {
+        solver.setRootLpLookaheadWork(work);
+        check_optimal();
+        CHECK(stats.stop == RootLpLookaheadStop::WorkLimit);
+        CHECK(stats.row_visits + stats.lp_solves + stats.lp_iterations == work);
+        REQUIRE(stats.samples.size() == 1);
+        CHECK_FALSE(stats.samples.front().gain_per_unit);
+        if (work == 3) {
+            CHECK_FALSE(stats.samples.front().lp_status);
+        } else {
+            CHECK(stats.samples.front().lp_status == Status::IterLimit);
+        }
+        CHECK(solver.getBranchingStats().root_branch_variable == 0);
+    }
+
+    // With x0 = 1, propagation rounds x1's upper bound to 0, while the
+    // pure-path LP still takes x1 = 0.5. The down branch can yield an LP
+    // gain but has no first-pass inference of its own.
+    rows.insert(rows.end(), {{6, 0, 1}, {6, 1, 2}});
+    model.num_rows = 7;
+    model.row_lower.push_back(-kInf);
+    model.row_upper.push_back(2);
+    model.matrix = SparseMatrix(7, 6, std::move(rows));
+    solver.load(model);
+    solver.setRootLpLookaheadDepth(2);
+    solver.setRootLpLookaheadWork(20000);
+    check_optimal();
+    REQUIRE(stats.samples.size() > 6);
+    const auto& already_entailed = stats.samples[6];
+    CHECK(already_entailed.branch.level == 2);
+    CHECK(already_entailed.branch.variable == 1);
+    CHECK(already_entailed.branch.is_upper);
+    CHECK(already_entailed.inference.skipped == 1);
+    CHECK(already_entailed.inference.samples == 0);
+    CHECK(already_entailed.inference.tightened_columns == 0);
+    CHECK(already_entailed.lp_status == Status::Optimal);
+    REQUIRE(already_entailed.gain_per_unit);
+    CHECK_THAT(*already_entailed.gain_per_unit, WithinAbs(3.0, 1e-12));
+}
+
 TEST_CASE("MipSolver: branch diagnostics observe serial reliability decisions only",
           "[mip][branching]") {
     auto lp = buildRcFixingKnapsackMip();

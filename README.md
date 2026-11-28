@@ -115,6 +115,8 @@ Key options:
 | `--systematic-probing-pairs <n>` / `--systematic-probing-rows <n>` | 128 / 10000 | Cap complete binary probe pairs and row visits per branch |
 | `--root-rapid-learning` / `--no-root-rapid-learning` | off | Search binary branches with row propagation before the root LP. Import checked global bounds, serial conflicts and validated incumbents. Stop after two consecutive eight-node blocks yield no new facts |
 | `--root-rapid-learning-nodes <n>` / `--root-rapid-learning-rows <n>` | 128 / 20000 | Cap search nodes and total row visits. A zero cap skips the stage |
+| `--root-lp-lookahead` / `--no-root-lp-lookahead` | off | Probe shallow paths after the first optimal root LP. Use qualified LP gains for pseudocosts and first-pass propagation for serial inference history when inference scoring or coverage is enabled. Publish independently checked global propagation conflicts to the serial tree |
+| `--root-lp-lookahead-depth <n>` / `--root-lp-lookahead-work <n>` | 2 / 20000 | Explore two levels, or three with depth `3`, subject to the solve deadline. Share one work allowance across propagation and proof row visits, LP starts and simplex iterations. A zero work cap skips the stage |
 | `--presolve-probing` / `--no-presolve-probing` | off | Probing pass inside presolve |
 | `--presolve-probing-rounds <n>` / `--presolve-probing-probes <n>` / `--presolve-probing-time <s>` | 2 / 5000 / 5 | Its budget, per presolve call |
 | `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |

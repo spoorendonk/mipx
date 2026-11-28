@@ -120,6 +120,20 @@ void ReliabilityBranching::updatePseudoCost(Index var, bool up_direction, Real g
     }
 }
 
+std::optional<Real> TreePseudocostSample::gainPerUnit() const {
+    if (status != Status::Optimal || cutoff || !std::isfinite(parent_objective) ||
+        !std::isfinite(objective) || !std::isfinite(branch_value)) {
+        return std::nullopt;
+    }
+    // is_upper means the child tightened x_j's upper bound: the down branch.
+    const Real dist = branch.is_upper ? branch_value - branch.bound : branch.bound - branch_value;
+    if (!std::isfinite(dist) || !(dist > 1e-8)) {
+        return std::nullopt;
+    }
+    const Real gain = std::max<Real>(0.0, objective - parent_objective) / dist;
+    return std::isfinite(gain) ? std::optional{gain} : std::nullopt;
+}
+
 bool ReliabilityBranching::updateFromChild(const TreePseudocostSample& sample,
                                            BranchingTelemetry& telemetry) {
     const Index var = sample.branch.variable;
@@ -130,15 +144,11 @@ bool ReliabilityBranching::updateFromChild(const TreePseudocostSample& sample,
         ++telemetry.pseudocost_tree_skipped;
         return false;
     }
-    // is_upper means the child tightened x_j's upper bound: the down branch.
-    const bool up_direction = !sample.branch.is_upper;
-    const Real dist = up_direction ? sample.branch.bound - sample.branch_value
-                                   : sample.branch_value - sample.branch.bound;
-    if (!(dist > 1e-8)) {
+    const auto gain = sample.gainPerUnit();
+    if (!gain) {
         return false;
     }
-    updatePseudoCost(var, up_direction,
-                     std::max<Real>(0.0, sample.objective - sample.parent_objective) / dist);
+    updatePseudoCost(var, !sample.branch.is_upper, *gain);
     ++telemetry.pseudocost_updates_tree;
     return true;
 }

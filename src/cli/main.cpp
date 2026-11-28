@@ -72,6 +72,8 @@ void printUsage(FILE* out) {
                  "[--systematic-probing-pairs N] [--systematic-probing-rows N] "
                  "[--root-rapid-learning|--no-root-rapid-learning] "
                  "[--root-rapid-learning-nodes N] [--root-rapid-learning-rows N] "
+                 "[--root-lp-lookahead|--no-root-lp-lookahead] "
+                 "[--root-lp-lookahead-depth 2|3] [--root-lp-lookahead-work N] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
                  "[--presolve-probing-probes N] [--presolve-probing-time S] "
                  "[--clique-table|--no-clique-table] "
@@ -233,6 +235,9 @@ int main(int argc, char* argv[]) {
     bool root_rapid_learning = false;
     std::optional<mipx::Int> rapid_learning_nodes;
     std::optional<mipx::Int> rapid_learning_rows;
+    bool root_lp_lookahead = false;
+    std::optional<mipx::Int> root_lp_lookahead_depth;
+    std::optional<mipx::Int> root_lp_lookahead_work;
     bool presolve_probing = false;
     std::optional<mipx::Int> presolve_probing_rounds;
     std::optional<mipx::Int> presolve_probing_probes;
@@ -387,7 +392,12 @@ int main(int argc, char* argv[]) {
             root_rapid_learning = true;
         } else if (arg == "--no-root-rapid-learning") {
             root_rapid_learning = false;
-        } else if ((arg == "--root-rapid-learning-nodes" || arg == "--root-rapid-learning-rows") &&
+        } else if (arg == "--root-lp-lookahead") {
+            root_lp_lookahead = true;
+        } else if (arg == "--no-root-lp-lookahead") {
+            root_lp_lookahead = false;
+        } else if ((arg == "--root-rapid-learning-nodes" || arg == "--root-rapid-learning-rows" ||
+                    arg == "--root-lp-lookahead-depth" || arg == "--root-lp-lookahead-work") &&
                    i + 1 < argc) {
             const std::string_view value = argv[++i];
             const auto end = value.data() + value.size();
@@ -397,8 +407,18 @@ int main(int argc, char* argv[]) {
                 std::fprintf(stderr, "%s requires a nonnegative integer\n", arg.c_str());
                 return 1;
             }
-            (arg == "--root-rapid-learning-nodes" ? rapid_learning_nodes : rapid_learning_rows) =
-                count;
+            if (arg == "--root-lp-lookahead-depth") {
+                if (count != 2 && count != 3) {
+                    std::fprintf(stderr, "%s requires 2 or 3\n", arg.c_str());
+                    return 1;
+                }
+                root_lp_lookahead_depth = count;
+            } else if (arg == "--root-lp-lookahead-work") {
+                root_lp_lookahead_work = count;
+            } else {
+                (arg == "--root-rapid-learning-nodes" ? rapid_learning_nodes
+                                                      : rapid_learning_rows) = count;
+            }
         } else if (arg == "--presolve-probing") {
             presolve_probing = true;
         } else if (arg == "--no-presolve-probing") {
@@ -959,6 +979,13 @@ int main(int argc, char* argv[]) {
             if (rapid_learning_rows) {
                 solver.setRootRapidLearningRowBudget(*rapid_learning_rows);
             }
+            solver.setRootLpLookaheadEnabled(root_lp_lookahead);
+            if (root_lp_lookahead_depth) {
+                solver.setRootLpLookaheadDepth(*root_lp_lookahead_depth);
+            }
+            if (root_lp_lookahead_work) {
+                solver.setRootLpLookaheadWork(*root_lp_lookahead_work);
+            }
             solver.setCliqueTableEnabled(clique_table_enabled);
             if (plunge_depth || plunge_bound_quotient) {
                 // The setter takes both; whichever was not given keeps the
@@ -1106,6 +1133,24 @@ int main(int argc, char* argv[]) {
                     stats.duplicate_conflicts, stats.incumbents_rejected,
                     static_cast<unsigned long long>(stats.tree_conflict_tightenings),
                     static_cast<unsigned long long>(stats.tree_conflict_cutoffs));
+            }
+            if (root_lp_lookahead) {
+                const auto& stats = solver.getRootLpLookaheadStats();
+                constexpr auto stops = std::array{"not-run", "exhausted", "work-limit", "deadline"};
+                mipx::Int gains = 0;
+                mipx::Int depth = 0;
+                for (const auto& sample : stats.samples) {
+                    gains += sample.gain_per_unit.has_value();
+                    depth = std::max(depth, sample.branch.level);
+                }
+                log.log(
+                    "Root LP look-ahead: stop=%s depth=%d rows=%d lp_solves=%d lp_iters=%d "
+                    "gains=%d conflicts=%d rejected_proofs=%d duplicate_conflicts=%d "
+                    "root_branch=%d\n",
+                    stops[static_cast<std::size_t>(stats.stop)], depth, stats.row_visits,
+                    stats.lp_solves, stats.lp_iterations, gains, stats.conflicts_imported,
+                    stats.proofs_rejected, stats.duplicate_conflicts,
+                    solver.getBranchingStats().root_branch_variable);
             }
             if (print_det_heur_gate) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",

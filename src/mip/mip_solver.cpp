@@ -2053,7 +2053,8 @@ void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
 
     clause.rapid_learning = source == ConflictSource::RootRapidLearning;
     if (conflict_restart_threshold_ > 0 && !clause.literals.empty() &&
-        source != ConflictSource::RootProbe && !clause.rapid_learning) {
+        source != ConflictSource::RootProbe && source != ConflictSource::RootLpLookahead &&
+        !clause.rapid_learning) {
         // One event per learned clause. Reuse improves branch scores but
         // does not make the same clause fresh restart evidence again.
         conflict_restart_activity_ += 1.0;
@@ -2113,7 +2114,8 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
         conflict_stats_.watch_body_scans += query.body_scans;
         conflict_stats_.watch_literal_checks += query.literal_checks;
         if (query.triggered) {
-            if (boundConflictLearningActive() || lpConflictProofsActive()) {
+            if (boundConflictLearningActive() || lpConflictProofsActive() ||
+                root_learning_clauses_active_) {
                 match = std::ranges::find_if(conflict_pool_, [&](const ConflictClause& clause) {
                     return !clause.bound_scope && clause.watch_id == *query.triggered;
                 });
@@ -2121,7 +2123,8 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
                 match = std::ranges::lower_bound(conflict_pool_, *query.triggered, {},
                                                  &ConflictClause::watch_id);
             }
-            assert(match != conflict_pool_.end() && match->watch_id == *query.triggered);
+            assert(match != conflict_pool_.end() && !match->bound_scope &&
+                   match->watch_id == *query.triggered);
         }
     } else {
         const auto triggers = [&](const ConflictClause& clause, const auto& check_literal) {
@@ -2826,15 +2829,15 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     bool bound_conflict_tightened = false;
-    const bool use_rapid_conflicts = use_conflicts && rapid_learning_clauses_active_;
-    if (use_bound_conflicts || use_lp_proofs || use_rapid_conflicts) {
+    const bool use_root_learning = use_conflicts && root_learning_clauses_active_;
+    if (use_bound_conflicts || use_lp_proofs || use_root_learning) {
         const auto before = touched_vars.size();
         if (!propagateBoundConflicts(lp, conflict_cutoff, current_lower, current_upper,
                                      touched_vars)) {
             return false;
         }
         bound_conflict_tightened = touched_vars.size() != before;
-        if ((use_lp_proofs || use_rapid_conflicts) && bound_conflict_tightened &&
+        if ((use_lp_proofs || use_root_learning) && bound_conflict_tightened &&
             std::isfinite(conflict_cutoff)) {
             // A later path fallback may depend on a cutoff-scoped clause or antecedent.
             fallback_scope = BoundReasonScope{.cutoff = conflict_cutoff};
@@ -4974,6 +4977,8 @@ MipResult MipSolver::solve() {
     branch_dual_degeneracy_stats_ = {};
     serial_node_policy_stats_ = {};
     rapid_learning_stats_ = {};
+    root_lp_lookahead_stats_ = {};
+    branching_stats_ = {};
     if (!loaded_) {
         return {};
     }
@@ -5172,6 +5177,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     branch_cutoff_stats_.clear();
     branch_cutoff_comparison_stats_ = {};
     branch_dual_degeneracy_stats_ = {};
+    branching_stats_ = {};
     search_stats_ = {};
     // A retry keeps work counters, but only the last attempt supplies a proof bound.
     serial_node_policy_stats_.proof_bound_improvement = 0.0;
@@ -5180,7 +5186,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
-    rapid_learning_clauses_active_ = false;
+    root_learning_clauses_active_ = false;
     implication_graph_ = {};
     vb_store_ = {};
     clique_stats_ = {};
@@ -5609,7 +5615,6 @@ MipResult MipSolver::solveMinimizationOnce() {
     // Set every solve, so turning strong branching back on takes effect.
     branching_rule_.setStrongBranchProbeBudget(
         strong_branching_enabled_ ? ReliabilityBranching::kDefaultStrongBranchProbeBudget : 0);
-    branching_stats_ = {};
     Real incumbent = kInf;
     std::vector<Real> best_solution;
     Int total_lp_iters = 0;
@@ -5680,7 +5685,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         const bool infeasible = runRootRapidLearning(
             solution_pool, using_transformed_problem ? &original_problem : nullptr,
             did_presolve ? &presolver : nullptr);
-        rapid_learning_clauses_active_ = rapid_learning_stats_.conflicts_imported > 0;
+        root_learning_clauses_active_ = rapid_learning_stats_.conflicts_imported > 0;
         total_work +=
             (static_cast<double>(rapid_learning_stats_.row_visits) + rapid_learning_stats_.nodes) *
             1e-6;
@@ -6806,6 +6811,19 @@ MipResult MipSolver::solveMinimizationOnce() {
         root_basis = lp.getBasis();
     }
 
+    // Samples and clauses belong to this working model. A fallback solve in
+    // different columns keeps the telemetry and starts with fresh history.
+    const bool ran_root_lookahead = root_lp_lookahead_enabled_ && !discrete_vars.empty() &&
+                                    root_lp_lookahead_stats_.stop == RootLpLookaheadStop::NotRun;
+    if (ran_root_lookahead) {
+        runRootLpLookahead(lp.getOptions(), root_primals, root_basis, root_bound, incumbent);
+        const auto& stats = root_lp_lookahead_stats_;
+        root_learning_clauses_active_ |= stats.conflicts_imported > 0;
+        total_lp_iters += stats.lp_iterations;
+        total_work +=
+            stats.lp_work_units + (static_cast<double>(stats.row_visits) + stats.lp_solves) * 1e-6;
+    }
+
     // The cut loop, the back-outs and the tree reuse this solver: each solve
     // that runs against the deadline sets its own limit.
     setLpTimeLimit(lp, -1.0);
@@ -7249,6 +7267,7 @@ MipResult MipSolver::solveMinimizationOnce() {
                                     : nullptr});
         const Index branch_var = selection.variable;
         if (branch_var >= 0) {
+            branching_stats_.root_branch_variable = branch_var;
             auto [left, right] =
                 createChildren(std::move(root_node), branch_var, root_primals[branch_var]);
             left.lp_bound = right.lp_bound = root_bound;
@@ -7289,6 +7308,17 @@ MipResult MipSolver::solveMinimizationOnce() {
         const Index history_columns = did_presolve ? original_problem.num_cols : problem_.num_cols;
         if (inference_coverage) {
             inference_history.resize(history_columns);
+            if (ran_root_lookahead) {
+                for (const auto& sample : root_lp_lookahead_stats_.samples) {
+                    const Index col = history_col_mapping.empty()
+                                          ? sample.branch.variable
+                                          : history_col_mapping[sample.branch.variable];
+                    auto& history = inference_history[col];
+                    auto& direction = sample.branch.is_upper ? history.down : history.up;
+                    direction.samples += sample.inference.samples;
+                    direction.tightened_columns += sample.inference.tightened_columns;
+                }
+            }
         }
         if (collect_cutoffs) {
             branch_cutoff_stats_.resize(history_columns);

@@ -178,6 +178,8 @@ struct BranchingTelemetry {
     /// Child nodes whose LP ended infeasible, cut off or without an optimum,
     /// so gave no gain to record.
     Int pseudocost_tree_skipped = 0;
+    /// Column chosen for the first ordinary root split, in working columns.
+    Index root_branch_variable = -1;
 
     BranchingTelemetry& operator+=(const BranchingTelemetry& other) {
         selections += other.selections;
@@ -213,6 +215,8 @@ struct TreePseudocostSample {
     /// The child's LP reached the incumbent's objective, so the node is cut
     /// off; its gain is bounded by the cutoff, not measured by the branching.
     bool cutoff = false;
+
+    [[nodiscard]] std::optional<Real> gainPerUnit() const;
 
     [[nodiscard]] static TreePseudocostSample fromChild(const BnbNode& child, Status status,
                                                         Real objective, bool cutoff = false) {

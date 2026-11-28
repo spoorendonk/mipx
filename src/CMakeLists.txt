@@ -27,6 +27,7 @@ add_library(mipx STATIC
     mip/variable_bounds.cpp
     mip/probing.cpp
     mip/rapid_learning.cpp
+    mip/root_lp_lookahead.cpp
     mip/conflict_graph.cpp
     mip/clique_table.cpp
     mip/node_queue.cpp
