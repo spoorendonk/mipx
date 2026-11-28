@@ -2579,6 +2579,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                          : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, opts, std_obj_offset_,
                                           dualized_obj_sign, z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {
+            // The dense NE first allocates its factor inside the IPM's start,
+            // and a rerun from another start would run out again (#480).
+            ipm_ran = false;
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
         }
