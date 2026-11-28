@@ -551,6 +551,8 @@ public:
     }
     /// Prefer a ready inference challenger within 1% of the serial pseudocost winner.
     void setInferenceBranchScoreEnabled(bool enabled) { inference_branch_score_enabled_ = enabled; }
+    /// Count qualified first-LP dispositions of actual serial variable children.
+    void setBranchCutoffStatsEnabled(bool enabled) { branch_cutoff_stats_enabled_ = enabled; }
     /// Learn pseudocosts from the gains of solved child nodes (#199). On by
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.
@@ -675,6 +677,10 @@ public:
     const BranchInferenceCoverageStats& getBranchInferenceCoverageStats() const {
         return branch_inference_coverage_stats_;
     }
+    /// Last serial solve attempt, indexed by original column before presolve.
+    const std::vector<MipBranchCutoffStats>& getBranchCutoffStats() const {
+        return branch_cutoff_stats_;
+    }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
     [[nodiscard]] ObjPropStats getObjPropStats() const {
@@ -777,7 +783,8 @@ private:
         std::unique_ptr<DomainPropagator> pre_lp_propagator;
         std::vector<MipBranchInferenceStats>* branch_inference = nullptr;
         std::span<MipBranchInferenceStats> branch_inference_history;
-        std::span<const Index> branch_inference_col_mapping;
+        std::span<MipBranchCutoffStats> branch_cutoff_history;
+        std::span<const Index> branch_history_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
         LpProblem* conflict_global_rows = nullptr;
         const LpProblem* reconvergence_model = nullptr;
@@ -800,7 +807,7 @@ private:
                      Int& total_lp_iters, double& total_work, HeuristicRuntime& heuristic_runtime,
                      SolutionPool& solution_pool, Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound, const std::function<double()>& elapsed,
-                     std::span<const Index> branch_inference_col_mapping,
+                     std::span<const Index> branch_history_col_mapping,
                      std::span<MipBranchInferenceStats> branch_inference_history = {},
                      LpProblem* conflict_global_rows = nullptr,
                      const LpProblem* reconvergence_model = nullptr);
@@ -1053,6 +1060,7 @@ private:
     bool directional_inference_enabled_ = false;
     bool inference_branch_coverage_enabled_ = false;
     bool inference_branch_score_enabled_ = false;
+    bool branch_cutoff_stats_enabled_ = false;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;
@@ -1093,6 +1101,7 @@ private:
     MipSerialNodePolicyStats serial_node_policy_stats_{};
     std::vector<MipBranchInferenceStats> branch_inference_stats_;
     BranchInferenceCoverageStats branch_inference_coverage_stats_;
+    std::vector<MipBranchCutoffStats> branch_cutoff_stats_;
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
     RcFixingStats rc_fixing_stats_{};

@@ -72,6 +72,16 @@ struct MipBranchInferenceStats {
     MipDirectionalInferenceStats up;
 };
 
+struct MipDirectionalCutoffStats {
+    uint64_t qualified_attempts = 0;
+    uint64_t cutoffs = 0;
+};
+
+struct MipBranchCutoffStats {
+    MipDirectionalCutoffStats down;
+    MipDirectionalCutoffStats up;
+};
+
 struct InferenceCoverageBand {
     /// A challenger exists within the score gap.
     uint64_t close = 0;

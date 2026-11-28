@@ -2749,6 +2749,7 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
 
     solver.setPreLpPropagationEnabled(true);
     solver.setDirectionalInferenceEnabled(true);
+    solver.setBranchCutoffStatsEnabled(true);
     for (int repeat = 0; repeat < 2; ++repeat) {
         const auto screened = solver.solve();
         REQUIRE(screened.status == Status::Optimal);
@@ -2769,6 +2770,11 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
         CHECK(inference[1].down.skipped == 0);
         CHECK(inference[1].up.cutoffs == 0);
         CHECK(inference[1].up.samples == 1);
+        const auto& cutoffs = solver.getBranchCutoffStats();
+        REQUIRE(cutoffs.size() == 3);
+        CHECK(cutoffs[1].down.qualified_attempts == 0);
+        CHECK(cutoffs[1].down.cutoffs == 0);
+        CHECK(cutoffs[1].up.qualified_attempts == 1);
         CHECK(stats.warm_starts + stats.cold_starts ==
               baseline_stats.warm_starts + baseline_stats.cold_starts - 1);
         CHECK(solver.getConflictStats().bound_infeasible_conflicts == 1);
@@ -2780,6 +2786,7 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
 
     solver.setPreLpPropagationEnabled(false);
     solver.setDirectionalInferenceEnabled(false);
+    solver.setBranchCutoffStatsEnabled(false);
     const auto explicitly_off = solver.solve();
     CHECK(explicitly_off.status == baseline.status);
     CHECK(explicitly_off.objective == baseline.objective);
@@ -2787,6 +2794,7 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
     CHECK(explicitly_off.lp_iterations == baseline.lp_iterations);
     CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
     CHECK(solver.getBranchInferenceStats().empty());
+    CHECK(solver.getBranchCutoffStats().empty());
 }
 
 TEST_CASE("MipSolver: directional inference counts distinct columns at the first pass",
@@ -2905,6 +2913,99 @@ TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions on
 #else
     CHECK(coverage.fallback.decisions > 0);
 #endif
+}
+
+TEST_CASE("MipSolver: first child LP cutoffs use original columns and normalized bounds",
+          "[mip][branching]") {
+    // The fixed first column is eliminated by presolve. The LP takes x=0.5,
+    // while x=0 gives the incumbent and x=1 has a worse optimum.
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.sense = Sense::Maximize;
+    lp.obj = {0.0, 0.0, -1.0};
+    lp.obj_offset = 19.0;
+    lp.col_lower = {1.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 4.0};
+    lp.col_type = {VarType::Continuous, VarType::Binary, VarType::Continuous};
+    lp.num_rows = 2;
+    lp.row_lower = {-2.0, 1.0};
+    lp.row_upper = {kInf, kInf};
+    lp.matrix = SparseMatrix(2, 3, {{0, 1, -4.0}, {0, 2, 1.0}, {1, 1, 2.0}, {1, 2, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setPreLpPropagationEnabled(false);
+    solver.setTreePseudocostsEnabled(false);
+    solver.setNumThreads(1);
+
+    SECTION("Optimal children count once and distinguish surviving and cutoff LPs") {
+        solver.setPresolve(GENERATE(false, true));
+        solver.load(lp);
+        const auto baseline = solver.solve();
+        REQUIRE(baseline.status == Status::Optimal);
+        CHECK(solver.getBranchCutoffStats().empty());
+        solver.setBranchCutoffStatsEnabled(true);
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            const auto result = solver.solve();
+            REQUIRE(result.status == Status::Optimal);
+            CHECK_THAT(result.objective, WithinAbs(18.0, 1e-9));
+            CHECK(result.best_bound == baseline.best_bound);
+            CHECK(result.nodes == baseline.nodes);
+            CHECK(result.lp_iterations == baseline.lp_iterations);
+            CHECK(result.work_units == baseline.work_units);
+            const auto& stats = solver.getBranchCutoffStats();
+            REQUIRE(stats.size() == 3);
+            CHECK(stats[1].down.qualified_attempts == 1);
+            CHECK(stats[1].down.cutoffs == 0);
+            CHECK(stats[1].up.qualified_attempts == 1);
+            CHECK(stats[1].up.cutoffs == 1);
+            for (Index j : {0, 2}) {
+                CHECK(stats[j].down.qualified_attempts == 0);
+                CHECK(stats[j].up.qualified_attempts == 0);
+            }
+        }
+        // A stop before the next tree must clear the previous solve's counts.
+        lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2}, {}, "sos2"}};
+        solver.setSos2NativeBranching(true);
+        solver.setNodeLimit(0);
+        solver.load(lp);
+        REQUIRE(solver.solve().status == Status::NodeLimit);
+        CHECK(solver.getBranchCutoffStats().empty());
+    }
+
+    SECTION("An infeasible LP counts even when no optimal objective exists") {
+        lp.col_upper[2] = 1.5;
+        solver.setPresolve(false);
+        solver.setBranchCutoffStatsEnabled(true);
+        solver.load(lp);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        const auto& stats = solver.getBranchCutoffStats();
+        REQUIRE(stats.size() == 3);
+        CHECK(stats[1].up.qualified_attempts == 1);
+        CHECK(stats[1].up.cutoffs == 1);
+        CHECK(solver.getConflictStats().lp_infeasible_conflicts == 1);
+    }
+
+    SECTION("Queued children and LPs without a verdict supply no attempts") {
+        solver.setPresolve(false);
+        solver.setBranchCutoffStatsEnabled(true);
+        solver.load(lp);
+        solver.setNodeLimit(1);
+        REQUIRE(solver.solve().status == Status::NodeLimit);
+        const auto& stats = solver.getBranchCutoffStats();
+        REQUIRE(stats.size() == 3);
+        CHECK(stats[1].down.qualified_attempts == 0);
+        CHECK(stats[1].up.qualified_attempts == 0);
+        solver.setNodeLimit(20);
+        solver.setNodeLpIterationLimit(0);
+        REQUIRE(solver.solve().status != Status::Optimal);
+        CHECK(solver.getLpStats().nodes_dropped_no_verdict > 0);
+        REQUIRE(stats.size() == 3);
+        CHECK(stats[1].down.qualified_attempts == 0);
+        CHECK(stats[1].up.qualified_attempts == 0);
+    }
 }
 
 TEST_CASE("MipSolver: pre-LP propagation leaves an inconclusive node LP intact", "[mip][domain]") {

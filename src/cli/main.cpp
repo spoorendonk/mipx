@@ -55,6 +55,7 @@ void printUsage(FILE* out) {
                  "[--directional-inference (serial tree)] "
                  "[--inference-branch-coverage (serial tree)] "
                  "[--inference-branch-score (serial tree)] "
+                 "[--branch-cutoff-stats (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
@@ -199,6 +200,7 @@ int main(int argc, char* argv[]) {
     bool directional_inference = false;
     bool inference_branch_coverage = false;
     bool inference_branch_score = false;
+    bool branch_cutoff_stats = false;
     std::optional<mipx::NodePolicy> serial_node_policy;
     const char* serial_node_policy_name = nullptr;
     bool cut_strengthening = false;
@@ -415,6 +417,8 @@ int main(int argc, char* argv[]) {
             inference_branch_coverage = true;
         } else if (arg == "--inference-branch-score") {
             inference_branch_score = true;
+        } else if (arg == "--branch-cutoff-stats") {
+            branch_cutoff_stats = true;
         } else if (arg == "--serial-node-policy" && i + 1 < argc) {
             serial_node_policy_name = argv[++i];
             const std::string_view policy = serial_node_policy_name;
@@ -873,6 +877,7 @@ int main(int argc, char* argv[]) {
             solver.setDirectionalInferenceEnabled(directional_inference);
             solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
             solver.setInferenceBranchScoreEnabled(inference_branch_score);
+            solver.setBranchCutoffStatsEnabled(branch_cutoff_stats);
             solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
@@ -1098,6 +1103,28 @@ int main(int argc, char* argv[]) {
                     };
                     report("reliable", coverage.reliable);
                     report("fallback", coverage.fallback);
+                }
+            }
+            if (branch_cutoff_stats) {
+#ifdef MIPX_HAS_TBB
+                if (num_threads > 1) {
+                    log.log("Child LP cutoff statistics unavailable for parallel search\n");
+                } else
+#endif
+                {
+                    const auto& columns = solver.getBranchCutoffStats();
+                    const auto report = [&](const char* name, auto member) {
+                        mipx::MipDirectionalCutoffStats total;
+                        for (const auto& column : columns) {
+                            total.qualified_attempts += (column.*member).qualified_attempts;
+                            total.cutoffs += (column.*member).cutoffs;
+                        }
+                        log.log("Child LP cutoffs %s: qualified_attempts=%llu cutoffs=%llu\n", name,
+                                static_cast<unsigned long long>(total.qualified_attempts),
+                                static_cast<unsigned long long>(total.cutoffs));
+                    };
+                    report("down", &mipx::MipBranchCutoffStats::down);
+                    report("up", &mipx::MipBranchCutoffStats::up);
                 }
             }
             if (serial_node_policy) {
