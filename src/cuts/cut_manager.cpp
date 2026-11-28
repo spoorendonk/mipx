@@ -162,7 +162,10 @@ void CutManager::recordRound(
         auto& kpi = family_kpis_[fi];
         const auto& round = separation_stats.families[fi];
         const Int selected = selected_by_family[fi];
-        const Int rejected = std::max<Int>(0, round.generated - selected);
+        // Carried cuts were admitted in earlier rounds. Keep the current
+        // separation's rejection count independent of their selection.
+        const Int credited = allow_carried_cuts ? round.accepted : selected;
+        const Int rejected = std::max<Int>(0, round.generated - credited);
 
         kpi.attempted += round.attempted;
         kpi.generated += round.generated;
@@ -170,9 +173,7 @@ void CutManager::recordRound(
         kpi.rejected += rejected;
         kpi.separation_seconds += round.time_seconds;
 
-        const Int efficacy_count = allow_carried_cuts ? round.accepted : selected;
-        const Real avg_eff =
-            efficacy_count > 0 ? round.efficacy_sum / static_cast<Real>(efficacy_count) : 0.0;
+        const Real avg_eff = credited > 0 ? round.efficacy_sum / static_cast<Real>(credited) : 0.0;
         kpi.efficacy_ema = kEmaAlpha * avg_eff + (1.0 - kEmaAlpha) * kpi.efficacy_ema;
 
         Real fam_delta = 0.0;

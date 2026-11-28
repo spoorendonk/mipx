@@ -70,12 +70,19 @@ TEST_CASE("CutManager AUTO credits a productive carried cut in a root probe", "[
     std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected{};
     manager.recordRound(initial, selected, 0.0, 1.0, 0.0, 1.0, true, 0, true);
     CHECK_FALSE(manager.familyEnabled(CutFamily::Cover));
+    CHECK(manager.kpis()[cover].rejected == 0);
 
     selected[cover] = 1;
     manager.recordRound({}, selected, 1.0, 1.0, 0.0, 1.0, true, 0, true);
     CHECK(manager.kpis()[cover].generated == 1);
     CHECK(manager.kpis()[cover].accepted == 1);
+    CHECK(manager.kpis()[cover].rejected == 0);
     CHECK(manager.familyEnabled(CutFamily::Cover));
+
+    CutSeparationStats rejected_candidate;
+    rejected_candidate.at(CutFamily::Cover).generated = 1;
+    manager.recordRound(rejected_candidate, selected, 1.0, 1.0, 0.0, 1.0, true, 0, true);
+    CHECK(manager.kpis()[cover].rejected == 1);
 }
 
 TEST_CASE("CutManager policy decisions are deterministic", "[cuts][policy]") {
