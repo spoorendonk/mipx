@@ -1768,6 +1768,11 @@ void BarrierSolver::setOptions(const BarrierOptions& options) {
                          options.presolve != options_.presolve ||
                          options.implicit_upper_bounds != options_.implicit_upper_bounds ||
                          options.ruiz_iterations != options_.ruiz_iterations || reselect;
+    // A pending edit's rebuild runs first, under the options it was made
+    // with, as it did when edits rebuilt at once.
+    if (loaded_ && transform_stale_ && !reshape) {
+        rebuildTransform();
+    }
     options_ = options;
     if (loaded_ && reshape) {
         rebuildTransform();

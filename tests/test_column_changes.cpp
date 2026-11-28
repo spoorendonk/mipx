@@ -605,5 +605,24 @@ TEST_CASE("Column changes: batched barrier and PDLP edits solve as a fresh load"
         kept.setOptions(o);
         fresh.setOptions(o);
         check(kept, fresh, false);
+
+        // An options change after the edits leaves their scaling as it was
+        // made: the same as a load of the edited LP before the change.
+        PdlpOptions other = o;
+        other.ruiz_iterations = o.ruiz_iterations + 5;
+        PdlpSolver late;
+        PdlpSolver early;
+        late.setOptions(o);
+        early.setOptions(o);
+        late.load(base);
+        edit(late);
+        late.setOptions(other);
+        early.load(edited);
+        early.setOptions(other);
+        const LpResult a = late.solve();
+        const LpResult b = early.solve();
+        CHECK(a.status == b.status);
+        CHECK(a.objective == b.objective);
+        CHECK(a.iterations == b.iterations);
     }
 }

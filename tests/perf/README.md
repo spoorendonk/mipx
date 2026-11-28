@@ -616,7 +616,8 @@ pivots per added column, sum `primal_pivots` and `added_columns` over
 `dual-warm` solves with added columns and divide the totals.
 
 `--edit-csv FILE` (#442) times `dual-warm`'s edit calls, which the solve
-timer leaves out, one row per op:
+timer leaves out, one row per op (none for `coeffs`, whose reload the solve
+row's `reloaded` flags):
 
 ```text
 after,arm,op,items,basic,seconds

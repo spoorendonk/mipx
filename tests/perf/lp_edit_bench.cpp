@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
         return 2;
     }
     const LpProblem lp = readMps(argv[1]);
+    if (lp.num_rows == 0 || lp.num_cols == 0) {
+        std::fprintf(stderr, "%s: the edits need at least one row and one column\n", argv[1]);
+        return 2;
+    }
     const int rounds = std::atoi(argv[2]);
     const int edits = std::atoi(argv[3]);
     std::printf("%s: %d rows, %d cols, %d nnz\n", argv[1], lp.num_rows, lp.num_cols,

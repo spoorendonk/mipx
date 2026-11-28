@@ -336,7 +336,9 @@ void apply(const lpseq::Op& op, LpProblem& lp, std::vector<Arm>& arms, EditLog& 
             case OpKind::Solve:
                 break;
         }
-        if (log.out != nullptr) {
+        // A coeffs op only marks the arm for a reload at the next solve,
+        // which the solve row flags; it has no edit call to time.
+        if (log.out != nullptr && op.kind != OpKind::Coeffs) {
             const double secs =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
             *log.out << std::format("{},{},{},{},{},{:.9f}\n", log.after, arm.name, opName(op.kind),

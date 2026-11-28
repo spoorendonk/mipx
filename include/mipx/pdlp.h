@@ -168,7 +168,13 @@ public:
     void setWarmStart(std::span<const Real> x, std::span<const Real> y);
     void clearWarmStart();
 
-    void setOptions(const PdlpOptions& options) { options_ = options; }
+    // A pending edit's rebuild runs first, under the options it was made with.
+    void setOptions(const PdlpOptions& options) {
+        if (loaded_ && scaled_stale_) {
+            buildScaledProblem();
+        }
+        options_ = options;
+    }
     [[nodiscard]] const PdlpOptions& options() const { return options_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
     /// Restart counts from the last solve, including polishing.
