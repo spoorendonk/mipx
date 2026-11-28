@@ -52,6 +52,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -373,6 +374,8 @@ constexpr PresolveRuleStat kRuleStats[] = {
     {"aggregator", &PresolveStats::aggregator_changes, &PresolveStats::aggregator_seconds},
     {"zero_cost_singleton", &PresolveStats::zero_cost_singleton_changes,
      &PresolveStats::zero_cost_singleton_seconds},
+    {"mip_singleton_stuffing", &PresolveStats::mip_singleton_stuffing_changes,
+     &PresolveStats::mip_singleton_stuffing_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
     // HiGHS's bench calls the rule dependent_equations.
     {"dependent_equations", &PresolveStats::dependent_equation_changes,
@@ -1846,6 +1849,97 @@ Index Presolver::aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& c
         row_coeffs.clear();
     }
 
+    return changes;
+}
+
+// The preferred-endpoint case of singleton column stuffing (#450). With the
+// other columns held fixed, these continuous singletons form a fractional
+// knapsack in row activity. A prefix in descending gain per unit of activity
+// can be filled in an optimum if its combined capacity fits even at the worst
+// activity of the other columns. Their integer values need not change.
+Index Presolver::stuffMipSingletonColumns(LpProblem& lp, const std::vector<bool>& col_removed,
+                                          const std::vector<bool>& row_removed,
+                                          const std::vector<Index>& row_active_nnz,
+                                          const std::vector<Index>& col_active_nnz,
+                                          std::vector<uint8_t>& next_dirty_cols) {
+    struct Candidate {
+        Index col;
+        Real preference;
+        Real preferred_bound;
+        Real coefficient_magnitude;
+        Real width_upper;
+    };
+    const Real sense = lp.sense == Sense::Maximize ? -1.0 : 1.0;
+    const auto addUpper = [](Real activity, Real coefficient, Real value) {
+        return std::nextafter(std::fma(coefficient, value, activity), kInf);
+    };
+    Index changes = 0;
+    std::vector<Candidate> candidates;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        if (row_removed[i] || row_active_nnz[i] < 2) {
+            continue;
+        }
+        const Real lower = lp.row_lower[i];
+        const Real upper = lp.row_upper[i];
+        const bool upper_only = lower == -kInf && std::isfinite(upper);
+        const bool lower_only = upper == kInf && std::isfinite(lower);
+        if (!upper_only && !lower_only) {
+            continue;
+        }
+        const Real direction = upper_only ? 1.0 : -1.0;
+        const Real rhs = upper_only ? upper : -lower;
+        Real activity_upper = 0.0;
+        candidates.clear();
+        for (const auto [j, coeff] : work_->row(i)) {
+            if (col_removed[j] || coeff == 0.0) {
+                continue;
+            }
+            const Real a = direction * coeff;
+            const Real cost = sense * lp.obj[j];
+            const Real lb = lp.col_lower[j];
+            const Real ub = lp.col_upper[j];
+            if (!std::isfinite(a) || !(lb <= ub)) {
+                activity_upper = kInf;
+                break;
+            }
+            const Real at_max = a > 0.0 ? ub : lb;
+            const Real at_min = a > 0.0 ? lb : ub;
+            const bool prefers_more_activity = a > 0.0 ? cost < 0.0 : cost > 0.0;
+            if (col_active_nnz[j] == 1 && lp.col_type[j] == VarType::Continuous &&
+                prefers_more_activity && std::isfinite(cost) && std::isfinite(lb) &&
+                std::isfinite(ub) && lb < ub) {
+                const Real width_upper = std::nextafter(ub - lb, kInf);
+                candidates.push_back({j, std::abs(cost / a), at_max, std::abs(a), width_upper});
+                activity_upper = addUpper(activity_upper, a, at_min);
+            } else {
+                activity_upper = addUpper(activity_upper, a, at_max);
+            }
+        }
+        if (candidates.empty() || !(activity_upper < rhs)) {
+            continue;
+        }
+        std::ranges::sort(candidates, std::greater{}, &Candidate::preference);
+        // Rounded ratios preserve strict order, but equal rounded values
+        // can hide distinct exact ratios. Require the whole tied group to fit.
+        for (std::size_t first = 0; first < candidates.size();) {
+            std::size_t end = first;
+            do {
+                const auto& c = candidates[end++];
+                activity_upper = addUpper(activity_upper, c.coefficient_magnitude, c.width_upper);
+            } while (end < candidates.size() &&
+                     candidates[end].preference == candidates[first].preference);
+            if (!(activity_upper < rhs)) {
+                break;
+            }
+            for (; first < end; ++first) {
+                const auto& c = candidates[first];
+                lp.col_lower[c.col] = c.preferred_bound;
+                lp.col_upper[c.col] = c.preferred_bound;
+                next_dirty_cols[c.col] = 1;  // Ordinary fixed-column elimination and postsolve.
+                ++changes;
+            }
+        }
+    }
     return changes;
 }
 
@@ -4215,6 +4309,19 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                                    next_dirty_cols);
             });
             stats_.aggregator_changes += ch;
+            total_changes += ch;
+        }
+
+        // Scan once the other reductions have stalled. Columns that appeared
+        // in an eliminated equation and another row can become singletons.
+        if (options_.enable_mip_singleton_stuffing && !lp_only && total_changes == 0 &&
+            !infeasible_) {
+            ch = timed(stats_.mip_singleton_stuffing_seconds, [&] {
+                return stuffMipSingletonColumns(lp, col_removed, row_removed, row_active_nnz,
+                                                col_active_nnz, next_dirty_cols);
+            });
+            stats_.mip_singleton_stuffing_changes += ch;
+            stats_.bounds_tightened += ch;
             total_changes += ch;
         }
 

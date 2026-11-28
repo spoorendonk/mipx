@@ -213,6 +213,9 @@ struct PresolveStats {
     /// Zero-cost column singletons removed as their ranged row's or
     /// equation's slack (enable_zero_cost_singletons, #359).
     Index zero_cost_singleton_changes = 0;
+    /// Continuous singleton columns fixed at their preferred endpoint by
+    /// MIP singleton stuffing (#450).
+    Index mip_singleton_stuffing_changes = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -251,6 +254,7 @@ struct PresolveStats {
     Real free_col_substitution_seconds = 0.0;
     Real aggregator_seconds = 0.0;
     Real zero_cost_singleton_seconds = 0.0;
+    Real mip_singleton_stuffing_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -327,6 +331,11 @@ struct PresolveOptions {
     /// sides finite as that row's slack, widening the row's sides (#359,
     /// HiGHS's zero-cost singleton). Off by default until benchmarked.
     bool enable_zero_cost_singletons = false;
+    /// In a MIP's one-sided row, fix the continuous singleton columns whose
+    /// preferred endpoints fit even at the worst activity of the other
+    /// columns, in decreasing order of objective gain per unit of activity.
+    /// Off by default until benchmarked.
+    bool enable_mip_singleton_stuffing = false;
     /// Dual fixing's cases from HiGHS's dualFixing that the cost-sign rule
     /// misses (#366): a column is fixed at a finite bound its cost does not
     /// push it away from when every row that locks it the other way holds
@@ -525,6 +534,11 @@ private:
                                       std::vector<Index>& col_active_nnz,
                                       std::vector<uint8_t>& next_dirty_rows,
                                       std::vector<uint8_t>& next_dirty_cols);
+    Index stuffMipSingletonColumns(LpProblem& lp, const std::vector<bool>& col_removed,
+                                   const std::vector<bool>& row_removed,
+                                   const std::vector<Index>& row_active_nnz,
+                                   const std::vector<Index>& col_active_nnz,
+                                   std::vector<uint8_t>& next_dirty_cols);
     // Root probing: fixes variables whose opposite branch propagates to
     // infeasibility, and strengthens coefficients with the learned variable
     // bounds. Runs at most once per presolve call.

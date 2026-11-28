@@ -821,6 +821,9 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions zero_cost = o;
     zero_cost.enable_zero_cost_singletons = true;
     cases.push_back({"zero-cost singletons (opt-in)", zero_cost});
+    PresolveOptions stuffing = o;
+    stuffing.enable_mip_singleton_stuffing = true;
+    cases.push_back({"MIP singleton stuffing (opt-in)", stuffing});
     PresolveOptions extended_dual = o;
     extended_dual.enable_extended_dual_fixing = true;
     cases.push_back({"extended dual fixing (opt-in)", extended_dual});
@@ -846,6 +849,7 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_doubleton_fill_in = true;
     all.enable_aggregator = true;
     all.enable_zero_cost_singletons = true;
+    all.enable_mip_singleton_stuffing = true;
     all.enable_extended_dual_fixing = true;
     all.enable_dependent_equations = true;
     cases.push_back({"all opt-in but parallel columns and single equations", all});
@@ -891,6 +895,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) { return o.enable_aggregator; }},
         {"zero-cost singletons", &PresolveStats::zero_cost_singleton_changes,
          [](const PresolveOptions& o) { return o.enable_zero_cost_singletons; }},
+        {"MIP singleton stuffing", &PresolveStats::mip_singleton_stuffing_changes,
+         [](const PresolveOptions& o) { return o.enable_mip_singleton_stuffing; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
@@ -1084,6 +1090,10 @@ std::vector<LpProblem> presolveAuditModels() {
                                {{-2, 1, 1}, {0, 1, 1}}, {1, -kInf}, {3, 3}));
     models.push_back(makeModel(Sense::Minimize, {0, 1, 2}, {0, 0, 0}, {kInf, 3, 2}, {C, I, I},
                                {{1, 1, 1}, {0, 1, -1}}, {2, -kInf}, {5, 1}));
+    // MIP singleton stuffing (#450): x0 reaches its upper bound while x1
+    // trades its remaining activity against the value of the binary x2.
+    models.push_back(makeModel(Sense::Minimize, {-2, -1, -5, 1}, {0, 0, 0, 0}, {1, 8, 1, 1},
+                               {C, C, B, B}, {{1, 1, 4, 0}, {0, 0, 1, 1}}, {-kInf, 1}, {10, kInf}));
     // Extended dual fixing (#366): x0 at zero cost with two down locks and
     // no up lock; x0 whose one down lock, a ranged row's lower side, holds at
     // x0 = 0 for any x1 >= 1; the same upward, maximizing.

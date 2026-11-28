@@ -2705,6 +2705,56 @@ TEST_CASE("Presolve: zero-cost singletons leave what they cannot take", "[presol
     }
 }
 
+TEST_CASE("Presolve: MIP singleton stuffing fixes only a certified prefix", "[presolve]") {
+    // min -2x - y - 5z + w, with x + y + 4z <= 10, z + w >= 1.
+    // z = 1 leaves six units of activity for x and y. The more valuable x
+    // uses one unit at its preferred bound, but y needs eight to reach its.
+    LpProblem lp = rowsModel({-2, -1, -5, 1}, {0, 0, 0, 0}, {1, 8, 1, 1},
+                             {{-kInf, 10, {{0, 1}, {1, 1}, {2, 4}}}, {1, kInf, {{2, 1}, {3, 1}}}});
+    lp.col_type[2] = lp.col_type[3] = VarType::Binary;
+    PresolveOptions options;
+    options.enable_mip_singleton_stuffing = true;
+    Index expected = 0;
+    Real expected_x = 1.0;
+
+    SECTION("default off") {
+        options = PresolveOptions{};
+    }
+    SECTION("higher objective gain takes the first unit") {
+        expected = 1;
+    }
+    SECTION("maximization with a lower row side and the lower preferred bound") {
+        lp = rowsModel({-2, 1, 5, -1}, {-1, 0, 0, 0}, {0, 8, 1, 1},
+                       {{-10, kInf, {{0, 1}, {1, -1}, {2, -4}}}, {1, kInf, {{2, 1}, {3, 1}}}});
+        lp.sense = Sense::Maximize;
+        lp.col_type[2] = lp.col_type[3] = VarType::Binary;
+        expected = 1;
+        expected_x = -1.0;
+    }
+    SECTION("a partial tie does not certify the group") {
+        lp.obj[0] = -1.0;
+    }
+    SECTION("the worst integer activity consumes the slack") {
+        lp.row_upper[0] = 4.5;
+    }
+    SECTION("a ranged row has another side") {
+        lp.row_lower[0] = 2.0;
+    }
+    SECTION("the rule is restricted to MIPs") {
+        lp.col_type[2] = lp.col_type[3] = VarType::Continuous;
+    }
+
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, options);
+    CHECK(presolver.stats().mip_singleton_stuffing_changes == expected);
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+    if (expected == 1) {
+        CHECK(full[0] == expected_x);
+        CHECK(std::ranges::find(presolver.colMapping(), 0) == presolver.colMapping().end());
+    }
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2
