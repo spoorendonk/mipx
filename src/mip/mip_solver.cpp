@@ -3970,6 +3970,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                                       conflict_restart_activity_ >= conflict_restart_threshold_;
         const bool stagnation_restart =
             allow_restarts && nodes_since_incumbent >= restart_stagnation_nodes_;
+        std::optional<Int> incumbent_restart_id;
         if ((stagnation_restart || conflict_restart) && search_profile_ != SearchProfile::Stable &&
             queue.size() > restart_keep_nodes_ &&
             (!geometric_restarts_enabled_ ||
@@ -3999,8 +4000,16 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             // target child stays in the queue and is selected by policy again.
             plunge_target_id = -1;
             plunge_depth = 0;
-            if (queue.empty()) {
-                break;
+            if (incumbent_guided_restarts_enabled_) {
+                if (incumbent >= kInf || best_solution.empty()) {
+                    ++search_stats_.incumbent_restart_no_incumbent;
+                } else {
+                    incumbent_restart_id =
+                        queue.incumbentCompatibleId(best_solution, problem_.col_type);
+                    if (!incumbent_restart_id) {
+                        ++search_stats_.incumbent_restart_no_match;
+                    }
+                }
             }
         }
 
@@ -4022,7 +4031,19 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             }
         }
         if (!plunged_into_node) {
-            node = queue.pop();
+            if (incumbent_restart_id) {
+                const Int policy_id = queue.nextId();
+                node = std::move(queue.popById(*incumbent_restart_id).value());
+                ++search_stats_.incumbent_restart_selections;
+                if (node.id != policy_id && search_stats_.incumbent_restart_promotions++ == 0) {
+                    search_stats_.first_incumbent_restart_promoted_id = node.id;
+                    search_stats_.first_incumbent_restart_policy_id = policy_id;
+                    search_stats_.first_incumbent_restart_pool_objective =
+                        solution_pool.bestObjective();
+                }
+            } else {
+                node = queue.pop();
+            }
         }
         const Int strong_budget = computeStrongBranchBudget(
             search_profile_, node.depth, nodes_since_incumbent, restart_stagnation_nodes_);
@@ -7536,6 +7557,15 @@ MipResult MipSolver::solveMinimizationOnce() {
             log_.log("Conflict restarts: count=%d threshold=%d last_activity=%.6g\n",
                      search_stats_.conflict_restarts, conflict_restart_threshold_,
                      search_stats_.last_conflict_restart_activity);
+        }
+        if (incumbent_guided_restarts_enabled_) {
+            log_.log(
+                "Incumbent-guided restarts: selections=%d promotions=%d no_incumbent=%d "
+                "no_match=%d\n",
+                search_stats_.incumbent_restart_selections,
+                search_stats_.incumbent_restart_promotions,
+                search_stats_.incumbent_restart_no_incumbent,
+                search_stats_.incumbent_restart_no_match);
         }
         if (tree_presolve_stats_.attempts > 0) {
             log_.log(

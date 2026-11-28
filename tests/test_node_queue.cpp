@@ -1,5 +1,6 @@
 #include "mipx/bnb_node.h"
 
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -36,6 +37,59 @@ TEST_CASE("NodeQueue assigns unique ids", "[node_queue]") {
     REQUIRE(a.id != b.id);
     REQUIRE(b.id != c.id);
     REQUIRE(a.id != c.id);
+}
+
+TEST_CASE("Incumbent path preference preserves the queue proof and node payload", "[node_queue]") {
+    NodeQueue queue(NodePolicy::BestFirst);
+    BnbNode node;
+    node.lp_bound = 1.0;
+    node.bound_changes = {{0, 2.0, true}, {1, 0.0, true}};
+    const Int proof_node = queue.push(node);
+
+    node.lp_bound = 3.0;
+    node.basis = {BasisStatus::Basic};
+    node.basis_rows = 1;
+    node.bound_changes = {{0, 3.0, false}, {0, 3.0, true}, {1, 0.0, true}};
+    const Int preferred = queue.push(node);
+    node.lp_bound = 2.0;
+    const Int other_match = queue.push(node);
+
+    constexpr std::array types{VarType::Integer, VarType::Continuous};
+    constexpr std::array incumbent{3.0 - 1e-8, 0.0};
+    CHECK(queue.nextId() == proof_node);
+    CHECK(queue.incumbentCompatibleId(incumbent, types) == preferred);
+    CHECK_FALSE(queue.incumbentCompatibleId({}, types));
+    CHECK(queue.bestBound() == 1.0);
+    CHECK(queue.size() == 3);
+
+    const auto selected = queue.popById(preferred);
+    REQUIRE(selected);
+    CHECK(selected->basis == node.basis);
+    CHECK(selected->basis_rows == node.basis_rows);
+    CHECK(queue.incumbentCompatibleId(incumbent, types) == other_match);
+    CHECK(queue.bestBound() == 1.0);
+    queue.prune(2.0);
+    CHECK_FALSE(queue.incumbentCompatibleId(incumbent, types));
+    CHECK(queue.pop().id == proof_node);
+    CHECK(queue.empty());
+}
+
+TEST_CASE("Incumbent path preference checks native SOS2 support", "[node_queue]") {
+    NodeQueue queue;
+    BnbNode node;
+    node.bound_changes = {{0, 0.0, true}, {0, 0.0, false}};
+    const Int excluded = queue.push(node);
+    node.bound_changes = {{1, 0.0, true}, {1, 0.0, false}};
+    const Int compatible = queue.push(node);
+    node.bound_changes = {{2, 0.0, true}};
+    queue.push(node);
+
+    constexpr std::array types{VarType::Continuous, VarType::Continuous};
+    constexpr std::array incumbent{0.4, -1e-9};
+    CHECK(queue.nextId() == excluded);
+    CHECK(queue.incumbentCompatibleId(incumbent, types) == compatible);
+    REQUIRE(queue.popById(compatible));
+    CHECK_FALSE(queue.incumbentCompatibleId(incumbent, types));
 }
 
 TEST_CASE("BestFirst pops in order of increasing lp_bound", "[node_queue]") {

@@ -130,36 +130,55 @@ Int NodeQueue::push(BnbNode node) {
     return id;
 }
 
-BnbNode NodeQueue::pop() {
+Int NodeQueue::nextId() const {
     if (nodes_.empty()) {
-        throw std::runtime_error("NodeQueue::pop() called on empty queue");
+        throw std::runtime_error("NodeQueue policy selection on empty queue");
     }
-
-    const NodeKey* key = nullptr;
     switch (policy_) {
         case NodePolicy::BestFirst:
-            key = &(*best_first_.begin());
-            break;
+            return best_first_.begin()->id;
         case NodePolicy::DepthFirst:
-            key = &(*depth_first_.begin());
-            break;
+            return depth_first_.begin()->id;
         case NodePolicy::BestEstimate:
-            key = &(*best_estimate_.begin());
-            break;
+            return best_estimate_.begin()->id;
         case NodePolicy::DepthBiased:
-            key = &(*depth_biased_.begin());
-            break;
+            return depth_biased_.begin()->id;
     }
-    if (key == nullptr) {
-        throw std::runtime_error("NodeQueue policy selection failed");
-    }
-    auto it = nodes_.find(key->id);
-    if (it == nodes_.end()) {
+    throw std::runtime_error("NodeQueue policy selection failed");
+}
+
+BnbNode NodeQueue::pop() {
+    auto node = popById(nextId());
+    if (!node) {
         throw std::runtime_error("NodeQueue internal inconsistency on pop");
     }
-    BnbNode result = std::move(it->second);
-    eraseById(key->id);
-    return result;
+    return std::move(*node);
+}
+
+std::optional<Int> NodeQueue::incumbentCompatibleId(std::span<const Real> incumbent,
+                                                    std::span<const VarType> types) const {
+    if (incumbent.empty() || incumbent.size() != types.size()) {
+        return std::nullopt;
+    }
+    const auto compatible = [&](const BranchDecision& decision) {
+        if (decision.variable < 0 || static_cast<std::size_t>(decision.variable) >= types.size()) {
+            return false;
+        }
+        const VarType type = types[decision.variable];
+        const Real raw = incumbent[decision.variable];
+        const bool discrete =
+            type == VarType::Integer || type == VarType::Binary || type == VarType::SemiInteger;
+        const Real value = discrete ? std::round(raw) : raw;
+        constexpr Real tolerance = 1e-7;
+        return decision.is_upper ? value <= decision.bound + tolerance
+                                 : value >= decision.bound - tolerance;
+    };
+    for (const auto& [id, node] : nodes_) {
+        if (std::ranges::all_of(node.bound_changes, compatible)) {
+            return id;
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<BnbNode> NodeQueue::popById(Int id) {

@@ -34,6 +34,7 @@ void printUsage(FILE* out) {
                  "[--conflict-activity-branching|--no-conflict-activity-branching] "
                  "[--conflict-restart-threshold N] "
                  "[--geometric-restarts|--no-geometric-restarts] "
+                 "[--incumbent-guided-restarts|--no-incumbent-guided-restarts] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
@@ -187,6 +188,7 @@ int main(int argc, char* argv[]) {
     bool conflict_activity_branching = false;
     mipx::Int conflict_restart_threshold = 0;
     bool geometric_restarts = false;
+    bool incumbent_guided_restarts = false;
     bool bound_conflict_learning = false;
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
@@ -313,6 +315,10 @@ int main(int argc, char* argv[]) {
             geometric_restarts = true;
         } else if (arg == "--no-geometric-restarts") {
             geometric_restarts = false;
+        } else if (arg == "--incumbent-guided-restarts") {
+            incumbent_guided_restarts = true;
+        } else if (arg == "--no-incumbent-guided-restarts") {
+            incumbent_guided_restarts = false;
         } else if (arg == "--bound-conflict-learning") {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
@@ -936,6 +942,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictActivityBranchingEnabled(conflict_activity_branching);
             solver.setConflictRestartThreshold(conflict_restart_threshold);
             solver.setGeometricRestartsEnabled(geometric_restarts);
+            solver.setIncumbentGuidedRestartsEnabled(incumbent_guided_restarts);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
             solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);

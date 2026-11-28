@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <vector>
 
 namespace mipx {
@@ -62,6 +63,14 @@ public:
 
     /// Remove and return the next node to process.
     BnbNode pop();
+
+    /// ID selected by the current policy. Requires a nonempty queue.
+    Int nextId() const;
+
+    /// Lowest ID whose branch bounds accept the incumbent. Integer columns use
+    /// rounded values and native SOS2 fixings use the actual support values.
+    std::optional<Int> incumbentCompatibleId(std::span<const Real> incumbent,
+                                             std::span<const VarType> types) const;
 
     /// Remove and return the node with the given id, or nullopt when it is no
     /// longer queued (for example after prune() dropped it). Used by the serial

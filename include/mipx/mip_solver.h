@@ -40,6 +40,10 @@
 
 namespace mipx {
 
+namespace test {
+struct MipSolverRestartAccess;
+}
+
 enum class RootLpPolicy {
     DualDefault,
     BarrierRoot,
@@ -241,6 +245,13 @@ struct MipSearchStats {
     /// Serial restarts whose conflict activity reached the configured threshold.
     Int conflict_restarts = 0;
     Real last_conflict_restart_activity = 0.0;
+    Int incumbent_restart_selections = 0;
+    Int incumbent_restart_promotions = 0;
+    Int incumbent_restart_no_incumbent = 0;
+    Int incumbent_restart_no_match = 0;
+    Int first_incumbent_restart_promoted_id = -1;
+    Int first_incumbent_restart_policy_id = -1;
+    Real first_incumbent_restart_pool_objective = kInf;
 };
 
 struct MipSerialNodePolicyStats {
@@ -636,6 +647,11 @@ public:
     /// Opt in to spacing enabled serial restart triggers. The minimum starts
     /// at the stagnation interval and doubles after each restart.
     void setGeometricRestartsEnabled(bool enabled) { geometric_restarts_enabled_ = enabled; }
+    /// Prefer an incumbent-compatible queued path for the first selection after
+    /// an actual serial restart. Off by default.
+    void setIncumbentGuidedRestartsEnabled(bool enabled) {
+        incumbent_guided_restarts_enabled_ = enabled;
+    }
     /// Opt in to exact-safe serial restarts on recent learned conflicts.
     /// Evidence decays by 0.995 per node, gains one per nonempty published
     /// conflict, and resets on any restart.
@@ -826,6 +842,8 @@ public:
     const VariableBoundStore& getVariableBoundStore() const { return vb_store_; }
 
 private:
+    friend struct test::MipSolverRestartAccess;
+
     void refreshTreePresolveProfile();
     [[nodiscard]] MipTreePresolveStats treePresolveStatsSnapshot() const;
     void mergeTreePresolveStatsDelta(const MipTreePresolveStats& delta);
@@ -1174,6 +1192,7 @@ private:
     std::optional<NodePolicy> serial_node_policy_override_;
     bool restarts_enabled_ = false;
     bool geometric_restarts_enabled_ = false;
+    bool incumbent_guided_restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
     Int conflict_restart_threshold_ = 0;

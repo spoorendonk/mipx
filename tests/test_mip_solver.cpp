@@ -21,6 +21,12 @@ using namespace mipx;
 using Catch::Matchers::WithinAbs;
 using mipx::test::buildSlowRootSetCover;
 
+namespace mipx::test {
+struct MipSolverRestartAccess {
+    static const auto& conflictScores(const MipSolver& solver) { return solver.conflict_scores_; }
+};
+}  // namespace mipx::test
+
 // ---------------------------------------------------------------------------
 // Helper: build a small MIP for testing
 // min -x - 2y  s.t. x + y <= 4, x <= 3, y <= 3, x,y >= 0, x,y integer
@@ -3851,7 +3857,9 @@ TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
     solver.setConflictRestartThreshold(2);
     const auto restarted = solver.solve();
     const auto search = solver.getSearchStats();
+    const auto retained_scores = test::MipSolverRestartAccess::conflictScores(solver);
     REQUIRE(search.conflict_restarts > 1);
+    REQUIRE(std::ranges::any_of(retained_scores, [](Real score) { return score > 0.0; }));
     CHECK(search.restarts == search.conflict_restarts);
     // At most one conflict is published per node in this fixture. Two
     // publications with intervening decay cannot reach the threshold of two.
@@ -3870,6 +3878,26 @@ TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
     CHECK(solver.getBranchingStats().pseudocost_updates_tree == branching.pseudocost_updates_tree);
     CHECK(solver.getBranchingStats().pseudocost_hits == branching.pseudocost_hits);
     CHECK(solver.getBranchingStats().strong_branch_probes == branching.strong_branch_probes);
+
+    // The incumbent's path is already closed when the conflict restarts in
+    // this fixture. Enabling guidance therefore leaves the traversal intact.
+    solver.setIncumbentGuidedRestartsEnabled(true);
+    const auto guided = solver.solve();
+    CHECK(solver.getSearchStats().conflict_restarts == search.conflict_restarts);
+    CHECK(solver.getSearchStats().incumbent_restart_no_match +
+              solver.getSearchStats().incumbent_restart_no_incumbent ==
+          search.conflict_restarts);
+    CHECK(solver.getSearchStats().incumbent_restart_promotions == 0);
+    CHECK(guided.status == restarted.status);
+    CHECK(guided.objective == restarted.objective);
+    CHECK(guided.nodes == restarted.nodes);
+    CHECK(guided.lp_iterations == restarted.lp_iterations);
+    CHECK(solver.getConflictStats().bound_conflict_tightenings ==
+          conflicts.bound_conflict_tightenings);
+    CHECK(solver.getConflictStats().bound_conflict_cutoffs == conflicts.bound_conflict_cutoffs);
+    CHECK(solver.getBranchingStats().pseudocost_hits == branching.pseudocost_hits);
+    CHECK(test::MipSolverRestartAccess::conflictScores(solver) == retained_scores);
+    solver.setIncumbentGuidedRestartsEnabled(false);
 
     // Conflict activity alone fired several times above. A minimum interval
     // longer than the entire search defers all of those restarts.
@@ -3914,6 +3942,108 @@ TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
     CHECK(solver.getSearchStats().restarts == 0);
     CHECK(solver.getSearchStats().conflict_restarts == 0);
     CHECK(solver.getSearchStats().last_conflict_restart_activity == 0.0);
+}
+
+TEST_CASE("MipSolver: serial restarts prefer an incumbent-compatible path", "[mip][search]") {
+    LpProblem lp;
+    lp.num_cols = 12;
+    lp.num_rows = 3;
+    lp.obj = {-11, -15, -12, -14, -10, -17, -20, -17, -3, -2, -19, -17};
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.row_lower.assign(lp.num_rows, -kInf);
+    lp.row_upper = {52.5, 51.5, 44.5};
+    constexpr Real weights[3][12] = {{16, 14, 11, 8, 8, 14, 1, 13, 19, 1, 19, 15},
+                                     {3, 5, 12, 13, 20, 18, 10, 14, 3, 18, 15, 5},
+                                     {7, 3, 6, 15, 13, 2, 19, 15, 8, 9, 1, 20}};
+    std::vector<Triplet> entries;
+    for (Index row = 0; row < lp.num_rows; ++row) {
+        for (Index col = 0; col < lp.num_cols; ++col) {
+            entries.push_back({row, col, weights[row][col]});
+        }
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(entries));
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setRestartsEnabled(true);
+    solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    solver.setRestartControls(8, 2);
+    solver.setGapTolerance(0.0);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK(baseline.objective == -73.0);
+    REQUIRE(solver.getSearchStats().restarts > 0);
+    CHECK(solver.getSearchStats().incumbent_restart_selections == 0);
+
+    solver.setIncumbentGuidedRestartsEnabled(true);
+    const auto guided = solver.solve();
+    const auto& stats = solver.getSearchStats();
+    CAPTURE(stats.incumbent_restart_selections, stats.incumbent_restart_no_incumbent,
+            stats.incumbent_restart_no_match, stats.first_incumbent_restart_promoted_id,
+            stats.first_incumbent_restart_policy_id);
+    CHECK(stats.incumbent_restart_promotions > 0);
+    CHECK(stats.first_incumbent_restart_promoted_id == 15);
+    CHECK(stats.first_incumbent_restart_policy_id == 14);
+    CHECK(std::isfinite(stats.first_incumbent_restart_pool_objective));
+    CHECK(stats.restart_nodes_dropped == 0);
+    CHECK(guided.status == baseline.status);
+    CHECK(guided.objective == baseline.objective);
+    CHECK(guided.best_bound == baseline.best_bound);
+    CHECK(solver.getLpStats().nodes_dropped_no_verdict == 0);
+    CHECK(solver.getLpStats().warm_starts > 8);
+
+    auto infeasible = buildSearchStagnationMip();
+    std::vector<Triplet> with_clique;
+    for (Index col = 0; col < infeasible.num_cols; ++col) {
+        with_clique.push_back({0, col, 1.0});
+    }
+    with_clique.push_back({1, infeasible.num_cols, 1.0});
+    with_clique.push_back({1, infeasible.num_cols + 1, 1.0});
+    infeasible.num_cols += 2;
+    ++infeasible.num_rows;
+    infeasible.obj.resize(infeasible.num_cols, 0.0);
+    infeasible.col_lower.resize(infeasible.num_cols, 0.0);
+    infeasible.col_upper.resize(infeasible.num_cols, 1.0);
+    infeasible.col_type.resize(infeasible.num_cols, VarType::Binary);
+    infeasible.col_names.resize(infeasible.num_cols);
+    infeasible.row_lower.push_back(-kInf);
+    infeasible.row_upper.push_back(1.5);
+    infeasible.row_names.emplace_back("packing");
+    infeasible.matrix =
+        SparseMatrix(infeasible.num_rows, infeasible.num_cols, std::move(with_clique));
+    solver.setSystematicProbingEnabled(true);
+    solver.setCliqueTableEnabled(true);
+    solver.load(infeasible);
+    const auto without_incumbent = solver.solve();
+    REQUIRE(without_incumbent.status == Status::Infeasible);
+    REQUIRE(stats.restarts > 0);
+    CHECK(stats.incumbent_restart_no_incumbent == stats.restarts);
+    CHECK(stats.incumbent_restart_selections == 0);
+    CHECK(stats.first_incumbent_restart_promoted_id == -1);
+    CHECK(stats.restart_nodes_dropped == 0);
+    const Int implications = solver.getImplicationGraph().numImplications();
+    const auto clique = solver.getCliqueStats();
+    REQUIRE(implications > 0);
+    REQUIRE(clique.num_cliques > 0);
+    CHECK(clique.node_attachments > 0);
+
+    solver.setIncumbentGuidedRestartsEnabled(false);
+    const auto fallback = solver.solve();
+    CHECK(fallback.status == without_incumbent.status);
+    CHECK(fallback.nodes == without_incumbent.nodes);
+    CHECK(fallback.lp_iterations == without_incumbent.lp_iterations);
+    CHECK(solver.getImplicationGraph().numImplications() == implications);
+    CHECK(solver.getCliqueStats().num_cliques == clique.num_cliques);
+    CHECK(solver.getCliqueStats().node_attachments == clique.node_attachments);
 }
 
 TEST_CASE("MipSolver: serial node policy attributes work and resets on solve", "[mip][search]") {

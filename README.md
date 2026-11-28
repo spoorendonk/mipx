@@ -91,6 +91,7 @@ Key options:
 | `--conflict-activity-branching` / `--no-conflict-activity-branching` | off | Bias serial pseudocost ranking by decayed learned-conflict activity |
 | `--conflict-restart-threshold <n>` | 0 | Restart serial search when recent conflict activity reaches `n` and the open queue exceeds the restart floor. Use 0 to disable the trigger |
 | `--geometric-restarts` / `--no-geometric-restarts` | off | Delay enabled serial restart triggers for 96 nodes from the start of tree search. Double the minimum interval after each restart |
+| `--incumbent-guided-restarts` / `--no-incumbent-guided-restarts` | off | For the first selection after an enabled serial restart, prefer the oldest queued path that accepts the incumbent's integer values and native SOS2 support |
 | `--bound-conflict-learning` / `--no-bound-conflict-learning` | off | Learn and propagate 1-UIP bound conflicts in serial search on all-discrete models |
 | `--reconvergence-cuts` / `--no-reconvergence-cuts` | off | Add checked binary reconvergence cuts in serial search on all-discrete models with cuts and conflicts enabled |
 | `--conflict-ray-shortening` / `--no-conflict-ray-shortening` | off | Shorten serial tree no-goods when a rechecked LP ray proves infeasibility with fewer branch bounds |
