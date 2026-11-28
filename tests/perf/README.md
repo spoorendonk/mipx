@@ -10,6 +10,7 @@ reference:
 | `match_1e-4` | right verdict, objective within 1e-4 |
 | `disagree` | a wrong answer: Optimal off by more than 1e-4; or a verdict (Optimal / Infeasible / Unbounded) the reference contradicts |
 | `dnf` | did not finish: time, node or iteration limit, error, crash |
+| `time_limit` | the solver reported its time limit in `barrier-cg` |
 
 The expected class for each instance and backend is checked in under
 `instance_gate/` (`lp_expected.csv`, `mip_expected.csv`). The gate fails on any
@@ -29,7 +30,7 @@ python3 tests/perf/run_instance_gate.py mip     # curated MIPLIB subset
 ctest --test-dir build -L instance-gate --output-on-failure   # both, via ctest
 ```
 
-Each run prints one line per instance and a per-backend count of the four
+Each run prints one line per instance and a per-backend count of the
 classes. Without downloaded instances the script prints `SKIPPED` and exits 77,
 which ctest shows as a skip. Options: `--backends dual,pdlp`, `--time-limit S`
 (defaults: 10s per LP, 60s per MIP), `--binary PATH`. A row's own
@@ -81,69 +82,48 @@ backend still holds its m × m normal equations, about 2.2 GB on stocfor3
 not the memory. It takes minutes, so it has its own ctest label and stays out
 of `instance-gate` and the commit and push gates.
 
-The `barrier-cg` suite (#358) runs the same two backends over one later
-column-generation master per public CommaLab instance of the cold LP panel
-(#272: grid1-9, planar30/50/80/100/150/300). Each master has a path column
-that shares a demand row and a capacity row, giving the normal equations
-off-diagonal entries. This replaces the diagonal first-master panel (#331)
-and keeps the gate at 30 solves. It checks both backends against
-`instance_gate/barrier_cg_expected.csv` and the recorded HiGHS objectives in
-`tests/data/cg_masters_later/cg_masters.solu`. The suite passes `--no-presolve`
-so the CLI cannot solve a master before entering the barrier. The barrier's
-own presolve still runs. All 15 sparse factorizations show fill on the pinned
-panel, and the two backends together take about 12 s on the test host.
+The `barrier-cg` suite runs both backends on 15 later column-generation
+masters with shared demand and capacity columns (#358). The v1 panel (#483)
+uses grid1–9 and planar30/50/80/100/150/300 from Larsson and Yuan's 2004
+instances in the [CommaLAB collection](https://commalab.di.unipi.it/datasets/mmcf/#Plnr).
+The download script fetches the grid and planar archives and checks them
+against `tests/data/commalab_archives.sha256`. The gate checks the archives
+again and generates temporary MPS files on each run. It checks their bytes
+against `instance_gate/barrier_cg_v1.sha256` before running the solver. CTest
+reports `Skipped` when neither archive is present. A partial or corrupt
+download or a model checksum mismatch fails the gate.
 
-Download [`grid.tgz`](https://commalab.di.unipi.it/files/Data/MMCF/grid.tgz)
-and [`planar.tgz`](https://commalab.di.unipi.it/files/Data/MMCF/planar.tgz)
-from [CommaLAB's multicommodity flow collection](https://commalab.di.unipi.it/datasets/mmcf/).
-The external column-generation tool needs HiGHS support and must read the
-gzip-compressed instance files in the original format described by each
-archive's `format.doc`. From the directory containing the two archives,
-prepare the inputs as follows.
+The v1 generator starts with an artificial column per demand, then prices
+one shortest path per commodity using the original arc costs. Equal-cost
+routes keep the first predecessor reached in input arc order, with equal-distance
+nodes processed in node-ID order. The resulting master keeps the artificial
+columns and adds one path column per commodity. Each path touches its demand
+row and the capacity rows of its arcs, producing off-diagonal normal equations.
+The gate passes `--no-presolve` to reach the barrier on every case. The
+barrier's own presolve still runs.
 
-```bash
-mkdir -p commalab/{grid,planar}
-tar -xzf grid.tgz -C commalab/grid
-tar -xzf planar.tgz -C commalab/planar
-gzip commalab/grid/grid{1..9} commalab/planar/planar{30,50,80,100,150,300}
-```
+`instance_gate/barrier_cg_v1.solu` records the objectives of these generated
+LPs from HiGHS 1.14.0 with `solver=simplex`, `presolve=off` and `threads=1`.
+`instance_gate/barrier_cg_expected.csv` records the default 10-second classes
+for that panel. The dense backend reached the time limit on grid8, grid9,
+planar150 and planar300. Dense Cholesky costs cubic time in the order of
+the normal equations, even when the matrix is sparse. It accounted for
+97–99% of sampled CPU cycles in five-second runs of the four dense cases.
+The sparse backend matched all 15 objectives at 1e-6, and dense matched
+the other 11. The `time_limit` expectation accepts a solver deadline or a
+result that matches at 1e-6.
+A crash, error or wrong completed objective fails the gate.
 
-Run the generator from the mipx checkout.
-
-```bash
-python3 tests/perf/generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab
-```
-
-The executable must run HiGHS with presolve disabled and accept an
-instance path followed by `--method cg
---backend highs --highs-method simplex --threads 1 --no-sidecar
---cg-set lp_dump=DIR --cg-set lp_dump_every=1 --cg-set max_iterations=5`.
-The generator checks for `backend = highs simplex presolve=off` in the
-dump's manifest. The tool writes `DIR/lp_0000/` with a full master just
-before each solve, with one row/value pair per `COLUMNS` line and
-consecutive solve numbers starting at 0. If the dump uses a different
-manifest format value with the same version 1 layout, pass `--dump-format`
-with that exact value.
-
-The generator picks the first coupled snapshot after solve 0, looks up
-its matching `solve` record in `ops.txt`, and writes `<name>.mps` and the
-`.solu` in `tests/data/cg_masters_later/`.
-Reproducing the reference masters requires the same starting columns and
-pricing strategy. A change to the generator's model or pricing can
-produce different intermediate LPs for the same inputs.
-It requires a finite optimal objective for a minimisation LP with zero
-objective offset and no free rows. A failed dump leaves the published
-panel untouched. The suite reports `Skipped` until the later masters are
-generated. First-master downloads live in a separate directory.
-
-The whole gate (both suites, both backends) takes about 5.7 minutes, nearly
-all of it the dense backend on Netlib; there is no faster subset in the commit
-and push gates, since it stays out of them.
+To inspect the exact models or solve them independently, export the same
+v1 panel with `python3 tests/perf/generate_cg_masters.py --out PATH` after
+downloading the archives. When testing different fixtures with `--data-dir`,
+pair them with their own expected list via `--expected-file`.
 
 ```bash
 python3 tests/perf/run_instance_gate.py barrier                          # both backends
 python3 tests/perf/run_instance_gate.py barrier --backends barrier-sparse
 python3 tests/perf/run_instance_gate.py barrier --all --write-expected   # regenerate the list
+./tests/data/download_commalab.sh
 python3 tests/perf/run_instance_gate.py barrier-cg                       # the cg masters
 ctest --test-dir build -L barrier-gate --output-on-failure               # both suites
 ```

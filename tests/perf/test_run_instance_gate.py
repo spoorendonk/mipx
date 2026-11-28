@@ -71,6 +71,12 @@ def test_classify(
         ("match_1e-4", "dnf", "fail"),
         ("dnf", "dnf", "ok"),
         ("dnf", "match_1e-4", "better"),
+        ("time_limit", "time_limit", "ok"),
+        ("time_limit", "match_1e-6", "better"),
+        ("time_limit", "match_1e-4", "fail"),
+        ("time_limit", "dnf", "fail"),
+        ("time_limit", "disagree", "fail"),
+        ("match_1e-6", "time_limit", "fail"),
         ("match_1e-4", "match_1e-6", "better"),
         # A wrong answer fails even where the list already expects one.
         ("disagree", "disagree", "fail"),
@@ -144,6 +150,62 @@ def test_cg_gate_runs_both_barrier_backends_without_cli_presolve(
     ]
     assert gate.main(argv) == 0
     assert factors == ["dense", "sparse"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "exit_code"),
+    [
+        ("Status: Time limit\n", 0, 0),
+        ("Status: Time limit\n", -11, 1),
+        ("Status: Time limit\n", 1, 1),
+        ("Status: Optimal\nObjective: 10\n", 0, 0),
+        ("Status: Optimal\nObjective: 10\n", 1, 1),
+        ("Status: Optimal\nObjective: 10.0001\n", 0, 1),
+        ("Status: Optimal\nObjective: 11\n", 0, 1),
+        ("Status: Error\n", 0, 1),
+    ],
+)
+def test_cg_gate_generates_a_fresh_panel_and_checks_the_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    returncode: int,
+    exit_code: int,
+) -> None:
+    expected = tmp_path / "expected.csv"
+    expected.write_text("instance,backend,expected\ngrid1,barrier-dense,time_limit\n")
+    suite = gate.replace(gate.SUITES["barrier-cg"], data_dir=tmp_path, expected=expected)
+    monkeypatch.setitem(gate.SUITES, "barrier-cg", suite)
+    (tmp_path / "grid.tgz").touch()
+
+    def generate(inputs: Path, out: Path) -> None:
+        assert inputs == tmp_path
+        assert out != tmp_path
+        (out / "grid1.mps").touch()
+        (out / "cg_masters.solu").write_text("=opt= grid1 10\n")
+
+    def solve(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert Path(cmd[1]).is_file()
+        assert cmd[cmd.index("--time-limit") + 1] == "10"
+        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+    monkeypatch.setattr(gate.cg_masters, "generate_panel", generate)
+    monkeypatch.setattr(gate.subprocess, "run", solve)
+    assert gate.main(["barrier-cg", "--binary", sys.executable]) == exit_code
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["expected.csv", "grid.tgz"]
+
+
+def test_pinned_cg_gate_skips_empty_inputs_but_fails_on_partial_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    suite = gate.replace(gate.SUITES["barrier-cg"], data_dir=tmp_path)
+    monkeypatch.setitem(gate.SUITES, "barrier-cg", suite)
+    assert gate.main(["barrier-cg"]) == gate.SKIP_EXIT
+    assert "download_commalab.sh" in capsys.readouterr().err
+
+    (tmp_path / "planar.tgz").touch()
+    assert gate.main(["barrier-cg"]) == 1
+    assert "Cannot generate barrier-cg v1 panel" in capsys.readouterr().err
 
 
 def test_read_solu_keeps_only_usable_references(tmp_path: Path) -> None:

@@ -1,239 +1,179 @@
 #!/usr/bin/env python3
-"""Generate the later column-generation masters of the CPU barrier gate (#358).
-
-Writes, for each of the 15 public CommaLab instances of the cold LP panel
-(#272: grid1-9, planar30/50/80/100/150/300), the first later master LP with
-a path column linking demand and capacity rows as `<name>.mps`, and
-`cg_masters.solu` with the corresponding objective HiGHS reported for it
-(simplex, presolve off), in `.solu` format for run_instance_gate.py's
-`barrier-cg` suite.
-
-The external column-generation tool must support the arguments in
-`dump_master`. With `lp_dump_every=1`, it writes `master_NNNN.mps` with
-all edits applied immediately before solve NNNN, whose result appears in
-`ops.txt`. See "LP Sequence Replay" in tests/perf/README.md for the format.
-
-    generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab \\
-        [--out tests/data/cg_masters_later]
-
-`--instances` is the public CommaLab directory (`grid/gridN.gz`,
-`planar/planarN.gz`). Exit status is 0 when every master and the `.solu`
-were written. If a run or its dump fails, the script returns 1 without
-publishing a new panel.
-"""
+"""Generate the barrier-cg v1 panel from the pinned CommaLAB archives."""
 
 from __future__ import annotations
 
 import argparse
-import math
-import shutil
-import subprocess
-import sys
-import tempfile
+import hashlib
+import heapq
+import io
+import tarfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_OUT = REPO / "tests" / "data" / "cg_masters_later"
+DEFAULT_INPUTS = REPO / "tests" / "data" / "commalab"
+CHECKSUMS = DEFAULT_INPUTS.parent / "commalab_archives.sha256"
+REFERENCES = Path(__file__).resolve().parent / "instance_gate" / "barrier_cg_v1.solu"
+MASTER_CHECKSUMS = REFERENCES.with_suffix(".sha256")
 SOLU = "cg_masters.solu"
-LPSEQ_FORMAT = "lpseq 1"
-REFERENCE_BACKEND = "highs simplex presolve=off"
+CASES = {
+    "grid.tgz": [f"grid{i}" for i in range(1, 10)],
+    "planar.tgz": [f"planar{n}" for n in (30, 50, 80, 100, 150, 300)],
+}
 
-INSTANCES = [f"grid{i}" for i in range(1, 10)] + [f"planar{n}" for n in (30, 50, 80, 100, 150, 300)]
-
-
-def instance_file(instances: Path, name: str) -> Path:
-    family = "grid" if name.startswith("grid") else "planar"
-    return instances / family / f"{name}.gz"
-
-
-def read_manifest(path: Path) -> dict[str, str]:
-    entries: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            entries[key.strip()] = value.strip()
-    return entries
+Arc = tuple[int, int, int, int]  # tail, head, cost, capacity
+Demand = tuple[int, int, int]  # origin, destination, volume
+Graph = list[list[tuple[int, int, int]]]  # arc index, head, cost
+Tree = tuple[dict[int, int], dict[int, tuple[int, int]]]  # distances, predecessors
 
 
-MPS_SECTIONS = {"NAME", "ROWS", "COLUMNS", "RHS", "RANGES", "BOUNDS", "OBJSENSE", "ENDATA"}
+def read_instance(data: bytes) -> tuple[int, list[Arc], list[Demand]]:
+    nodes, arc_count, demand_count, *values = map(int, data.split())
+    arc_end = 4 * arc_count
+    if len(values) != arc_end + 3 * demand_count:
+        raise ValueError("incorrect arc or commodity count")
+    arcs = []
+    for i in range(0, arc_end, 4):
+        tail, head, cost, capacity = values[i : i + 4]
+        arcs.append((tail, head, cost, capacity))
+    demands = []
+    for i in range(arc_end, len(values), 3):
+        origin, destination, volume = values[i : i + 3]
+        demands.append((origin, destination, volume))
+    return nodes, arcs, demands
 
 
-def has_capacity_path(mps: Path) -> bool:
-    """Find a path column touching both a demand (G) and a capacity (L) row."""
-    row_types: dict[str, str] = {}
-    path_sides: dict[str, set[str]] = {}
-    section = ""
-    for line in mps.read_text(encoding="utf-8").splitlines():
-        fields = line.split()
-        if not fields:
+def shortest_tree(graph: Graph, origin: int) -> Tree:
+    distance = {origin: 0}
+    predecessor: dict[int, tuple[int, int]] = {}
+    pending = [(0, origin)]
+    while pending:
+        cost, node = heapq.heappop(pending)
+        if cost != distance[node]:
             continue
-        if fields[0] in MPS_SECTIONS:
-            section = fields[0]
-        elif section == "ROWS":
-            sense, row = fields
-            row_types[row] = sense
-        elif section == "COLUMNS":
-            # The recorder writes one row/value pair on each line.
-            col, row, value = fields
-            side = row_types.get(row)
-            if side is None:
-                raise ValueError(f"{mps.name}: column {col} references unknown row {row}")
-            if side in {"G", "L"} and float(value) != 0.0:
-                path_sides.setdefault(col, set()).add(side)
-    # The recorder writes free rows as N, which the MPS reader drops.
-    if (n_rows := list(row_types.values()).count("N")) != 1:
-        raise ValueError(f"{mps.name}: master has {n_rows} N rows, not just the objective")
-    # CG's constraint coefficients are nonnegative, so the shared column
-    # contributes a nonzero off-diagonal entry to A D A^T.
-    return any(sides == {"G", "L"} for sides in path_sides.values())
+        # Ties keep the first route: nodes are popped by (distance, node ID)
+        # and outgoing arcs are visited in the order of the input file.
+        for arc, head, length in graph[node]:
+            candidate = cost + length
+            if head not in distance or candidate < distance[head]:
+                distance[head] = candidate
+                predecessor[head] = arc, node
+                heapq.heappush(pending, (candidate, head))
+    return distance, predecessor
 
 
-def later_master(lp: Path) -> tuple[Path, float]:
-    """Choose the earliest coupled later snapshot and its recorded objective."""
-    next_seq = 0
-    for line in (lp / "ops.txt").read_text(encoding="utf-8").splitlines():
-        parts = line.split()
-        if not parts or parts[0] != "solve":
-            # A snapshot already includes all preceding edits.
-            continue
-        if len(parts) != 6 or int(parts[1]) != next_seq:
-            raise ValueError(f"ops.txt: expected solve {next_seq}, got {line!r}")
-        seq = next_seq
-        next_seq += 1
-        if seq == 0:
-            continue
-        mps = lp / f"master_{seq:04d}.mps"
-        if not has_capacity_path(mps):
-            continue
-        status, objective = parts[2], float(parts[3])
-        if status != "optimal" or not math.isfinite(objective):
-            raise ValueError(f"solve {seq}: expected a finite optimal objective, got {line!r}")
-        return mps, objective
-    raise ValueError("no later master with a path linking demand and capacity rows")
+def price_paths(nodes: int, arcs: list[Arc], demands: list[Demand]) -> list[tuple[int, list[int]]]:
+    graph: Graph = [[] for _ in range(nodes + 1)]  # CommaLAB node IDs start at 1.
+    for index, (tail, head, cost, _) in enumerate(arcs):
+        graph[tail].append((index, head, cost))
+
+    trees: dict[int, Tree] = {}
+    paths = []
+    for origin, destination, _ in demands:
+        if origin not in trees:
+            trees[origin] = shortest_tree(graph, origin)
+        distance, predecessor = trees[origin]
+        if destination not in distance:
+            raise ValueError(f"node {destination} is unreachable from node {origin}")
+        cost = distance[destination]
+        route = []
+        node = destination
+        while node != origin:
+            arc, node = predecessor[node]
+            route.append(arc)
+        route.reverse()
+        paths.append((cost, route))
+    return paths
 
 
-def dump_master(cg_tool: Path, source: Path, dump: Path) -> Path:
-    """Run a few CG iterations and return the first LP's snapshot directory."""
-    cmd = [
-        str(cg_tool),
-        str(source),
-        "--method",
-        "cg",
-        "--backend",
-        "highs",
-        "--highs-method",
-        "simplex",
-        "--threads",
-        "1",
-        "--no-sidecar",
-        "--cg-set",
-        f"lp_dump={dump}",
-        "--cg-set",
-        "lp_dump_every=1",
-        "--cg-set",
-        "max_iterations=5",
-    ]
-    # The tool can report a failed exact check at the iteration limit. The dump's
-    # individual LP solve records determine whether it contains a usable master.
+def master_mps(source: bytes) -> bytes:
+    nodes, arcs, demands = read_instance(source)
+    paths = price_paths(nodes, arcs, demands)
+    used_arcs = sorted({arc for _, route in paths for arc in route})
+    if not used_arcs:
+        raise ValueError("later master has no path linking demand and capacity rows")
+    # With only artificial columns, the initial master has this demand dual
+    # for every commodity and zero capacity duals. One shortest-path pricing
+    # sweep adds a negative reduced-cost path for each demand.
+    penalty = 2 * max(cost for cost, _ in paths) + 1
+    with io.StringIO(newline="\n") as out:
+        print("NAME master\nROWS\n N obj", file=out)
+        for i in range(len(demands)):
+            print(f" G d{i}", file=out)
+        for arc in used_arcs:
+            print(f" L a{arc}", file=out)
+        print("COLUMNS", file=out)
+        for i, (cost, route) in enumerate(paths):
+            print(f" u{i} obj {penalty}\n u{i} d{i} 1", file=out)
+            print(f" p{i} obj {cost}\n p{i} d{i} 1", file=out)
+            for arc in route:
+                print(f" p{i} a{arc} 1", file=out)
+        print("RHS", file=out)
+        for i, (_, _, volume) in enumerate(demands):
+            print(f" rhs d{i} {volume}", file=out)
+        for arc in used_arcs:
+            print(f" rhs a{arc} {arcs[arc][3]}", file=out)
+        print("ENDATA", file=out)
+        return out.getvalue().encode("ascii")
+
+
+def read_checksums(path: Path) -> dict[str, str]:
+    checksums = {}
+    for line in path.read_text(encoding="ascii").splitlines():
+        checksum, name = line.split()
+        checksums[name] = checksum
+    return checksums
+
+
+def read_archives(inputs: Path) -> dict[str, bytes]:
+    archives = {}
+    for name, checksum in read_checksums(CHECKSUMS).items():
+        path = inputs / name
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != checksum:
+            raise ValueError(f"incorrect SHA-256 for {path}; rerun tests/data/download_commalab.sh")
+        archives[name] = data
+    return archives
+
+
+def generate_panel(inputs: Path, out: Path) -> None:
+    archives = read_archives(inputs)
+    checksums = read_checksums(MASTER_CHECKSUMS)
+    masters = {}
+    for name, cases in CASES.items():
+        with tarfile.open(fileobj=io.BytesIO(archives[name]), mode="r:gz") as archive:
+            for case in cases:
+                try:
+                    source = archive.extractfile(case)
+                except KeyError as error:
+                    raise ValueError(f"{case} is missing from {name}") from error
+                if source is None:
+                    raise ValueError(f"{case} is not a file in {name}")
+                with source:
+                    model = master_mps(source.read())
+                filename = f"{case}.mps"
+                if hashlib.sha256(model).hexdigest() != checksums.get(filename):
+                    raise ValueError(f"generated {filename} differs from the pinned v1 model")
+                masters[filename] = model
+
+    references = REFERENCES.read_bytes()
+    out.mkdir(parents=True, exist_ok=True)
+    for filename, model in masters.items():
+        (out / filename).write_bytes(model)
+    (out / SOLU).write_bytes(references)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--instances", type=Path, default=DEFAULT_INPUTS, help="archive directory")
+    parser.add_argument("--out", type=Path, required=True, help="output for MPS and .solu files")
+    args = parser.parse_args()
     try:
-        run = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=600)
-    except subprocess.TimeoutExpired as err:
-        raise RuntimeError(f"CG tool ran past {err.timeout} s on {source}") from err
-    lp = dump / "lp_0000"
-    if not (lp / "master_0000.mps").is_file() or not (lp / "ops.txt").is_file():
-        tail = (run.stderr or run.stdout).strip()[-500:]
-        raise RuntimeError(
-            f"CG tool wrote no master for {source} (exit {run.returncode}: {tail}; {' '.join(cmd)})"
-        )
-    return lp
-
-
-def checked_master(cg_tool: Path, source: Path, dump: Path, dump_format: str) -> tuple[Path, float]:
-    """Dump one instance's later master and return its MPS and reference objective.
-
-    Raises RuntimeError, ValueError or OSError when the master cannot serve
-    as a gate instance (for example, the tool or a dump file is missing).
-    """
-    if not source.is_file():
-        raise RuntimeError(f"no instance file {source}")
-    lp = dump_master(cg_tool, source, dump)
-    manifest = read_manifest(lp / "manifest.txt")
-    actual_format = manifest.get("format")
-    if actual_format != dump_format:
-        raise RuntimeError(
-            f"unsupported dump format: {actual_format!r} (expected {dump_format!r}). "
-            "Pass --dump-format for a compatible producer with a different marker."
-        )
-    backend = manifest.get("backend")
-    if backend != REFERENCE_BACKEND:
-        raise RuntimeError(f"unsupported backend: {backend!r} (expected {REFERENCE_BACKEND!r})")
-    # The reference must be the MPS's own objective: refuse what mipx-solve
-    # would read differently from what HiGHS solved.
-    if manifest.get("sense") != "min" or float(manifest.get("obj_offset", "0")) != 0.0:
-        raise RuntimeError(f"sense or offset not min/0: {manifest}")
-    return later_master(lp)
-
-
-def generate(
-    cg_tool: Path, instances: Path, out: Path, workdir: Path, *, dump_format: str = LPSEQ_FORMAT
-) -> tuple[list[str], list[str]]:
-    """Dump and check every master; copy them all to out only if none failed.
-
-    Returns (.solu lines, failures); the caller writes the .solu.
-    """
-    solu: list[str] = []
-    failures: list[str] = []
-    masters: list[tuple[Path, str]] = []
-    for name in INSTANCES:
-        try:
-            mps, objective = checked_master(
-                cg_tool, instance_file(instances, name), workdir / name, dump_format
-            )
-        except (RuntimeError, ValueError, OSError) as err:
-            failures.append(f"{name}: {err}")
-            continue
-        masters.append((mps, name))
-        solu.append(f"=opt= {name} {objective!r}")
-    if failures:
-        return solu, failures
-    for mps, name in masters:
-        try:
-            shutil.copyfile(mps, out / f"{name}.mps")
-        except OSError as err:
-            failures.append(f"{name}: {err}")
-        else:
-            print(f"{name}: {mps.name}")
-    return solu, failures
-
-
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--cg-tool", required=True, type=Path, help="column-generation executable")
-    p.add_argument(
-        "--instances", required=True, type=Path, help="public CommaLab instance directory"
-    )
-    p.add_argument(
-        "--dump-format",
-        default=LPSEQ_FORMAT,
-        help="expected manifest format value for a compatible producer (default: %(default)s)",
-    )
-    p.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    args = p.parse_args(argv)
-
-    args.out.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".dump_", dir=args.out) as tmp:
-        solu, failures = generate(
-            args.cg_tool, args.instances, args.out, Path(tmp), dump_format=args.dump_format
-        )
-    for failure in failures:
-        print(f"FAILED: {failure}", file=sys.stderr)
-    if failures:
-        print(f"{args.out} left as it was", file=sys.stderr)
-        return 1
-    (args.out / SOLU).write_text("".join(line + "\n" for line in solu), encoding="utf-8")
-    print(f"wrote {len(solu)} masters and {SOLU} to {args.out}")
+        generate_panel(args.instances, args.out)
+    except (OSError, ValueError, tarfile.TarError) as error:
+        parser.exit(1, f"Cannot generate barrier-cg v1 panel: {error}\n")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

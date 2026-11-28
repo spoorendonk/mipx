@@ -38,9 +38,9 @@ tests/data/*_roundtrip.mps
 !tests/data/cplex2.mps
 # Legacy first-master downloads (#331).
 tests/data/cg_masters/*
-# Later masters are generated (#358); their reference objectives are tracked.
+# Legacy later-master exports (#358) and the v1 gate's downloaded sources (#483).
 tests/data/cg_masters_later/*
-!tests/data/cg_masters_later/cg_masters.solu
+tests/data/commalab/
 
 # Scratch planning docs
 plan-barrier.md

@@ -1,5 +1,6 @@
 # Expected class per instance and backend for run_instance_gate.py.
-# Later CommaLab masters with coupled demand and capacity rows (#358).
+# CommaLAB v1 masters from generate_cg_masters.py and barrier_cg_v1.solu (#483).
+# Dense grid8/9 and planar150/300 reach the 10 s normal-equations deadline.
 # Refresh these rows: tests/perf/run_instance_gate.py barrier-cg --write-expected
 # Add every instance with a reference: tests/perf/run_instance_gate.py barrier-cg --all --write-expected
 instance,backend,expected
@@ -17,17 +18,17 @@ grid6,barrier-dense,match_1e-6
 grid6,barrier-sparse,match_1e-6
 grid7,barrier-dense,match_1e-6
 grid7,barrier-sparse,match_1e-6
-grid8,barrier-dense,match_1e-6
+grid8,barrier-dense,time_limit
 grid8,barrier-sparse,match_1e-6
-grid9,barrier-dense,match_1e-6
+grid9,barrier-dense,time_limit
 grid9,barrier-sparse,match_1e-6
 planar100,barrier-dense,match_1e-6
 planar100,barrier-sparse,match_1e-6
-planar150,barrier-dense,match_1e-6
+planar150,barrier-dense,time_limit
 planar150,barrier-sparse,match_1e-6
 planar30,barrier-dense,match_1e-6
 planar30,barrier-sparse,match_1e-6
-planar300,barrier-dense,match_1e-6
+planar300,barrier-dense,time_limit
 planar300,barrier-sparse,match_1e-6
 planar50,barrier-dense,match_1e-6
 planar50,barrier-sparse,match_1e-6

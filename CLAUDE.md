@@ -312,8 +312,9 @@ The CPU barrier gate (#330) runs every Netlib LP through both barrier
 normal-equations backends and takes about six minutes on one thread (dense
 ~5 min, sparse ~70 s, of which ~26 s is pilot87, nearly all crossover), so
 `-L solver-regression` now runs it too. Its second test (#358) runs one
-later column-generation master per CommaLab instance the same way, once
-`tests/perf/generate_cg_masters.py` has made them (see `tests/perf/README.md`).
+later column-generation master per CommaLAB instance the same way, generating
+them from the archives fetched by `tests/data/download_commalab.sh` (see
+`tests/perf/README.md`).
 To run both on their own:
 
 ```bash

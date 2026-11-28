@@ -50,15 +50,18 @@ import csv
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+import generate_cg_masters as cg_masters
 
 REPO = Path(__file__).resolve().parents[2]
 GATE_DIR = Path(__file__).resolve().parent / "instance_gate"
 
 CLASSES = ("match_1e-6", "match_1e-4", "disagree", "dnf")
-MATCHES = ("match_1e-6", "match_1e-4")
 SKIP_EXIT = 77
 
 
@@ -91,6 +94,10 @@ class Suite:
     backends: tuple[str, ...]
     download: str
     extra_solver_args: tuple[str, ...] = ()
+    distinguish_time_limit: bool = False
+
+    def classes(self) -> tuple[str, ...]:
+        return (*CLASSES, "time_limit") if self.distinguish_time_limit else CLASSES
 
     def references(self) -> dict[str, Reference]:
         path = self.data_dir / self.solu
@@ -145,14 +152,15 @@ SUITES: dict[str, Suite] = {
     ),
     # The same on later column-generation masters of #272 with coupled rows (#358).
     "barrier-cg": Suite(
-        REPO / "tests" / "data" / "cg_masters_later",
-        "cg_masters.solu",
+        cg_masters.DEFAULT_INPUTS,
+        cg_masters.SOLU,
         GATE_DIR / "barrier_cg_expected.csv",
         10.0,
         ("barrier-dense", "barrier-sparse"),
-        "tests/perf/generate_cg_masters.py --cg-tool PATH/TOOL --instances PATH/commalab",
+        "tests/data/download_commalab.sh",
         # CLI presolve can solve these small masters before barrier starts.
         extra_solver_args=("--no-presolve",),
+        distinguish_time_limit=True,
     ),
 }
 
@@ -161,13 +169,13 @@ SUITES: dict[str, Suite] = {
 BARRIER_NE = {"barrier-dense": "dense", "barrier-sparse": "sparse"}
 
 
-def read_expected(path: Path) -> list[Expectation]:
+def read_expected(path: Path, classes: tuple[str, ...] = CLASSES) -> list[Expectation]:
     if not path.is_file():
         return []
     rows: list[Expectation] = []
     with path.open(encoding="utf-8", newline="") as f:
         for row in csv.DictReader(line for line in f if not line.startswith("#")):
-            if row["expected"] not in CLASSES:
+            if row["expected"] not in classes:
                 raise SystemExit(f"{path}: unknown class {row['expected']!r} for {row['instance']}")
             limit = row.get("time_limit") or ""
             rows.append(
@@ -203,7 +211,9 @@ def parse_outcome(output: str) -> Outcome:
     return Outcome(status, float(match.group(1)) if match else None)
 
 
-def classify(outcome: Outcome, ref: Reference) -> str:
+def classify(outcome: Outcome, ref: Reference, *, distinguish_time_limit: bool = False) -> str:
+    if distinguish_time_limit and outcome.status == "time_limit":
+        return "time_limit"
     claims = {"optimal": "opt", "gap_limit": "opt", "infeasible": "inf", "unbounded": "unbd"}
     claim = claims.get(outcome.status)
     if claim is None:
@@ -238,10 +248,8 @@ def solver_args(backend: str, time_limit: float) -> list[str]:
     return args
 
 
-def run_one(
-    binary: Path, instance: Path, backend: str, time_limit: float, extra_args: tuple[str, ...]
-) -> Outcome:
-    cmd = [str(binary), str(instance), *solver_args(backend, time_limit), *extra_args]
+def run_one(binary: Path, instance: Path, backend: str, time_limit: float, suite: Suite) -> Outcome:
+    cmd = [str(binary), str(instance), *solver_args(backend, time_limit), *suite.extra_solver_args]
     # The solver's own limit is the real one; the wall-clock guard only
     # catches a hang, so it is generous.
     try:
@@ -250,10 +258,9 @@ def run_one(
         )
     except subprocess.TimeoutExpired:
         return Outcome("timeout", None)
-    outcome = parse_outcome(proc.stdout + "\n" + proc.stderr)
-    if proc.returncode != 0 and outcome.status == "crash":
+    if suite.distinguish_time_limit and proc.returncode != 0:
         return Outcome("crash", None)
-    return outcome
+    return parse_outcome(proc.stdout + "\n" + proc.stderr)
 
 
 def verdict(expected: str | None, observed: str) -> str:
@@ -262,8 +269,11 @@ def verdict(expected: str | None, observed: str) -> str:
         return "fail"
     if expected is None:
         return "unlisted"
-    rank = {"match_1e-6": 0, "match_1e-4": 1, "dnf": 2, "disagree": 3}
-    if rank[observed] > rank[expected] and expected in MATCHES:
+    if expected == "time_limit":
+        # A solve that finishes still has to meet the panel's objective tolerance.
+        return {"match_1e-6": "better", "time_limit": "ok"}.get(observed, "fail")
+    rank = {"match_1e-6": 0, "match_1e-4": 1, "time_limit": 2, "dnf": 3, "disagree": 4}
+    if rank[observed] > rank[expected]:
         return "fail"
     return "better" if rank[observed] < rank[expected] else "ok"
 
@@ -315,12 +325,14 @@ def build_plan(args: argparse.Namespace, suite: Suite, listed: list[Expectation]
     return plan
 
 
-def print_summary(results: dict[tuple[str, str], str], backends: list[str]) -> None:
+def print_summary(
+    results: dict[tuple[str, str], str], backends: list[str], classes: tuple[str, ...]
+) -> None:
     print("\nSummary (per backend):")
-    print(f"  {'backend':<14} " + " ".join(f"{c:>10}" for c in CLASSES))
+    print(f"  {'backend':<14} " + " ".join(f"{c:>10}" for c in classes))
     for backend in backends:
         counts = Counter(cls for (_, b), cls in results.items() if b == backend)
-        print(f"  {backend:<14} " + " ".join(f"{counts.get(c, 0):>10}" for c in CLASSES))
+        print(f"  {backend:<14} " + " ".join(f"{counts.get(c, 0):>10}" for c in classes))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -352,8 +364,8 @@ def execute(args: argparse.Namespace, suite: Suite, plan: Plan) -> dict[tuple[st
         ref = refs.get(name)
         if ref is None:  # build_plan only schedules instances with a reference
             continue
-        outcome = run_one(binary, instances[name], backend, limit, suite.extra_solver_args)
-        cls = classify(outcome, ref)
+        outcome = run_one(binary, instances[name], backend, limit, suite)
+        cls = classify(outcome, ref, distinguish_time_limit=suite.distinguish_time_limit)
         results[(name, backend)] = cls
         tag = verdict(plan.expected.get((name, backend)), cls)
         obj = "" if outcome.objective is None else f" obj={outcome.objective:.10g}"
@@ -389,25 +401,22 @@ def report(plan: Plan, results: dict[tuple[str, str], str], list_written: bool) 
     return 0 if ok else 1
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    suite = SUITES[args.suite]
-    if args.data_dir:
-        suite = replace(suite, data_dir=Path(args.data_dir))
-    if args.expected_file:
-        suite = replace(suite, expected=Path(args.expected_file))
-    listed = read_expected(suite.expected)
+def skip_gate(args: argparse.Namespace, suite: Suite, listed: list[Expectation]) -> int:
+    # Name what was not gated, so a skip cannot read as a pass (#341).
+    backends = selected_backends(args, suite)
+    names = sorted({row.instance for row in listed if row.backend in backends})
+    print(
+        f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}, "
+        f"not run: {', '.join(names) or 'none listed'}. "
+        f"Get them with {suite.download}.",
+        file=sys.stderr,
+    )
+    return SKIP_EXIT
+
+
+def run_gate(args: argparse.Namespace, suite: Suite, listed: list[Expectation]) -> int:
     if not find_instances(suite.data_dir):
-        # Name what was not gated, so a skip cannot read as a pass (#341).
-        backends = selected_backends(args, suite)
-        names = sorted({row.instance for row in listed if row.backend in backends})
-        print(
-            f"SKIPPED: instance gate '{args.suite}': no instances in {suite.data_dir}, "
-            f"not run: {', '.join(names) or 'none listed'}. "
-            f"Get them with {suite.download}.",
-            file=sys.stderr,
-        )
-        return SKIP_EXIT
+        return skip_gate(args, suite, listed)
     if not Path(args.binary).is_file():
         raise SystemExit(f"Solver binary not found: {args.binary} (build first)")
 
@@ -415,7 +424,7 @@ def main(argv: list[str]) -> int:
     backends = selected_backends(args, suite)
     print(f"Instance gate '{args.suite}': {len(plan.runs)} runs, backends {','.join(backends)}")
     results = execute(args, suite, plan)
-    print_summary(results, backends)
+    print_summary(results, backends, suite.classes())
 
     if args.write_expected:
         # Every existing entry is kept -- other backends', and listed instances
@@ -436,6 +445,33 @@ def main(argv: list[str]) -> int:
         write_expected(suite.expected, list(merged.values()), header)
         print(f"Wrote {suite.expected}")
     return report(plan, results, args.write_expected)
+
+
+def run_pinned_cg(args: argparse.Namespace, suite: Suite, listed: list[Expectation]) -> int:
+    inputs = suite.data_dir
+    if not any((inputs / name).exists() for name in cg_masters.CASES):
+        return skip_gate(args, suite, listed)
+    with tempfile.TemporaryDirectory(prefix=".barrier-cg-v1-", dir=inputs) as tmp:
+        panel = Path(tmp)
+        try:
+            cg_masters.generate_panel(inputs, panel)
+        except (OSError, ValueError, tarfile.TarError) as error:
+            print(f"Cannot generate barrier-cg v1 panel: {error}", file=sys.stderr)
+            return 1
+        return run_gate(args, replace(suite, data_dir=panel), listed)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    suite = SUITES[args.suite]
+    if args.expected_file:
+        suite = replace(suite, expected=Path(args.expected_file))
+    listed = read_expected(suite.expected, suite.classes())
+    if args.data_dir:
+        suite = replace(suite, data_dir=Path(args.data_dir))
+    elif args.suite == "barrier-cg":
+        return run_pinned_cg(args, suite, listed)
+    return run_gate(args, suite, listed)
 
 
 if __name__ == "__main__":
