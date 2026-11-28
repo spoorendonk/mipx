@@ -549,6 +549,8 @@ public:
     void setInferenceBranchCoverageEnabled(bool enabled) {
         inference_branch_coverage_enabled_ = enabled;
     }
+    /// Prefer a ready inference challenger within 1% of the serial pseudocost winner.
+    void setInferenceBranchScoreEnabled(bool enabled) { inference_branch_score_enabled_ = enabled; }
     /// Learn pseudocosts from the gains of solved child nodes (#199). On by
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.
@@ -909,7 +911,8 @@ private:
     bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
-                                            std::span<const Real> current_upper, Index default_var);
+                                            std::span<const Real> current_upper,
+                                            Index default_var) const;
     HeuristicRuntimeConfig makeHeuristicRuntimeConfig() const;
 
     /// Build the root conflict graph and clique table from problem_.
@@ -1049,6 +1052,7 @@ private:
     bool tree_pseudocosts_enabled_ = true;
     bool directional_inference_enabled_ = false;
     bool inference_branch_coverage_enabled_ = false;
+    bool inference_branch_score_enabled_ = false;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;

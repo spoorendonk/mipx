@@ -259,6 +259,68 @@ TEST_CASE("Inference coverage only compares candidates on the winning pseudocost
     }
 }
 
+TEST_CASE("Inference picks a ready near tie only when the weaker direction improves",
+          "[branching]") {
+    const Real scale = GENERATE(1e-8, 1.0, 1e150);
+    const Index reliability_threshold = GENERATE(1, 2);
+    LpProblem lp;
+    lp.num_cols = 6;
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    const std::array<Real, 6> primals{0.5, 0.5, 0.125, 0.25, 0.5, 0.5};
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setReliabilityThreshold(reliability_threshold);
+    const std::array<Real, 6> costs{200.0, 199.0, 199.5, 199.5, 197.0, 200.0};
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        // Columns 2 and 3 have the same predicted score. The prefilter visits 1, 3, 2.
+        const Real down_multiplier = j == 2 ? 4.0 : (j == 3 ? 2.0 : 1.0);
+        branching.updatePseudoCost(j, false, costs[j] * scale * down_multiplier);
+        branching.updatePseudoCost(j, true, costs[j] * scale * (j == 2 || j == 3 ? 0.5 : 1.0));
+    }
+
+    std::array<MipBranchInferenceStats, 6> history{};
+    for (auto& entry : history) {
+        entry = {{.samples = 4, .tightened_columns = 12}, {.samples = 4, .tightened_columns = 40}};
+    }
+    history[0].down.tightened_columns = 8;
+    history[4].down.tightened_columns = 36;  // Outside 1%.
+    history[5].up.samples = 3;               // Incomplete challenger.
+    BranchingTelemetry telemetry;
+    BranchInferenceCoverageStats stats;
+    const BranchInferenceCoverage coverage{history, {}, stats, true};
+    const auto select = [&](const BranchInferenceCoverage* observation) {
+        return branching.selectWithInferenceCoverage(solver, lp, primals, lp.col_lower,
+                                                     lp.col_upper, 0.0, false, telemetry, {},
+                                                     observation);
+    };
+    auto& path = reliability_threshold == 1 ? stats.reliable : stats.fallback;
+    REQUIRE(select(nullptr).variable == 0);
+    const auto preferred = select(&coverage);
+    REQUIRE(preferred.variable == 2);
+    REQUIRE(preferred.inference_baseline == 0);
+    REQUIRE(path.selection_changes == 1);
+    stats.recordArbitration(preferred, 1, 1);  // The override replaces the proposal.
+    stats.recordArbitration(preferred, 2, 2);  // The baseline would choose it anyway.
+    CHECK(path.surviving_changes == 0);
+    stats.recordArbitration(preferred, 2, 0);
+    CHECK(path.surviving_changes == 1);
+    stats.recordArbitration(preferred, 1, 0);  // The override takes a third column.
+    CHECK(path.surviving_changes == 2);
+
+    history[2].down.samples = 3;
+    CHECK(select(&coverage).variable == 3);
+    history[0].down.tightened_columns = 12;
+    CHECK(select(&coverage).variable == 0);  // No strictly better ready challenger.
+    history[0].down.samples = 3;
+    history[3].down.tightened_columns = 24;
+    CHECK(select(&coverage).variable == 0);  // Incomplete baseline.
+    CHECK(path.selection_changes == 2);
+}
+
 TEST_CASE("ReliabilityBranching gives sibling probes the same reliability view", "[branching]") {
     LpProblem lp;
     lp.num_cols = 3;

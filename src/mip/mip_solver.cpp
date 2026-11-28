@@ -2209,7 +2209,7 @@ bool MipSolver::propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff,
 Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals,
                                                    std::span<const Real> current_lower,
                                                    std::span<const Real> current_upper,
-                                                   Index default_var) {
+                                                   Index default_var) const {
     if (default_var < 0 || default_var >= static_cast<Index>(conflict_scores_.size())) {
         return default_var;
     }
@@ -2248,7 +2248,6 @@ Index MipSolver::selectConflictAwareBranchVariable(std::span<const Real> primals
     }
 
     if (best_var != default_var && best_score > default_score + 0.25) {
-        ++conflict_stats_.branch_score_overrides;
         return best_var;
     }
     return default_var;
@@ -3723,6 +3722,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
     if (branch_var < 0) {
         const Real probe_reference = pre_lp_tightened ? node_obj_out : node_result.objective;
+        BranchingSelection selection;
         if (stable_branching) {
             const Int budget = strong_branching_enabled_ && strong_branch_budget_override >= 2
                                    ? strong_branch_budget_override
@@ -3744,8 +3744,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                                       ? std::span<const Real>(conflict_scores_)
                                       : std::span<const Real>{};
             const BranchInferenceCoverage coverage{history, mapping,
-                                                   branch_inference_coverage_stats_};
-            auto selection = branching_rule_.selectWithInferenceCoverage(
+                                                   branch_inference_coverage_stats_,
+                                                   inference_branch_score_enabled_};
+            selection = branching_rule_.selectWithInferenceCoverage(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
                 false, branching_stats_, activity,
                 history.empty() || node.depth == 0 ? nullptr : &coverage);
@@ -3755,9 +3756,19 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
             branch_var = selection.variable;
         }
+        Index baseline = selection.inference_baseline;
         if (use_conflicts && !conflict_activity_branching_enabled_ && branch_var >= 0) {
-            branch_var = selectConflictAwareBranchVariable(node_primals_out, current_lower,
-                                                           current_upper, branch_var);
+            const Index overridden = selectConflictAwareBranchVariable(
+                node_primals_out, current_lower, current_upper, branch_var);
+            conflict_stats_.branch_score_overrides += overridden != branch_var;
+            branch_var = overridden;
+            if (baseline >= 0) {
+                baseline = selectConflictAwareBranchVariable(node_primals_out, current_lower,
+                                                             current_upper, baseline);
+            }
+        }
+        if (selection.inference_baseline >= 0) {
+            branch_inference_coverage_stats_.recordArbitration(selection, branch_var, baseline);
         }
     }
     if (branch_var < 0) {
@@ -7187,7 +7198,8 @@ MipResult MipSolver::solveMinimizationOnce() {
             conflict_stats_.reconvergence_cuts_in_tree = reconvergence_model.has_value();
         }
         std::span<const Index> inference_col_mapping;
-        const bool inference_coverage = inference_branch_coverage_enabled_;
+        const bool inference_coverage =
+            inference_branch_coverage_enabled_ || inference_branch_score_enabled_;
         if ((directional_inference_enabled_ || inference_coverage) && did_presolve) {
             inference_col_mapping = presolver.colMapping();
         }

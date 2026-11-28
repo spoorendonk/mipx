@@ -54,6 +54,7 @@ void printUsage(FILE* out) {
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--directional-inference (serial tree)] "
                  "[--inference-branch-coverage (serial tree)] "
+                 "[--inference-branch-score (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
@@ -197,6 +198,7 @@ int main(int argc, char* argv[]) {
     bool balanced_branch_score = false;
     bool directional_inference = false;
     bool inference_branch_coverage = false;
+    bool inference_branch_score = false;
     std::optional<mipx::NodePolicy> serial_node_policy;
     const char* serial_node_policy_name = nullptr;
     bool cut_strengthening = false;
@@ -411,6 +413,8 @@ int main(int argc, char* argv[]) {
             directional_inference = true;
         } else if (arg == "--inference-branch-coverage") {
             inference_branch_coverage = true;
+        } else if (arg == "--inference-branch-score") {
+            inference_branch_score = true;
         } else if (arg == "--serial-node-policy" && i + 1 < argc) {
             serial_node_policy_name = argv[++i];
             const std::string_view policy = serial_node_policy_name;
@@ -868,6 +872,7 @@ int main(int argc, char* argv[]) {
             solver.setBalancedBranchScore(balanced_branch_score);
             solver.setDirectionalInferenceEnabled(directional_inference);
             solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
+            solver.setInferenceBranchScoreEnabled(inference_branch_score);
             solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
@@ -1076,6 +1081,24 @@ int main(int argc, char* argv[]) {
                 };
                 report("reliable", coverage.reliable);
                 report("fallback", coverage.fallback);
+            }
+            if (inference_branch_score) {
+#ifdef MIPX_HAS_TBB
+                if (num_threads > 1) {
+                    log.log("Inference branch score unavailable for parallel search\n");
+                } else
+#endif
+                {
+                    const auto& coverage = solver.getBranchInferenceCoverageStats();
+                    const auto report = [&](const char* name,
+                                            const mipx::InferenceCoveragePath& path) {
+                        log.log("Inference branch score %s: changes=%llu survived=%llu\n", name,
+                                static_cast<unsigned long long>(path.selection_changes),
+                                static_cast<unsigned long long>(path.surviving_changes));
+                    };
+                    report("reliable", coverage.reliable);
+                    report("fallback", coverage.fallback);
+                }
             }
             if (serial_node_policy) {
                 const auto& stats = solver.getSerialNodePolicyStats();

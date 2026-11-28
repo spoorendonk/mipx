@@ -57,6 +57,7 @@ struct BranchingSelection {
     Index variable = -1;
     bool used_pseudocost = false;
     bool used_reliable_pseudocost = false;
+    Index inference_baseline = -1;
 };
 
 struct MipDirectionalInferenceStats {
@@ -85,11 +86,18 @@ struct InferenceCoveragePath {
     uint64_t decisions = 0;
     /// Cumulative bands. Each decision contributes at most once per counter.
     std::array<InferenceCoverageBand, kGapPercents.size()> bands{};
+    uint64_t selection_changes = 0;
+    /// The final branch differs from the baseline after applying arbitration to both.
+    uint64_t surviving_changes = 0;
 };
 
 struct BranchInferenceCoverageStats {
     InferenceCoveragePath reliable;
     InferenceCoveragePath fallback;
+
+    /// Both columns are the results of the same downstream arbitration rule.
+    void recordArbitration(const BranchingSelection& selection, Index chosen,
+                           Index baseline_chosen);
 };
 
 /// Live first-pass histories in original model column order. Each working
@@ -98,6 +106,7 @@ struct BranchInferenceCoverage {
     std::span<const MipBranchInferenceStats> history;
     std::span<const Index> original_columns;
     BranchInferenceCoverageStats& stats;
+    bool select_by_inference = false;
 };
 
 struct BranchingTelemetry {
@@ -256,9 +265,9 @@ private:
         bool reliable = false;
     };
 
-    static void measureInferenceCoverage(const BranchInferenceCoverage& coverage,
-                                         std::span<const Candidate> candidates, Index winner,
-                                         Real winner_score, bool reliable);
+    static void compareInference(const BranchInferenceCoverage& coverage,
+                                 std::span<const Candidate> candidates, Real winner_score,
+                                 BranchingSelection& selection);
 
     [[nodiscard]] bool inRange(Index var) const {
         return var >= 0 && var < static_cast<Index>(pseudocosts_.size());
