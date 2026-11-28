@@ -3345,6 +3345,14 @@ bool MipSolver::plungeBoundDegraded(Real child_bound, const NodeQueue& queue) co
     return child_bound > best_bound + tolerance;
 }
 
+void MipSolver::setSerialNodePolicyOverride(std::optional<NodePolicy> policy) {
+    if (policy && *policy != NodePolicy::BestFirst && *policy != NodePolicy::BestEstimate &&
+        *policy != NodePolicy::DepthBiased) {
+        throw std::invalid_argument("Unsupported serial node policy override");
+    }
+    serial_node_policy_override_ = policy;
+}
+
 void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,
                             Int& total_lp_iters, double& total_work,
                             HeuristicRuntime& heuristic_runtime, SolutionPool& solution_pool,
@@ -3387,6 +3395,23 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     Int rins_fixed_sum = 0;
     Int nodes_since_incumbent = 0;
 
+    auto* policy_stats =
+        serial_node_policy_override_ && !queue.empty() ? &serial_node_policy_stats_ : nullptr;
+    const Real initial_proof_bound = policy_stats ? queue.bestBound() : kInf;
+    const auto pruneQueue = [&] {
+        const Int previous_size = policy_stats ? queue.size() : 0;
+        queue.prune(pruneBound(incumbent));
+        if (policy_stats) {
+            policy_stats->nodes_pruned_from_queue += previous_size - queue.size();
+        }
+    };
+    const auto recordIncumbent = [&] {
+        if (policy_stats) {
+            ++policy_stats->incumbents_accepted;
+        }
+        pruneQueue();
+    };
+
     // Plunge (dive) state. Plunging mirrors the sibling-cache gate: it only
     // applies to the serial tree search. plunge_target_id is the queued child
     // to dive into next; plunge_depth counts consecutive dives.
@@ -3409,7 +3434,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
 
         if (incumbent < kInf) {
-            queue.prune(pruneBound(incumbent));
+            pruneQueue();
             if (queue.empty()) {
                 break;
             }
@@ -3423,7 +3448,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             break;
         }
 
-        const NodePolicy target_policy = selectSearchPolicy(search_profile_, nodes_since_incumbent);
+        const NodePolicy target_policy = serial_node_policy_override_.value_or(
+            selectSearchPolicy(search_profile_, nodes_since_incumbent));
         if (queue.policy() != target_policy) {
             queue.setPolicy(target_policy);
             ++search_stats_.policy_switches;
@@ -3437,8 +3463,11 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             // Exact-safe restart: reset the queue policy without discarding any
             // unexplored nodes. Dropping queued nodes would turn restart into a
             // heuristic truncation and can produce invalid "optimal" claims.
-            queue.setPolicy(NodePolicy::BestFirst);
+            queue.setPolicy(serial_node_policy_override_.value_or(NodePolicy::BestFirst));
             ++search_stats_.restarts;
+            if (policy_stats) {
+                ++policy_stats->restarts;
+            }
             nodes_since_incumbent = 0;
             // A restart resets node selection, so abandon any pending dive. The
             // target child stays in the queue and is selected by policy again.
@@ -3473,6 +3502,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             search_profile_, node.depth, nodes_since_incumbent, restart_stagnation_nodes_);
         ++search_stats_.strong_budget_updates;
         ++nodes_explored;
+        if (policy_stats) {
+            ++policy_stats->nodes_selected;
+        }
 
         std::vector<BnbNode> children;
         Real node_obj = 0.0;
@@ -3481,10 +3513,18 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         double node_work = 0.0;
         Int node_int_inf = -1;
 
+        const Int dropped_before =
+            policy_stats ? lp_stats_.nodes_dropped_no_verdict + lp_stats_.nodes_dropped_time_limit
+                         : 0;
         bool branched =
             processNode(lp, node, incumbent, children, node_obj, node_primals, node_iters,
                         node_work, current_lower, current_upper, touched_vars, node_scratch,
                         node_stats, node_int_inf, strong_budget);
+        if (policy_stats && children.empty() &&
+            lp_stats_.nodes_dropped_no_verdict + lp_stats_.nodes_dropped_time_limit ==
+                dropped_before) {
+            ++policy_stats->nodes_closed;
+        }
         total_lp_iters += node_iters;
         total_work += node_work;
         bool improved_this_node = false;
@@ -3531,7 +3571,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                         queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                         node_int_inf);
-            queue.prune(pruneBound(incumbent));
+            recordIncumbent();
             nodes_since_incumbent = 0;
             improved_this_node = true;
         }
@@ -3572,7 +3612,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                         : elapsed();
                 logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true, 0);
-                queue.prune(pruneBound(incumbent));
+                recordIncumbent();
                 nodes_since_incumbent = 0;
                 improved_this_node = true;
             }
@@ -3638,7 +3678,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 logProgress(nodes_explored, queue.size(), total_lp_iters, incumbent,
                             queue.empty() ? incumbent : queue.bestBound(), log_elapsed, true,
                             node_int_inf);
-                queue.prune(pruneBound(incumbent));
+                recordIncumbent();
                 nodes_since_incumbent = 0;
                 improved_this_node = true;
             }
@@ -3647,6 +3687,20 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         if (!improved_this_node) {
             ++nodes_since_incumbent;
         }
+    }
+
+    if (policy_stats &&
+        (policy_stats->nodes_selected > 0 || policy_stats->nodes_pruned_from_queue > 0)) {
+        policy_stats->policy = serial_node_policy_override_;
+        const Real dropped_bound = lp_stats_.dropped_node_bound;
+        const bool dropped_open = dropped_bound < pruneBound(incumbent);
+        const Real queued_bound = queue.empty() ? incumbent : queue.bestBound();
+        const Real final_proof_bound =
+            dropped_open ? std::min(queued_bound, dropped_bound) : queued_bound;
+        if (std::isfinite(initial_proof_bound) && std::isfinite(final_proof_bound)) {
+            policy_stats->proof_bound_improvement = final_proof_bound - initial_proof_bound;
+        }
+        policy_stats->proof_completed = queue.empty() && !dropped_open;
     }
 
     mergeNodeWorkStats(node_stats);
@@ -4363,6 +4417,7 @@ void negateObjective(LpProblem& problem) {
 
 MipResult MipSolver::solve() {
     branch_inference_stats_.clear();
+    serial_node_policy_stats_ = {};
     if (!loaded_) {
         return {};
     }
@@ -4552,6 +4607,9 @@ MipResult MipSolver::solveMinimizationOnce() {
     conflict_stats_ = {};
     pre_root_stats_ = {};
     search_stats_ = {};
+    // A retry keeps work counters, but only the last attempt supplies a proof bound.
+    serial_node_policy_stats_.proof_bound_improvement = 0.0;
+    serial_node_policy_stats_.proof_completed = false;
     tree_presolve_stats_ = {};
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};

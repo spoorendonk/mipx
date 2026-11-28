@@ -2456,6 +2456,74 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(sstats.restarts >= 1);
     CHECK(sstats.restart_nodes_dropped == 0);
     CHECK(sstats.strong_budget_updates >= 1);
+    CHECK_FALSE(solver.getSerialNodePolicyStats().policy.has_value());
+
+    solver.setSerialNodePolicyOverride(NodePolicy::DepthBiased);
+    const auto pinned = solver.solve();
+    const auto& policy_stats = solver.getSerialNodePolicyStats();
+    REQUIRE(policy_stats.policy == NodePolicy::DepthBiased);
+    CHECK(sstats.policy_switches == 1);
+    CHECK(policy_stats.restarts == sstats.restarts);
+    CHECK(policy_stats.restarts >= 1);
+    CHECK(sstats.restart_nodes_dropped == 0);
+    CHECK(policy_stats.nodes_selected == pinned.nodes - 1);
+}
+
+TEST_CASE("MipSolver: serial node policy attributes work and resets on solve", "[mip][search]") {
+    const auto policy =
+        GENERATE(NodePolicy::BestFirst, NodePolicy::BestEstimate, NodePolicy::DepthBiased);
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setNumThreads(1);
+    solver.setGapTolerance(0.0);
+    solver.setSerialNodePolicyOverride(policy);
+    solver.load(buildRootRoundingMip());
+
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(result.objective == 0.0);
+        CHECK(result.nodes == 3);
+        const auto& stats = solver.getSerialNodePolicyStats();
+        CHECK(stats.policy == policy);
+        CHECK(stats.nodes_selected == 2);
+        CHECK(stats.nodes_closed == 2);
+        CHECK(stats.nodes_pruned_from_queue == 0);
+        CHECK(stats.incumbents_accepted == 0);  // The incumbent was available at the root.
+        CHECK(stats.restarts == 0);
+        CHECK_THAT(stats.proof_bound_improvement, WithinAbs(0.49, 1e-9));
+        CHECK(stats.proof_completed);
+    }
+
+    solver.setNodeLimit(1);
+    const auto limited = solver.solve();
+    REQUIRE(limited.status == Status::NodeLimit);
+    const auto& limited_stats = solver.getSerialNodePolicyStats();
+    CHECK_FALSE(limited_stats.policy.has_value());
+    CHECK(limited_stats.nodes_selected == 0);
+    CHECK(limited_stats.nodes_closed == 0);
+    CHECK(limited_stats.proof_bound_improvement == 0.0);
+    CHECK_FALSE(limited_stats.proof_completed);
+
+    solver.setNodeLimit(300);
+    solver.setObjectiveIntegralityEnabled(true);
+    const auto pruned = solver.solve();
+    REQUIRE(pruned.status == Status::Optimal);
+    CHECK(pruned.nodes == 1);
+    const auto& pruned_stats = solver.getSerialNodePolicyStats();
+    CHECK(pruned_stats.policy == policy);
+    CHECK(pruned_stats.nodes_selected == 0);
+    CHECK(pruned_stats.nodes_closed == 0);
+    CHECK(pruned_stats.nodes_pruned_from_queue == 2);
+    CHECK_THAT(pruned_stats.proof_bound_improvement, WithinAbs(0.49, 1e-9));
+    CHECK(pruned_stats.proof_completed);
+
+    solver.setSerialNodePolicyOverride(std::nullopt);
+    solver.setObjectiveIntegralityEnabled(false);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK_FALSE(solver.getSerialNodePolicyStats().policy.has_value());
 }
 
 namespace {
@@ -2651,6 +2719,10 @@ TEST_CASE("MipSolver: plunge rounding accepts an improving incumbent", "[mip][se
     MipSolver solver;
     configurePlungeSolver(solver);
     solver.setPlungeControls(8, 0.0);
+    const bool measure_policy = GENERATE(false, true);
+    if (measure_policy) {
+        solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    }
     solver.load(lp);
     const auto result = solver.solve();
 
@@ -2658,6 +2730,11 @@ TEST_CASE("MipSolver: plunge rounding accepts an improving incumbent", "[mip][se
     const auto& stats = solver.getSearchStats();
     CHECK(stats.plunge_rounding_calls > 0);
     CHECK(stats.plunge_rounding_improvements > 0);
+    if (measure_policy) {
+        const auto& policy = solver.getSerialNodePolicyStats();
+        CHECK(policy.nodes_selected == result.nodes - 1);
+        CHECK(policy.incumbents_accepted >= stats.plunge_rounding_improvements);
+    }
 
     // The accepted incumbent must not corrupt the answer.
     MipSolver baseline;

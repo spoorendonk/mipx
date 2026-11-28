@@ -204,6 +204,20 @@ struct MipSearchStats {
     uint64_t det_heur_gate_openings = 0;
 };
 
+struct MipSerialNodePolicyStats {
+    std::optional<NodePolicy> policy;
+    Int nodes_selected = 0;
+    /// Selected nodes resolved without children. Queue prunes and unresolved LPs are separate.
+    Int nodes_closed = 0;
+    Int nodes_pruned_from_queue = 0;
+    Int incumbents_accepted = 0;
+    Int restarts = 0;
+    /// Net gain in objective units in the final attempt, when both bounds are finite.
+    Real proof_bound_improvement = 0.0;
+    /// The final serial tree exhausted the queue and resolved all outstanding bounds.
+    bool proof_completed = false;
+};
+
 struct MipDirectionalInferenceStats {
     uint64_t samples = 0;
     uint64_t tightened_columns = 0;
@@ -469,6 +483,9 @@ public:
     /// closes. Mainly for tests that need a node LP without a verdict.
     void setNodeLpIterationLimit(Int limit) { node_lp_iter_limit_ = limit; }
     void setSearchProfile(SearchProfile profile) { search_profile_ = profile; }
+    /// Pin the serial queue policy independently of the search profile.
+    /// Pass nullopt for the profile schedule. DepthFirst is not a supported override.
+    void setSerialNodePolicyOverride(std::optional<NodePolicy> policy);
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
     void setRestartControls(Int stagnation_nodes, Int keep_nodes) {
         restart_stagnation_nodes_ = std::max<Int>(8, stagnation_nodes);
@@ -551,6 +568,11 @@ public:
     const MipPreRootStats& getPreRootStats() const { return pre_root_stats_; }
     [[nodiscard]] bool hasLpLightCapability() const;
     const MipSearchStats& getSearchStats() const { return search_stats_; }
+    /// Work counters include all serial tree attempts in the last solve. A
+    /// policy is reported once the overridden tree selects or prunes a node.
+    const MipSerialNodePolicyStats& getSerialNodePolicyStats() const {
+        return serial_node_policy_stats_;
+    }
     /// Indexed by loaded-model column (after feature linearization, before presolve).
     /// Empty when no serial tree was entered or measurement was disabled.
     const std::vector<MipBranchInferenceStats>& getBranchInferenceStats() const {
@@ -862,6 +884,7 @@ private:
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;
+    std::optional<NodePolicy> serial_node_policy_override_;
     bool restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
@@ -892,6 +915,7 @@ private:
     MipConflictStats conflict_stats_{};
     MipPreRootStats pre_root_stats_{};
     MipSearchStats search_stats_{};
+    MipSerialNodePolicyStats serial_node_policy_stats_{};
     std::vector<MipBranchInferenceStats> branch_inference_stats_;
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};

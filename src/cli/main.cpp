@@ -43,6 +43,7 @@ void printUsage(FILE* out) {
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--directional-inference (serial tree)] "
+                 "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
@@ -164,6 +165,8 @@ int main(int argc, char* argv[]) {
     bool tree_pseudocosts = true;
     bool balanced_branch_score = false;
     bool directional_inference = false;
+    std::optional<mipx::NodePolicy> serial_node_policy;
+    const char* serial_node_policy_name = nullptr;
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
@@ -309,6 +312,19 @@ int main(int argc, char* argv[]) {
             balanced_branch_score = false;
         } else if (arg == "--directional-inference") {
             directional_inference = true;
+        } else if (arg == "--serial-node-policy" && i + 1 < argc) {
+            serial_node_policy_name = argv[++i];
+            const std::string_view policy = serial_node_policy_name;
+            if (policy == "best-first") {
+                serial_node_policy = mipx::NodePolicy::BestFirst;
+            } else if (policy == "best-estimate") {
+                serial_node_policy = mipx::NodePolicy::BestEstimate;
+            } else if (policy == "depth-biased") {
+                serial_node_policy = mipx::NodePolicy::DepthBiased;
+            } else {
+                std::fprintf(stderr, "Invalid serial node policy: %s\n", serial_node_policy_name);
+                return 2;
+            }
         } else if (arg == "--cut-strengthening") {
             cut_strengthening = true;
         } else if (arg == "--no-cut-strengthening") {
@@ -714,6 +730,7 @@ int main(int argc, char* argv[]) {
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
             solver.setBalancedBranchScore(balanced_branch_score);
             solver.setDirectionalInferenceEnabled(directional_inference);
+            solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
@@ -839,6 +856,20 @@ int main(int argc, char* argv[]) {
                 };
                 report("down", &mipx::MipBranchInferenceStats::down);
                 report("up", &mipx::MipBranchInferenceStats::up);
+            }
+            if (serial_node_policy) {
+                const auto& stats = solver.getSerialNodePolicyStats();
+                if (stats.policy) {
+                    log.log(
+                        "Serial node policy %s: selected=%d closed=%d queue_pruned=%d "
+                        "incumbents=%d restarts=%d proof_bound_gain=%.10g proof_completed=%s\n",
+                        serial_node_policy_name, stats.nodes_selected, stats.nodes_closed,
+                        stats.nodes_pruned_from_queue, stats.incumbents_accepted, stats.restarts,
+                        stats.proof_bound_improvement, stats.proof_completed ? "yes" : "no");
+                } else {
+                    log.log("Serial node policy %s: no serial queue processed\n",
+                            serial_node_policy_name);
+                }
             }
             log.log("Time: %.2fs\n", result.time_seconds);
         } else {
