@@ -188,6 +188,10 @@ public:
         bool attempted = false;
         bool singular_recovery = false;
         bool cold_fallback = false;
+        // A barrier stop short of tolerance ran a cold dual simplex after a
+        // warm optimum, for a rigorous Farkas ray (#408).
+        bool infeasibility_probe = false;
+        Int probe_iterations = 0;
     };
     [[nodiscard]] CrossoverStats crossoverStats() const { return crossover_stats_; }
     [[nodiscard]] const std::string& lastError() const { return last_error_; }
@@ -219,7 +223,7 @@ private:
                                         std::vector<Real>& s, Int& iters);
     void reconstructOriginalSolution(const std::vector<Real>& z, const std::vector<Real>& y);
     bool checkOriginalPrimalFeasibility(std::span<const Real> x) const;
-    bool runCrossover();
+    bool runCrossover(bool probe_infeasibility);
 
     BarrierOptions options_{};
     LpProblem original_;
@@ -258,6 +262,9 @@ private:
     CrossoverStats crossover_stats_;
     Status crossover_status_ =
         Status::Error;  // Infeasible/Unbounded if either crossover run proved it
+    // Crossover's simplex ended Infeasible on a ray farkasRayProvesInfeasible
+    // accepts: the barrier reports Infeasible, not a contradiction (#408).
+    bool crossover_proved_infeasible_ = false;
     bool used_gpu_ = false;
     Int gondzio_corrections_ = 0;
     bool used_homogeneous_ = false;

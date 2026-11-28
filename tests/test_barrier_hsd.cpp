@@ -501,6 +501,70 @@ TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hs
           BarrierIpmOutcome::Failed);
 }
 
+namespace {
+
+// x <= 1 and x >= lower2 on 0 <= x <= 10, with a second column y in
+// [y_lower, kInf] on the first row: x + y <= 1. Infeasible for lower2 > 1
+// once y >= 0, by the ray (1, -1).
+LpProblem twoRowLp(Real lower2, Real y_lower) {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_lower = {0.0, y_lower};
+    lp.col_upper = {10.0, kInf};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.col_names.assign(2, "");
+    lp.row_lower = {-kInf, lower2};
+    lp.row_upper = {1.0, kInf};
+    lp.row_names.assign(2, "");
+    lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}});
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("Barrier crossover: a Farkas ray is rechecked in the model's data",
+          "[barrier][crossover]") {
+    const auto lp = twoRowLp(2.0, 0.0);
+    const std::vector<Real> ray{1.0, -1.0};
+    CHECK(farkasRayProvesInfeasible(lp, ray));
+    // Any positive multiple proves the same.
+    const std::vector<Real> scaled{1e-3, -1e-3};
+    CHECK(farkasRayProvesInfeasible(lp, scaled));
+    // A multiplier on an infinite side is dropped: (1, 1) leaves the ray
+    // (1, 0), which proves nothing.
+    const std::vector<Real> wrong_sign{1.0, 1.0};
+    CHECK_FALSE(farkasRayProvesInfeasible(lp, wrong_sign));
+    CHECK_FALSE(farkasRayProvesInfeasible(lp, std::vector<Real>{0.0, 0.0}));
+    CHECK_FALSE(farkasRayProvesInfeasible(lp, std::vector<Real>{1.0}));
+    const Real nan = std::numeric_limits<Real>::quiet_NaN();
+    CHECK_FALSE(farkasRayProvesInfeasible(lp, std::vector<Real>{nan, -1.0}));
+    // Infeasible by 1e-12 against terms of 2: a sliver, no proof.
+    CHECK_FALSE(farkasRayProvesInfeasible(twoRowLp(1.0 + 1e-12, 0.0), ray));
+    // By 1e-6 it is one.
+    CHECK(farkasRayProvesInfeasible(twoRowLp(1.0 + 1e-6, 0.0), ray));
+    // y unbounded below: d_y = 1 meets an infinite lower bound, and the LP
+    // is feasible.
+    CHECK_FALSE(farkasRayProvesInfeasible(twoRowLp(2.0, -kInf), ray));
+}
+
+// Netlib cplex2 is infeasible by 1.6e-11 per row: from the HSD run's stalled
+// point the warm crossover lands within the simplex's tolerance and ended
+// Optimal (#408). The probe's cold run finds a ray that rechecks.
+TEST_CASE("Barrier HSD: crossover proves Netlib cplex2 infeasible", "[barrier][hsd][crossover]") {
+    const auto lp = readMps(mipx::test::testDataDir() + "/cplex2.mps");
+    auto opts = quietOptions(true, BarrierAlgorithm::CpuSparseCholesky);
+    opts.presolve = true;
+    opts.threads = 1;
+    const auto crossed = crossWith(lp, opts);
+    CHECK(crossed.homogeneous);
+    CHECK(crossed.stats.infeasibility_probe);
+    CHECK(crossed.stats.probe_iterations > 0);
+    CHECK(crossed.result.status == Status::Infeasible);
+}
+
 TEST_CASE("Barrier HSD: implicit upper bounds fall back to Mehrotra's loop", "[barrier][hsd]") {
     auto opts = quietOptions(true, BarrierAlgorithm::CpuCholesky);
     opts.implicit_upper_bounds = true;
@@ -655,4 +719,8 @@ TEST_CASE("Barrier HSD: a stop short of tolerance seeds crossover", "[barrier][h
     // the optimal one: no pivot (a crash-basis start takes one here).
     CHECK(on.iters == 0);
     checkBasis(on.basis, lp);
+    // The stop short ran the infeasibility probe, whose cold run found no
+    // ray: the warm optimum stands (#408).
+    CHECK(on.stats.infeasibility_probe);
+    CHECK_FALSE(on.stats.cold_fallback);
 }

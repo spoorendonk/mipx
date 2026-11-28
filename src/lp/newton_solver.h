@@ -113,6 +113,13 @@ BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real
                                    Real kappa, Real mu_rel, Real ctz, Real bty, Real tol,
                                    bool verbose = false);
 
+// Whether `ray`, one multiplier per row of `lp`, proves `lp` infeasible in its
+// own data, rechecked as getDualRay()'s contract leaves to a consumer that
+// needs rigor (#408): in long double, alpha - beta above round-off of every
+// term that makes it up. A multiplier whose side is infinite is dropped, so
+// the proof is that of the rest of the ray.
+bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray);
+
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
 #ifdef MIPX_HAS_CUDSS
 // Also report the eliminated column count of the backend that finished.

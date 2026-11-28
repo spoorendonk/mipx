@@ -32,6 +32,9 @@ tests/data/*_roundtrip.mps
 # The second column-generation master of the public CommaLab grid2 is
 # CpuAugmented's regression LP (#270).
 !tests/data/grid2_master_0001.mps
+# Netlib cplex2, infeasible by 1.6e-11 per row: crossover's regression LP
+# for a rigorous Farkas ray (#408).
+!tests/data/cplex2.mps
 # Legacy first-master downloads (#331).
 tests/data/cg_masters/*
 # Later masters are generated (#358); their reference objectives are tracked.

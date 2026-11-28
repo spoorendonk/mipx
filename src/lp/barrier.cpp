@@ -2480,8 +2480,87 @@ std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
 
 }  // namespace
 
-bool BarrierSolver::runCrossover() {
+// For the ray y and d = A^T y, getDualRay()'s alpha and beta (lp_solver.h),
+// from the model's own numbers, with every product and sum in long double.
+// The simplex's ray is tolerance-bound: its contract lets alpha - beta fall
+// short of zero by 1e-6 of its terms. Here alpha - beta must exceed two
+// margins together:
+// - kGapRel of `terms`, the sum of the magnitudes of the terms of alpha and
+//   beta, so a proof is not a sliver of the numbers it is made of;
+// - a bound on the sums' own round-off, eps * (terms summed) * `cancel`,
+//   where `cancel` also counts each d_j's spread, the sum of its |y_i a_ij|,
+//   times its bound: d_j can be the remainder of a large cancellation.
+// Netlib cplex2's ray (#408) has alpha - beta = 6.0e-5 against terms of
+// 3.2e-2 and a `cancel` of 8.2e6, so both margins hold with room. A d_j
+// within kZeroRel of its spread is the ray's own round-off, from the double
+// solve that produced y: against an infinite bound it counts as zero; any
+// larger d_j that meets an infinite bound leaves d^T x unbounded below, so
+// there is no proof.
+bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
+    using Wide = long double;
+    constexpr Wide kGapRel = 1e-9L;
+    constexpr Wide kZeroRel = 1e-12L;
+    if (ray.size() != static_cast<std::size_t>(lp.num_rows)) {
+        return false;
+    }
+    const auto nn = static_cast<std::size_t>(lp.num_cols);
+    std::vector<Wide> d(nn, 0.0L);
+    std::vector<Wide> spread(nn, 0.0L);
+    Wide beta = 0.0L;
+    Wide terms = 0.0L;
+    bool any = false;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const Wide yi = ray[static_cast<std::size_t>(i)];
+        if (!std::isfinite(yi)) {
+            return false;
+        }
+        const Real side = yi > 0.0L ? lp.row_upper[i] : lp.row_lower[i];
+        if (yi == 0.0L || !isFinite(side)) {
+            continue;
+        }
+        any = true;
+        beta += yi * side;
+        terms += std::abs(yi * side);
+        const auto rv = lp.matrix.row(i);
+        for (Index k = 0; k < rv.size(); ++k) {
+            const auto j = static_cast<std::size_t>(rv.indices[k]);
+            const Wide t = yi * rv.values[k];
+            d[j] += t;
+            spread[j] += std::abs(t);
+        }
+    }
+    if (!any) {
+        return false;
+    }
+    Wide cancel = terms;
+    Wide alpha = 0.0L;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        const auto uj = static_cast<std::size_t>(j);
+        if (d[uj] == 0.0L) {
+            continue;
+        }
+        const Real bound = d[uj] > 0.0L ? lp.col_lower[j] : lp.col_upper[j];
+        if (!isFinite(bound)) {
+            if (std::abs(d[uj]) <= kZeroRel * spread[uj]) {
+                continue;
+            }
+            return false;
+        }
+        alpha += d[uj] * bound;
+        terms += std::abs(d[uj] * bound);
+        cancel += spread[uj] * std::abs(bound);
+    }
+    // Every product and partial sum above rounds once at most per term, and
+    // no sum runs over more terms than there are entries, rows and columns.
+    const Wide summed = static_cast<Wide>(lp.matrix.numNonzeros()) +
+                        static_cast<Wide>(lp.num_rows) + static_cast<Wide>(lp.num_cols);
+    const Wide round_off = std::numeric_limits<Wide>::epsilon() * summed * cancel;
+    return alpha - beta > kGapRel * terms + round_off;
+}
+
+bool BarrierSolver::runCrossover(bool probe_infeasibility) {
     crossover_status_ = Status::Error;
+    crossover_proved_infeasible_ = false;
     const auto deadline = deadline_.orStop(options_.stop_flag);
     std::optional<std::vector<BasisStatus>> basis;
     if (!deadline.passed()) {
@@ -2528,6 +2607,25 @@ bool BarrierSolver::runCrossover() {
             dualized_reduced_costs_ = simplex.getReducedCosts();
         }
     };
+    // A cold dual simplex from the slack basis, within the time left and
+    // 3 * (m + n) iterations: generous for a fresh LP, and a bound on its
+    // runtime in a MIP node's context.
+    const auto solveCold = [&](DualSimplexSolver& cold) {
+        cold.load(original_);
+        cold.setVerbose(false);
+        const Int dim_sum =
+            static_cast<Int>(original_.num_rows) + static_cast<Int>(original_.num_cols);
+        cold.setIterationLimit(3 * dim_sum);
+        DualSimplexOptions cold_opts;
+        cold_opts.stop_flag = options_.stop_flag;
+        cold_opts.max_solve_seconds = deadline_.remainingSeconds();
+        cold.setOptions(cold_opts);
+        return cold.solve();
+    };
+    const auto proves = [&](const DualSimplexSolver& simplex, const LpResult& r) {
+        return r.status == Status::Infeasible &&
+               farkasRayProvesInfeasible(original_, simplex.getDualRay());
+    };
     crossover_stats_.attempted = true;
     auto result = ds.solve();
     const auto starts = ds.basisStartStats();
@@ -2537,8 +2635,32 @@ bool BarrierSolver::runCrossover() {
     crossover_status_ = result.status;
 
     if (result.status == Status::Optimal) {
+        // A warm start from a barrier point that stopped short can land
+        // within the simplex's tolerance of an LP that is infeasible by far
+        // less, where no pivot sees a row miss by more than kPrimalTol:
+        // Netlib cplex2 misses by 1.6e-11 at best, proven by a Farkas ray
+        // with |y|_1 = 4.4e6, and the warm optimum by 1e-9 (#408). A cold
+        // run approaches from the slack basis; its ray, if rigorous, is
+        // the verdict, and otherwise the warm optimum stands. A warm run
+        // that already started from the slack basis was that run.
+        if (probe_infeasibility && !starts.cold_start && !deadline.passed()) {
+            crossover_stats_.infeasibility_probe = true;
+            DualSimplexSolver probe;
+            const LpResult probed = solveCold(probe);
+            crossover_stats_.probe_iterations = probed.iterations;
+            if (proves(probe, probed)) {
+                crossover_status_ = Status::Infeasible;
+                crossover_proved_infeasible_ = true;
+                return false;
+            }
+        }
         acceptBasis(ds, result);
         return true;
+    }
+    // A rigorous warm ray needs no cold run to stand.
+    if (proves(ds, result)) {
+        crossover_proved_infeasible_ = true;
+        return false;
     }
     // No time left for a cold run. A warm proof of infeasibility or
     // unboundedness stands, even when the deadline passed as it ended.
@@ -2563,21 +2685,14 @@ bool BarrierSolver::runCrossover() {
     }
 
     DualSimplexSolver ds_cold;
-    ds_cold.load(original_);
-    ds_cold.setVerbose(false);
-    // Bound the cold fallback to avoid unbounded runtime in MIP node context.
-    // 3 * (m + n) is generous for a fresh LP and matches typical cold-start
-    // expectations in branch-and-cut.
-    const Int dim_sum = static_cast<Int>(original_.num_rows) + static_cast<Int>(original_.num_cols);
-    ds_cold.setIterationLimit(3 * dim_sum);
-    DualSimplexOptions cold_opts;
-    cold_opts.stop_flag = options_.stop_flag;
-    cold_opts.max_solve_seconds = deadline_.remainingSeconds();
-    ds_cold.setOptions(cold_opts);
-
-    auto cold_result = ds_cold.solve();
+    const LpResult cold_result = solveCold(ds_cold);
     crossover_stats_.singular_recovery |= ds_cold.basisStartStats().singular_recovery;
     crossover_iters_ += cold_result.iterations;
+    if (proves(ds_cold, cold_result)) {
+        crossover_status_ = Status::Infeasible;
+        crossover_proved_infeasible_ = true;
+        return false;
+    }
     // Keep a warm run's proof of infeasibility or unboundedness: a cold run
     // that only hits its iteration limit must not hide the contradiction.
     if (crossover_status_ != Status::Infeasible && crossover_status_ != Status::Unbounded) {
@@ -2765,17 +2880,30 @@ LpResult BarrierSolver::solve() {
 
     // Run crossover to extract a basic feasible solution.
     if (options_.crossover) {
-        const bool crossed = runCrossover();
+        const bool crossed = runCrossover(near_optimal);
         if (options_.verbose && crossover_stats_.attempted) {
             std::printf(
                 "Crossover: %d simplex iterations, singular-basis recovery %s, "
                 "cold fallback %s.\n",
                 crossover_iters_, crossover_stats_.singular_recovery ? "yes" : "no",
                 crossover_stats_.cold_fallback ? "yes" : "no");
+            if (crossover_stats_.infeasibility_probe) {
+                std::printf("Crossover: infeasibility probe, %d simplex iterations.\n",
+                            crossover_stats_.probe_iterations);
+            }
         } else if (options_.verbose) {
             std::printf("Crossover: stopped before simplex cleanup.\n");
         }
-        if (!crossed) {
+        iterations_ += crossover_stats_.probe_iterations;
+        if (!crossed && crossover_proved_infeasible_) {
+            // A rigorous Farkas ray outranks a point within tolerance.
+            clearSolution();
+            status_ = Status::Infeasible;
+            iterations_ += crossover_iters_;
+            if (options_.verbose) {
+                std::printf("Crossover: simplex proved the LP infeasible.\n");
+            }
+        } else if (!crossed) {
             if (crossover_status_ == Status::Infeasible || crossover_status_ == Status::Unbounded) {
                 // Simplex on the same LP contradicts the barrier's optimum,
                 // so neither verdict is reported.
