@@ -137,14 +137,18 @@ struct DualSimplexOptions {
     // Stall-triggered cost perturbation (#427), for the warm starts the one
     // above skips. Off by default. A run of cost_perturbation_stall_pivots
     // consecutive zero dual steps (refactors do not end it, a nonzero dual
-    // step does) moves the cost of every nonbasic structural at a bound by
-    // the size above toward its dual-feasible side: up at its lower bound,
-    // down at its upper; fixed and free columns stay. The basic costs, so
-    // the duals, do not move, and the basis stays dual feasible. Each further
-    // run of that length in the same simplex pass adds it again 10 times
-    // larger, up to
-    // cost_perturbation_stall_max_activations in all. It comes off with the
-    // cold-start one, at primal feasibility. It fires on any start and needs
+    // step does; zero steps in a cleanup phase are not counted) moves the
+    // cost of every nonbasic structural at a bound toward its dual-feasible
+    // side, up at its lower bound, down at its upper, by the cold-start
+    // perturbation's size from the costs at the solve's entry; fixed and free
+    // columns stay. The basic costs, so the duals, do not move, and the basis
+    // stays dual feasible. Each further run of that length in the same
+    // simplex pass (one solve() can make up to three: warm, cold fallback,
+    // unscaled clean-up) moves them again by 10 times the previous
+    // activation's size, up to cost_perturbation_stall_max_activations
+    // activations per pass (below 1: none; keep it small, the size grows
+    // tenfold each time). It comes off with the cold-start one, at primal
+    // feasibility. It fires on any start and needs
     // cost_perturbation_multiplier > 0, not enable_cost_perturbation.
     bool enable_stall_cost_perturbation = false;
     Int cost_perturbation_stall_pivots = 8;

@@ -1809,12 +1809,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         return flipped;
     };
-    // The perturbation's base, multiplier * 5e-7 * C, from the costs as they
-    // stand; and the size of column j's move, (1 + u_j) (|c_j| + 1) base.
+    // The perturbation's base, multiplier * 5e-7 * C, and the size of column
+    // j's move, (1 + u_j) (|c_j| + 1) base, both from the costs at entry: a
+    // stall mid-solve (#427) is sized without the shifts held by then.
     auto costPerturbationBase = [&]() -> Real {
         Real bigc = 0.0;
         for (Index j = 0; j < num_cols_; ++j) {
-            bigc = std::max(bigc, std::abs(obj_[j]));
+            bigc = std::max(bigc, std::abs(obj_at_entry[static_cast<std::size_t>(j)]));
         }
         if (bigc > 100.0) {
             bigc = std::sqrt(std::sqrt(bigc));
@@ -1835,7 +1836,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     auto costPerturbationSize = [&](Index j, Real base) -> Real {
         const uint32_t hash = static_cast<uint32_t>(j + 1) * 2654435761u;
         const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
-        return (1.0 + u) * (std::abs(obj_[j]) + 1.0) * base;
+        return (1.0 + u) * (std::abs(obj_at_entry[static_cast<std::size_t>(j)]) + 1.0) * base;
     };
     if (cold_start && options_.enable_cost_perturbation &&
         options_.cost_perturbation_multiplier > 0.0) {
@@ -2673,7 +2674,11 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         // The stall-triggered cost perturbation (#427). Only nonbasic costs
         // move, each toward the side that keeps its reduced cost dual
         // feasible, so the duals stay as they are and only those reduced
-        // costs change. It joins cost_perturb and comes off with it.
+        // costs change. It joins cost_perturb and comes off with it. Zero
+        // steps in a cleanup, where it does not fire, are not counted.
+        if (in_cleanup_phase) {
+            stall_cost_streak = 0;
+        }
         if (options_.enable_stall_cost_perturbation &&
             options_.cost_perturbation_stall_pivots > 0 &&
             options_.cost_perturbation_multiplier > 0.0 && !in_cleanup_phase &&
