@@ -27,6 +27,15 @@ struct LearnedBoundConflict {
                                                  const BoundReasonTrail& trail,
                                                  std::span<const BranchDecision> premises);
 
+/// Return the branch premises used by a checked global contradiction.
+[[nodiscard]] std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
+    const LpProblem& model, const BoundReasonTrail& trail,
+    std::span<const BranchDecision> premises);
+
+/// Check a deduction against the global model without branch premises.
+[[nodiscard]] bool checkGlobalBoundDeduction(const LpProblem& model, const BoundReasonTrail& trail,
+                                             BoundReasonId id);
+
 /// Recheck a reconvergence clause using only the global model and return its
 /// binary inequality if the forbidden assignment can be ruled out.
 [[nodiscard]] std::optional<Cut> checkedReconvergenceCut(std::span<const BranchDecision> forbidden,

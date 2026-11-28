@@ -221,8 +221,34 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, cons
     }
 }
 
+bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
+                       std::span<const BranchDecision> premises, std::vector<BoundReasonId> pending,
+                       std::vector<BranchDecision>* used) {
+    std::unordered_set<BoundReasonId> checked;
+    while (!pending.empty()) {
+        const auto id = pending.back();
+        pending.pop_back();
+        if (!checked.insert(id).second) {
+            continue;
+        }
+        const auto& step = trail.reason(id);
+        if (step.scope.node_local || step.scope.cutoff != kInf ||
+            !checksDeduction(model, trail, step, premises)) {
+            return false;
+        }
+        if (used != nullptr && step.source == BoundReasonSource::Branch) {
+            used->push_back(literal(step));
+        }
+        for (const auto support : step.supports.ids()) {
+            pending.push_back(support);
+        }
+    }
+    return true;
+}
+
 bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail,
-                         std::span<const BranchDecision> premises) {
+                         std::span<const BranchDecision> premises,
+                         std::vector<BranchDecision>* used = nullptr) {
     const auto& failure = trail.contradiction();
     if (!failure || failure->scope.node_local || failure->scope.cutoff != kInf) {
         return false;
@@ -243,22 +269,7 @@ bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail,
                !checksRow(model, trail, failure->source_index, failure->supports)) {
         return false;
     }
-    std::unordered_set<BoundReasonId> checked;
-    while (!pending.empty()) {
-        const auto id = pending.back();
-        pending.pop_back();
-        if (checked.insert(id).second) {
-            const auto& step = trail.reason(id);
-            if (step.scope.node_local || step.scope.cutoff != kInf ||
-                !checksDeduction(model, trail, step, premises)) {
-                return false;
-            }
-            for (const auto support : step.supports.ids()) {
-                pending.push_back(support);
-            }
-        }
-    }
-    return true;
+    return checksReasonChain(model, trail, premises, std::move(pending), used);
 }
 
 std::vector<BranchDecision> reconvergenceConditions(const BoundReasonTrail& trail,
@@ -371,6 +382,21 @@ std::optional<LearnedBoundConflict> analyzeConflict(const BoundReasonTrail& trai
 bool checkGlobalBoundContradiction(const LpProblem& model, const BoundReasonTrail& trail,
                                    std::span<const BranchDecision> premises) {
     return checksContradiction(model, trail, premises);
+}
+
+std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
+    const LpProblem& model, const BoundReasonTrail& trail,
+    std::span<const BranchDecision> premises) {
+    std::vector<BranchDecision> used;
+    if (!checksContradiction(model, trail, premises, &used)) {
+        return std::nullopt;
+    }
+    return used;
+}
+
+bool checkGlobalBoundDeduction(const LpProblem& model, const BoundReasonTrail& trail,
+                               BoundReasonId id) {
+    return checksReasonChain(model, trail, {}, {id}, nullptr);
 }
 
 std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail& trail,
