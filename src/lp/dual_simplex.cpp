@@ -2288,14 +2288,20 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // escalation waits another bound_perturbation_stall_pivots.
     Int bound_perturb_streak_mark = 0;
 
-    // While perturbed, pivots park nonbasic variables on the shrunken bounds
-    // (lb + eps, ub - eps), and they stay there after the perturbation comes
+    // While perturbed, pivots park nonbasic variables on the perturbed bounds
+    // (lb + eps, ub - eps; lb - eps, ub + eps for the outward perturbation,
+    // #425), and they stay there after the perturbation comes
     // off mid-solve: moving them back at once would undo the progress the
     // perturbation bought. snapNonbasicToBounds() moves each back onto its
     // true bound, so the basis is a vertex of the model again, before the
     // solve accepts an optimum and when it stops; the caller then recomputes
     // the basic primals (it returns true when it moved anything).
     bool nonbasic_off_bounds = false;
+    // The outward perturbation (#425) goes on at most once per call of this
+    // function (one solve() may make up to three: warm, cold fallback,
+    // unscaled clean-up), so a cleanup that returns to the primal phase does
+    // not perturb again.
+    bool outward_perturbation_applied = false;
 
     auto clearBoundPerturbation = [&]() {
         if (!bound_perturb_active_) {
@@ -2314,6 +2320,14 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         nonbasic_off_bounds = false;
         for (Index k : nonbasic_) {
             const std::size_t ks = static_cast<std::size_t>(k);
+            // The outward perturbation widens fixed variables too (HiGHS
+            // does, for basic ones), so one that left the basis while it was
+            // on carries AtLower or AtUpper: it is Fixed again.
+            if (outward_perturbation_applied && base_var_lower[ks] == base_var_upper[ks] &&
+                (var_status_[k] == BasisStatus::AtLower ||
+                 var_status_[k] == BasisStatus::AtUpper)) {
+                var_status_[k] = BasisStatus::Fixed;
+            }
             switch (var_status_[k]) {
                 case BasisStatus::AtLower:
                 case BasisStatus::Fixed:
@@ -2427,6 +2441,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             const Real r = static_cast<Real>(z >> 11) * 0x1.0p-53;
             const Real lb = base_var_lower[ks];
             const Real ub = base_var_upper[ks];
+            if (var_status_[k] == BasisStatus::Fixed) {
+                continue;  // nonbasic and fixed: it never enters (HiGHS skips it too)
+            }
             if (lb != -kInf) {
                 lower_bound_perturb_[ks] = -scale * r * std::max(1.0, std::abs(lb));
             }
@@ -2452,9 +2469,6 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         return activateBoundPerturbation(bound_perturb_level_ + 1);
     };
-    // The outward perturbation goes on once per pass, so a cleanup that
-    // returns to the primal phase does not perturb again.
-    bool outward_perturbation_applied = false;
 
     // Log header.
     if (verbose_) {
@@ -2996,7 +3010,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 break;
             }
 
-            // First primal pivot of the pass: widen the bounds first (#425).
+            // First primal pivot of this call: widen the bounds first (#425).
             // The bound lambdas read the perturbation pointers taken at the
             // top of the loop, so price again there.
             if (options_.enable_primal_bound_perturbation && !outward_perturbation_applied &&

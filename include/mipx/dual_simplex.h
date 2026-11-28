@@ -158,10 +158,13 @@ struct DualSimplexOptions {
     // A priori outward bound perturbation for the primal phase (#425), after
     // HiGHS's HEkk::initialiseBound for its primal simplex and Bach, Black,
     // Huiberts, Kafer, arXiv:2510.21613 (outward, random, kept until an
-    // apparent optimum). Off by default. The first time a solve reaches the
-    // primal-feasible, dual-infeasible phase, every finite bound moves
-    // outward by base * r_k * max(1, |bound|), r_k in [0, 1) from a fixed
-    // seed, so the basis stays feasible and nothing moves. It replaces the
+    // apparent optimum). Off by default. The first time a simplex pass (the
+    // warm solve, a cold fallback, the unscaled clean-up) reaches the
+    // primal-feasible, dual-infeasible phase, every finite bound but a
+    // nonbasic fixed variable's moves outward by base * r_k * max(1, |bound|),
+    // r_k in [0, 1) from a fixed seed. Unlike HiGHS, which moves nonbasics
+    // onto the perturbed bounds, nonbasics stay where they are, inside the
+    // wider box: the basis stays feasible and no value moves. It replaces the
     // stall-triggered perturbation while it is on: a stall of
     // bound_perturbation_stall_pivots escalates it by
     // bound_perturbation_expand_factor, up to bound_perturbation_max_level.
