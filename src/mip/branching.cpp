@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace mipx {
 
@@ -163,6 +164,60 @@ Real ReliabilityBranching::blendScore(Real frac, Real pseudo_score) {
     return frac_term + 0.15 * pseudo_term;
 }
 
+void ReliabilityBranching::measureInferenceCoverage(const BranchInferenceCoverage& coverage,
+                                                    std::span<const Candidate> candidates,
+                                                    Index winner, Real winner_score,
+                                                    bool reliable) {
+    if (!std::isfinite(winner_score)) {
+        return;
+    }
+    auto& path = reliable ? coverage.stats.reliable : coverage.stats.fallback;
+    ++path.decisions;
+    const auto weakerMean = [&](Index variable) -> std::optional<Real> {
+        const auto columns = coverage.original_columns;
+        const auto& sample = coverage.history[columns.empty() ? variable : columns[variable]];
+        if (sample.down.samples < 4 || sample.up.samples < 4) {
+            return std::nullopt;
+        }
+        return std::min(
+            static_cast<Real>(sample.down.tightened_columns) /
+                static_cast<Real>(sample.down.samples),
+            static_cast<Real>(sample.up.tightened_columns) / static_cast<Real>(sample.up.samples));
+    };
+
+    enum class Evidence { None, Close, Ready, Favored };
+    std::array<Evidence, InferenceCoveragePath::kGapPercents.size()> evidence{};
+    const auto winner_mean = weakerMean(winner);
+    for (const auto& candidate : candidates) {
+        if (candidate.var == winner || (reliable && !candidate.reliable) ||
+            !std::isfinite(candidate.pseudo_score)) {
+            continue;
+        }
+        const Real gap = candidate.pseudo_score == winner_score
+                             ? 0.0
+                             : (winner_score - candidate.pseudo_score) / winner_score;
+        if (gap > InferenceCoveragePath::kGapPercents.back() / 100.0) {
+            continue;
+        }
+        Evidence observed = Evidence::Close;
+        if (winner_mean) {
+            if (const auto challenger_mean = weakerMean(candidate.var)) {
+                observed = *challenger_mean > *winner_mean ? Evidence::Favored : Evidence::Ready;
+            }
+        }
+        for (std::size_t i = 0; i < evidence.size(); ++i) {
+            if (gap <= InferenceCoveragePath::kGapPercents[i] / 100.0) {
+                evidence[i] = std::max(evidence[i], observed);
+            }
+        }
+    }
+    for (std::size_t i = 0; i < evidence.size(); ++i) {
+        path.bands[i].close += evidence[i] >= Evidence::Close;
+        path.bands[i].ready += evidence[i] >= Evidence::Ready;
+        path.bands[i].favored += evidence[i] == Evidence::Favored;
+    }
+}
+
 BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpProblem& problem,
                                                 std::span<const Real> primal_values,
                                                 std::span<const Real> col_lower,
@@ -178,12 +233,22 @@ BranchingSelection ReliabilityBranching::selectWithConflictActivity(
     std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
     bool force_strong_branch, BranchingTelemetry& telemetry,
     std::span<const Real> conflict_activity) {
-    return selectWithProbeSink(lp, problem, primal_values, col_lower, col_upper, node_objective,
-                               force_strong_branch, strong_branch_probe_budget_, telemetry,
-                               conflict_activity, [&](const StrongBranchPseudocostSample& sample) {
-                                   updatePseudoCost(sample.variable, sample.up_direction,
-                                                    sample.gain_per_unit);
-                               });
+    return selectWithInferenceCoverage(lp, problem, primal_values, col_lower, col_upper,
+                                       node_objective, force_strong_branch, telemetry,
+                                       conflict_activity, nullptr);
+}
+
+BranchingSelection ReliabilityBranching::selectWithInferenceCoverage(
+    DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+    std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+    bool force_strong_branch, BranchingTelemetry& telemetry,
+    std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage) {
+    return selectWithProbeSink(
+        lp, problem, primal_values, col_lower, col_upper, node_objective, force_strong_branch,
+        strong_branch_probe_budget_, telemetry, conflict_activity, coverage,
+        [&](const StrongBranchPseudocostSample& sample) {
+            updatePseudoCost(sample.variable, sample.up_direction, sample.gain_per_unit);
+        });
 }
 
 BranchingSelection ReliabilityBranching::selectDeferred(
@@ -193,7 +258,7 @@ BranchingSelection ReliabilityBranching::selectDeferred(
     std::vector<StrongBranchPseudocostSample>& samples) const {
     return selectWithProbeSink(
         lp, problem, primal_values, col_lower, col_upper, node_objective, false, probe_budget,
-        telemetry, {},
+        telemetry, {}, nullptr,
         [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
 }
 
@@ -202,7 +267,8 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
     std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
     bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
-    std::span<const Real> conflict_activity, RecordProbe record_probe) const {
+    std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage,
+    RecordProbe record_probe) const {
     BranchingSelection selection;
     ++telemetry.selections;
 
@@ -397,6 +463,10 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     }
 
     if (best_reliable >= 0) {
+        if (coverage != nullptr) {
+            measureInferenceCoverage(*coverage, candidates, best_reliable, best_reliable_score,
+                                     true);
+        }
         selection.variable = best_reliable;
         selection.used_pseudocost = true;
         selection.used_reliable_pseudocost = true;
@@ -415,6 +485,10 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
 
     selection.variable = (best_it == candidates.end()) ? -1 : best_it->var;
     if (selection.variable >= 0) {
+        if (coverage != nullptr) {
+            measureInferenceCoverage(*coverage, candidates, best_it->var, best_it->pseudo_score,
+                                     false);
+        }
         selection.used_pseudocost = true;
         ++telemetry.pseudocost_uses;
     }

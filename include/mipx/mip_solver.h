@@ -247,18 +247,6 @@ struct MipSerialNodePolicyStats {
     bool proof_completed = false;
 };
 
-struct MipDirectionalInferenceStats {
-    uint64_t samples = 0;
-    uint64_t tightened_columns = 0;
-    uint64_t cutoffs = 0;
-    uint64_t skipped = 0;
-};
-
-struct MipBranchInferenceStats {
-    MipDirectionalInferenceStats down;
-    MipDirectionalInferenceStats up;
-};
-
 struct MipTreePresolveStats {
     Int attempts = 0;
     Int runs = 0;
@@ -547,6 +535,11 @@ public:
     void setBalancedBranchScore(bool enabled) { branching_rule_.setBalancedScore(enabled); }
     /// Measure the first domain propagation pass of each serial variable-branch child.
     void setDirectionalInferenceEnabled(bool enabled) { directional_inference_enabled_ = enabled; }
+    /// Measure live sample coverage at serial tree pseudocost decisions after the root.
+    /// Only feasible first-pass propagation contributes samples. Off by default.
+    void setInferenceBranchCoverageEnabled(bool enabled) {
+        inference_branch_coverage_enabled_ = enabled;
+    }
     /// Learn pseudocosts from the gains of solved child nodes (#199). On by
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.
@@ -667,6 +660,10 @@ public:
     const std::vector<MipBranchInferenceStats>& getBranchInferenceStats() const {
         return branch_inference_stats_;
     }
+    /// Coverage from the last solve attempt.
+    const BranchInferenceCoverageStats& getBranchInferenceCoverageStats() const {
+        return branch_inference_coverage_stats_;
+    }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
     [[nodiscard]] ObjPropStats getObjPropStats() const {
@@ -768,6 +765,7 @@ private:
         std::vector<Index> rc_tightened;
         std::unique_ptr<DomainPropagator> pre_lp_propagator;
         std::vector<MipBranchInferenceStats>* branch_inference = nullptr;
+        std::span<MipBranchInferenceStats> branch_inference_history;
         std::span<const Index> branch_inference_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
         LpProblem* conflict_global_rows = nullptr;
@@ -797,6 +795,7 @@ private:
                      SolutionPool& solution_pool, Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound, const std::function<double()>& elapsed,
                      std::span<const Index> branch_inference_col_mapping,
+                     std::span<MipBranchInferenceStats> branch_inference_history = {},
                      LpProblem* conflict_global_rows = nullptr,
                      const LpProblem* reconvergence_model = nullptr);
 
@@ -1044,6 +1043,7 @@ private:
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;
     bool directional_inference_enabled_ = false;
+    bool inference_branch_coverage_enabled_ = false;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;
@@ -1083,6 +1083,7 @@ private:
     MipSearchStats search_stats_{};
     MipSerialNodePolicyStats serial_node_policy_stats_{};
     std::vector<MipBranchInferenceStats> branch_inference_stats_;
+    BranchInferenceCoverageStats branch_inference_coverage_stats_;
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
     RcFixingStats rc_fixing_stats_{};

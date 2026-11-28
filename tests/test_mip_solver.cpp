@@ -14,6 +14,7 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <utility>
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
@@ -2761,24 +2762,27 @@ TEST_CASE("MipSolver: directional inference counts distinct columns at the first
     CHECK(solver.getBranchingStats().strong_branch_probes == 2);
 
     solver.setDirectionalInferenceEnabled(true);
-    const auto measured = solver.solve();
-    CHECK(measured.status == baseline.status);
-    CHECK(measured.objective == baseline.objective);
-    CHECK(measured.solution == baseline.solution);
-    CHECK(measured.nodes == baseline.nodes);
-    CHECK(measured.lp_iterations == baseline.lp_iterations);
-    CHECK(measured.work_units == baseline.work_units);
     const auto& inference = solver.getBranchInferenceStats();
-    REQUIRE(inference.size() == 3);
-    for (const auto& direction : {inference[0].down, inference[0].up}) {
-        CHECK(direction.samples == 1);
-        CHECK(direction.tightened_columns == 1);
-        CHECK(direction.cutoffs == 0);
-        CHECK(direction.skipped == 0);
-    }
-    for (Index j : {1, 2}) {
-        CHECK(inference[j].down.samples == 0);
-        CHECK(inference[j].up.samples == 0);
+    for (const bool coverage : {false, true}) {
+        solver.setInferenceBranchCoverageEnabled(coverage);
+        const auto measured = solver.solve();
+        CHECK(measured.status == baseline.status);
+        CHECK(measured.objective == baseline.objective);
+        CHECK(measured.solution == baseline.solution);
+        CHECK(measured.nodes == baseline.nodes);
+        CHECK(measured.lp_iterations == baseline.lp_iterations);
+        CHECK(measured.work_units == baseline.work_units);
+        REQUIRE(inference.size() == 3);
+        for (const auto& direction : {inference[0].down, inference[0].up}) {
+            CHECK(direction.samples == 1);
+            CHECK(direction.tightened_columns == 1);
+            CHECK(direction.cutoffs == 0);
+            CHECK(direction.skipped == 0);
+        }
+        for (Index j : {1, 2}) {
+            CHECK(inference[j].down.samples == 0);
+            CHECK(inference[j].up.samples == 0);
+        }
     }
 
     solver.setPreLpPropagationEnabled(false);
@@ -2799,6 +2803,50 @@ TEST_CASE("MipSolver: directional inference counts distinct columns at the first
     solver.load(lp);
     REQUIRE(solver.solve().status == Status::NodeLimit);
     CHECK(solver.getBranchInferenceStats().empty());
+}
+
+TEST_CASE("MipSolver: inference coverage observes serial pseudocost decisions only",
+          "[mip][branching]") {
+    auto lp = buildRcFixingKnapsackMip();
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setPreLpPropagationEnabled(true);
+    solver.setNumThreads(1);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    REQUIRE(baseline.nodes > 5);
+    const auto& coverage = solver.getBranchInferenceCoverageStats();
+    CHECK(coverage.fallback.decisions == 0);
+    solver.setInferenceBranchCoverageEnabled(true);
+    const auto measured = solver.solve();
+    CHECK(measured.status == baseline.status);
+    CHECK(measured.objective == baseline.objective);
+    CHECK(measured.solution == baseline.solution);
+    CHECK(measured.best_bound == baseline.best_bound);
+    CHECK(measured.nodes == baseline.nodes);
+    CHECK(measured.lp_iterations == baseline.lp_iterations);
+    CHECK(measured.work_units == baseline.work_units);
+    CHECK(coverage.fallback.decisions > 0);
+    CHECK(std::cmp_less(coverage.fallback.decisions, solver.getBranchingStats().selections));
+    CHECK(solver.getBranchInferenceStats().empty());
+
+    solver.setNumThreads(2);
+    const auto two_threads = solver.solve();
+    CHECK(two_threads.status == baseline.status);
+    CHECK(two_threads.objective == baseline.objective);
+#ifdef MIPX_HAS_TBB
+    CHECK(coverage.reliable.decisions == 0);
+    CHECK(coverage.fallback.decisions == 0);
+#else
+    CHECK(coverage.fallback.decisions > 0);
+#endif
 }
 
 TEST_CASE("MipSolver: pre-LP propagation leaves an inconclusive node LP intact", "[mip][domain]") {
