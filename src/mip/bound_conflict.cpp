@@ -131,6 +131,9 @@ bool checksRowSide(const LpProblem& model, const BoundReasonTrail& trail, Index 
     auto next = ids.begin();
     Real activity = 0.0;
     for (Index k = 0; k < sparse.size(); ++k) {
+        if (budget != nullptr && k % 256 == 0 && budget->stopped()) {
+            return false;
+        }
         const auto col = sparse.indices[k];
         const Real coefficient = sparse.values[k];
         if (coefficient == 0.0) {
@@ -230,8 +233,7 @@ bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
                        std::vector<BranchDecision>* used, BoundProofBudget* budget) {
     std::unordered_set<BoundReasonId> checked;
     while (!pending.empty()) {
-        if (budget != nullptr && budget->deadline.passed()) {
-            budget->interrupted = true;
+        if (budget != nullptr && budget->stopped()) {
             return false;
         }
         const auto id = pending.back();
@@ -247,7 +249,11 @@ bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
         if (used != nullptr && step.source == BoundReasonSource::Branch) {
             used->push_back(literal(step));
         }
+        std::size_t n = 0;
         for (const auto support : step.supports.ids()) {
+            if (budget != nullptr && n++ % 256 == 0 && budget->stopped()) {
+                return false;
+            }
             pending.push_back(support);
         }
     }
@@ -397,7 +403,8 @@ std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
     const LpProblem& model, const BoundReasonTrail& trail, std::span<const BranchDecision> premises,
     BoundProofBudget* budget) {
     std::vector<BranchDecision> used;
-    if (!checksContradiction(model, trail, premises, &used, budget)) {
+    if (!checksContradiction(model, trail, premises, &used, budget) ||
+        (budget != nullptr && budget->stopped())) {
         return std::nullopt;
     }
     return used;
@@ -405,7 +412,8 @@ std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
 
 bool checkGlobalBoundDeduction(const LpProblem& model, const BoundReasonTrail& trail,
                                BoundReasonId id, BoundProofBudget* budget) {
-    return checksReasonChain(model, trail, {}, {id}, nullptr, budget);
+    return checksReasonChain(model, trail, {}, {id}, nullptr, budget) &&
+           (budget == nullptr || !budget->stopped());
 }
 
 std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail& trail,

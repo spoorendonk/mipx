@@ -68,6 +68,9 @@ std::optional<Real> checkedPointObjective(const LpProblem& model, std::span<cons
     }
     ActivityInterval objective{model.obj_offset, model.obj_offset};
     for (Index col = 0; col < model.num_cols; ++col) {
+        if (col % 256 == 0 && budget.stopped()) {
+            return std::nullopt;
+        }
         const Real value = point[col];
         if (!std::isfinite(value) || value < model.col_lower[col] || value > model.col_upper[col] ||
             (model.col_type[col] != VarType::Continuous && std::trunc(value) != value) ||
@@ -88,6 +91,9 @@ std::optional<Real> checkedPointObjective(const LpProblem& model, std::span<cons
         ActivityInterval activity;
         const auto sparse = model.matrix.row(row);
         for (Index k = 0; k < sparse.size(); ++k) {
+            if (k % 256 == 0 && budget.stopped()) {
+                return std::nullopt;
+            }
             if (!activity.addProduct(sparse.values[k], point[sparse.indices[k]])) {
                 return std::nullopt;
             }
@@ -99,9 +105,13 @@ std::optional<Real> checkedPointObjective(const LpProblem& model, std::span<cons
     return objective.upper;
 }
 
-std::vector<Real> candidatePoint(const LpProblem& model, const DomainPropagator& domain) {
+std::vector<Real> candidatePoint(const LpProblem& model, const DomainPropagator& domain,
+                                 const Deadline& deadline) {
     std::vector<Real> point(model.num_cols);
     for (Index col = 0; col < model.num_cols; ++col) {
+        if (col % 256 == 0 && deadline.passed()) {
+            return {};
+        }
         Real lower = domain.getLower(col);
         Real upper = domain.getUpper(col);
         if (model.col_type[col] != VarType::Continuous) {
@@ -171,11 +181,13 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
                 if (value == (upper ? problem_.col_upper[col] : problem_.col_lower[col])) {
                     continue;
                 }
-                if (checkGlobalBoundDeduction(problem_, trail, trail.current(col, upper),
-                                              &budget)) {
-                    import_bound({col, upper, value});
-                } else if (budget.interrupted) {
+                const bool checked =
+                    checkGlobalBoundDeduction(problem_, trail, trail.current(col, upper), &budget);
+                if (budget.stopped()) {
                     return;
+                }
+                if (checked) {
+                    import_bound({col, upper, value});
                 } else {
                     ++stats.proofs_rejected;
                 }
@@ -183,7 +195,7 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
         }
     };
     const auto import_point = [&]() {
-        auto point = candidatePoint(problem_, domain);
+        auto point = candidatePoint(problem_, domain, deadline);
         auto objective = checkedPointObjective(problem_, point, budget);
         std::vector<Real> mapped;
         if (objective && loaded != nullptr) {
@@ -199,7 +211,7 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
                 objective.reset();
             }
         }
-        if (budget.interrupted || deadline.passed()) {
+        if (budget.stopped()) {
             return;
         }
         if (!objective) {
@@ -243,10 +255,11 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
     };
     const auto import_conflict = [&]() {
         auto proof = checkedGlobalBoundConflict(problem_, trail, path, &budget);
+        if (budget.stopped()) {
+            return false;
+        }
         if (!proof) {
-            if (!budget.interrupted) {
-                ++stats.proofs_rejected;
-            }
+            ++stats.proofs_rejected;
             return false;
         }
         if (proof->empty()) {
@@ -263,6 +276,9 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
             key.reserve(proof->size());
             for (const auto& branch : *proof) {
                 key.emplace_back(branch.variable, branch.is_upper);
+            }
+            if (budget.stopped()) {
+                return false;
             }
             if (!imported_conflicts.insert(std::move(key)).second) {
                 ++stats.duplicate_conflicts;
@@ -290,7 +306,7 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
         return false;
     };
     std::uint64_t last_block_yield = 0;
-    for (;;) {
+    while (!out_of_work()) {
         ++stats.nodes;
         const bool feasible =
             !trail.contradiction() && domain.propagateWithRowBudget(rows_left, &deadline);
