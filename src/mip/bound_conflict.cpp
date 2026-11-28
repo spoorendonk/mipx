@@ -122,7 +122,10 @@ bool binaryFixing(const BranchDecision& condition) {
 // violation. An overflow or an infinite endpoint leaves this proof unchecked.
 bool checksRowSide(const LpProblem& model, const BoundReasonTrail& trail, Index row,
                    const BoundReasonSupports& supports, std::optional<BoundEndpoint> opposite,
-                   bool minimum) {
+                   bool minimum, BoundProofBudget* budget) {
+    if (budget != nullptr && !budget->debitRow()) {
+        return false;
+    }
     const auto sparse = model.matrix.row(row);
     auto ids = supports.ids();
     auto next = ids.begin();
@@ -157,16 +160,17 @@ bool checksRowSide(const LpProblem& model, const BoundReasonTrail& trail, Index 
 }
 
 bool checksRow(const LpProblem& model, const BoundReasonTrail& trail, Index row,
-               const BoundReasonSupports& supports, std::optional<BoundEndpoint> opposite = {}) {
+               const BoundReasonSupports& supports, std::optional<BoundEndpoint> opposite,
+               BoundProofBudget* budget) {
     if (row < 0 || row >= model.num_rows) {
         return false;
     }
-    return checksRowSide(model, trail, row, supports, opposite, true) ||
-           checksRowSide(model, trail, row, supports, opposite, false);
+    return checksRowSide(model, trail, row, supports, opposite, true, budget) ||
+           checksRowSide(model, trail, row, supports, opposite, false, budget);
 }
 
 bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, const BoundReason& step,
-                     std::span<const BranchDecision> premises) {
+                     std::span<const BranchDecision> premises, BoundProofBudget* budget) {
     const auto& endpoint = step.endpoint;
     if (endpoint.col < 0 || endpoint.col >= model.num_cols) {
         return false;
@@ -198,7 +202,7 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, cons
                     return false;
                 }
             }
-            return checksRow(model, trail, step.source_index, step.supports, opposite);
+            return checksRow(model, trail, step.source_index, step.supports, opposite, budget);
         }
         case BoundReasonSource::IntegerRounding: {
             if (type == VarType::Continuous) {
@@ -223,9 +227,13 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, cons
 
 bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
                        std::span<const BranchDecision> premises, std::vector<BoundReasonId> pending,
-                       std::vector<BranchDecision>* used) {
+                       std::vector<BranchDecision>* used, BoundProofBudget* budget) {
     std::unordered_set<BoundReasonId> checked;
     while (!pending.empty()) {
+        if (budget != nullptr && budget->deadline.passed()) {
+            budget->interrupted = true;
+            return false;
+        }
         const auto id = pending.back();
         pending.pop_back();
         if (!checked.insert(id).second) {
@@ -233,7 +241,7 @@ bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
         }
         const auto& step = trail.reason(id);
         if (step.scope.node_local || step.scope.cutoff != kInf ||
-            !checksDeduction(model, trail, step, premises)) {
+            !checksDeduction(model, trail, step, premises, budget)) {
             return false;
         }
         if (used != nullptr && step.source == BoundReasonSource::Branch) {
@@ -248,7 +256,8 @@ bool checksReasonChain(const LpProblem& model, const BoundReasonTrail& trail,
 
 bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail,
                          std::span<const BranchDecision> premises,
-                         std::vector<BranchDecision>* used = nullptr) {
+                         std::vector<BranchDecision>* used = nullptr,
+                         BoundProofBudget* budget = nullptr) {
     const auto& failure = trail.contradiction();
     if (!failure || failure->scope.node_local || failure->scope.cutoff != kInf) {
         return false;
@@ -266,10 +275,10 @@ bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail,
             return false;
         }
     } else if (failure->source != BoundReasonSource::Row ||
-               !checksRow(model, trail, failure->source_index, failure->supports)) {
+               !checksRow(model, trail, failure->source_index, failure->supports, {}, budget)) {
         return false;
     }
-    return checksReasonChain(model, trail, premises, std::move(pending), used);
+    return checksReasonChain(model, trail, premises, std::move(pending), used, budget);
 }
 
 std::vector<BranchDecision> reconvergenceConditions(const BoundReasonTrail& trail,
@@ -385,18 +394,18 @@ bool checkGlobalBoundContradiction(const LpProblem& model, const BoundReasonTrai
 }
 
 std::optional<std::vector<BranchDecision>> checkedGlobalBoundConflict(
-    const LpProblem& model, const BoundReasonTrail& trail,
-    std::span<const BranchDecision> premises) {
+    const LpProblem& model, const BoundReasonTrail& trail, std::span<const BranchDecision> premises,
+    BoundProofBudget* budget) {
     std::vector<BranchDecision> used;
-    if (!checksContradiction(model, trail, premises, &used)) {
+    if (!checksContradiction(model, trail, premises, &used, budget)) {
         return std::nullopt;
     }
     return used;
 }
 
 bool checkGlobalBoundDeduction(const LpProblem& model, const BoundReasonTrail& trail,
-                               BoundReasonId id) {
-    return checksReasonChain(model, trail, {}, {id}, nullptr);
+                               BoundReasonId id, BoundProofBudget* budget) {
+    return checksReasonChain(model, trail, {}, {id}, nullptr, budget);
 }
 
 std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail& trail,

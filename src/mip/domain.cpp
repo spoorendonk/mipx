@@ -1,6 +1,7 @@
 #include "mipx/domain.h"
 
 #include "mipx/clique_table.h"
+#include "mipx/deadline.h"
 #include "mipx/implication_graph.h"
 #include "mipx/objective_propagator.h"
 
@@ -153,12 +154,12 @@ bool DomainPropagator::propagate(Int max_iterations) {
     return propagateWithRowBudget(max_iterations);
 }
 
-bool DomainPropagator::propagateWithRowBudget(Int& row_visits_left) {
+bool DomainPropagator::propagateWithRowBudget(Int& row_visits_left, const Deadline* deadline) {
     objective_infeasible_ = false;
-    if (row_visits_left <= 0) {
+    if (row_visits_left <= 0 || (deadline != nullptr && deadline->passed())) {
         return true;
     }
-    const bool feasible = propagate(row_visits_left, 0);
+    const bool feasible = propagate(row_visits_left, 0, deadline);
     if (!feasible && reasons_ && !reasons_->contradiction()) {
         reasons_->fail(
             BoundReasonSource::Opaque, {}, -1,
@@ -176,8 +177,9 @@ void DomainPropagator::seedRows() {
     }
 }
 
-bool DomainPropagator::propagateRows(Int& visits_left, InferencePass* pass, bool sweep) {
-    while (visits_left > 0) {
+bool DomainPropagator::propagateRows(Int& visits_left, InferencePass* pass, bool sweep,
+                                     const Deadline* deadline) {
+    while (visits_left > 0 && (deadline == nullptr || !deadline->passed())) {
         Index row;
         if (!queue_.empty()) {
             row = queue_.back();
@@ -273,10 +275,14 @@ bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainProp
     return feasible;
 }
 
-bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
+bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes,
+                                 const Deadline* deadline) {
     seedRows();
-    if (!propagateRows(row_visits_left)) {
+    if (!propagateRows(row_visits_left, nullptr, true, deadline)) {
         return false;
+    }
+    if (deadline != nullptr && deadline->passed()) {
+        return true;
     }
 
     // Run clique propagation after row-based propagation converges.
@@ -286,7 +292,7 @@ bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
         }
         // If clique propagation changed bounds, re-run row propagation.
         if (!queue_.empty()) {
-            return row_visits_left == 0 || propagate(row_visits_left, objective_passes);
+            return row_visits_left == 0 || propagate(row_visits_left, objective_passes, deadline);
         }
     }
 
@@ -297,7 +303,8 @@ bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
             return false;
         }
         if (!queue_.empty()) {
-            return row_visits_left == 0 || propagate(row_visits_left, objective_passes + 1);
+            return row_visits_left == 0 ||
+                   propagate(row_visits_left, objective_passes + 1, deadline);
         }
     }
 

@@ -11,6 +11,7 @@
 namespace mipx {
 
 class CliqueTable;
+class Deadline;
 class ImplicationGraph;
 class ObjectivePropagator;
 
@@ -91,9 +92,9 @@ public:
     ///        default budget, kMaxRowRounds passes' worth over the rows).
     bool propagate(Int max_iterations = 0);
 
-    /// Run propagation and debit one visit per evaluated row, including a
-    /// contradictory row. A nonpositive budget returns true without evaluating rows.
-    bool propagateWithRowBudget(Int& row_visits_left);
+    /// Debit one visit per evaluated row, including a contradictory row.
+    /// Running out of budget or time leaves the partial deductions in place.
+    bool propagateWithRowBudget(Int& row_visits_left, const Deadline* deadline = nullptr);
 
     /// Run row, clique and binary implication propagation with a shared cap.
     /// Inference may spend up to half the cap. Newly appended cliques are
@@ -140,13 +141,14 @@ private:
     };
 
     void seedRows();
-    bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true);
+    bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true,
+                       const Deadline* deadline = nullptr);
     bool propagateRow(Index row, InferencePass* pass);
     void prioritizeChangedCliques(InferencePass& pass, std::size_t first_change) const;
 
     /// propagate() after `objective_passes` passes of the objective row,
     /// debiting the same row budget when clique or objective updates wake rows.
-    bool propagate(Int& row_visits_left, Int objective_passes);
+    bool propagate(Int& row_visits_left, Int objective_passes, const Deadline* deadline);
 
     /// Propagate the objective cutoff row. Returns false if no point of the
     /// domain improves on the cutoff.
