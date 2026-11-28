@@ -74,6 +74,24 @@ TEST_CASE("CLI: an .lp file is solved by the LP reader", "[cli][io]") {
     CHECK_FALSE(run.mentions("Objective: 0.0000000000e+00"));
 }
 
+TEST_CASE("CLI: root propagation row budget reaches the solver", "[cli][mip]") {
+    const auto run = runSolver("'" + testDataDir() +
+                               "/knapsack4_bv.mps' --threads 1 --dual --no-presolve --verbose "
+                               "--root-cut-propagation --root-cut-propagation-row-budget 1");
+    CHECK(run.exit_code == 0);
+    CHECK(run.mentions("Status: Optimal"));
+    CHECK(run.mentions(" row_visits=1 budget_exhaustions=1"));
+}
+
+TEST_CASE("CLI: root propagation row budget rejects invalid counts", "[cli][mip]") {
+    for (const auto* value : {"-1", "2rows", "999999999999"}) {
+        const auto run = runSolver("'" + testDataDir() +
+                                   "/knapsack4_bv.mps' --root-cut-propagation-row-budget " + value);
+        CHECK(run.exit_code != 0);
+        CHECK(run.mentions("--root-cut-propagation-row-budget requires a nonnegative integer"));
+    }
+}
+
 TEST_CASE("CLI: an LP-format file forced to MPS is rejected", "[cli][io]") {
     const auto run = runSolver("'" + testDataDir() + "/lp_format.lp' --format mps");
 

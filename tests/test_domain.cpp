@@ -74,6 +74,36 @@ LpProblem make(bool branch_fixture) {
 
 }  // namespace
 
+TEST_CASE("DomainPropagator: explicit row budget charges the contradictory visit", "[domain]") {
+    const auto problem = makeProblem(1, 1, {{0, 0, 1}}, {2}, {kInf}, {0}, {1});
+    DomainPropagator propagator;
+    propagator.load(problem);
+
+    Int row_visits_left = 0;
+    REQUIRE(propagator.propagateWithRowBudget(row_visits_left));
+    CHECK(row_visits_left == 0);
+
+    row_visits_left = 2;
+    REQUIRE_FALSE(propagator.propagateWithRowBudget(row_visits_left));
+    CHECK(row_visits_left == 1);
+}
+
+TEST_CASE("DomainPropagator: explicit row budget preserves deductions from a partial pass",
+          "[domain]") {
+    const auto problem =
+        makeProblem(2, 2, {{0, 0, 1}, {1, 1, 1}}, {1, 1}, {kInf, kInf}, {0, 0}, {2, 2});
+    DomainPropagator propagator;
+    propagator.load(problem);
+
+    Int row_visits_left = 1;
+    REQUIRE(propagator.propagateWithRowBudget(row_visits_left));
+    CHECK(row_visits_left == 0);
+    const auto [untouched, tightened] =
+        std::minmax({propagator.getLower(0), propagator.getLower(1)});
+    CHECK(untouched == 0.0);
+    CHECK_THAT(tightened, WithinAbs(1.0, 4 * DomainPropagator::kTol));
+}
+
 TEST_CASE("Bound conflicts: first UIP, subsumption and sibling reuse", "[domain][conflicts]") {
     // At level one a fixes r. At level two b fixes u, which forces p and q.
     // The packing row forbids a = r = p = q = 1. Column d is irrelevant.

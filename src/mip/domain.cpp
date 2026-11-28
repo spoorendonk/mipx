@@ -145,13 +145,20 @@ Real DomainPropagator::getUpper(Index col) const {
 }
 
 bool DomainPropagator::propagate(Int max_iterations) {
-    objective_infeasible_ = false;
     if (max_iterations <= 0) {
         const int64_t budget = int64_t{kMaxRowRounds} * std::max<Index>(num_rows_, 1);
         max_iterations =
             static_cast<Int>(std::min<int64_t>(budget, std::numeric_limits<Int>::max()));
     }
-    const bool feasible = propagate(max_iterations, 0);
+    return propagateWithRowBudget(max_iterations);
+}
+
+bool DomainPropagator::propagateWithRowBudget(Int& row_visits_left) {
+    objective_infeasible_ = false;
+    if (row_visits_left <= 0) {
+        return true;
+    }
+    const bool feasible = propagate(row_visits_left, 0);
     if (!feasible && reasons_ && !reasons_->contradiction()) {
         reasons_->fail(
             BoundReasonSource::Opaque, {}, -1,
@@ -160,7 +167,7 @@ bool DomainPropagator::propagate(Int max_iterations) {
     return feasible;
 }
 
-bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
+bool DomainPropagator::propagate(Int& row_visits_left, Int objective_passes) {
     // If queue is empty, seed with all rows.
     if (queue_.empty()) {
         for (Index i = 0; i < num_rows_; ++i) {
@@ -169,9 +176,8 @@ bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
         }
     }
 
-    Int iterations = 0;
     while (!queue_.empty()) {
-        if (iterations >= iterations_left) {
+        if (row_visits_left == 0) {
             return true;
         }
 
@@ -179,10 +185,10 @@ bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
         queue_.pop_back();
         row_in_queue_[row] = false;
 
+        --row_visits_left;
         if (!propagateRow(row)) {
             return false;
         }
-        ++iterations;
     }
 
     // Run clique propagation after row-based propagation converges.
@@ -192,9 +198,7 @@ bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
         }
         // If clique propagation changed bounds, re-run row propagation.
         if (!queue_.empty()) {
-            return iterations < iterations_left
-                       ? propagate(iterations_left - iterations, objective_passes)
-                       : true;
+            return row_visits_left == 0 || propagate(row_visits_left, objective_passes);
         }
     }
 
@@ -205,9 +209,7 @@ bool DomainPropagator::propagate(Int iterations_left, Int objective_passes) {
             return false;
         }
         if (!queue_.empty()) {
-            return iterations < iterations_left
-                       ? propagate(iterations_left - iterations, objective_passes + 1)
-                       : true;
+            return row_visits_left == 0 || propagate(row_visits_left, objective_passes + 1);
         }
     }
 

@@ -53,7 +53,8 @@ void printUsage(FILE* out) {
                  "[--directional-inference (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
-                 "[--root-cut-recheck] [--root-cut-propagation] [--root-flow-cover] "
+                 "[--root-cut-recheck] [--root-cut-propagation] "
+                 "[--root-cut-propagation-row-budget N] [--root-flow-cover] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
                  "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
@@ -192,6 +193,7 @@ int main(int argc, char* argv[]) {
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
+    mipx::Int root_cut_propagation_row_budget = 0;
     bool root_flow_cover = false;
     bool sos2_adjacent_intervals = false;
     bool sos2_native_branching = false;
@@ -393,6 +395,16 @@ int main(int argc, char* argv[]) {
             root_cut_recheck = true;
         } else if (arg == "--root-cut-propagation") {
             root_cut_propagation = true;
+        } else if (arg == "--root-cut-propagation-row-budget" && i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const auto end = value.data() + value.size();
+            const auto [parsed, ec] =
+                std::from_chars(value.data(), end, root_cut_propagation_row_budget);
+            if (ec != std::errc{} || parsed != end || root_cut_propagation_row_budget < 0) {
+                std::fprintf(stderr,
+                             "--root-cut-propagation-row-budget requires a nonnegative integer\n");
+                return 1;
+            }
         } else if (arg == "--root-flow-cover") {
             root_flow_cover = true;
         } else if (arg == "--sos2-adjacent-intervals") {
@@ -816,6 +828,7 @@ int main(int argc, char* argv[]) {
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
+            solver.setRootCutPropagationRowBudget(root_cut_propagation_row_budget);
             solver.setRootFlowCoverEnabled(root_flow_cover);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {

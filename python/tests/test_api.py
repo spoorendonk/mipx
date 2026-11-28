@@ -143,9 +143,13 @@ def test_root_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
     solver.set_presolve(False)
     solver.set_root_cut_propagation_enabled(True)
     solver.load(mipx.read_lp(str(path)))
-    result = solver.solve()
-    assert result.status == mipx.Status.Optimal
-    assert result.objective == pytest.approx(1.0)
+    for visits in (0, 1):
+        solver.set_root_cut_propagation_row_budget(visits)
+        result = solver.solve()
+        assert result.status == mipx.Status.Optimal
+        assert result.objective == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="Root cut propagation row budget"):
+        solver.set_root_cut_propagation_row_budget(-1)
 
 
 def test_mip_solver_accepts_root_flow_cover_setting(tmp_path: Path) -> None:

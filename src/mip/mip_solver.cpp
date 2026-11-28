@@ -1696,6 +1696,13 @@ void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
     rc_fixing_stats_.propagation_triggers += delta.propagation_triggers;
 }
 
+void MipSolver::setRootCutPropagationRowBudget(Int visits) {
+    if (visits < 0) {
+        throw std::invalid_argument("Root cut propagation row budget must be nonnegative");
+    }
+    root_cut_propagation_row_budget_ = visits;
+}
+
 void MipSolver::setRootFeasibilityJumpRestarts(Int restarts) {
     if (restarts < 0 || restarts > HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts) {
         throw std::invalid_argument(
@@ -7411,6 +7418,8 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     };
     Int stagnation_rounds = 0;
     double cut_node_work = 0.0;
+    Int propagation_visits_left = root_cut_propagation_row_budget_;
+    const bool limit_propagation_visits = propagation_visits_left > 0;
 
     for (Int round = 0; round < max_cut_rounds_; ++round) {
         const auto policy = cut_manager.beginRound(round, true, 0, cut_node_work, total_work);
@@ -7565,6 +7574,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         lp.addRows(starts, col_indices, values, lower, upper);
 
         proposed_bounds.clear();
+        bool propagation_budget_exhausted = false;
         if (root_cut_propagation_enabled_ && certificate_problem != nullptr) {
             DomainPropagator propagator;
             propagator.load(*certificate_problem);
@@ -7572,7 +7582,20 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             // budget bounds the work even if rows keep waking one another.
             // Leave any propagation contradiction to the regular cut solve
             // and its back-out path.
-            if (propagator.propagate(certificate_problem->num_rows)) {
+            const Int visit_limit =
+                limit_propagation_visits
+                    ? std::min(certificate_problem->num_rows, propagation_visits_left)
+                    : certificate_problem->num_rows;
+            Int round_visits_left = visit_limit;
+            const bool feasible = propagator.propagateWithRowBudget(round_visits_left);
+            const Int visits = visit_limit - round_visits_left;
+            cut_stats_.root_cut_propagation_row_visits += static_cast<std::uint64_t>(visits);
+            if (limit_propagation_visits) {
+                propagation_visits_left -= visits;
+                propagation_budget_exhausted = propagation_visits_left == 0;
+                cut_stats_.root_cut_propagation_budget_exhaustions += propagation_budget_exhausted;
+            }
+            if (feasible) {
                 for (Index j = 0; j < problem_.num_cols; ++j) {
                     const Real lb = propagator.getLower(j);
                     const Real ub = propagator.getUpper(j);
@@ -7687,7 +7710,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             }
         }
 
-        if (result.work_units > cut_per_round_work_budget_) {
+        if (propagation_budget_exhausted || result.work_units > cut_per_round_work_budget_) {
             break;
         }
         if (improvement < kCutImprovementTol) {
@@ -7754,9 +7777,12 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     cut_stats_.root_cuts_added += total_cuts;
     cut_stats_.root_cut_bound_tightenings += static_cast<Int>(retained_bound_undo.size());
     if (verbose_ && root_cut_propagation_enabled_) {
-        log_.log("Root cut propagation: tightenings=%d backed_out=%d\n",
-                 cut_stats_.root_cut_bound_tightenings,
-                 cut_stats_.root_cut_bound_tightenings_backed_out);
+        log_.log(
+            "Root cut propagation: tightenings=%d backed_out=%d row_visits=%llu "
+            "budget_exhaustions=%d\n",
+            cut_stats_.root_cut_bound_tightenings, cut_stats_.root_cut_bound_tightenings_backed_out,
+            static_cast<unsigned long long>(cut_stats_.root_cut_propagation_row_visits),
+            cut_stats_.root_cut_propagation_budget_exhaustions);
     }
     root_cut_family_stats_ = total_family_stats;
 

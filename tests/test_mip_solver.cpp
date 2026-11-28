@@ -1372,8 +1372,33 @@ TEST_CASE("MipSolver: root cut propagation carries discrete bounds across cut ro
 
     REQUIRE(solver.solve().status == Status::Optimal);
     CHECK(solver.getCutStats().root_cut_bound_tightenings == 0);
+    const Int no_propagation_rounds = solver.getCutStats().root_rounds;
+
+    solver.setRootCutPropagationRowBudget(1);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getCutStats().root_rounds == no_propagation_rounds);
+    CHECK(solver.getCutStats().root_cut_propagation_row_visits == 0);
+    CHECK(solver.getCutStats().root_cut_propagation_budget_exhaustions == 0);
 
     solver.setRootCutPropagationEnabled(true);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(2.0, 1e-8));
+        const auto& cuts = solver.getCutStats();
+        CHECK(cuts.root_rounds == 1);
+        CHECK(cuts.root_cut_propagation_row_visits == 1);
+        CHECK(cuts.root_cut_propagation_budget_exhaustions == 1);
+        CHECK(solver.getExactRefinementStats().certificate_passed);
+    }
+
+    solver.setRootCutPropagationRowBudget(0);
+    solver.setMaxCutRounds(1);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    const auto first_round_visits = solver.getCutStats().root_cut_propagation_row_visits;
+    REQUIRE(first_round_visits > 1);
+
+    solver.setMaxCutRounds(2);
     for (int repeat = 0; repeat < 2; ++repeat) {
         const auto result = solver.solve();
         REQUIRE(result.status == Status::Optimal);
@@ -1385,10 +1410,20 @@ TEST_CASE("MipSolver: root cut propagation carries discrete bounds across cut ro
         CHECK(cuts.root_rounds == 2);
         CHECK(cuts.root_cut_bound_tightenings == 2);
         CHECK(cuts.root_cut_bound_tightenings_backed_out == 0);
+        CHECK(cuts.root_cut_propagation_row_visits > first_round_visits + 1);
+        CHECK(cuts.root_cut_propagation_budget_exhaustions == 0);
         const auto& certificate = solver.getExactRefinementStats();
         CHECK(certificate.rows_evaluated == lp.num_rows + cuts.root_cuts_added);
         CHECK(certificate.certificate_passed);
     }
+
+    solver.setRootCutPropagationRowBudget(static_cast<Int>(first_round_visits) + 1);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(2.0, 1e-8));
+    CHECK(solver.getCutStats().root_rounds == 2);
+    CHECK(solver.getCutStats().root_cut_propagation_row_visits == first_round_visits + 1);
+    CHECK(solver.getCutStats().root_cut_propagation_budget_exhaustions == 1);
 }
 
 TEST_CASE("MipSolver: a backed-out root cut batch discards its propagated bounds",
@@ -1424,16 +1459,27 @@ TEST_CASE("MipSolver: a backed-out root cut batch discards its propagated bounds
     solver.setExactRefinementMode(ExactRefinementMode::On);
     solver.load(lp);
 
-    REQUIRE(solver.solve().status == Status::Infeasible);
-    const auto& cuts = solver.getCutStats();
-    CHECK(cuts.root_rounds_backed_out == 1);
-    CHECK(cuts.root_cuts_added == 0);
-    CHECK(cuts.root_cut_bound_tightenings == 0);
-    CHECK(cuts.root_cut_bound_tightenings_backed_out == 1);
-    const auto& certificate = solver.getExactRefinementStats();
-    CHECK(certificate.rows_evaluated == lp.num_rows);
-    CHECK(certificate.max_col_violation_before == 0.0);
-    CHECK(certificate.certificate_passed);
+    for (const Int budget : {0, 1}) {
+        CAPTURE(budget);
+        solver.setRootCutPropagationRowBudget(budget);
+        REQUIRE(solver.solve().status == Status::Infeasible);
+        const auto& cuts = solver.getCutStats();
+        CHECK(cuts.root_rounds_backed_out == 1);
+        CHECK(cuts.root_cuts_added == 0);
+        CHECK(cuts.root_cut_bound_tightenings == 0);
+        CHECK(cuts.root_cut_bound_tightenings_backed_out == 1);
+        if (budget == 1) {
+            CHECK(cuts.root_cut_propagation_row_visits == 1);
+            CHECK(cuts.root_cut_propagation_budget_exhaustions == 1);
+        } else {
+            CHECK(cuts.root_cut_propagation_row_visits > 1);
+            CHECK(cuts.root_cut_propagation_budget_exhaustions == 0);
+        }
+        const auto& certificate = solver.getExactRefinementStats();
+        CHECK(certificate.rows_evaluated == lp.num_rows);
+        CHECK(certificate.max_col_violation_before == 0.0);
+        CHECK(certificate.certificate_passed);
+    }
 }
 
 TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",

@@ -80,6 +80,10 @@ public:
     ///        default budget, kMaxRowRounds passes' worth over the rows).
     bool propagate(Int max_iterations = 0);
 
+    /// Run propagation and debit one visit per evaluated row, including a
+    /// contradictory row. A nonpositive budget returns true without evaluating rows.
+    bool propagateWithRowBudget(Int& row_visits_left);
+
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();
     void popCheckpoint();
@@ -101,8 +105,8 @@ private:
     bool propagateRow(Index row);
 
     /// propagate() after `objective_passes` passes of the objective row,
-    /// with `iterations_left` (> 0) row propagations still allowed.
-    bool propagate(Int iterations_left, Int objective_passes);
+    /// debiting the same row budget when clique or objective updates wake rows.
+    bool propagate(Int& row_visits_left, Int objective_passes);
 
     /// Propagate the objective cutoff row. Returns false if no point of the
     /// domain improves on the cutoff.
