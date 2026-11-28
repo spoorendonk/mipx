@@ -185,6 +185,8 @@ NB_MODULE(_core, m) {
         .def("set_presolve", &MipSolver::setPresolve, "enabled"_a)
         .def("set_cuts_enabled", &MipSolver::setCutsEnabled, "enabled"_a)
         .def("set_root_cut_recheck", &MipSolver::setRootCutRecheck, "enabled"_a)
+        .def("set_root_cut_propagation_enabled", &MipSolver::setRootCutPropagationEnabled,
+             "enabled"_a)
         .def("set_num_threads", &MipSolver::setNumThreads, "threads"_a)
         .def("set_root_lp_policy", &MipSolver::setRootLpPolicy, "policy"_a)
         .def("set_parallel_mode", &MipSolver::setParallelMode, "mode"_a)
