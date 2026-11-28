@@ -155,12 +155,26 @@ BnbNode NodeQueue::pop() {
     return std::move(*node);
 }
 
+bool NodeQueue::IncumbentScanBudget::visit() {
+    if (work_left == 0 || deadline.passed()) {
+        stopped = true;
+        return false;
+    }
+    --work_left;
+    ++visits;
+    return true;
+}
+
 std::optional<Int> NodeQueue::incumbentCompatibleId(std::span<const Real> incumbent,
-                                                    std::span<const VarType> types) const {
+                                                    std::span<const VarType> types,
+                                                    IncumbentScanBudget* budget) const {
     if (incumbent.empty() || incumbent.size() != types.size()) {
         return std::nullopt;
     }
     const auto compatible = [&](const BranchDecision& decision) {
+        if (budget != nullptr && !budget->visit()) {
+            return false;
+        }
         if (decision.variable < 0 || static_cast<std::size_t>(decision.variable) >= types.size()) {
             return false;
         }
@@ -174,8 +188,14 @@ std::optional<Int> NodeQueue::incumbentCompatibleId(std::span<const Real> incumb
                                  : value >= decision.bound - tolerance;
     };
     for (const auto& [id, node] : nodes_) {
+        if (budget != nullptr && !budget->visit()) {
+            break;
+        }
         if (std::ranges::all_of(node.bound_changes, compatible)) {
             return id;
+        }
+        if (budget != nullptr && budget->stopped) {
+            break;
         }
     }
     return std::nullopt;

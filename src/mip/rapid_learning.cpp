@@ -130,16 +130,23 @@ std::vector<Real> candidatePoint(const LpProblem& model, const DomainPropagator&
 }  // namespace
 
 bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* loaded,
-                                     const Presolver* postsolve) {
+                                     const Presolver* postsolve,
+                                     const OverheadBudget::Phase& phase) {
     auto& stats = rapid_learning_stats_;
-    const auto deadline = Deadline::after(timeLeft());
-    if (deadline.passed()) {
-        stats.stop = RapidLearningStop::Deadline;
-        return false;
-    }
+    const auto& deadline = phase.deadline;
+    const auto deadline_stop =
+        phase.allowance_deadline ? RapidLearningStop::Allowance : RapidLearningStop::Deadline;
     if (root_rapid_learning_max_nodes_ == 0 || root_rapid_learning_row_budget_ == 0) {
         stats.stop = root_rapid_learning_max_nodes_ == 0 ? RapidLearningStop::NodeLimit
                                                          : RapidLearningStop::RowLimit;
+        return false;
+    }
+    if (deadline.passed()) {
+        stats.stop = deadline_stop;
+        return false;
+    }
+    if (phase.work_left == 0) {
+        stats.stop = RapidLearningStop::Allowance;
         return false;
     }
 
@@ -147,9 +154,17 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
     // The proof checker sees the same global rows and root bounds. Keep
     // graph-, clique- and cutoff-derived deductions outside this domain.
     domain.load(problem_, true);
+    if (!domain.prepareTimedPropagation(deadline)) {
+        stats.stop = deadline_stop;
+        return false;
+    }
     const auto& trail = *domain.boundReasons();
     std::vector<Index> binaries;
     for (Index col = 0; col < problem_.num_cols; ++col) {
+        if (col % 256 == 0 && deadline.passed()) {
+            stats.stop = deadline_stop;
+            return false;
+        }
         if (isBinaryColumn(problem_, col) && problem_.col_lower[col] == 0.0 &&
             problem_.col_upper[col] == 1.0) {
             binaries.push_back(col);
@@ -293,7 +308,7 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
 
     const auto out_of_work = [&]() {
         if (deadline.passed()) {
-            stats.stop = RapidLearningStop::Deadline;
+            stats.stop = deadline_stop;
             return true;
         }
         if (rows_left == 0) {
@@ -308,7 +323,7 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
         const bool feasible =
             !trail.contradiction() && domain.propagateWithRowBudget(rows_left, &deadline);
         if (deadline.passed()) {
-            stats.stop = RapidLearningStop::Deadline;
+            stats.stop = deadline_stop;
             break;
         }
         if (!feasible) {
@@ -347,6 +362,10 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
         }
         if (stats.nodes == root_rapid_learning_max_nodes_) {
             stats.stop = RapidLearningStop::NodeLimit;
+            break;
+        }
+        if (static_cast<std::uint64_t>(stats.nodes) == phase.work_left) {
+            stats.stop = RapidLearningStop::Allowance;
             break;
         }
         if (split != binaries.end()) {

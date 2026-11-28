@@ -2,6 +2,7 @@
 
 #include "mipx/branch_decision.h"
 #include "mipx/core.h"
+#include "mipx/deadline.h"
 #include "mipx/implication_graph.h"
 #include "mipx/variable_bounds.h"
 
@@ -23,6 +24,8 @@ struct ProbingStats {
     std::uint64_t row_visits = 0;  // Measured in systematic mode.
     std::uint64_t implication_candidates = 0;
     bool skipped_unsupported_domains = false;
+    bool stopped_at_deadline = false;
+    bool stopped_at_probe_limit = false;
     Int fixings_found = 0;
     Int implications_found = 0;
     Int vubs_found = 0;
@@ -48,6 +51,7 @@ struct ProbingConfig {
     // A positive row cap selects the systematic pass. Both branches receive
     // this allowance, and max_probes_per_round caps the complete pairs.
     Int systematic_rows_per_branch = 0;
+    Deadline deadline;
 };
 
 /// Root probing engine.

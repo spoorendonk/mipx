@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 namespace mipx {
 
@@ -36,6 +37,10 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     std::vector<Index> binary_vars;
     binary_vars.reserve(static_cast<std::size_t>(problem.num_cols));
     for (Index j = 0; j < problem.num_cols; ++j) {
+        if (j % 256 == 0 && config.deadline.passed()) {
+            stats.stopped_at_deadline = true;
+            return stats;
+        }
         if (isBinaryColumn(problem, j) && problem.col_upper[j] - problem.col_lower[j] > kTol &&
             (!systematic || (problem.col_lower[j] == 0.0 && problem.col_upper[j] == 1.0))) {
             binary_vars.push_back(j);
@@ -55,6 +60,11 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     // Create domain propagator once and reuse across all probes.
     DomainPropagator dp;
     dp.load(problem, systematic);
+    if (!dp.prepareTimedPropagation(config.deadline)) {
+        stats.stopped_at_deadline = true;
+        stats.time_seconds = elapsed();
+        return stats;
+    }
 
     // Multiple rounds of probing to discover cascading implications.
     const Int max_rounds = systematic ? 1 : config.max_rounds;
@@ -71,10 +81,15 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
         }
 
         for (Index var : binary_vars) {
+            if (config.deadline.passed()) {
+                stats.stopped_at_deadline = true;
+                break;
+            }
             if (elapsed() > config.time_limit) {
                 break;
             }
             if (probes_this_round >= config.max_probes_per_round) {
+                stats.stopped_at_probe_limit = true;
                 break;
             }
 
@@ -110,6 +125,9 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
             }
             dp.popCheckpoint();
             ++probes_this_round;
+            if (stats.stopped_at_deadline) {
+                break;
+            }
         }
 
         // Check if we learned anything new.
@@ -175,6 +193,10 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
     std::vector<Index> changed_columns;
     std::array<bool, 2> infeasible{};
     for (const bool value : {false, true}) {
+        if (config.deadline.passed()) {
+            stats.stopped_at_deadline = true;
+            break;
+        }
         dp.pushCheckpoint();
         ++stats.branches_probed[value];
         const Real bound = value ? 1.0 : 0.0;
@@ -183,10 +205,22 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
             const BranchDecision branch{var, bound, !value, 1};
             dp.setBranchBound(var, !value, bound, branch.level);
             Int rows_left = config.systematic_rows_per_branch;
-            feasible = dp.propagateWithRowBudget(rows_left);
+            feasible = dp.propagateWithRowBudget(rows_left, &config.deadline);
             stats.row_visits += config.systematic_rows_per_branch - rows_left;
+            if (config.deadline.passed()) {
+                stats.stopped_at_deadline = true;
+                dp.popCheckpoint();
+                break;
+            }
+            Int proof_rows = std::numeric_limits<Int>::max();
+            BoundProofBudget proof_budget{proof_rows, config.deadline};
+            const auto premises = std::span{&branch, 1};
             if (!feasible &&
-                checkGlobalBoundContradiction(problem, *dp.boundReasons(), std::span{&branch, 1})) {
+                (config.deadline.isSet()
+                     ? checkedGlobalBoundConflict(problem, *dp.boundReasons(), premises,
+                                                  &proof_budget)
+                           .has_value()
+                     : checkGlobalBoundContradiction(problem, *dp.boundReasons(), premises))) {
                 checked_conflicts_.push_back(branch);
                 infeasible[value] = true;
             }
@@ -213,6 +247,10 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
             ++stats.infeasible_probes;
         }
         dp.popCheckpoint();
+        if (config.deadline.passed()) {
+            stats.stopped_at_deadline = true;
+            break;
+        }
     }
 
     // If one direction is infeasible, the variable is fixed.

@@ -1597,13 +1597,54 @@ void MipSolver::buildCliqueTable() {
     }
 }
 
-double MipSolver::timeLeft() const {
-    const double spent =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
+void MipSolver::OverheadBudget::setLimit(std::optional<MipOverheadLimit> new_limit) {
+    if (new_limit && (!std::isfinite(new_limit->time_fraction) || new_limit->time_fraction < 0.0 ||
+                      new_limit->time_fraction > 1.0)) {
+        throw std::invalid_argument("An overhead allowance fraction must be in [0, 1]");
+    }
+    limit = new_limit;
+}
+
+void MipSolver::OverheadBudget::reset(double solve_limit) {
+    usage = {};
+    timed = limit && std::isfinite(solve_limit);
+    time_allowance = timed ? limit->time_fraction * std::max(0.0, solve_limit) : kInf;
+}
+
+double MipSolver::OverheadBudget::secondsLeft(double global_left) const {
+    return std::min(global_left, std::max(0.0, time_allowance - usage.seconds));
+}
+
+MipSolver::OverheadBudget::Phase MipSolver::OverheadBudget::start(double global_left,
+                                                                  Clock::time_point now) const {
+    const double seconds = secondsLeft(global_left);
+    const auto work = limit && !timed ? limit->work_limit - std::min(limit->work_limit, usage.work)
+                                      : std::numeric_limits<std::uint64_t>::max();
+    return {now, Deadline::after(seconds, now), work, timed && seconds < global_left};
+}
+
+void MipSolver::OverheadBudget::charge(const Phase& phase, Clock::time_point now,
+                                       std::uint64_t work) {
+    if (limit) {
+        usage.seconds += std::chrono::duration<double>(now - phase.started).count();
+        usage.work += std::min(work, std::numeric_limits<std::uint64_t>::max() - usage.work);
+    }
+}
+
+void MipSolver::setRootLearningAllowance(std::optional<MipOverheadLimit> limit) {
+    root_learning_overhead_.setLimit(limit);
+}
+
+void MipSolver::setRestartOverheadAllowance(std::optional<MipOverheadLimit> limit) {
+    restart_overhead_.setLimit(limit);
+}
+
+double MipSolver::timeLeft(Deadline::Clock::time_point now) const {
+    const double spent = std::chrono::duration<double>(now - solve_start_).count();
     return std::max(0.0, time_limit_ - spent);
 }
 
-bool MipSolver::runRootProbing() {
+bool MipSolver::runRootProbing(const OverheadBudget::Phase* phase) {
     probing_stats_ = {};
     probing_stats_.enabled = true;
     probing_stats_.systematic = systematic_probing_enabled_;
@@ -1622,6 +1663,19 @@ bool MipSolver::runRootProbing() {
         config.max_probes_per_round = systematic_probing_max_pairs_;
         config.systematic_rows_per_branch = systematic_probing_rows_per_branch_;
         config.learn_vubs = false;
+        if (phase != nullptr) {
+            if (!phase->canStart()) {
+                probing_stats_.stopped_by_learning_allowance =
+                    phase->work_left == 0 || phase->allowance_deadline;
+                return false;
+            }
+            config.deadline = phase->deadline;
+            if (!root_learning_overhead_.timed) {
+                config.time_limit = kInf;
+            }
+            config.max_probes_per_round = static_cast<Int>(
+                std::min<std::uint64_t>(config.max_probes_per_round, phase->work_left));
+        }
     }
 
     ProbingEngine engine;
@@ -1632,6 +1686,11 @@ bool MipSolver::runRootProbing() {
     }
 
     probing_stats_.variables_probed = stats.variables_probed;
+    probing_stats_.stopped_by_learning_allowance =
+        phase != nullptr &&
+        ((phase->allowance_deadline && stats.stopped_at_deadline) ||
+         (phase->work_left < static_cast<std::uint64_t>(systematic_probing_max_pairs_) &&
+          stats.stopped_at_probe_limit));
     probing_stats_.branches_probed = stats.branches_probed;
     probing_stats_.row_visits = stats.row_visits;
     probing_stats_.implication_candidates = stats.implication_candidates;
@@ -4160,6 +4219,11 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     Int nodes_since_incumbent = 0;
     Int last_restart_node = nodes_explored;
     Int restart_min_nodes = restart_stagnation_nodes_;
+    const bool budget_restarts = restart_overhead_.limit.has_value();
+    std::optional<Int> last_incumbent_node;
+    if (budget_restarts && std::isfinite(incumbent)) {
+        last_incumbent_node = nodes_explored;
+    }
 
     auto* policy_stats =
         serial_node_policy_override_ && !queue.empty() ? &serial_node_policy_stats_ : nullptr;
@@ -4172,6 +4236,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
     };
     const auto recordIncumbent = [&] {
+        if (budget_restarts) {
+            last_incumbent_node = nodes_explored;
+        }
         if (policy_stats) {
             ++policy_stats->incumbents_accepted;
         }
@@ -4227,11 +4294,58 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                                       conflict_restart_activity_ >= conflict_restart_threshold_;
         const bool stagnation_restart =
             allow_restarts && nodes_since_incumbent >= restart_stagnation_nodes_;
+        const bool triggered =
+            (stagnation_restart || conflict_restart) && search_profile_ != SearchProfile::Stable;
+        const bool large_frontier = queue.size() > restart_keep_nodes_;
+        const bool spaced =
+            !geometric_restarts_enabled_ || nodes_explored - last_restart_node >= restart_min_nodes;
+        if (budget_restarts && search_profile_ != SearchProfile::Stable) {
+            if (triggered && !large_frontier) {
+                ++restart_overhead_stats_.skipped_small_frontier;
+            } else if (!triggered && allow_restarts && last_incumbent_node &&
+                       nodes_explored - *last_incumbent_node < restart_stagnation_nodes_) {
+                ++restart_overhead_stats_.skipped_recent_progress;
+            }
+        }
+
         std::optional<Int> incumbent_restart_id;
-        if ((stagnation_restart || conflict_restart) && search_profile_ != SearchProfile::Stable &&
-            queue.size() > restart_keep_nodes_ &&
-            (!geometric_restarts_enabled_ ||
-             nodes_explored - last_restart_node >= restart_min_nodes)) {
+        std::optional<OverheadBudget::Phase> restart_phase;
+        std::uint64_t preparation_work = 0;
+        bool prepared = triggered && large_frontier && spaced;
+        if (prepared && budget_restarts) {
+            const auto now = Deadline::Clock::now();
+            restart_phase = restart_overhead_.start(timeLeft(now), now);
+            prepared = restart_phase->canStart();
+            if (prepared) {
+                preparation_work = 1;
+            }
+        }
+        const bool has_incumbent = incumbent < kInf && !best_solution.empty();
+        if (prepared && incumbent_guided_restarts_enabled_ && has_incumbent) {
+            std::optional<NodeQueue::IncumbentScanBudget> scan;
+            if (restart_phase) {
+                scan.emplace(restart_phase->deadline, restart_phase->work_left - preparation_work);
+            }
+            incumbent_restart_id = queue.incumbentCompatibleId(best_solution, problem_.col_type,
+                                                               scan ? &*scan : nullptr);
+            if (scan) {
+                preparation_work += scan->visits;
+                prepared = !scan->stopped;
+            }
+        }
+        const auto preparation_end =
+            restart_phase ? Deadline::Clock::now() : Deadline::Clock::time_point{};
+        const bool preparation_expired =
+            restart_phase && restart_phase->deadline.passed(preparation_end);
+        const bool solve_expired = restart_phase && timeLeft(preparation_end) <= 0.0;
+        if (restart_phase && (!prepared || preparation_expired || solve_expired)) {
+            prepared = false;
+            incumbent_restart_id.reset();
+            if (!solve_expired) {
+                ++restart_overhead_stats_.skipped_budget;
+            }
+        }
+        if (prepared) {
             // Exact-safe restart: reset the queue policy without discarding any
             // unexplored nodes. Dropping queued nodes would turn restart into a
             // heuristic truncation and can produce invalid "optimal" claims.
@@ -4261,16 +4375,21 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             plunge_target_id = -1;
             plunge_depth = 0;
             if (incumbent_guided_restarts_enabled_) {
-                if (incumbent >= kInf || best_solution.empty()) {
+                if (!has_incumbent) {
                     ++search_stats_.incumbent_restart_no_incumbent;
-                } else {
-                    incumbent_restart_id =
-                        queue.incumbentCompatibleId(best_solution, problem_.col_type);
-                    if (!incumbent_restart_id) {
-                        ++search_stats_.incumbent_restart_no_match;
-                    }
+                } else if (!incumbent_restart_id) {
+                    ++search_stats_.incumbent_restart_no_match;
                 }
             }
+        }
+        if (restart_phase && preparation_work > 0) {
+            restart_overhead_.charge(*restart_phase, Deadline::Clock::now(), preparation_work);
+        }
+        if (solve_expired) {
+            if (verbose_) {
+                log_.log("Time limit reached.\n");
+            }
+            break;
         }
 
         BnbNode node;
@@ -5258,6 +5377,9 @@ MipResult MipSolver::solve() {
     branch_dual_degeneracy_stats_ = {};
     serial_node_policy_stats_ = {};
     search_stats_ = {};
+    root_learning_overhead_.reset(time_limit_);
+    restart_overhead_.reset(time_limit_);
+    restart_overhead_stats_ = {};
     rapid_learning_stats_ = {};
     root_lp_lookahead_stats_ = {};
     branching_stats_ = {};
@@ -5917,11 +6039,21 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     // Root probing: discover implications, variable bounds, and fixings.
     if ((probing_enabled_ || systematic_probing_enabled_) && !discrete_vars.empty()) {
-        if (!using_transformed_problem) {
+        std::optional<OverheadBudget::Phase> phase;
+        if (systematic_probing_enabled_ && root_learning_overhead_.limit) {
+            const auto now = Deadline::Clock::now();
+            phase = root_learning_overhead_.start(timeLeft(now), now);
+        }
+        const bool can_probe = !phase || phase->canStart();
+        if (can_probe && !using_transformed_problem) {
             saved_root_lower = problem_.col_lower;
             saved_root_upper = problem_.col_upper;
         }
-        const bool probing_infeasible = runRootProbing();
+        const bool probing_infeasible = runRootProbing(phase ? &*phase : nullptr);
+        if (phase && can_probe) {
+            root_learning_overhead_.charge(*phase, Deadline::Clock::now(),
+                                           probing_stats_.variables_probed);
+        }
         total_work += systematic_probing_enabled_
                           ? static_cast<double>(probing_stats_.row_visits +
                                                 probing_stats_.implication_candidates) *
@@ -5960,13 +6092,21 @@ MipResult MipSolver::solveMinimizationOnce() {
     SolutionPool solution_pool(problem_.sense);
     if (root_rapid_learning_enabled_ && !discrete_vars.empty() &&
         rapid_learning_stats_.stop == RapidLearningStop::NotRun) {
-        if (!using_transformed_problem && saved_root_lower.empty()) {
+        const auto now = Deadline::Clock::now();
+        const auto phase = root_learning_overhead_.start(timeLeft(now), now);
+        const bool can_learn = root_rapid_learning_max_nodes_ > 0 &&
+                               root_rapid_learning_row_budget_ > 0 && phase.canStart();
+        if (can_learn && !using_transformed_problem && saved_root_lower.empty()) {
             saved_root_lower = problem_.col_lower;
             saved_root_upper = problem_.col_upper;
         }
         const bool infeasible = runRootRapidLearning(
             solution_pool, using_transformed_problem ? &original_problem : nullptr,
-            did_presolve ? &presolver : nullptr);
+            did_presolve ? &presolver : nullptr, phase);
+        if (root_learning_overhead_.limit && can_learn) {
+            root_learning_overhead_.charge(phase, Deadline::Clock::now(),
+                                           rapid_learning_stats_.nodes);
+        }
         root_learning_clauses_active_ = rapid_learning_stats_.conflicts_imported > 0;
         total_work +=
             (static_cast<double>(rapid_learning_stats_.row_visits) + rapid_learning_stats_.nodes) *
@@ -7098,8 +7238,16 @@ MipResult MipSolver::solveMinimizationOnce() {
     const bool ran_root_lookahead = root_lp_lookahead_enabled_ && !discrete_vars.empty() &&
                                     root_lp_lookahead_stats_.stop == RootLpLookaheadStop::NotRun;
     if (ran_root_lookahead) {
-        runRootLpLookahead(lp.getOptions(), root_primals, root_basis, root_bound, incumbent);
+        const auto now = Deadline::Clock::now();
+        const auto phase = root_learning_overhead_.start(timeLeft(now), now);
+        const bool can_learn = root_lp_lookahead_work_ > 0 && phase.canStart();
+        runRootLpLookahead(lp.getOptions(), root_primals, root_basis, root_bound, incumbent, phase);
         const auto& stats = root_lp_lookahead_stats_;
+        if (root_learning_overhead_.limit && can_learn) {
+            root_learning_overhead_.charge(phase, Deadline::Clock::now(),
+                                           static_cast<std::uint64_t>(stats.row_visits) +
+                                               stats.lp_solves + stats.lp_iterations);
+        }
         root_learning_clauses_active_ |= stats.conflicts_imported > 0;
         total_lp_iters += stats.lp_iterations;
         total_work +=

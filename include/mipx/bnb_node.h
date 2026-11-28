@@ -3,8 +3,10 @@
 #include "mipx/branch_decision.h"
 #include "mipx/core.h"
 #include "mipx/cut_pool.h"
+#include "mipx/deadline.h"
 #include "mipx/lp_solver.h"
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -70,10 +72,21 @@ public:
     /// ID selected by the current policy. Requires a nonempty queue.
     Int nextId() const;
 
+    /// Optional cap for queued node and branch bound visits.
+    struct IncumbentScanBudget {
+        Deadline deadline;
+        std::uint64_t work_left;
+        std::uint64_t visits = 0;
+        bool stopped = false;
+
+        bool visit();
+    };
+
     /// Lowest ID whose branch bounds accept the incumbent. Integer columns use
     /// rounded values and native SOS2 fixings use the actual support values.
     std::optional<Int> incumbentCompatibleId(std::span<const Real> incumbent,
-                                             std::span<const VarType> types) const;
+                                             std::span<const VarType> types,
+                                             IncumbentScanBudget* budget = nullptr) const;
 
     /// Remove and return the node with the given id, or nullopt when it is no
     /// longer queued (for example after prune() dropped it). Used by the serial

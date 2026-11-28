@@ -85,6 +85,7 @@ public:
     [[nodiscard]] std::span<const Index> csr_row_starts() const { return row_starts_; }
 
 private:
+    friend class DomainPropagator;
     friend class SparseLU;
     [[nodiscard]] bool ensureCSC(const Deadline& deadline) const;
     [[nodiscard]] bool buildCSC(const Deadline& deadline) const;

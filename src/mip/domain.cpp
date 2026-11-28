@@ -43,6 +43,10 @@ void DomainPropagator::load(const LpProblem& problem, bool record_reasons, Index
     objective_infeasible_ = false;
 }
 
+bool DomainPropagator::prepareTimedPropagation(const Deadline& deadline) const {
+    return (!deadline.isSet() || matrix_.ensureCSC(deadline)) && !deadline.passed();
+}
+
 void DomainPropagator::setObjectiveCutoff(const ObjectivePropagator* objective, Real cutoff) {
     objective_ = objective;
     objective_cutoff_ = cutoff;
