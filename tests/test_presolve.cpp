@@ -561,6 +561,81 @@ TEST_CASE("Presolve: singleton column removal", "[presolve]") {
     CHECK_THAT(full_sol[2], WithinAbs(0.0, 1e-8));  // z fixed at 0
 }
 
+namespace {
+
+// One row over n singleton columns: sum_j x_j {>=, <=} rhs, x_j >= 0, cost
+// 1 + (j mod 7), minimized.
+LpProblem buildOneRowSingletons(Index n, bool at_least, Real rhs) {
+    LpProblem lp;
+    lp.name = "one_row_singletons";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.obj.resize(n);
+    std::vector<Triplet> entries;
+    entries.reserve(static_cast<size_t>(n));
+    for (Index j = 0; j < n; ++j) {
+        lp.obj[j] = 1.0 + static_cast<Real>(j % 7);
+        entries.push_back({0, j, 1.0});
+    }
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, kInf);
+    lp.col_type.assign(n, VarType::Continuous);
+    lp.num_rows = 1;
+    lp.row_lower = {at_least ? rhs : -kInf};
+    lp.row_upper = {at_least ? kInf : rhs};
+    lp.matrix = SparseMatrix(1, n, std::move(entries));
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("Presolve: the singleton-column pass is linear in a row of singletons", "[presolve]") {
+    // A >= row: each singleton's cost wants it at 0, the row wants it up, so
+    // the pass removes nothing. Counting the row's other columns by walking
+    // the row read n entries per singleton, n^2 in all (#414: 12 s at 100k).
+    constexpr Index kCols = 100000;
+    auto lp = buildOneRowSingletons(kCols, /*at_least=*/true, 1.0);
+
+    Presolver presolver;
+    // Parallel columns would merge the equal-cost columns; keep them apart.
+    PresolveOptions options;
+    options.enable_parallel_cols = false;
+    presolver.setOptions(options);
+    auto reduced = presolver.presolve(lp);
+    const auto& stats = presolver.stats();
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(stats.singleton_col_changes == 0);
+    CHECK(reduced.num_cols == kCols);
+    // Per column and round: its one entry and its row's count.
+    CHECK(stats.singleton_col_entries_visited > 0);
+    CHECK(stats.singleton_col_entries_visited <= int64_t{stats.rounds} * 2 * kCols);
+}
+
+TEST_CASE("Presolve: singletons removed from one row in one pass keep the row's count",
+          "[presolve]") {
+    // A <= row: the first singletons are fixed at 0 in turn, so the later
+    // ones see fewer active columns in the row. The last wants to go up
+    // (cost -1, at most 1), which the row allows only once it is alone in
+    // it: a count that missed the removals would keep it.
+    constexpr Index kCols = 5;
+    auto lp = buildOneRowSingletons(kCols, /*at_least=*/false, 10.0);
+    lp.obj[kCols - 1] = -1.0;
+    lp.col_upper[kCols - 1] = 1.0;
+
+    Presolver presolver;
+    auto reduced = presolver.presolve(lp);
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(reduced.num_cols == 0);
+    CHECK(presolver.stats().singleton_col_changes == kCols);
+
+    auto full = presolver.postsolve(std::vector<Real>{});
+    REQUIRE(full.size() == static_cast<size_t>(kCols));
+    for (Index j = 0; j + 1 < kCols; ++j) {
+        CHECK_THAT(full[j], WithinAbs(0.0, 1e-12));
+    }
+    CHECK_THAT(full[kCols - 1], WithinAbs(1.0, 1e-12));
+}
+
 // =============================================================================
 // Tests: Forcing row
 // =============================================================================

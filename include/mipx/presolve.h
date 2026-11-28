@@ -225,6 +225,12 @@ struct PresolveStats {
     Index rounds_with_changes = 0;
     Index rows_examined = 0;
     Index cols_examined = 0;
+    /// Matrix entries the singleton-column pass read, summed over the
+    /// rounds, with a row's active count taken from presolve's bookkeeping
+    /// as one. A test holds it to about the matrix's entries per round
+    /// (#414), so code there that walks a singleton's row adds what it
+    /// reads here.
+    int64_t singleton_col_entries_visited = 0;
     /// Wall time of presolve's setup (copying the problem, rounding integer
     /// bounds, counting row and column lengths) and its reduction loop;
     /// building the reduced problem after it is not included.

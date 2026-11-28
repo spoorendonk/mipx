@@ -825,6 +825,7 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             continue;
         }
         for (const auto [row, a] : work_->col(j)) {
+            ++stats_.singleton_col_entries_visited;
             if (!row_removed[row]) {
                 singleton_row = row;
                 singleton_coeff = a;
@@ -844,13 +845,14 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
             continue;  // Free variable — skip.
         }
 
-        // Count remaining variables in the row (excluding this one).
-        Index remaining_in_row = 0;
-        for (const auto [col, a] : work_->row(singleton_row)) {
-            if (col != j && !col_removed[col]) {
-                ++remaining_in_row;
-            }
-        }
+        // The row's other active columns. Walking the row for this count
+        // costs its length per singleton, so a row of n singletons cost
+        // O(n^2) (#414); row_active_nnz holds it: it starts at the row's
+        // length, removeActiveColumn takes one off for each column it
+        // removes, and the fill-in sites add one for each entry they insert.
+        // The count is one read; a walk of the row would read its length.
+        const Index remaining_in_row = row_active_nnz[singleton_row] - 1;
+        ++stats_.singleton_col_entries_visited;
 
         auto objective_prefers_lower = [&]() -> bool {
             if (lp.sense == Sense::Minimize) {
