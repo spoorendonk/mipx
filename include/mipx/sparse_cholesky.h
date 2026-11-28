@@ -92,12 +92,16 @@ public:
     /// Numeric factorization of the matrix whose entries are `values`, aligned
     /// with the analyzed pattern. Returns false when a pivot is not finite, or
     /// when `deadline` passes or its stop flag is raised (checked before each
-    /// panel of a supernode; error() says which).
+    /// panel, and between update kernels and before returning with
+    /// lower-triangle BLAS updates enabled; error() says which).
     bool factorize(std::span<const Real> values, const PivotRule& rule,
                    const Deadline& deadline = {});
 
     /// Solve M·x = b in place (original numbering).
     void solve(std::span<Real> b) const;
+
+    /// Compute only the lower part of wide inter-supernode updates with BLAS.
+    void setLowerTriangleUpdates(bool enabled) { lower_triangle_updates_ = enabled; }
 
     /// Threads of the BLAS that runs the supernode blocks, process-wide, applied
     /// at the next factorize() (OpenBLAS only; a no-op for other BLAS and for
@@ -131,6 +135,7 @@ private:
     bool analyzeImpl(Index n, std::span<const Index> col_starts, std::span<const Index> row_indices,
                      std::span<const Index> perm, std::size_t max_bytes, const Deadline& deadline);
 
+    bool lower_triangle_updates_ = false;
     Index n_ = 0;
     std::vector<Index> perm_;   // perm_[new] = old (fill-reducing then postorder)
     std::vector<Index> iperm_;  // iperm_[old] = new

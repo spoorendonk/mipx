@@ -1064,6 +1064,7 @@ private:
 
     bool setupFactor(const BarrierOptions& opts) override {
         opts_ = opts;
+        chol_.setLowerTriangleUpdates(opts.ne_lower_updates);
         findDenseColumns(opts);
         return analyzePattern();
     }

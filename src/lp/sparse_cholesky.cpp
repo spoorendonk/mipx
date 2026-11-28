@@ -270,9 +270,9 @@ double trapezoidEntries(Index nrows, Index ncols) {
 // Dense kernels on column-major blocks: BLAS-3 when a library is loaded,
 // plain loops otherwise.
 
-// C = C - A·Bᵀ, C m×n, A m×k, B n×k.
+// C = beta·C - A·Bᵀ, C m×n, A m×k, B n×k. beta is either 0 or 1.
 void gemmMinusNT(const Blas* blas, Index m, Index n, Index k, const Real* a, Index lda,
-                 const Real* b, Index ldb, Real* c, Index ldc) {
+                 const Real* b, Index ldb, Real* c, Index ldc, Real beta = 1.0) {
     if (m <= 0 || n <= 0 || k <= 0) {
         return;
     }
@@ -280,12 +280,14 @@ void gemmMinusNT(const Blas* blas, Index m, Index n, Index k, const Real* a, Ind
         const char no = 'N';
         const char tr = 'T';
         const Real minus_one = -1.0;
-        const Real one = 1.0;
-        blas->dgemm(&no, &tr, &m, &n, &k, &minus_one, a, &lda, b, &ldb, &one, c, &ldc, 1, 1);
+        blas->dgemm(&no, &tr, &m, &n, &k, &minus_one, a, &lda, b, &ldb, &beta, c, &ldc, 1, 1);
         return;
     }
     for (Index j = 0; j < n; ++j) {
         Real* cj = c + static_cast<std::ptrdiff_t>(j) * ldc;
+        if (beta == 0.0) {
+            std::fill_n(cj, m, 0.0);
+        }
         for (Index p = 0; p < k; ++p) {
             const Real bjp = b[j + static_cast<std::ptrdiff_t>(p) * ldb];
             if (bjp == 0.0) {
@@ -299,8 +301,9 @@ void gemmMinusNT(const Blas* blas, Index m, Index n, Index k, const Real* a, Ind
     }
 }
 
-// Lower triangle of C = C - A·Aᵀ, C n×n, A n×k.
-void syrkMinusLN(const Blas* blas, Index n, Index k, const Real* a, Index lda, Real* c, Index ldc) {
+// Lower triangle of C = beta·C - A·Aᵀ, C n×n, A n×k. beta is either 0 or 1.
+void syrkMinusLN(const Blas* blas, Index n, Index k, const Real* a, Index lda, Real* c, Index ldc,
+                 Real beta = 1.0) {
     if (n <= 0 || k <= 0) {
         return;
     }
@@ -308,12 +311,14 @@ void syrkMinusLN(const Blas* blas, Index n, Index k, const Real* a, Index lda, R
         const char lo = 'L';
         const char no = 'N';
         const Real minus_one = -1.0;
-        const Real one = 1.0;
-        blas->dsyrk(&lo, &no, &n, &k, &minus_one, a, &lda, &one, c, &ldc, 1, 1);
+        blas->dsyrk(&lo, &no, &n, &k, &minus_one, a, &lda, &beta, c, &ldc, 1, 1);
         return;
     }
     for (Index j = 0; j < n; ++j) {
         Real* cj = c + static_cast<std::ptrdiff_t>(j) * ldc;
+        if (beta == 0.0) {
+            std::fill(cj + j, cj + n, 0.0);
+        }
         for (Index p = 0; p < k; ++p) {
             const Real* ap = a + static_cast<std::ptrdiff_t>(p) * lda;
             const Real ajp = ap[j];
@@ -366,6 +371,7 @@ void trsmRightLowerTrans(const Blas* blas, Index m, Index n, const Real* l, Inde
 // the scratch block of one update (in reals).
 constexpr Index kPanel = 64;
 constexpr std::size_t kMaxUpdateEntries = std::size_t{1} << 22;
+constexpr Index kMinLowerUpdateCols = 16;
 
 }  // namespace
 
@@ -694,6 +700,7 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
     num_dependent_ = 0;
     shifted_.clear();
     const Blas* kernels = blas();
+    const bool lower_updates = lower_triangle_updates_ && kernels != nullptr;
 
     for (Index s = 0; s < ns; ++s) {
         const Index first = snode_start_[s];
@@ -801,6 +808,9 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
             const auto width = static_cast<Index>(
                 std::max<std::size_t>(1, kMaxUpdateEntries / static_cast<std::size_t>(ld - r0)));
             for (Index c0 = r0; c0 < r1; c0 += width) {
+                if (lower_updates && timedOut()) {
+                    return false;
+                }
                 const Index c1 = std::min(r1, c0 + width);
                 const Index wm = ld - c0;
                 const Index wn = c1 - c0;
@@ -808,9 +818,23 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
                 if (update_.size() < wsize) {
                     update_.resize(wsize);
                 }
-                std::fill_n(update_.begin(), wsize, 0.0);
-                // update_ = 0 - A·Bᵀ: the negated update, added below.
-                gemmMinusNT(kernels, wm, wn, nc, at(c0, 0), ld, at(c0, 0), ld, update_.data(), wm);
+                // The scatter only uses the lower triangle of the top square
+                // and all rows beneath it. For a narrow chunk a single GEMM
+                // avoids the cost of dispatching two kernels.
+                if (lower_updates && wn >= kMinLowerUpdateCols) {
+                    syrkMinusLN(kernels, wn, nc, at(c0, 0), ld, update_.data(), wm, 0.0);
+                    if (wm > wn) {
+                        if (timedOut()) {
+                            return false;
+                        }
+                        gemmMinusNT(kernels, wm - wn, wn, nc, at(c1, 0), ld, at(c0, 0), ld,
+                                    update_.data() + wn, wm, 0.0);
+                    }
+                } else {
+                    std::fill_n(update_.begin(), wsize, 0.0);
+                    gemmMinusNT(kernels, wm, wn, nc, at(c0, 0), ld, at(c0, 0), ld, update_.data(),
+                                wm);
+                }
                 for (Index cc = c0; cc < c1; ++cc) {
                     Real* tcol = tblk + static_cast<std::size_t>(rows[cc] - tfirst) * tld;
                     const Real* w = update_.data() + static_cast<std::size_t>(cc - c0) * wm;
@@ -822,7 +846,7 @@ bool SparseCholesky::factorize(std::span<const Real> values, const PivotRule& ru
             r0 = r1;
         }
     }
-    return true;
+    return !lower_updates || !timedOut();
 }
 
 void SparseCholesky::solve(std::span<Real> b) const {

@@ -364,6 +364,34 @@ TEST_CASE("SparseCholesky factors a supernode wider than one panel", "[sparse_ch
     CHECK(solveResidual(m, chol, 12) < 1e-9);
 }
 
+TEST_CASE("SparseCholesky solves with lower-triangle inter-supernode updates",
+          "[sparse_cholesky]") {
+    const KernelChoice kernels(GENERATE(true, false));
+    constexpr Index block = 32;
+    constexpr Index n = 3 * block;
+    std::vector<std::vector<Real>> m(n, std::vector<Real>(n, 0.0));
+    for (Index i = 0; i < n; ++i) {
+        m[i][i] = n;
+        for (Index j = 0; j < i; ++j) {
+            // The gaps between the updated rows keep the blocks from
+            // joining. The first update has a rectangle under its square.
+            if (i / block == j / block || i % block < 20) {
+                m[i][j] = m[j][i] = -1.0 / (i - j);
+            }
+        }
+    }
+    const Pattern p = lowerOf(m);
+    std::vector<Index> perm(n);
+    std::iota(perm.begin(), perm.end(), 0);
+    SparseCholesky chol;
+    chol.setLowerTriangleUpdates(true);
+    REQUIRE(chol.analyze(n, p.col_starts, p.rows, perm));
+    REQUIRE(chol.snodeStart() == std::vector<Index>{0, block, 2 * block, n});
+    REQUIRE(chol.factorize(p.vals, SparseCholesky::PivotRule{}));
+    CHECK(chol.numDependentPivots() == 0);
+    CHECK(solveResidual(m, chol, 12) < 1e-12);
+}
+
 TEST_CASE("SparseCholesky drops a dependent row in a later panel", "[sparse_cholesky]") {
     const KernelChoice kernels(GENERATE(true, false));
     // Dense M: a single supernode, the dependent row 90 in its second panel.

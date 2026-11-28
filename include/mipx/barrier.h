@@ -91,6 +91,9 @@ struct BarrierOptions {
     // (#314); ne_max_dense_cols = 0 keeps them all in.
     Real dense_col_fraction = 0.1;
     Int ne_max_dense_cols = 100;
+    // Use triangular BLAS updates between supernodes of the sparse CPU
+    // normal-equations factor. Ignored without BLAS.
+    bool ne_lower_updates = false;
     Int ir_steps = 2;
     Int ruiz_iterations = 10;
     // Upper bounds inside the IPM (#299): a column with finite bounds, and a
