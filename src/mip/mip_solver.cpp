@@ -20,6 +20,7 @@
 #endif
 
 #include "../heuristics/common.h"
+#include "conflict_ray.h"
 #include "mipx/barrier.h"
 #include "mipx/cut_pool.h"
 #include "mipx/heuristics.h"
@@ -81,6 +82,15 @@ bool keepCrossingWithinTolerance(Real& lb, Real& ub) {
         std::swap(lb, ub);
     }
     return true;
+}
+
+void appendCertificateRow(LpProblem& model, std::span<const Index> indices,
+                          std::span<const Real> values, Real lower, Real upper) {
+    model.matrix.addRow(indices, values);
+    model.row_lower.push_back(lower);
+    model.row_upper.push_back(upper);
+    model.row_names.emplace_back();
+    model.num_rows = model.matrix.numRows();
 }
 
 /// Count binary, general-integer, and continuous variables.
@@ -1730,6 +1740,7 @@ MipSolver::ConflictClause MipSolver::acquireConflictClause() {
     clause.literals.clear();
     clause.age = 0;
     clause.hits = 0;
+    clause.ray_shortened = false;
     return clause;
 }
 
@@ -1777,7 +1788,9 @@ void MipSolver::ageConflictPool() {
 }
 
 void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
-                                      bool lp_infeasible) {
+                                      bool lp_infeasible, const DualSimplexSolver* lp,
+                                      const LpProblem* global_rows,
+                                      std::span<const Index> local_rows) {
     if (bound_changes.empty()) {
         return;
     }
@@ -1823,6 +1836,19 @@ void MipSolver::learnConflictFromNode(const std::vector<BranchDecision>& bound_c
 
     conflict_stats_.minimized_literals += std::max<Int>(
         0, static_cast<Int>(bound_changes.size()) - static_cast<Int>(clause.literals.size()));
+    if (lp != nullptr && global_rows != nullptr) {
+        const auto before = clause.literals.size();
+        if (shortenConflictWithRay(*global_rows, lp->getDualRay(), local_rows, problem_.col_lower,
+                                   problem_.col_upper, clause.literals)) {
+            ++conflict_stats_.ray_qualified;
+            const auto dropped = static_cast<Int>(before - clause.literals.size());
+            if (dropped > 0) {
+                clause.ray_shortened = true;
+                ++conflict_stats_.ray_shortened;
+                conflict_stats_.ray_literals_dropped += dropped;
+            }
+        }
+    }
     conflict_stats_.learned += 1;
     if (lp_infeasible) {
         ++conflict_stats_.lp_infeasible_conflicts;
@@ -1861,6 +1887,8 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
 
     for (auto& clause : conflict_pool_) {
         bool triggered = true;
+        // The checked proof used exact path endpoints.
+        const Real tolerance = clause.ray_shortened ? 0.0 : 1e-9;
         for (const auto& lit : clause.literals) {
             if (lit.variable < 0 ||
                 lit.variable >= static_cast<Index>(node_scratch.var_epoch.size())) {
@@ -1873,12 +1901,12 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
             }
             const Index p = node_scratch.var_pos[lit.variable];
             if (lit.is_upper) {
-                if (node_scratch.node_ub[p] > lit.bound + 1e-9) {
+                if (node_scratch.node_ub[p] > lit.bound + tolerance) {
                     triggered = false;
                     break;
                 }
             } else {
-                if (node_scratch.node_lb[p] < lit.bound - 1e-9) {
+                if (node_scratch.node_lb[p] < lit.bound - tolerance) {
                     triggered = false;
                     break;
                 }
@@ -1887,6 +1915,7 @@ bool MipSolver::isConflictTriggered(const NodeScratch& node_scratch) {
 
         if (triggered) {
             ++conflict_stats_.reused;
+            conflict_stats_.ray_reused += clause.ray_shortened;
             ++conflict_stats_.pruned;
             clause.age = 0;
             ++clause.hits;
@@ -2272,6 +2301,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     std::vector<Index> temp_local_rows;
     ScopedRowRemoval local_row_guard(lp, temp_local_rows);
+    auto learnLpConflict = [&]() {
+        if (use_conflicts) {
+            learnConflictFromNode(node.bound_changes, true, &lp, node_scratch.conflict_global_rows,
+                                  temp_local_rows);
+        }
+    };
     struct RestoreIterationLimit {
         DualSimplexSolver& lp;
         Int limit;
@@ -2602,9 +2637,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     if (node_result.status == Status::Infeasible) {
-        if (use_conflicts) {
-            learnConflictFromNode(node.bound_changes, true);
-        }
+        learnLpConflict();
         return false;
     }
     if (node_result.status != Status::Optimal) {
@@ -2869,9 +2902,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 if (refresh.status == Status::Infeasible) {
                     ++tree_presolve_delta.infeasible;
                     flushTreePresolveStats();
-                    if (use_conflicts) {
-                        learnConflictFromNode(node.bound_changes, true);
-                    }
+                    learnLpConflict();
                     return false;
                 }
                 if (refresh.status != Status::Optimal) {
@@ -2988,9 +3019,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             node_iters_out += refresh.iterations;
             node_work_out += refresh.work_units;
             if (refresh.status == Status::Infeasible) {
-                if (use_conflicts) {
-                    learnConflictFromNode(node.bound_changes, true);
-                }
+                learnLpConflict();
                 return false;
             }
             if (refresh.status == Status::Optimal) {
@@ -3117,6 +3146,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
                     if (promote_global) {
                         ++cut_stats_.tree_cuts_global;
+                        if (node_scratch.conflict_global_rows != nullptr) {
+                            appendCertificateRow(*node_scratch.conflict_global_rows, cut.indices,
+                                                 cut.values, cut.lower, cut.upper);
+                        }
                     } else {
                         local_offsets.push_back(static_cast<Index>(lower.size()) - 1);
                         Cut local_cut = cut;
@@ -3358,7 +3391,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                             HeuristicRuntime& heuristic_runtime, SolutionPool& solution_pool,
                             Real& incumbent, std::vector<Real>& best_solution, Real root_bound,
                             const std::function<double()>& elapsed,
-                            std::span<const Index> branch_inference_col_mapping) {
+                            std::span<const Index> branch_inference_col_mapping,
+                            LpProblem* conflict_global_rows) {
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
     std::vector<Index> root_symmetry_tightened;
@@ -3387,6 +3421,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         node_scratch.branch_inference = &branch_inference_stats_;
         node_scratch.branch_inference_col_mapping = branch_inference_col_mapping;
     }
+    node_scratch.conflict_global_rows = conflict_global_rows;
     Int rins_calls = 0;
     Int rins_solves = 0;
     Int rins_found = 0;
@@ -6158,7 +6193,9 @@ MipResult MipSolver::solveMinimizationOnce() {
     // Run cutting planes at root (suppress LP iteration logs — we log per round).
     LpProblem root_certificate_problem;
     LpProblem* root_certificate_problem_ptr = nullptr;
-    if (exact_refinement_mode_ != ExactRefinementMode::Off) {
+    const bool check_conflict_rays =
+        conflict_ray_shortening_enabled_ && conflicts_enabled_ && num_threads_ <= 1;
+    if (exact_refinement_mode_ != ExactRefinementMode::Off || check_conflict_rays) {
         root_certificate_problem = problem_;
         root_certificate_problem_ptr = &root_certificate_problem;
     }
@@ -6599,7 +6636,8 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
         solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
                     solution_pool, incumbent, best_solution, root_bound, elapsed,
-                    inference_col_mapping);
+                    inference_col_mapping,
+                    check_conflict_rays ? root_certificate_problem_ptr : nullptr);
     }
 
     if (best_solution.empty()) {
@@ -6754,6 +6792,14 @@ MipResult MipSolver::solveMinimizationOnce() {
                 conflict_stats_.purged, conflict_stats_.minimized_literals,
                 conflict_stats_.lp_infeasible_conflicts, conflict_stats_.bound_infeasible_conflicts,
                 conflict_stats_.branch_score_overrides);
+        }
+        if (conflict_ray_shortening_enabled_) {
+            log_.log(
+                "Conflict rays: active=%s qualified=%d shortened=%d literals_dropped=%d "
+                "reused=%d\n",
+                check_conflict_rays ? "yes" : "no", conflict_stats_.ray_qualified,
+                conflict_stats_.ray_shortened, conflict_stats_.ray_literals_dropped,
+                conflict_stats_.ray_reused);
         }
         if (search_stats_.plunge_nodes > 0 || search_stats_.plunge_backtracks_bound > 0) {
             log_.log(
@@ -7081,15 +7127,16 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                                                              static_cast<std::size_t>(end - start));
                 const auto val_span = std::span<const Real>(values.data() + start,
                                                             static_cast<std::size_t>(end - start));
-                certificate_problem->matrix.addRow(idx_span, val_span);
-                certificate_problem->row_lower.push_back(lower[r]);
-                certificate_problem->row_upper.push_back(upper[r]);
-                certificate_problem->row_names.push_back("");
-                const double mirror_work = static_cast<double>((end - start) + 1) * 1e-6;
-                total_work += mirror_work;
-                cut_node_work += mirror_work;
+                appendCertificateRow(*certificate_problem, idx_span, val_span, lower[r], upper[r]);
+                // A mirror used only for tree conflict learning must leave
+                // the root cut budget and its stopping decisions unchanged.
+                if (exact_refinement_mode_ != ExactRefinementMode::Off ||
+                    root_cut_propagation_enabled_) {
+                    const double mirror_work = static_cast<double>((end - start) + 1) * 1e-6;
+                    total_work += mirror_work;
+                    cut_node_work += mirror_work;
+                }
             }
-            certificate_problem->num_rows = certificate_problem->matrix.numRows();
         }
 
         const auto pre_round_basis = lp.getBasis();
