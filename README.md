@@ -31,18 +31,32 @@ On Netlib LP instances, mipx is roughly 2-5x slower than HiGHS on medium problem
 Requires C++23 and CMake 3.25+.
 
 ```bash
-cmake -B build && cmake --build build -j$(nproc)
+cmake -B build && cmake --build build --parallel
 ```
 
 Optional dependencies:
 
 ```bash
 # TBB for parallel tree search
-cmake -B build -DMIPX_USE_TBB=ON && cmake --build build -j$(nproc)
+cmake -B build -DMIPX_USE_TBB=ON && cmake --build build --parallel
 
 # CUDA for GPU-accelerated barrier and PDLP
-cmake -B build -DMIPX_USE_CUDA=ON && cmake --build build -j$(nproc)
+cmake -B build -DMIPX_USE_GPU=ON && cmake --build build --parallel
 ```
+
+On macOS, the default Apple Clang build works with the Command Line Tools.
+CUDA and cuDSS tests require those backends and are unavailable on Apple Silicon.
+The sparse barrier uses its own loops when CMake finds only the Accelerate
+framework. To use an installed Homebrew OpenBLAS, add its prefix when
+configuring a fresh build directory:
+
+```bash
+cmake -B build -DCMAKE_PREFIX_PATH="$(brew --prefix openblas)"
+```
+
+Build the Python package and install all extras with `uv sync --all-extras`.
+For the local correctness suite on macOS, run
+`ctest --test-dir build --output-on-failure -LE solver-regression`.
 
 ## Usage
 
@@ -122,7 +136,7 @@ behaves identically: despite the name it reads `.lp` files as LP.
 ## Tests
 
 ```bash
-ctest --test-dir build -j$(nproc)
+ctest --test-dir build --parallel
 ```
 
 Netlib and MIPLIB instances are not in the repo. Download them for benchmark tests:

@@ -670,6 +670,7 @@ std::size_t factorMemoryCap(const BarrierOptions& opts) {
         }
         std::fclose(f);
     }
+#ifdef _SC_AVPHYS_PAGES
     if (cap == 0) {
         const long pages = sysconf(_SC_AVPHYS_PAGES);
         const long page_size = sysconf(_SC_PAGE_SIZE);
@@ -677,6 +678,7 @@ std::size_t factorMemoryCap(const BarrierOptions& opts) {
             cap = static_cast<std::size_t>(pages) * static_cast<std::size_t>(page_size);
         }
     }
+#endif
     if (const auto headroom = cgroupHeadroom()) {
         // At least 1 byte: 0 would read as "no cap".
         const std::size_t h = std::max<std::size_t>(*headroom, 1);

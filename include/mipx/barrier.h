@@ -76,8 +76,8 @@ struct BarrierOptions {
     Int threads = 1;
     // Cap in bytes on a CPU normal-equations factor (dense or sparse); one
     // above it ends the solve with Status::Error. The sparse path counts the
-    // arrays of M itself against the same cap. 0: the memory available when
-    // the backend is set up (MemAvailable, or the cgroup's headroom if lower).
+    // arrays of M itself against the same cap. 0 uses the memory available at
+    // setup where the platform reports it (on Linux, bounded by cgroup headroom).
     std::size_t ne_max_bytes = 0;
     // Fraction of m above which a column of A counts as dense. The sparse
     // normal-equations path takes max(dense_col_fraction * m, 16) nonzeros as
