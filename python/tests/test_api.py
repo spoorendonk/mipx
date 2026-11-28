@@ -132,7 +132,10 @@ def test_root_feasibility_jump_pass_limit() -> None:
             solver.set_root_feasibility_jump_restarts(passes)
 
 
-def test_root_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "setting", ("set_root_cut_propagation_enabled", "set_root_inactive_cut_propagation_enabled")
+)
+def test_root_cut_propagation_can_be_enabled(tmp_path: Path, setting: str) -> None:
     path = tmp_path / "root_cut.lp"
     path.write_text(
         "Minimize\n obj: x\nSubject To\n r1: x + y >= 1\n r2: x - y >= 0\n"
@@ -141,7 +144,7 @@ def test_root_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
     solver = mipx.MipSolver()
     solver.set_verbose(False)
     solver.set_presolve(False)
-    solver.set_root_cut_propagation_enabled(True)
+    getattr(solver, setting)(True)
     solver.load(mipx.read_lp(str(path)))
     for visits in (0, 1):
         solver.set_root_cut_propagation_row_budget(visits)

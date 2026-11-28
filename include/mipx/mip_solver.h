@@ -131,7 +131,8 @@ struct MipCutStats {
     Int root_cut_bound_tightenings_backed_out = 0;
     /// Includes visits in rounds whose LP changes were backed out.
     std::uint64_t root_cut_propagation_row_visits = 0;
-    /// Work attempted by root cut inference. Tightenings count retained updates.
+    /// Work attempted by bounded root inference and inactive-cut propagation.
+    /// Tightenings count retained updates.
     DomainPropagationWork root_cut_inference;
     /// Counts a pass that spends its entire cap, even if its last visit also
     /// reaches a row fixpoint or its final cut batch is backed out.
@@ -411,6 +412,10 @@ public:
     void setRootCutPropagationEnabled(bool enabled) { root_cut_propagation_enabled_ = enabled; }
     /// Feed global cliques, implications and bounds back into root cut rounds.
     void setRootCutInferenceEnabled(bool enabled) { root_cut_inference_enabled_ = enabled; }
+    /// Use globally valid inactive pool rows for root propagation.
+    void setRootInactiveCutPropagationEnabled(bool enabled) {
+        root_inactive_cut_propagation_enabled_ = enabled;
+    }
     /// Feed incumbent-derived bounds back into root separation. Off by default.
     void setRootCutoffFeedbackEnabled(bool enabled) { root_cutoff_feedback_enabled_ = enabled; }
     /// Limit visits across all root cut rounds, shared by root propagators.
@@ -854,8 +859,8 @@ private:
     MipResult solveMinimizationOnce();
 
     /// Run cutting plane rounds at the root node.
-    Int runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
-                         LpProblem* certificate_problem, Real cutoff);
+    bool runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, double& total_work,
+                          LpProblem* certificate_problem, Real cutoff);
 
     /// Serial branch-and-bound loop.
     void solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_explored,
@@ -1083,6 +1088,7 @@ private:
     bool root_cut_recheck_ = false;
     bool root_cut_propagation_enabled_ = false;
     bool root_cut_inference_enabled_ = false;
+    bool root_inactive_cut_propagation_enabled_ = false;
     bool root_cutoff_feedback_enabled_ = false;
     Int root_cut_propagation_row_budget_ = 0;
     Int max_cuts_per_round_ = 50;

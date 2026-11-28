@@ -182,6 +182,9 @@ bool CutPool::addCut(Cut cut) {
 
     // Check parallelism against existing cuts.
     for (const auto& entry : cuts_) {
+        if (entry.invalidated || entry.cut.valid_cutoff != cut.valid_cutoff) {
+            continue;
+        }
         const auto& existing = entry.cut;
         Real sim = cosineSimilarity(cut.indices, cut.values, existing.indices, existing.values);
         if (sim > parallelism_threshold_) {
@@ -198,6 +201,9 @@ bool CutPool::addCut(Cut cut) {
 
 void CutPool::ageAll(std::span<const Real> primals, Real active_tol, std::span<const Real> guide) {
     for (auto& entry : cuts_) {
+        if (entry.invalidated) {
+            continue;
+        }
         auto& cut = entry.cut;
         auto nearBinding = [&](std::span<const Real> point) {
             const Real activity = cutLhs(cut, point);
@@ -213,16 +219,32 @@ void CutPool::ageAll(std::span<const Real> primals, Real active_tol, std::span<c
 }
 
 void CutPool::purge(Int age_threshold) {
-    std::erase_if(cuts_,
-                  [age_threshold](const Entry& entry) { return entry.cut.age > age_threshold; });
+    purge(age_threshold, nullptr);
+}
+
+void CutPool::purge(Int age_threshold, Index* next) {
+    const auto expired = [age_threshold](const Entry& entry) {
+        return entry.invalidated || entry.cut.age > age_threshold;
+    };
+    if (next != nullptr) {
+        const Index before = std::clamp(*next, Index{0}, size());
+        *next = before -
+                static_cast<Index>(std::count_if(cuts_.begin(), cuts_.begin() + before, expired));
+    }
+    std::erase_if(cuts_, expired);
 }
 
 std::vector<Index> CutPool::topByEfficacy(Index k) const {
-    std::vector<Index> indices(static_cast<std::size_t>(size()));
-    std::iota(indices.begin(), indices.end(), 0);
+    std::vector<Index> indices;
+    indices.reserve(cuts_.size());
+    for (Index i = 0; i < size(); ++i) {
+        if (!cuts_[i].invalidated && !cuts_[i].cut.requiresCutoff()) {
+            indices.push_back(i);
+        }
+    }
 
     // Partial sort to get top-k.
-    Index n = std::min(k, size());
+    const Index n = std::clamp(k, Index{0}, static_cast<Index>(indices.size()));
     std::partial_sort(
         indices.begin(), indices.begin() + n, indices.end(),
         [this](Index a, Index b) { return cuts_[a].cut.efficacy > cuts_[b].cut.efficacy; });
@@ -235,8 +257,8 @@ std::vector<Index> CutPool::violatedByEfficacy(std::span<const Real> primals, Re
                                                std::span<const Real> guide) const {
     std::vector<std::pair<Index, Real>> ranked;
     for (Index i = 0; i < size(); ++i) {
-        const auto& [cut, installed] = cuts_[i];
-        if (installed) {
+        const auto& [cut, installed, invalidated] = cuts_[i];
+        if (installed || invalidated || cut.requiresCutoff()) {
             continue;
         }
         const Real violation = guide.empty()
@@ -270,6 +292,32 @@ void CutPool::markInstalled(std::span<const Index> indices) {
     for (const Index index : indices) {
         cuts_[index].installed = true;
     }
+}
+
+void CutPool::invalidate(std::span<const Index> indices) {
+    for (const Index index : indices) {
+        cuts_[index].invalidated = true;
+    }
+}
+
+std::vector<const Cut*> CutPool::inactiveGlobalCuts(Int limit, std::span<const Index> selected,
+                                                    Index* next) const {
+    std::vector<const Cut*> candidates;
+    const Index count = size();
+    Index i = next != nullptr && *next >= 0 && *next < count ? *next : 0;
+    for (Index scanned = 0; scanned < count && static_cast<Int>(candidates.size()) < limit;
+         ++scanned) {
+        const auto& [cut, installed, invalidated] = cuts_[i];
+        if (!installed && !invalidated && cut.isUnconditionalGlobal() &&
+            std::ranges::find(selected, i) == selected.end()) {
+            candidates.push_back(&cut);
+        }
+        i = i + 1 == count ? 0 : i + 1;
+    }
+    if (next != nullptr) {
+        *next = i;
+    }
+    return candidates;
 }
 
 }  // namespace mipx

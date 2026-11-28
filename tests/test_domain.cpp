@@ -578,6 +578,55 @@ TEST_CASE("Bounded inference visits pending cliques before unrelated rows", "[do
     CHECK(budget == 0);
 }
 
+TEST_CASE("Inactive pool propagation uses satisfied global cuts and wakes active rows",
+          "[domain][cuts]") {
+    const auto model = makeProblem(7, 3, {{0, 0, 1}, {0, 6, 1}}, {1, -kInf, -kInf},
+                                   {kInf, kInf, kInf}, std::vector<Real>(7, 0),
+                                   std::vector<Real>(7, 1), std::vector(7, VarType::Binary));
+    CutPool pool;
+    for (Index j = 0; j < 6; ++j) {
+        Cut cut{.indices = {j},
+                .values = {1},
+                .upper = 0.75,
+                .local = j == 1,
+                .efficacy = 1,
+                .valid_cutoff = j == 2 ? 5.0 : kInf};
+        REQUIRE(pool.addCut(std::move(cut)));
+    }
+    pool.invalidate(std::array<Index, 1>{3});
+    pool.markInstalled(std::array<Index, 1>{4});
+    const std::array<Index, 1> selected{5};
+    const auto candidates = pool.inactiveGlobalCuts(7, selected);
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates.front() == &pool[0]);
+    const std::array<Real, 7> primals{0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5};
+    CHECK(cutViolation(*candidates.front(), primals) == 0.0);
+    CHECK(pool.inactiveGlobalCuts(0, selected).empty());
+
+    DomainPropagator dp;
+    dp.load(model);
+    Int budget = 2;
+    DomainPropagationWork work;
+    REQUIRE(dp.propagateWithInactiveCuts(budget, work, candidates));
+    CHECK(budget == 0);
+    CHECK(work.inactive_cuts.visits == 1);
+    CHECK(work.inactive_cuts.tightenings == 1);
+    CHECK(work.rows.visits == 1);
+    CHECK(work.rows.tightenings == 1);
+    CHECK(dp.getUpper(0) == 0);
+    CHECK(dp.getLower(6) == 1);
+    for (Index j = 1; j < 6; ++j) {
+        CHECK(dp.getUpper(j) == 1);
+    }
+    Index next = 5;
+    pool.purge(10, &next);
+    CHECK(pool.size() == 5);
+    REQUIRE(next == 4);
+    const auto resumed = pool.inactiveGlobalCuts(1, {}, &next);
+    REQUIRE(resumed.size() == 1);
+    CHECK(resumed.front()->indices.front() == 5);
+}
+
 TEST_CASE("Bound reasons: clique records the forcing literal", "[domain][reasons]") {
     const auto binaries = std::vector(3, VarType::Binary);
     const auto packing = makeProblem(3, 1, {{0, 0, 1}, {0, 1, 1}, {0, 2, 1}}, {-kInf}, {1},

@@ -43,6 +43,14 @@ struct Cut {
     Real efficacy = 0.0;  // violation / ||a||
     Int age = 0;          // rounds since last active (binding)
     Int activity = 0;     // number of rounds where cut was active
+    /// Finite when validity requires an incumbent cutoff at least this strong.
+    /// Root cutoff feedback currently guides only unconditional separation.
+    Real valid_cutoff = std::numeric_limits<Real>::infinity();
+
+    [[nodiscard]] bool requiresCutoff() const {
+        return valid_cutoff != std::numeric_limits<Real>::infinity();
+    }
+    [[nodiscard]] bool isUnconditionalGlobal() const { return !local && !requiresCutoff(); }
 };
 
 /// Unscaled violation of either bound at the given LP point.
@@ -85,6 +93,8 @@ public:
 
     /// Remove cuts older than the given threshold.
     void purge(Int age_threshold = 10);
+    /// Also preserve the next position in an inactive-cut scan.
+    void purge(Int age_threshold, Index* next);
 
     /// Return indices of the top-k cuts by efficacy.
     [[nodiscard]] std::vector<Index> topByEfficacy(Index k) const;
@@ -96,6 +106,16 @@ public:
 
     /// Record that these cuts are now rows of the LP.
     void markInstalled(std::span<const Index> indices);
+
+    /// Invalidate entries without shifting indices. purge() removes them.
+    void invalidate(std::span<const Index> indices);
+
+    /// Cycle through insertion order for propagation, excluding rows selected
+    /// for this batch. next, if supplied, resumes the scan on the next call.
+    /// The returned pointers remain valid until the pool is mutated.
+    [[nodiscard]] std::vector<const Cut*> inactiveGlobalCuts(Int limit,
+                                                             std::span<const Index> selected = {},
+                                                             Index* next = nullptr) const;
 
     /// Number of cuts in the pool.
     [[nodiscard]] Index size() const { return static_cast<Index>(cuts_.size()); }
@@ -122,6 +142,7 @@ private:
     struct Entry {
         Cut cut;
         bool installed = false;
+        bool invalidated = false;
     };
     std::vector<Entry> cuts_;
     Real parallelism_threshold_ = 0.9;

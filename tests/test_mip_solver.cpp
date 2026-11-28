@@ -1605,6 +1605,95 @@ TEST_CASE("MipSolver: root cut clique deductions feed the next implied-bound rou
     }
 }
 
+TEST_CASE("MipSolver: inactive root pool deductions retain and roll back with the cut batch",
+          "[mip][cuts][domain]") {
+    const bool reject = GENERATE(false, true);
+    // Four covers compete for two slots. The third cover stays in the
+    // pool, but its y=0 deduction wakes y+z>=1. A second round can then
+    // tighten from the fourth cover without installing another row.
+    LpProblem lp;
+    lp.num_cols = reject ? 8 : 6;
+    lp.num_rows = reject ? 7 : 5;
+    lp.obj = {0, -1, -1, -1, 0, -1};
+    lp.col_lower = {1, 0, 0, 0, 0, 0};
+    lp.col_upper.assign(6, 1);
+    lp.col_type = {VarType::Binary, VarType::Binary,     VarType::Binary,
+                   VarType::Binary, VarType::Continuous, VarType::Binary};
+    lp.row_lower = {-kInf, -kInf, -kInf, 1, -kInf};
+    lp.row_upper = {3, 3, 2.5, kInf, 2.25};
+    std::vector<Triplet> entries{{0, 0, 2}, {0, 1, 2}, {1, 0, 2}, {1, 2, 2}, {2, 0, 2},
+                                 {2, 3, 2}, {3, 3, 1}, {3, 4, 1}, {4, 0, 2}, {4, 5, 2}};
+    if (reject) {
+        // Jointly these rows require the first cover's binary to be positive,
+        // which rejects the batch at LP reoptimization.
+        lp.obj.insert(lp.obj.end(), 2, 0);
+        lp.col_lower.insert(lp.col_lower.end(), 2, -kInf);
+        lp.col_upper.insert(lp.col_upper.end(), 2, kInf);
+        lp.col_type.insert(lp.col_type.end(), 2, VarType::Continuous);
+        lp.row_lower.insert(lp.row_lower.end(), {0.25, -kInf});
+        lp.row_upper.insert(lp.row_upper.end(), {kInf, 0});
+        entries.insert(entries.end(), {{5, 1, 1}, {5, 6, 1}, {5, 7, -1}, {6, 6, 1}, {6, 7, -1}});
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, entries);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setMaxCutRounds(1);
+    solver.setMaxCutsPerRound(1);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    for (Int f = 1; f < static_cast<Int>(CutFamily::Count); ++f) {
+        const auto family = static_cast<CutFamily>(f);
+        solver.setCutFamilyEnabled(family, family == CutFamily::Cover);
+    }
+    solver.load(lp);
+
+    if (!reject) {
+        REQUIRE(solver.solve().status == Status::Optimal);
+        CHECK(solver.getCutStats().root_cut_inference.inactive_cuts.visits == 0);
+        CHECK(solver.getCutStats().root_cuts_added == 2);
+    }
+    solver.setRootInactiveCutPropagationEnabled(true);
+    solver.setRootCutPropagationRowBudget(2);
+    const auto result = solver.solve();
+    const auto& stats = solver.getCutStats();
+    CHECK(stats.root_cut_inference.inactive_cuts.visits == 1);
+    CHECK(stats.root_cut_propagation_row_visits == 1);
+    CHECK(stats.root_cut_propagation_budget_exhaustions == 1);
+    const auto& certificate = solver.getExactRefinementStats();
+    CHECK(certificate.certificate_passed);
+    if (reject) {
+        REQUIRE(result.status == Status::Infeasible);
+        CHECK(stats.root_rounds_backed_out == 1);
+        CHECK(stats.root_cuts_added == 0);
+        CHECK(stats.root_cut_bound_tightenings_backed_out >= 2);
+        CHECK(stats.root_cut_inference.inactive_cuts.tightenings == 0);
+        CHECK(stats.root_cut_inference.rows.tightenings == 0);
+        CHECK(certificate.rows_evaluated == lp.num_rows);
+    } else {
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(0, 1e-8));
+        CHECK(stats.root_cuts_added == 2);
+        CHECK(stats.root_cut_inference.inactive_cuts.tightenings == 1);
+        CHECK(stats.root_cut_inference.rows.tightenings >= 1);
+        REQUIRE(result.solution.size() == 6);
+        CHECK_THAT(result.solution[4], WithinAbs(1, 1e-8));
+        CHECK(certificate.rows_evaluated == lp.num_rows + 2);
+
+        solver.setRootCutPropagationRowBudget(0);
+        solver.setMaxCutRounds(3);
+        const auto bound_only = solver.solve();
+        REQUIRE(bound_only.status == Status::Optimal);
+        CHECK_THAT(bound_only.objective, WithinAbs(0, 1e-8));
+        CHECK(stats.root_rounds == 2);
+        CHECK(stats.root_cuts_added == 2);
+        CHECK(stats.root_cut_inference.inactive_cuts.visits == 2);
+        CHECK(stats.root_cut_inference.inactive_cuts.tightenings == 2);
+        CHECK(certificate.rows_evaluated == lp.num_rows + 2);
+    }
+}
+
 TEST_CASE("MipSolver: root cutoff feedback needs a validated incumbent", "[mip][cuts][domain]") {
     const bool pre_root = GENERATE(false, true);
     const Int row_budget = GENERATE(0, 1);

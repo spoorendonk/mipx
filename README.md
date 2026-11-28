@@ -99,7 +99,8 @@ Key options:
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
 | `--root-cut-propagation` | off | Apply bounded row deductions from the root model and installed cuts during root cut rounds |
 | `--root-cut-inference` | off | Propagate installed rows and use retained global bounds in implied-bound separation. Also uses cliques with `--clique-table` and binary implications with `--probing` or `--systematic-probing` |
-| `--root-cut-propagation-row-budget N` | 0 | Stop after the cut batch that spends the cumulative visit budget, including clique and implication visits when inference is enabled. Zero keeps only the per-round limit |
+| `--root-inactive-cut-propagation` | off | Use a bounded set of globally valid, uninstalled pool rows, including rows satisfied by the current LP point. Tightenings wake affected active rows |
+| `--root-cut-propagation-row-budget N` | 0 | Stop after the cut batch that spends the cumulative visit budget, including visits to inactive cuts, cliques, and implications when enabled. Zero keeps only the per-round limit |
 | `--root-flow-cover` | off | Separate singleton signed flow covers from explicit on/off links and continuous balance rows at the root |
 | `--sos2-adjacent-intervals` | off | Linearize SOS2 with one binary per adjacent interval and a linear number of rows |
 | `--root-feasjump-restarts <n>` | 4 | Cap root feasibility-jump passes at 0 through 4, including the initial pass. Use 0 to skip the heuristic |

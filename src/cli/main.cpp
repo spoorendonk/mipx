@@ -61,6 +61,7 @@ void printUsage(FILE* out) {
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] [--root-cut-inference] "
+                 "[--root-inactive-cut-propagation] "
                  "[--root-cut-propagation-row-budget N] [--root-flow-cover] "
                  "[--root-cutoff-feedback] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
@@ -213,6 +214,7 @@ int main(int argc, char* argv[]) {
     bool root_cut_recheck = false;
     bool root_cut_propagation = false;
     bool root_cut_inference = false;
+    bool root_inactive_cut_propagation = false;
     bool root_cutoff_feedback = false;
     mipx::Int root_cut_propagation_row_budget = 0;
     bool root_flow_cover = false;
@@ -482,6 +484,8 @@ int main(int argc, char* argv[]) {
             root_cut_propagation = true;
         } else if (arg == "--root-cut-inference") {
             root_cut_inference = true;
+        } else if (arg == "--root-inactive-cut-propagation") {
+            root_inactive_cut_propagation = true;
         } else if (arg == "--root-cutoff-feedback") {
             root_cutoff_feedback = true;
         } else if (arg == "--root-cut-propagation-row-budget" && i + 1 < argc) {
@@ -927,6 +931,7 @@ int main(int argc, char* argv[]) {
             solver.setRootCutRecheck(root_cut_recheck);
             solver.setRootCutPropagationEnabled(root_cut_propagation);
             solver.setRootCutInferenceEnabled(root_cut_inference);
+            solver.setRootInactiveCutPropagationEnabled(root_inactive_cut_propagation);
             solver.setRootCutoffFeedbackEnabled(root_cutoff_feedback);
             solver.setRootCutPropagationRowBudget(root_cut_propagation_row_budget);
             solver.setRootFlowCoverEnabled(root_flow_cover);

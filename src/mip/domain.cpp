@@ -237,6 +237,12 @@ void DomainPropagator::prioritizeChangedCliques(InferencePass& pass,
 
 bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainPropagationWork& work,
                                                     Index first_clique) {
+    return propagateWithInactiveCuts(visits_left, work, {}, first_clique);
+}
+
+bool DomainPropagator::propagateWithInactiveCuts(Int& visits_left, DomainPropagationWork& work,
+                                                 std::span<const Cut* const> inactive,
+                                                 Index first_clique, bool sweep_active_rows) {
     if (visits_left <= 0) {
         return true;
     }
@@ -257,6 +263,23 @@ bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainProp
             feasible = checkCrossing(j) && propagateImplications(j, &pass);
         }
     }
+    for (const Cut* cut : inactive) {
+        if (!feasible || visits_left <= 0 ||
+            (sweep_active_rows && pass.inferenceAllowance() <= 0)) {
+            break;
+        }
+        if (!cut->isUnconditionalGlobal()) {
+            continue;
+        }
+        if (sweep_active_rows) {
+            pass.chargeInference(1);
+        } else {
+            --visits_left;
+        }
+        ++work.inactive_cuts.visits;
+        feasible = propagateActivity({cut->indices, cut->values}, cut->lower, cut->upper, -1, &pass,
+                                     &work.inactive_cuts);
+    }
     while (feasible && visits_left > 0) {
         // Exhaust woken rows and pending clique work before starting or
         // resuming a scan of unrelated rows.
@@ -273,6 +296,9 @@ bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainProp
                 feasible = propagateCliques(&pass);
                 continue;
             }
+        }
+        if (!sweep_active_rows) {
+            break;
         }
         const auto before = changes_.size();
         feasible = propagateRows(visits_left, &pass);
@@ -615,9 +641,13 @@ BoundReasonSupports::Snapshot DomainPropagator::activityReasons(SparseVectorView
 }
 
 bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadline* deadline) {
-    auto rv = matrix_.row(row);
-    Real rl = row_lower_[row];
-    Real ru = row_upper_[row];
+    return propagateActivity(matrix_.row(row), row_lower_[row], row_upper_[row], row, pass,
+                             pass != nullptr ? &pass->work.rows : nullptr, deadline);
+}
+
+bool DomainPropagator::propagateActivity(SparseVectorView rv, Real rl, Real ru, Index row,
+                                         InferencePass* pass, PropagationWork* work,
+                                         const Deadline* deadline) {
     // Save the endpoints that contributed to each activity sum. If an
     // earlier implication tightens the target itself, subtracting its live
     // contribution weakens the residual deduction from the saved endpoints.
@@ -626,6 +656,7 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
     if (deadline != nullptr && deadline->passed()) {
         return true;
     }
+    const BoundReasonSource source = row >= 0 ? BoundReasonSource::Row : BoundReasonSource::Opaque;
     const BoundReasonScope scope{.node_local = row >= global_rows_};
     const Int level = scope.node_local ? reason_level_ : 0;
 
@@ -684,13 +715,13 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
     const Real row_tol = kTol * scale;
     if (inf_min_count == 0 && act_min > ru + row_tol) {
         if (reasons_) {
-            reasons_->fail(BoundReasonSource::Row, min_reasons, row, scope);
+            reasons_->fail(source, min_reasons, row, scope);
         }
         return false;
     }
     if (inf_max_count == 0 && act_max < rl - row_tol) {
         if (reasons_) {
-            reasons_->fail(BoundReasonSource::Row, max_reasons, row, scope);
+            reasons_->fail(source, max_reasons, row, scope);
         }
         return false;
     }
@@ -771,7 +802,7 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
             recordChange(j);
             upper_[j] = new_ub;
             if (reasons_) {
-                reasons_->record({j, true, new_ub}, BoundReasonSource::Row,
+                reasons_->record({j, true, new_ub}, source,
                                  {a > 0 ? min_reasons : max_reasons, static_cast<std::size_t>(k)},
                                  row, scope, level);
             }
@@ -781,7 +812,7 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
             recordChange(j);
             lower_[j] = new_lb;
             if (reasons_) {
-                reasons_->record({j, false, new_lb}, BoundReasonSource::Row,
+                reasons_->record({j, false, new_lb}, source,
                                  {a > 0 ? max_reasons : min_reasons, static_cast<std::size_t>(k)},
                                  row, scope, level);
             }
@@ -809,8 +840,8 @@ bool DomainPropagator::propagateRow(Index row, InferencePass* pass, const Deadli
         }
 
         if (changed) {
-            if (pass != nullptr) {
-                pass->work.rows.tightenings += (lower_[j] > old_lower) + (upper_[j] < old_upper);
+            if (work != nullptr) {
+                work->tightenings += (lower_[j] > old_lower) + (upper_[j] < old_upper);
             }
             enqueueColumn(j);
             // Propagate binary implications when a variable becomes fixed.

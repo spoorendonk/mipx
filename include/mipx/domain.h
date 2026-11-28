@@ -14,6 +14,7 @@ class CliqueTable;
 class Deadline;
 class ImplicationGraph;
 class ObjectivePropagator;
+struct Cut;
 
 struct PropagationWork {
     std::uint64_t visits = 0;
@@ -24,6 +25,7 @@ struct DomainPropagationWork {
     PropagationWork rows;
     PropagationWork cliques;
     PropagationWork implications;
+    PropagationWork inactive_cuts;
 };
 
 class DomainPropagator {
@@ -101,6 +103,11 @@ public:
     /// visited first, starting at first_clique. No objective cutoff is used.
     bool propagateWithInferenceBudget(Int& visits_left, DomainPropagationWork& work,
                                       Index first_clique = 0);
+    /// Also visit eligible inactive pool rows. These are external constraints,
+    /// so their deductions wake active rows and their proofs are opaque to replay.
+    bool propagateWithInactiveCuts(Int& visits_left, DomainPropagationWork& work,
+                                   std::span<const Cut* const> inactive, Index first_clique = 0,
+                                   bool sweep_active_rows = true);
 
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();
@@ -144,6 +151,9 @@ private:
     bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true,
                        const Deadline* deadline = nullptr);
     bool propagateRow(Index row, InferencePass* pass, const Deadline* deadline);
+    bool propagateActivity(SparseVectorView row, Real lower, Real upper, Index source_row,
+                           InferencePass* pass, PropagationWork* work,
+                           const Deadline* deadline = nullptr);
     void prioritizeChangedCliques(InferencePass& pass, std::size_t first_change) const;
 
     /// propagate() after `objective_passes` passes of the objective row,

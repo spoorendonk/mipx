@@ -132,7 +132,7 @@ Int CliqueTable::extractFromCut(const Cut& cut, const LpProblem& problem,
     if (cut.upper > 1.0 + 1e-9 || cut.upper < 1.0 - 1e-9)
         return 0;
     // The table is global: a cut valid only in a subtree is no clique of it.
-    if (cut.local)
+    if (!cut.isUnconditionalGlobal())
         return 0;
 
     Clique clique;

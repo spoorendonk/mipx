@@ -188,6 +188,8 @@ NB_MODULE(_core, m) {
         .def("set_root_cut_propagation_enabled", &MipSolver::setRootCutPropagationEnabled,
              "enabled"_a)
         .def("set_root_cut_inference_enabled", &MipSolver::setRootCutInferenceEnabled, "enabled"_a)
+        .def("set_root_inactive_cut_propagation_enabled",
+             &MipSolver::setRootInactiveCutPropagationEnabled, "enabled"_a)
         .def("set_root_cutoff_feedback_enabled", &MipSolver::setRootCutoffFeedbackEnabled,
              "enabled"_a)
         .def("set_root_cut_propagation_row_budget", &MipSolver::setRootCutPropagationRowBudget,
