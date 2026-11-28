@@ -382,26 +382,45 @@ static Real coldObjective(const LpProblem& lp) {
     return r.objective;
 }
 
-TEST_CASE("Incremental: keep_basis_on_row_removal keeps it through a binding row's removal",
+TEST_CASE("Incremental: keep_basis_on_row_removal keeps it through binding rows' removal",
           "[incremental]") {
-    // At the optimum x = 1, y = 3, rows 0 (x + y <= 4) and 2 (y <= 3) bind,
-    // so row 0's logical is nonbasic and removing the row leaves one basic
-    // variable too many.
+    // The optimal basis at x = 1, y = 3: rows 0 (x + y <= 4) and 2 (y <= 3)
+    // bind, so their logicals are nonbasic and removing both rows leaves two
+    // basic variables too many. This is the first solve's own basis, so
+    // setBasis keeps that solve's positions, and what the positional rule
+    // keeps depends on its pivot order. The option instead pivots both
+    // removed rows' logicals in first, refactorizing once (counted in the
+    // next solve's edits), whatever the positions.
+    const std::vector<BasisStatus> basis = {
+        BasisStatus::Basic,    // x
+        BasisStatus::Basic,    // y
+        BasisStatus::AtUpper,  // logical of row 0  <- removed
+        BasisStatus::Basic,    // logical of row 1
+        BasisStatus::AtUpper,  // logical of row 2  <- removed
+        BasisStatus::Basic,    // logical of row 3
+    };
+    const std::vector<Index> remove = {0, 2};
     auto lp = buildLP_2var4row();
-    auto solver = keepBasisSolver(lp, true);
-    REQUIRE(solver.solve().status == Status::Optimal);
-    REQUIRE(solver.getBasis()[2] != BasisStatus::Basic);
 
-    const std::vector<Index> remove = {0};
-    solver.removeRows(remove);
-    REQUIRE(solver.numRows() == 3);
+    for (const bool keep : {true, false}) {
+        CAPTURE(keep);
+        auto solver = keepBasisSolver(lp, keep);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        solver.setBasis(basis);
+        solver.removeRows(remove);
+        REQUIRE(solver.numRows() == 2);
 
-    // Left: x <= 3, y <= 3, x + 2y <= 9, so x = y = 3 and objective -9.
-    auto result = solver.solve();
-    REQUIRE(result.status == Status::Optimal);
-    CHECK_FALSE(solver.basisStartStats().cold_start);
-    CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
-    CHECK_THAT(result.objective, WithinAbs(coldObjective(withoutRows(lp, remove)), 1e-6));
+        // Left: x <= 3, x + 2y <= 9, so x = 3, y = 3 and objective -9.
+        auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_FALSE(solver.basisStartStats().cold_start);
+        if (keep) {
+            CHECK_FALSE(solver.basisStartStats().singular_recovery);
+        }
+        CHECK((solver.getRefactorStats().edits > 0) == keep);
+        CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
+        CHECK_THAT(result.objective, WithinAbs(coldObjective(withoutRows(lp, remove)), 1e-6));
+    }
 }
 
 TEST_CASE("Incremental: keep_basis_on_row_removal keeps it when a logical is basic elsewhere",
@@ -432,6 +451,7 @@ TEST_CASE("Incremental: keep_basis_on_row_removal keeps it when a logical is bas
         auto result = solver.solve();
         REQUIRE(result.status == Status::Optimal);
         CHECK(solver.basisStartStats().cold_start == !keep);
+        CHECK_FALSE(solver.basisStartStats().singular_recovery);
         CHECK_THAT(result.objective, WithinAbs(-9.0, 1e-6));
     }
 }
@@ -501,6 +521,7 @@ TEST_CASE("Incremental: keep_basis_on_row_removal stays warm over repeated remov
             auto result = solver.solve();
             REQUIRE(result.status == Status::Optimal);
             CHECK_FALSE(solver.basisStartStats().cold_start);
+            CHECK_FALSE(solver.basisStartStats().singular_recovery);
             CHECK_THAT(result.objective, WithinAbs(coldObjective(lp), 1e-6));
         }
     }

@@ -5579,6 +5579,9 @@ void DualSimplexSolver::removeRows(std::span<const Index> rows) {
                 }
                 new_basis[pos++] = new_var;
             }
+            if (pos != new_rows) {
+                can_preserve = false;
+            }
         } else {
             for (Index old_row = 0; old_row < old_rows; ++old_row) {
                 Index new_row = row_map[old_row];
@@ -5749,8 +5752,7 @@ bool DualSimplexSolver::pivotInRemovedRowLogicals(std::span<const Index> row_map
         }
         const Index slack = num_cols_ + row;
         const Index leaving = basis_[best];
-        const Real minus_one = -1.0;
-        lu_.update(best, std::span(&row, 1), std::span(&minus_one, 1));
+        lu_.updateFromFtranColumn(best, alpha);
         basis_[best] = slack;
         basis_pos_[slack] = best;
         basis_pos_[leaving] = -1;
@@ -5765,9 +5767,6 @@ bool DualSimplexSolver::pivotInRemovedRowLogicals(std::span<const Index> row_map
         var_status_[leaving] = nearer_upper ? BasisStatus::AtUpper : BasisStatus::AtLower;
         reconcileNonbasicStatus(leaving, lo, up);
         reduced_cost_[leaving] = 0.0;
-        if (best < static_cast<Index>(devex_weights_.size())) {
-            devex_weights_[best] = 1.0;
-        }
     }
     return true;
 }
