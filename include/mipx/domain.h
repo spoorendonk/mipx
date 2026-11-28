@@ -4,6 +4,7 @@
 #include "mipx/branch_decision.h"
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
+#include "mipx/propagation_scheduler.h"
 #include "mipx/sparse_matrix.h"
 
 #include <vector>
@@ -15,6 +16,7 @@ class Deadline;
 class ImplicationGraph;
 class ObjectivePropagator;
 struct Cut;
+struct BinaryImplication;
 
 struct PropagationWork {
     std::uint64_t visits = 0;
@@ -26,6 +28,14 @@ struct DomainPropagationWork {
     PropagationWork cliques;
     PropagationWork implications;
     PropagationWork inactive_cuts;
+};
+
+struct ScheduledPropagationInputs {
+    std::span<const Cut* const> inactive;
+    Index first_clique = 0;
+    bool sweep_rows = true;
+    std::optional<Index> first_new_row;
+    const Deadline* deadline = nullptr;
 };
 
 class DomainPropagator {
@@ -111,6 +121,10 @@ public:
     /// Visit newly appended rows and any active rows woken by deductions.
     bool propagateNewRows(Index first, Int& visits_left, DomainPropagationWork& work,
                           const Deadline* deadline = nullptr);
+    /// Schedule eligible domain work, charging one unit per row, clique or edge.
+    bool propagateScheduled(Int& visits_left, DomainPropagationWork& work,
+                            PropagationScheduleStats& stats,
+                            const ScheduledPropagationInputs& inputs);
 
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();
@@ -141,6 +155,7 @@ private:
         Index next_unvisited_row;
         std::vector<bool> visited_rows;
         std::optional<std::vector<Index>> incident_cliques;
+        bool follow_implications = true;
 
         [[nodiscard]] Int inferenceAllowance() const {
             return std::min(shared_visits_left, inference_visits_left);
@@ -161,7 +176,7 @@ private:
     bool propagateRow(Index row, InferencePass* pass, const Deadline* deadline);
     bool propagateActivity(SparseVectorView row, Real lower, Real upper, Index source_row,
                            InferencePass* pass, PropagationWork* work,
-                           const Deadline* deadline = nullptr);
+                           const Deadline* deadline = nullptr, bool follow_implications = true);
     void prioritizeChangedCliques(InferencePass& pass, std::size_t first_change) const;
 
     /// propagate() after `objective_passes` passes of the objective row,
@@ -184,6 +199,7 @@ private:
     /// Propagate binary implications when a binary variable gets fixed.
     /// Returns false if infeasibility detected.
     bool propagateImplications(Index col, InferencePass* pass = nullptr);
+    bool propagateImplication(Index from, const BinaryImplication& edge, PropagationWork* work);
 
     // Problem data
     Index num_cols_ = 0;

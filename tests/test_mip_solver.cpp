@@ -1012,12 +1012,13 @@ TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
           "[mip][cuts][domain][parallel]") {
     const bool reject = GENERATE(false, true);
     const bool cover = GENERATE(false, true);
+    const bool scheduled = GENERATE(false, true);
 #ifdef MIPX_HAS_TBB
     const bool parallel = GENERATE(false, true);
 #else
     const bool parallel = false;
 #endif
-    CAPTURE(reject, cover, parallel);
+    CAPTURE(reject, cover, parallel, scheduled);
     // The two sides on s make the root optimum branch at b=1/4, y=1.
     // On b=0, the LP has y=1/2, and a cut fixes y=0, waking y+z>=1.
     // The sibling b=1 needs y=1 and z=0 to attain the optimum. The Cover
@@ -1073,6 +1074,7 @@ TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
     }
 
     solver.setTreeCutPropagationEnabled(true);
+    solver.setPropagationSchedulerEnabled(scheduled);
     const auto result = solver.solve();
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(cover ? 99.0 : 99.75, 1e-8));
@@ -1083,6 +1085,10 @@ TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
 
     const auto cuts = solver.getCutStats();
     CHECK(cuts.tree_cut_propagation.rows.visits > 0);
+    const auto& scheduled_rows =
+        cuts.tree_propagation_schedule
+            .producers[static_cast<std::size_t>(PropagationProducer::Rows)];
+    CHECK(scheduled_rows.calls == (scheduled ? cuts.tree_cut_propagation.rows.visits : 0));
     CHECK(cuts.tree_cut_propagation_resolves > 0);
     if (reject) {
         CHECK(cuts.tree_cut_propagation_backouts > 0);
@@ -1098,7 +1104,7 @@ TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
             CHECK(cuts.tree_cuts_global > 0);
         }
     }
-    if (parallel) {
+    if (parallel || scheduled) {
         const auto replay = solver.solve();
         REQUIRE(replay.status == Status::Optimal);
         CHECK(replay.objective == result.objective);
@@ -1109,6 +1115,8 @@ TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
         CHECK(repeated.tree_cut_propagation.rows.tightenings ==
               cuts.tree_cut_propagation.rows.tightenings);
         CHECK(repeated.tree_cut_propagation_backouts == cuts.tree_cut_propagation_backouts);
+        CHECK(repeated.tree_propagation_schedule.producers ==
+              cuts.tree_propagation_schedule.producers);
     }
 }
 
@@ -1718,6 +1726,8 @@ TEST_CASE("MipSolver: root cut clique deductions feed the next implied-bound rou
 TEST_CASE("MipSolver: inactive root pool deductions retain and roll back with the cut batch",
           "[mip][cuts][domain]") {
     const bool reject = GENERATE(false, true);
+    const bool scheduled = GENERATE(false, true);
+    CAPTURE(reject, scheduled);
     // Four covers compete for two slots. The third cover stays in the
     // pool, but its y=0 deduction wakes y+z>=1. A second round can then
     // tighten from the fourth cover without installing another row.
@@ -1765,12 +1775,20 @@ TEST_CASE("MipSolver: inactive root pool deductions retain and roll back with th
         CHECK(solver.getCutStats().root_cuts_added == 2);
     }
     solver.setRootInactiveCutPropagationEnabled(true);
+    solver.setPropagationSchedulerEnabled(scheduled);
     solver.setRootCutPropagationRowBudget(2);
     const auto result = solver.solve();
     const auto& stats = solver.getCutStats();
     CHECK(stats.root_cut_inference.inactive_cuts.visits == 1);
     CHECK(stats.root_cut_propagation_row_visits == 1);
     CHECK(stats.root_cut_propagation_budget_exhaustions == 1);
+    const auto rows = static_cast<std::size_t>(PropagationProducer::Rows);
+    const auto pool = static_cast<std::size_t>(PropagationProducer::InactiveCuts);
+    const auto budget = static_cast<std::size_t>(PropagationExit::Budget);
+    const auto first_schedule = stats.root_propagation_schedule.producers;
+    CHECK(first_schedule[pool].calls == (scheduled ? 1 : 0));
+    CHECK(first_schedule[rows].calls == (scheduled ? 1 : 0));
+    CHECK(first_schedule[pool].exits[budget] == (scheduled ? 1 : 0));
     const auto& certificate = solver.getExactRefinementStats();
     CHECK(certificate.certificate_passed);
     if (reject) {
@@ -1798,7 +1816,19 @@ TEST_CASE("MipSolver: inactive root pool deductions retain and roll back with th
         CHECK_THAT(bound_only.objective, WithinAbs(0, 1e-8));
         CHECK(stats.root_rounds == 2);
         CHECK(stats.root_cuts_added == 2);
-        CHECK(stats.root_cut_inference.inactive_cuts.visits == 2);
+        if (scheduled) {
+            const auto baseline = stats.root_propagation_schedule.producers;
+            CHECK(baseline[pool].calls == 4);
+            CHECK(baseline[pool].endpoints == 2);
+            CHECK(baseline[rows].calls == 4);
+            const auto replay = solver.solve();
+            REQUIRE(replay.status == Status::Optimal);
+            CHECK(replay.objective == bound_only.objective);
+            CHECK(replay.nodes == bound_only.nodes);
+            CHECK(stats.root_propagation_schedule.producers == baseline);
+        } else {
+            CHECK(stats.root_cut_inference.inactive_cuts.visits == 2);
+        }
         CHECK(stats.root_cut_inference.inactive_cuts.tightenings == 2);
         CHECK(certificate.rows_evaluated == lp.num_rows + 2);
     }

@@ -66,7 +66,7 @@ void printUsage(FILE* out) {
                  "[--root-cut-recheck] [--root-cut-propagation] [--root-cut-inference] "
                  "[--root-inactive-cut-propagation] "
                  "[--root-cut-propagation-row-budget N] [--root-flow-cover] "
-                 "[--root-cutoff-feedback] "
+                 "[--root-cutoff-feedback] [--propagation-scheduler] "
                  "[--sos2-adjacent-intervals|--sos2-native-branching] "
                  "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
@@ -224,6 +224,7 @@ int main(int argc, char* argv[]) {
     bool root_cut_inference = false;
     bool root_inactive_cut_propagation = false;
     bool root_cutoff_feedback = false;
+    bool propagation_scheduler = false;
     mipx::Int root_cut_propagation_row_budget = 0;
     bool root_flow_cover = false;
     bool sos2_adjacent_intervals = false;
@@ -536,6 +537,8 @@ int main(int argc, char* argv[]) {
             root_inactive_cut_propagation = true;
         } else if (arg == "--root-cutoff-feedback") {
             root_cutoff_feedback = true;
+        } else if (arg == "--propagation-scheduler") {
+            propagation_scheduler = true;
         } else if (arg == "--root-cut-propagation-row-budget" && i + 1 < argc) {
             const std::string_view value = argv[++i];
             const auto end = value.data() + value.size();
@@ -984,6 +987,7 @@ int main(int argc, char* argv[]) {
             solver.setRootCutInferenceEnabled(root_cut_inference);
             solver.setRootInactiveCutPropagationEnabled(root_inactive_cut_propagation);
             solver.setRootCutoffFeedbackEnabled(root_cutoff_feedback);
+            solver.setPropagationSchedulerEnabled(propagation_scheduler);
             solver.setRootCutPropagationRowBudget(root_cut_propagation_row_budget);
             solver.setRootFlowCoverEnabled(root_flow_cover);
             solver.setProbingEnabled(probing_enabled);
