@@ -138,6 +138,10 @@ struct MipConflictStats {
     Int lp_infeasible_conflicts = 0;
     Int bound_infeasible_conflicts = 0;
     Int branch_score_overrides = 0;
+    Int ray_qualified = 0;
+    Int ray_shortened = 0;
+    Int ray_literals_dropped = 0;
+    Int ray_reused = 0;
 };
 
 struct MipPreRootStats {
@@ -450,6 +454,10 @@ public:
         exact_refinement_rational_scale_ = std::max<Real>(1.0, scale);
     }
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
+    /// Shorten serial tree no-goods with rechecked LP infeasibility rays. Off by default.
+    void setConflictRayShorteningEnabled(bool enabled) {
+        conflict_ray_shortening_enabled_ = enabled;
+    }
     /// Turn strong branching off: branching then rests on pseudocosts alone,
     /// learned from the tree. Mainly for tests and experiments.
     void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
@@ -646,6 +654,7 @@ private:
         std::vector<MipBranchInferenceStats>* branch_inference = nullptr;
         std::span<const Index> branch_inference_col_mapping;
         std::vector<std::pair<Real, Real>> propagation_input_bounds;
+        LpProblem* conflict_global_rows = nullptr;
     };
 
     /// The solve proper, on a minimization: solve() negates a maximization
@@ -669,7 +678,8 @@ private:
                      Int& total_lp_iters, double& total_work, HeuristicRuntime& heuristic_runtime,
                      SolutionPool& solution_pool, Real& incumbent, std::vector<Real>& best_solution,
                      Real root_bound, const std::function<double()>& elapsed,
-                     std::span<const Index> branch_inference_col_mapping);
+                     std::span<const Index> branch_inference_col_mapping,
+                     LpProblem* conflict_global_rows = nullptr);
 
     /// Parallel branch-and-bound loop using TBB.
     void solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue, Int& nodes_explored,
@@ -733,8 +743,10 @@ private:
     /// TimeLimit counts it as stopped by the limit (#351).
     void recordNodeDroppedWithoutVerdict(Real bound, Status status);
     void ageConflictPool();
-    void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes,
-                               bool lp_infeasible);
+    void learnConflictFromNode(const std::vector<BranchDecision>& bound_changes, bool lp_infeasible,
+                               const DualSimplexSolver* lp = nullptr,
+                               const LpProblem* global_rows = nullptr,
+                               std::span<const Index> local_rows = {});
     bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
@@ -786,16 +798,13 @@ private:
                                              std::vector<Index>* tightened_vars = nullptr,
                                              double* work_units = nullptr) const;
 
-    struct ConflictLiteral {
-        Index variable = -1;
-        Real bound = 0.0;
-        bool is_upper = false;
-    };
+    using ConflictLiteral = BranchDecision;
 
     struct ConflictClause {
         std::vector<ConflictLiteral> literals;
         Int age = 0;
         Int hits = 0;
+        bool ray_shortened = false;
     };
     ConflictClause acquireConflictClause();
     void recycleConflictClause(ConflictClause clause);
@@ -856,6 +865,7 @@ private:
     bool pre_root_lp_light_enabled_ = false;
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
+    bool conflict_ray_shortening_enabled_ = false;
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;
     bool directional_inference_enabled_ = false;

@@ -1,9 +1,11 @@
+#include "../src/mip/conflict_ray.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
 #include "perf/slow_root_set_cover.hpp"
 #include "test_paths.hpp"
 
 #include <algorithm>
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
@@ -1918,6 +1920,106 @@ TEST_CASE("MipSolver: conflict learning preserves feasible optimum", "[mip][conf
     REQUIRE(with_result.status == Status::Optimal);
     REQUIRE(without_result.status == Status::Optimal);
     CHECK_THAT(with_result.objective, WithinAbs(without_result.objective, 1e-9));
+}
+
+TEST_CASE("MipSolver: a checked LP ray drops an irrelevant branch bound", "[mip][conflicts]") {
+    // Root y=0.5 is the only fractional column. In y=0 the LP takes x=u=0.5.
+    // Branching up on x is infeasible independently of y. The y=1 sibling
+    // can take x=u=0, which is the global optimum.
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {1.0, 0.4, 1.2};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous};
+    lp.col_names = {"y", "x", "u"};
+    lp.num_rows = 3;
+    lp.row_lower = {0.5, 0.5, -kInf};
+    lp.row_upper = {kInf, kInf, 0.5};
+    lp.matrix =
+        SparseMatrix(3, 3, {{0, 0, 1.0}, {0, 2, 1.0}, {1, 0, 1.0}, {1, 1, 1.0}, {2, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(1);
+    solver.load(lp);
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getConflictStats().ray_qualified == 0);
+
+    solver.setConflictRayShorteningEnabled(true);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-8));
+    REQUIRE(result.solution.size() == 3);
+    CHECK_THAT(result.solution[0], WithinAbs(1.0, 1e-8));
+    CHECK_THAT(result.solution[1], WithinAbs(0.0, 1e-8));
+    CHECK_THAT(result.solution[2], WithinAbs(0.0, 1e-8));
+    CHECK(solver.getConflictStats().ray_shortened >= 1);
+    CHECK(solver.getConflictStats().ray_literals_dropped >= 1);
+}
+
+TEST_CASE("MIP conflict ray recheck retains the path if a local row or bound is needed",
+          "[mip][conflicts]") {
+    LpProblem model;
+    model.num_cols = 3;
+    model.obj.assign(3, 0.0);
+    model.col_lower.assign(3, 0.0);
+    model.col_upper.assign(3, 1.0);
+    model.col_type.assign(3, VarType::Binary);
+    model.num_rows = 1;
+    model.row_lower = {0.5};
+    model.row_upper = {kInf};
+    model.matrix = SparseMatrix(1, 3, {{0, 0, 1.0}, {0, 2, 1.0}});
+    std::vector<BranchDecision> path{{0, 0.0, true}, {1, 0.0, true}};
+
+    DualSimplexSolver lp;
+    lp.setVerbose(false);
+    lp.load(model);
+    lp.setColBounds(0, 0.0, 0.0);
+    lp.setColBounds(1, 0.0, 0.0);
+    std::vector<Index> local_rows;
+    if (GENERATE(false, true)) {
+        // x=0 cannot satisfy this subtree's cut x>=0.5. Its ray is unusable
+        // even though the globally valid row remains in the LP.
+        lp.addRows(std::array<Index, 1>{0}, std::array<Index, 1>{0}, std::array<Real, 1>{1.0},
+                   std::array<Real, 1>{0.5}, std::array<Real, 1>{kInf});
+        local_rows.push_back(1);
+    } else {
+        // This fixing is absent from the persistent domain and branch path.
+        lp.setColBounds(2, 0.0, 0.0);
+    }
+    REQUIRE(lp.solve().status == Status::Infeasible);
+    const auto ray = lp.getDualRay();
+    REQUIRE_FALSE(ray.empty());
+    CHECK_FALSE(
+        shortenConflictWithRay(model, ray, local_rows, model.col_lower, model.col_upper, path));
+    REQUIRE(path.size() == 2);
+    CHECK(path[0].variable == 0);
+    CHECK(path[1].variable == 1);
+}
+
+TEST_CASE("MIP conflict rays map a promoted row past an unused local row", "[mip][conflicts]") {
+    LpProblem global;
+    global.num_cols = 2;
+    global.num_rows = 2;
+    global.col_lower = {0.0, 0.0};
+    global.col_upper = {1.0, 1.0};
+    global.row_lower = {-kInf, 0.5};
+    global.row_upper = {1.0, kInf};
+    global.matrix = SparseMatrix(2, 2, {{0, 1, 1.0}, {1, 0, 1.0}});
+    // The second LP row is local. The last row is the promoted x>=0.5.
+    const std::array<Real, 3> ray{0.0, 0.0, -1.0};
+    const std::array<Index, 1> local_rows{1};
+    std::vector<BranchDecision> path{{0, 0.0, true}, {1, 0.0, true}};
+
+    REQUIRE(
+        shortenConflictWithRay(global, ray, local_rows, global.col_lower, global.col_upper, path));
+    REQUIRE(path.size() == 1);
+    CHECK(path.front().variable == 0);
 }
 
 TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bounds",

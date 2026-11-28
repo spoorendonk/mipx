@@ -30,6 +30,7 @@ void printUsage(FILE* out) {
                  "[--node-limit N] [--gap-tol G] [--no-cuts|--cuts] "
                  "[--no-presolve|--presolve] [--barrier|--pdlp|--dual|--concurrent-root] "
                  "[--conflicts|--no-conflicts] "
+                 "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
@@ -151,6 +152,7 @@ int main(int argc, char* argv[]) {
     bool pre_root_lplight = false;
     bool pre_root_portfolio = true;
     bool conflicts_enabled = true;
+    bool conflict_ray_shortening = false;
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
@@ -227,6 +229,10 @@ int main(int argc, char* argv[]) {
             conflicts_enabled = true;
         } else if (arg == "--no-conflicts") {
             conflicts_enabled = false;
+        } else if (arg == "--conflict-ray-shortening") {
+            conflict_ray_shortening = true;
+        } else if (arg == "--no-conflict-ray-shortening") {
+            conflict_ray_shortening = false;
         } else if (arg == "--pre-lp-propagation") {
             pre_lp_propagation = true;
         } else if (arg == "--no-pre-lp-propagation") {
@@ -702,6 +708,7 @@ int main(int argc, char* argv[]) {
             solver.setPreRootLpLightEnabled(pre_root_lplight);
             solver.setPreRootPortfolioEnabled(pre_root_portfolio);
             solver.setConflictsEnabled(conflicts_enabled);
+            solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
@@ -760,13 +767,15 @@ int main(int argc, char* argv[]) {
             }
             log.log(
                 "Run profile: mode=%s seed=%llu threads=%d search=%s "
-                "conflicts=%s pre_lp_propagation=%s pre_lp_propagation_bounds=%s "
+                "conflicts=%s conflict_ray_shortening=%s pre_lp_propagation=%s "
+                "pre_lp_propagation_bounds=%s "
                 "tree_presolve=%s tree_presolve_min_frac=%d "
                 "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s "
                 "cut_strengthening=%s objective_propagation=%s objective_integrality=%s "
                 "tree_pseudocosts=%s balanced_branch_score=%s\n",
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
+                conflict_ray_shortening && conflicts_enabled && num_threads <= 1 ? "on" : "off",
                 pre_lp_propagation ? "on" : "off", pre_lp_propagation_bounds ? "on" : "off",
                 tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",

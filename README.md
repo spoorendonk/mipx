@@ -87,6 +87,7 @@ Key options:
 | `--node-limit <n>` | 1000000 | Maximum branch-and-bound nodes |
 | `--presolve` / `--no-presolve` | on | Presolve reductions |
 | `--cuts` / `--no-cuts` | on | Cutting planes |
+| `--conflict-ray-shortening` / `--no-conflict-ray-shortening` | off | Shorten serial tree no-goods when a rechecked LP ray proves infeasibility with fewer branch bounds |
 | `--pre-lp-propagation` / `--no-pre-lp-propagation` | off | Use bounded row propagation to prune contradictory child domains before simplex |
 | `--pre-lp-propagation-bounds` / `--no-pre-lp-propagation-bounds` | off | Apply bounded row deductions before simplex at depth-scheduled tree presolve nodes of all-discrete models in serial or opportunistic search |
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |

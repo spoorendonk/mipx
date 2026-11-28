@@ -32,6 +32,7 @@ add_library(mipx STATIC
     mip/objective_integrality.cpp
     mip/objective_propagator.cpp
     mip/mip_solver.cpp
+    mip/conflict_ray.cpp
     mip/orbital_fixing.cpp
     mip/schreier_sims.cpp
     mip/symbreak.cpp
