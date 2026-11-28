@@ -175,6 +175,27 @@ TEST_CASE("Parallel: single thread matches serial", "[parallel]") {
 }
 
 #ifdef MIPX_HAS_TBB
+TEST_CASE("Parallel: pre-LP propagation counts work from both search modes", "[parallel][tbb]") {
+    const auto lp = buildBranchingMip();
+    for (const auto mode : {ParallelMode::Deterministic, ParallelMode::Opportunistic}) {
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setNumThreads(2);
+        solver.setParallelMode(mode);
+        solver.setPresolve(false);
+        solver.setCutsEnabled(false);
+        solver.setStrongBranchingEnabled(false);
+        solver.setPreLpPropagationEnabled(true);
+        solver.load(lp);
+
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-8.0, 1e-8));
+        CHECK(solver.getLpStats().pre_lp_propagation_calls > 0);
+        CHECK(solver.getLpStats().pre_lp_propagation_pruned > 0);
+    }
+}
+
 TEST_CASE("Parallel: multi-thread finds optimal", "[parallel][tbb]") {
     auto lp = buildBranchingMip();
 

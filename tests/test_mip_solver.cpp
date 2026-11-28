@@ -1854,6 +1854,7 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
     const auto baseline = solver.solve();
     REQUIRE(baseline.status == Status::Optimal);
     const auto baseline_stats = solver.getLpStats();
+    const auto baseline_branching = solver.getBranchingStats();
     CHECK(baseline_stats.pre_lp_propagation_calls == 0);
     CHECK(baseline_stats.pre_lp_propagation_pruned == 0);
 
@@ -1872,6 +1873,10 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
         CHECK(stats.warm_starts + stats.cold_starts ==
               baseline_stats.warm_starts + baseline_stats.cold_starts - 1);
         CHECK(solver.getConflictStats().bound_infeasible_conflicts == 1);
+        const auto& branching = solver.getBranchingStats();
+        CHECK(branching.pseudocost_updates_tree + branching.pseudocost_tree_skipped ==
+              baseline_branching.pseudocost_updates_tree +
+                  baseline_branching.pseudocost_tree_skipped - 1);
     }
 
     solver.setPreLpPropagationEnabled(false);
@@ -1881,6 +1886,46 @@ TEST_CASE("MipSolver: pre-LP propagation prunes a child and restores sibling bou
     CHECK(explicitly_off.nodes == baseline.nodes);
     CHECK(explicitly_off.lp_iterations == baseline.lp_iterations);
     CHECK(solver.getLpStats().pre_lp_propagation_calls == 0);
+}
+
+TEST_CASE("MipSolver: pre-LP propagation leaves an inconclusive node LP intact", "[mip][domain]") {
+    // x is binary, z continuous. Both children of the root's x=0.5 have an
+    // LP solution. Propagation can tighten z in the down child, but that
+    // tightening is deliberately not applied to the LP.
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 1.5};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Continuous};
+    lp.num_rows = 1;
+    lp.row_lower = {0.5};
+    lp.row_upper = {kInf};
+    lp.matrix = SparseMatrix(1, 2, {{0, 0, 1.0}, {0, 1, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.load(lp);
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Optimal);
+    CHECK_THAT(baseline.objective, WithinAbs(0.75, 1e-8));
+    const auto baseline_stats = solver.getLpStats();
+
+    solver.setPreLpPropagationEnabled(true);
+    const auto screened = solver.solve();
+    CHECK(screened.status == baseline.status);
+    CHECK(screened.objective == baseline.objective);
+    CHECK(screened.nodes == baseline.nodes);
+    CHECK(screened.lp_iterations == baseline.lp_iterations);
+    const auto& stats = solver.getLpStats();
+    CHECK(stats.pre_lp_propagation_calls > 0);
+    CHECK(stats.pre_lp_propagation_pruned == 0);
+    CHECK(stats.warm_starts == baseline_stats.warm_starts);
+    CHECK(stats.cold_starts == baseline_stats.cold_starts);
 }
 
 // ---------------------------------------------------------------------------
