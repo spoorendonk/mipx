@@ -111,6 +111,10 @@ TEST_CASE("Root cut recheck fills family quotas with violated uninstalled cuts",
     // Row 0 is binding, row 3 remains numerically violated in this synthetic
     // point, and both are installed. Only the better remaining Gomory fits.
     CHECK(selectRootCuts(pool, policy, new_point, true) == std::vector<Index>{4});
+    // The guide alone would miss row 4; the unconditional point alone would
+    // miss row 2. Rechecking both admits both families subject to their quotas.
+    const std::vector<Real> guide{0.0, 0.0, 3.0, 0.0, 0.0};
+    CHECK(selectRootCuts(pool, policy, new_point, true, guide) == std::vector<Index>{2, 4});
 
     // Preceding rows can be purged without losing the installed marker.
     const std::vector<Real> purge_point{0.0, 0.0, 0.0, 1.0, 0.0};

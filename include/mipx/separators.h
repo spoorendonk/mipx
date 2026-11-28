@@ -107,8 +107,10 @@ public:
         past_deadline_ = false;
     }
 
+    /// An optional guide may steer families that use only model rows and
+    /// bounds. LP-based families always use the point from the given basis.
     Int separate(DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primals,
-                 CutPool& pool, CutSeparationStats& stats);
+                 CutPool& pool, CutSeparationStats& stats, std::span<const Real> guide = {});
 
 private:
     /// Reads the clock on the first call and every 16th after it: the row loops call it per row,
