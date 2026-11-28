@@ -180,6 +180,85 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
 }
 
+TEST_CASE("Inference coverage only compares candidates on the winning pseudocost path",
+          "[branching]") {
+    LpProblem lp;
+    lp.num_cols = 6;
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    const std::vector<Real> primals(lp.num_cols, 0.5);
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setReliabilityThreshold(1);
+    branching.setPseudocostFallback(200.0);
+    const std::array<Real, 5> costs = {200.0, 200.0, 198.5, 192.0, 184.0};
+    for (Index j = 0; j < static_cast<Index>(costs.size()); ++j) {
+        branching.updatePseudoCost(j, false, costs[j]);
+        branching.updatePseudoCost(j, true, costs[j]);
+    }
+
+    const std::array<Index, 6> mapping = {6, 2, 4, 1, 5, 3};
+    std::vector<MipBranchInferenceStats> history(7);
+    for (const Index original : mapping) {
+        history[original] = {{.samples = 4, .tightened_columns = 8},
+                             {.samples = 4, .tightened_columns = 40}};
+    }
+    history[mapping[1]].up.samples = 3;               // Exact tie without a ready challenger.
+    history[mapping[2]].up.tightened_columns = 100;   // Weaker mean unchanged.
+    history[mapping[3]].down.tightened_columns = 12;  // Better weaker mean at 4%.
+    history[mapping[4]].down.tightened_columns = 36;  // Better but outside 5%.
+    history[mapping[5]].down.tightened_columns = 24;  // Ready, but unreliable pseudocost.
+    BranchingTelemetry telemetry;
+    BranchInferenceCoverageStats stats;
+    const BranchInferenceCoverage coverage{history, mapping, stats};
+
+    const auto select = [&](const BranchInferenceCoverage* observation) {
+        return branching.selectWithInferenceCoverage(solver, lp, primals, lp.col_lower,
+                                                     lp.col_upper, 0.0, false, telemetry, {},
+                                                     observation);
+    };
+
+    CHECK(select(nullptr).variable == 0);
+    CHECK(stats.reliable.decisions == 0);
+    CHECK(stats.fallback.decisions == 0);
+    const auto chosen = select(&coverage);
+    REQUIRE(chosen.variable == 0);
+    CHECK(chosen.used_reliable_pseudocost);
+    CHECK(stats.reliable.decisions == 1);
+    CHECK(stats.fallback.decisions == 0);
+    const auto& bands = stats.reliable.bands;
+    CHECK(bands[0].close == 1);
+    CHECK(bands[0].ready == 0);
+    CHECK(bands[0].favored == 0);
+    CHECK(bands[1].close == 1);
+    CHECK(bands[1].ready == 1);
+    CHECK(bands[1].favored == 0);
+    CHECK(bands[2].close == 1);
+    CHECK(bands[2].ready == 1);
+    CHECK(bands[2].favored == 1);
+
+    branching.setReliabilityThreshold(2);
+    CHECK(select(&coverage).variable == 0);
+    CHECK(stats.reliable.decisions == 1);
+    CHECK(stats.fallback.decisions == 1);
+    for (const auto& band : stats.fallback.bands) {
+        CHECK(band.close == 1);
+        CHECK(band.ready == 1);
+        CHECK(band.favored == 1);
+    }
+    history[mapping[0]].down.samples = 3;  // Winner readiness is required too.
+    CHECK(select(&coverage).variable == 0);
+    CHECK(stats.fallback.decisions == 2);
+    for (const auto& band : stats.fallback.bands) {
+        CHECK(band.close == 2);
+        CHECK(band.ready == 1);
+        CHECK(band.favored == 1);
+    }
+}
+
 TEST_CASE("ReliabilityBranching gives sibling probes the same reliability view", "[branching]") {
     LpProblem lp;
     lp.num_cols = 3;

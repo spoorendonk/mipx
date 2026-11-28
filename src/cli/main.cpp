@@ -53,6 +53,7 @@ void printUsage(FILE* out) {
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--directional-inference (serial tree)] "
+                 "[--inference-branch-coverage (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] "
@@ -192,6 +193,7 @@ int main(int argc, char* argv[]) {
     bool tree_pseudocosts = true;
     bool balanced_branch_score = false;
     bool directional_inference = false;
+    bool inference_branch_coverage = false;
     std::optional<mipx::NodePolicy> serial_node_policy;
     const char* serial_node_policy_name = nullptr;
     bool cut_strengthening = false;
@@ -384,6 +386,8 @@ int main(int argc, char* argv[]) {
             balanced_branch_score = false;
         } else if (arg == "--directional-inference") {
             directional_inference = true;
+        } else if (arg == "--inference-branch-coverage") {
+            inference_branch_coverage = true;
         } else if (arg == "--serial-node-policy" && i + 1 < argc) {
             serial_node_policy_name = argv[++i];
             const std::string_view policy = serial_node_policy_name;
@@ -838,6 +842,7 @@ int main(int argc, char* argv[]) {
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
             solver.setBalancedBranchScore(balanced_branch_score);
             solver.setDirectionalInferenceEnabled(directional_inference);
+            solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
             solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
@@ -1002,6 +1007,31 @@ int main(int argc, char* argv[]) {
                 };
                 report("down", &mipx::MipBranchInferenceStats::down);
                 report("up", &mipx::MipBranchInferenceStats::up);
+            }
+            bool print_inference_branch_coverage = inference_branch_coverage;
+#ifdef MIPX_HAS_TBB
+            if (print_inference_branch_coverage && num_threads > 1) {
+                log.log("Inference branch coverage unavailable for parallel search\n");
+                print_inference_branch_coverage = false;
+            }
+#endif
+            if (print_inference_branch_coverage) {
+                const auto& coverage = solver.getBranchInferenceCoverageStats();
+                const auto report = [&](const char* name, const mipx::InferenceCoveragePath& path) {
+                    for (std::size_t i = 0; i < path.bands.size(); ++i) {
+                        const auto& band = path.bands[i];
+                        log.log(
+                            "Inference branch coverage %s gap=%d%%: decisions=%llu "
+                            "close=%llu ready=%llu favored=%llu\n",
+                            name, path.kGapPercents[i],
+                            static_cast<unsigned long long>(path.decisions),
+                            static_cast<unsigned long long>(band.close),
+                            static_cast<unsigned long long>(band.ready),
+                            static_cast<unsigned long long>(band.favored));
+                    }
+                };
+                report("reliable", coverage.reliable);
+                report("fallback", coverage.fallback);
             }
             if (serial_node_policy) {
                 const auto& stats = solver.getSerialNodePolicyStats();

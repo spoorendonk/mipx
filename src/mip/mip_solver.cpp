@@ -2481,16 +2481,26 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     int_inf_out = -1;
     ++node_stats.nodes_solved;
     MipDirectionalInferenceStats* inference = nullptr;
-    if (node_scratch.branch_inference != nullptr && node.branch.variable >= 0) {
-        const auto mapping = node_scratch.branch_inference_col_mapping;
+    MipDirectionalInferenceStats* live_sample = nullptr;
+    const auto history = node_scratch.branch_inference_history;
+    const auto mapping = node_scratch.branch_inference_col_mapping;
+    if (node.branch.variable >= 0 &&
+        (node_scratch.branch_inference != nullptr || !history.empty())) {
         const Index col = mapping.empty() ? node.branch.variable : mapping[node.branch.variable];
-        auto& stats = (*node_scratch.branch_inference)[col];
-        inference = node.branch.is_upper ? &stats.down : &stats.up;
-        ++inference->skipped;
+        const auto direction =
+            node.branch.is_upper ? &MipBranchInferenceStats::down : &MipBranchInferenceStats::up;
+        if (node_scratch.branch_inference != nullptr) {
+            inference = &((*node_scratch.branch_inference)[col].*direction);
+            ++inference->skipped;
+        }
+        if (!history.empty()) {
+            live_sample = &(history[col].*direction);
+        }
     }
     const auto propagateChild = [&](DomainPropagator& dp, bool pre_lp = false) {
         auto& input = node_scratch.propagation_input_bounds;
-        if (inference != nullptr) {
+        const bool measure = inference != nullptr || live_sample != nullptr;
+        if (measure) {
             input.resize(problem_.num_cols);
             for (Index j = 0; j < problem_.num_cols; ++j) {
                 input[j] = {dp.getLower(j), dp.getUpper(j)};
@@ -2499,19 +2509,25 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         const bool feasible = pre_lp ? dp.propagate(problem_.num_rows) : propagateNode(dp);
         if (inference != nullptr) {
             --inference->skipped;
-            if (feasible) {
-                ++inference->samples;
-                for (Index j = 0; j < problem_.num_cols; ++j) {
-                    if (j != node.branch.variable &&
-                        (dp.getLower(j) > input[j].first || dp.getUpper(j) < input[j].second)) {
-                        ++inference->tightened_columns;
-                    }
-                }
-            } else {
-                ++inference->cutoffs;
-            }
-            inference = nullptr;  // Only the first pass at this child is measured.
+            inference->cutoffs += !feasible;
         }
+        if (measure && feasible) {
+            uint64_t tightened = 0;
+            for (Index j = 0; j < problem_.num_cols; ++j) {
+                if (j != node.branch.variable &&
+                    (dp.getLower(j) > input[j].first || dp.getUpper(j) < input[j].second)) {
+                    ++tightened;
+                }
+            }
+            for (auto* sample : {inference, live_sample}) {
+                if (sample != nullptr) {
+                    ++sample->samples;
+                    sample->tightened_columns += tightened;
+                }
+            }
+        }
+        // Only the first pass at this child is measured.
+        inference = live_sample = nullptr;
         return feasible;
     };
     const bool use_conflicts = conflicts_enabled_ && num_threads_ <= 1;
@@ -3646,9 +3662,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             const auto activity = use_conflicts && conflict_activity_branching_enabled_
                                       ? std::span<const Real>(conflict_scores_)
                                       : std::span<const Real>{};
-            auto selection = branching_rule_.selectWithConflictActivity(
+            const BranchInferenceCoverage coverage{history, mapping,
+                                                   branch_inference_coverage_stats_};
+            auto selection = branching_rule_.selectWithInferenceCoverage(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
-                false, branching_stats_, activity);
+                false, branching_stats_, activity,
+                history.empty() || node.depth == 0 ? nullptr : &coverage);
             if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(saved_budget);
@@ -3707,6 +3726,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                             Real& incumbent, std::vector<Real>& best_solution, Real root_bound,
                             const std::function<double()>& elapsed,
                             std::span<const Index> branch_inference_col_mapping,
+                            std::span<MipBranchInferenceStats> branch_inference_history,
                             LpProblem* conflict_global_rows, const LpProblem* reconvergence_model) {
     std::vector<Real> current_lower = problem_.col_lower;
     std::vector<Real> current_upper = problem_.col_upper;
@@ -3734,8 +3754,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             branch_inference_stats_.resize(problem_.num_cols);
         }
         node_scratch.branch_inference = &branch_inference_stats_;
-        node_scratch.branch_inference_col_mapping = branch_inference_col_mapping;
     }
+    node_scratch.branch_inference_history = branch_inference_history;
+    node_scratch.branch_inference_col_mapping = branch_inference_col_mapping;
     node_scratch.conflict_global_rows = conflict_global_rows;
     node_scratch.reconvergence_model = reconvergence_model;
     auto& reconvergence_pool = node_scratch.reconvergence_pool;
@@ -4823,6 +4844,7 @@ void negateObjective(LpProblem& problem) {
 
 MipResult MipSolver::solve() {
     branch_inference_stats_.clear();
+    branch_inference_coverage_stats_ = {};
     serial_node_policy_stats_ = {};
     if (!loaded_) {
         return {};
@@ -5012,6 +5034,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     root_cut_family_stats_ = {};
     conflict_stats_ = {};
     pre_root_stats_ = {};
+    branch_inference_coverage_stats_ = {};
     search_stats_ = {};
     // A retry keeps work counters, but only the last attempt supplies a proof bound.
     serial_node_policy_stats_.proof_bound_improvement = 0.0;
@@ -7061,13 +7084,20 @@ MipResult MipSolver::solveMinimizationOnce() {
             conflict_stats_.reconvergence_cuts_in_tree = reconvergence_model.has_value();
         }
         std::span<const Index> inference_col_mapping;
+        const bool inference_coverage = inference_branch_coverage_enabled_;
+        if ((directional_inference_enabled_ || inference_coverage) && did_presolve) {
+            inference_col_mapping = presolver.colMapping();
+        }
         if (directional_inference_enabled_ && did_presolve) {
             branch_inference_stats_.resize(original_problem.num_cols);
-            inference_col_mapping = presolver.colMapping();
+        }
+        std::vector<MipBranchInferenceStats> inference_history;
+        if (inference_coverage) {
+            inference_history.resize(did_presolve ? original_problem.num_cols : problem_.num_cols);
         }
         solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,
                     solution_pool, incumbent, best_solution, root_bound, elapsed,
-                    inference_col_mapping,
+                    inference_col_mapping, inference_history,
                     (check_conflict_rays || lpConflictProofsActive()) ? root_certificate_problem_ptr
                                                                       : nullptr,
                     reconvergence_model ? &*reconvergence_model : nullptr);

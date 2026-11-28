@@ -7,7 +7,9 @@
 #include "mipx/symmetry.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <utility>
@@ -55,6 +57,47 @@ struct BranchingSelection {
     Index variable = -1;
     bool used_pseudocost = false;
     bool used_reliable_pseudocost = false;
+};
+
+struct MipDirectionalInferenceStats {
+    uint64_t samples = 0;
+    uint64_t tightened_columns = 0;
+    uint64_t cutoffs = 0;
+    uint64_t skipped = 0;
+};
+
+struct MipBranchInferenceStats {
+    MipDirectionalInferenceStats down;
+    MipDirectionalInferenceStats up;
+};
+
+struct InferenceCoverageBand {
+    /// A challenger exists within the score gap.
+    uint64_t close = 0;
+    /// The winner and a close challenger both have at least four samples per direction.
+    uint64_t ready = 0;
+    /// A ready challenger has a strictly better weaker-direction mean.
+    uint64_t favored = 0;
+};
+
+struct InferenceCoveragePath {
+    static constexpr std::array<int, 3> kGapPercents = {0, 1, 5};
+    uint64_t decisions = 0;
+    /// Cumulative bands. Each decision contributes at most once per counter.
+    std::array<InferenceCoverageBand, kGapPercents.size()> bands{};
+};
+
+struct BranchInferenceCoverageStats {
+    InferenceCoveragePath reliable;
+    InferenceCoveragePath fallback;
+};
+
+/// Live first-pass histories in original model column order. Each working
+/// column maps to an entry in history. An empty mapping uses the working index.
+struct BranchInferenceCoverage {
+    std::span<const MipBranchInferenceStats> history;
+    std::span<const Index> original_columns;
+    BranchInferenceCoverageStats& stats;
 };
 
 struct BranchingTelemetry {
@@ -170,6 +213,13 @@ public:
                                                   BranchingTelemetry& telemetry,
                                                   std::span<const Real> conflict_activity);
 
+    /// Optionally observe pseudocost selection with the same conflict activity scoring.
+    BranchingSelection selectWithInferenceCoverage(
+        DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+        std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+        bool force_strong_branch, BranchingTelemetry& telemetry,
+        std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage);
+
     /// Read the batch's pseudocosts and collect this node's probe observations
     /// for ordered application after every node in the batch has finished.
     BranchingSelection selectDeferred(DualSimplexSolver& lp, const LpProblem& problem,
@@ -185,7 +235,8 @@ private:
         DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
         std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
         bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
-        std::span<const Real> conflict_activity, RecordProbe record_probe) const;
+        std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage,
+        RecordProbe record_probe) const;
 
     struct PseudoCost {
         Real up = 0.0;
@@ -204,6 +255,10 @@ private:
         Real prefilter_score = 0.0;
         bool reliable = false;
     };
+
+    static void measureInferenceCoverage(const BranchInferenceCoverage& coverage,
+                                         std::span<const Candidate> candidates, Index winner,
+                                         Real winner_score, bool reliable);
 
     [[nodiscard]] bool inRange(Index var) const {
         return var >= 0 && var < static_cast<Index>(pseudocosts_.size());
