@@ -58,6 +58,7 @@ struct BranchingSelection {
     bool used_pseudocost = false;
     bool used_reliable_pseudocost = false;
     Index inference_baseline = -1;
+    Index cutoff_baseline = -1;
 };
 
 struct MipDirectionalInferenceStats {
@@ -117,6 +118,37 @@ struct BranchInferenceCoverage {
     std::span<const Index> original_columns;
     BranchInferenceCoverageStats& stats;
     bool select_by_inference = false;
+};
+
+struct CutoffComparisonPath {
+    uint64_t decisions = 0;
+    uint64_t ready_pairs = 0;
+    uint64_t favored_decisions = 0;
+    uint64_t selection_changes = 0;
+    uint64_t surviving_changes = 0;
+};
+
+enum class BranchCutoffScoreMode { Off, RecordOnly, Score };
+
+struct BranchCutoffComparisonStats {
+    CutoffComparisonPath reliable;
+    CutoffComparisonPath fallback;
+
+    void recordArbitration(const BranchingSelection& selection, Index chosen,
+                           Index baseline_chosen);
+};
+
+/// Live first-LP dispositions in original model column order.
+struct BranchCutoffComparison {
+    std::span<const MipBranchCutoffStats> history;
+    std::span<const Index> original_columns;
+    BranchCutoffComparisonStats& stats;
+    bool select_by_cutoff = false;
+};
+
+struct BranchSelectionHistories {
+    const BranchInferenceCoverage* inference = nullptr;
+    const BranchCutoffComparison* cutoff = nullptr;
 };
 
 struct BranchingTelemetry {
@@ -239,6 +271,14 @@ public:
         bool force_strong_branch, BranchingTelemetry& telemetry,
         std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage);
 
+    BranchingSelection selectWithHistories(DualSimplexSolver& lp, const LpProblem& problem,
+                                           std::span<const Real> primal_values,
+                                           std::span<const Real> col_lower,
+                                           std::span<const Real> col_upper, Real node_objective,
+                                           bool force_strong_branch, BranchingTelemetry& telemetry,
+                                           std::span<const Real> conflict_activity,
+                                           BranchSelectionHistories histories);
+
     /// Read the batch's pseudocosts and collect this node's probe observations
     /// for ordered application after every node in the batch has finished.
     BranchingSelection selectDeferred(DualSimplexSolver& lp, const LpProblem& problem,
@@ -254,7 +294,7 @@ private:
         DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
         std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
         bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
-        std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage,
+        std::span<const Real> conflict_activity, BranchSelectionHistories histories,
         RecordProbe record_probe) const;
 
     struct PseudoCost {
@@ -267,17 +307,26 @@ private:
     struct Candidate {
         Index var = -1;
         Real value = 0.0;
-        Real frac = 0.0;
         Real down_dist = 0.0;
         Real up_dist = 0.0;
+        Real objective_score = 0.0;
         Real pseudo_score = 0.0;
         Real prefilter_score = 0.0;
         bool reliable = false;
+
+        [[nodiscard]] bool winsHistoryTie(const Candidate& other, bool objective_only) const {
+            const Real score = objective_only ? objective_score : pseudo_score;
+            const Real other_score = objective_only ? other.objective_score : other.pseudo_score;
+            return score > other_score || (score == other_score && var < other.var);
+        }
     };
 
     static void compareInference(const BranchInferenceCoverage& coverage,
                                  std::span<const Candidate> candidates, Real winner_score,
                                  BranchingSelection& selection);
+    static Index compareCutoffs(const BranchCutoffComparison& comparison,
+                                std::span<const Candidate> candidates, Real winner_score,
+                                const BranchingSelection& selection);
 
     [[nodiscard]] bool inRange(Index var) const {
         return var >= 0 && var < static_cast<Index>(pseudocosts_.size());

@@ -3756,17 +3756,26 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             const BranchInferenceCoverage coverage{history, mapping,
                                                    branch_inference_coverage_stats_,
                                                    inference_branch_score_enabled_};
-            selection = branching_rule_.selectWithInferenceCoverage(
+            const BranchCutoffComparison cutoff_comparison{
+                cutoff_history, mapping, branch_cutoff_comparison_stats_,
+                branch_cutoff_score_mode_ == BranchCutoffScoreMode::Score};
+            const BranchSelectionHistories branch_histories{
+                history.empty() || node.depth == 0 ? nullptr : &coverage,
+                cutoff_history.empty() || node.depth == 0 ||
+                        branch_cutoff_score_mode_ == BranchCutoffScoreMode::Off
+                    ? nullptr
+                    : &cutoff_comparison};
+            selection = branching_rule_.selectWithHistories(
                 lp, problem_, node_primals_out, current_lower, current_upper, probe_reference,
-                false, branching_stats_, activity,
-                history.empty() || node.depth == 0 ? nullptr : &coverage);
+                false, branching_stats_, activity, branch_histories);
             if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(saved_budget);
             }
             branch_var = selection.variable;
         }
-        Index baseline = selection.inference_baseline;
+        Index baseline = selection.cutoff_baseline >= 0 ? selection.cutoff_baseline
+                                                        : selection.inference_baseline;
         if (use_conflicts && !conflict_activity_branching_enabled_ && branch_var >= 0) {
             const Index overridden = selectConflictAwareBranchVariable(
                 node_primals_out, current_lower, current_upper, branch_var);
@@ -3779,6 +3788,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
         if (selection.inference_baseline >= 0) {
             branch_inference_coverage_stats_.recordArbitration(selection, branch_var, baseline);
+        }
+        if (selection.cutoff_baseline >= 0) {
+            branch_cutoff_comparison_stats_.recordArbitration(selection, branch_var, baseline);
         }
     }
     if (branch_var < 0) {
@@ -4949,6 +4961,7 @@ MipResult MipSolver::solve() {
     branch_inference_stats_.clear();
     branch_inference_coverage_stats_ = {};
     branch_cutoff_stats_.clear();
+    branch_cutoff_comparison_stats_ = {};
     serial_node_policy_stats_ = {};
     if (!loaded_) {
         return {};
@@ -5146,6 +5159,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     pre_root_stats_ = {};
     branch_inference_coverage_stats_ = {};
     branch_cutoff_stats_.clear();
+    branch_cutoff_comparison_stats_ = {};
     search_stats_ = {};
     // A retry keeps work counters, but only the last attempt supplies a proof bound.
     serial_node_policy_stats_.proof_bound_improvement = 0.0;
@@ -7215,8 +7229,9 @@ MipResult MipSolver::solveMinimizationOnce() {
         std::span<const Index> history_col_mapping;
         const bool inference_coverage =
             inference_branch_coverage_enabled_ || inference_branch_score_enabled_;
-        if ((directional_inference_enabled_ || inference_coverage ||
-             branch_cutoff_stats_enabled_) &&
+        const bool collect_cutoffs =
+            branch_cutoff_stats_enabled_ || branch_cutoff_score_mode_ != BranchCutoffScoreMode::Off;
+        if ((directional_inference_enabled_ || inference_coverage || collect_cutoffs) &&
             did_presolve) {
             history_col_mapping = presolver.colMapping();
         }
@@ -7228,7 +7243,7 @@ MipResult MipSolver::solveMinimizationOnce() {
         if (inference_coverage) {
             inference_history.resize(history_columns);
         }
-        if (branch_cutoff_stats_enabled_) {
+        if (collect_cutoffs) {
             branch_cutoff_stats_.resize(history_columns);
         }
         solveSerial(lp, queue, nodes_explored, total_lp_iters, total_work, root_runtime,

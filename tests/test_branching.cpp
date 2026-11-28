@@ -321,6 +321,77 @@ TEST_CASE("Inference picks a ready near tie only when the weaker direction impro
     CHECK(path.selection_changes == 2);
 }
 
+TEST_CASE("Smoothed weaker child cutoff rates rank ready pseudocost near ties", "[branching]") {
+    const Index reliability_threshold = GENERATE(1, 2);
+    const Real scale = GENERATE(0.01, 1.0);
+    LpProblem lp;
+    lp.num_cols = 6;
+    lp.col_type.assign(lp.num_cols, VarType::Binary);
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    const std::vector<Real> primals(lp.num_cols, 0.5);
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setReliabilityThreshold(reliability_threshold);
+    // Activity puts column 1 ahead of columns 2 and 3, which sit at the 1% boundary.
+    const std::array<Real, 6> costs{200.0, 133.2, 198.0, 198.0, 196.0, 200.0};
+    const std::array<Real, 6> activity{0.0, 1.0, 0.0, 0.0, 0.0, 0.0};
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        branching.updatePseudoCost(j, false, costs[j] * scale);
+        branching.updatePseudoCost(j, true, costs[j] * scale);
+    }
+
+    const std::array<Index, 6> columns{4, 5, 0, 2, 1, 3};
+    std::array<MipBranchCutoffStats, 6> history;
+    history[columns[0]] = {{8, 0}, {8, 8}};     // Weaker rate 1/10.
+    history[columns[1]] = {{4, 0}, {4, 4}};     // Weaker rate 1/6, equal raw rate.
+    history[columns[2]] = {{20, 20}, {12, 0}};  // Better pooled rate, weaker rate 1/14.
+    history[columns[3]] = {{4, 4}, {3, 3}};     // Insufficient up exposure.
+    history[columns[4]] = {{4, 4}, {4, 4}};     // Outside 1%.
+    history[columns[5]] = history[columns[0]];
+    BranchingTelemetry telemetry;
+    BranchCutoffComparisonStats stats;
+    BranchCutoffComparison cutoff{history, columns, stats};
+    const auto select = [&] {
+        return branching.selectWithHistories(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0,
+                                             false, telemetry, activity, {.cutoff = &cutoff});
+    };
+    const auto& path = reliability_threshold == 1 ? stats.reliable : stats.fallback;
+    CHECK(select().variable == 0);
+    REQUIRE(path.ready_pairs == 3);
+    REQUIRE(path.favored_decisions == 1);
+    CHECK(path.selection_changes == 0);
+
+    cutoff.select_by_cutoff = true;
+    const auto preferred = select();
+    REQUIRE(preferred.variable == 1);
+    REQUIRE(preferred.cutoff_baseline == 0);
+    CHECK(path.selection_changes == 1);
+    stats.recordArbitration(preferred, 1, 1);
+    CHECK(path.surviving_changes == 0);
+    stats.recordArbitration(preferred, 1, 0);
+    CHECK(path.surviving_changes == 1);
+
+    history[columns[2]] = history[columns[1]];
+    history[columns[3]] = history[columns[1]];
+    CHECK(select().variable == 2);  // Equal rate, then objective score and column index.
+    history[columns[0]].up.qualified_attempts = 3;
+    history[columns[0]].up.cutoffs = 3;
+    CHECK(select().variable == 0);
+    CHECK(path.selection_changes == 2);
+
+    history[columns[0]].up = {8, 8};
+    cutoff.original_columns = std::span(columns).first(1);
+    CHECK(select().variable == 0);
+    auto invalid_mapping = columns;
+    invalid_mapping[0] = static_cast<Index>(history.size());
+    cutoff.original_columns = invalid_mapping;
+    CHECK(select().variable == 0);
+    CHECK(path.selection_changes == 2);
+}
+
 TEST_CASE("ReliabilityBranching gives sibling probes the same reliability view", "[branching]") {
     LpProblem lp;
     lp.num_cols = 3;

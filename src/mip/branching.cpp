@@ -12,6 +12,7 @@ namespace {
 /// Integrality tolerance used when deciding which variables contribute to the
 /// pseudocost node estimate. Matches the branching/LP integrality tolerance.
 constexpr Real kPseudocostEstimateIntTol = 1e-6;
+constexpr Real kNearTieRelativeGap = 0.01;
 
 }  // namespace
 
@@ -171,6 +172,13 @@ void BranchInferenceCoverageStats::recordArbitration(const BranchingSelection& s
     }
 }
 
+void BranchCutoffComparisonStats::recordArbitration(const BranchingSelection& selection,
+                                                    Index chosen, Index baseline_chosen) {
+    if (selection.cutoff_baseline >= 0 && chosen != baseline_chosen) {
+        ++(selection.used_reliable_pseudocost ? reliable : fallback).surviving_changes;
+    }
+}
+
 void ReliabilityBranching::compareInference(const BranchInferenceCoverage& coverage,
                                             std::span<const Candidate> candidates,
                                             Real winner_score, BranchingSelection& selection) {
@@ -213,11 +221,9 @@ void ReliabilityBranching::compareInference(const BranchInferenceCoverage& cover
         if (winner_mean) {
             if (const auto challenger_mean = weakerMean(candidate.var)) {
                 observed = *challenger_mean > *winner_mean ? Evidence::Favored : Evidence::Ready;
-                const bool best_tie =
-                    best != nullptr && *challenger_mean == best_mean &&
-                    (candidate.pseudo_score > best->pseudo_score ||
-                     (candidate.pseudo_score == best->pseudo_score && candidate.var < best->var));
-                if (coverage.select_by_inference && gap <= 0.01 &&
+                const bool best_tie = best != nullptr && *challenger_mean == best_mean &&
+                                      candidate.winsHistoryTie(*best, false);
+                if (coverage.select_by_inference && gap <= kNearTieRelativeGap &&
                     (*challenger_mean > best_mean || best_tie)) {
                     best = &candidate;
                     best_mean = *challenger_mean;
@@ -240,6 +246,64 @@ void ReliabilityBranching::compareInference(const BranchInferenceCoverage& cover
         selection.variable = best->var;
         ++path.selection_changes;
     }
+}
+
+Index ReliabilityBranching::compareCutoffs(const BranchCutoffComparison& comparison,
+                                           std::span<const Candidate> candidates, Real winner_score,
+                                           const BranchingSelection& selection) {
+    if (!std::isfinite(winner_score)) {
+        return -1;
+    }
+    const Index winner = selection.variable;
+    const bool reliable = selection.used_reliable_pseudocost;
+    auto& path = reliable ? comparison.stats.reliable : comparison.stats.fallback;
+    ++path.decisions;
+    const auto weakerRate = [&](Index variable) -> std::optional<Real> {
+        const auto columns = comparison.original_columns;
+        if (!columns.empty() && static_cast<std::size_t>(variable) >= columns.size()) {
+            return std::nullopt;
+        }
+        const Index original = columns.empty() ? variable : columns[variable];
+        if (original < 0 || static_cast<std::size_t>(original) >= comparison.history.size()) {
+            return std::nullopt;
+        }
+        const auto& sample = comparison.history[original];
+        if (sample.down.qualified_attempts < 4 || sample.up.qualified_attempts < 4) {
+            return std::nullopt;
+        }
+        const auto rate = [](const MipDirectionalCutoffStats& direction) {
+            return (static_cast<Real>(direction.cutoffs) + 1.0) /
+                   (static_cast<Real>(direction.qualified_attempts) + 2.0);
+        };
+        return std::min(rate(sample.down), rate(sample.up));
+    };
+
+    const auto winner_rate = weakerRate(winner);
+    if (!winner_rate) {
+        return -1;
+    }
+    const Candidate* best = nullptr;
+    Real best_rate = *winner_rate;
+    const Real minimum_score = winner_score * (1.0 - kNearTieRelativeGap);
+    for (const auto& candidate : candidates) {
+        if (candidate.var == winner || (reliable && !candidate.reliable) ||
+            !std::isfinite(candidate.pseudo_score) || candidate.pseudo_score < minimum_score) {
+            continue;
+        }
+        const auto rate = weakerRate(candidate.var);
+        if (!rate) {
+            continue;
+        }
+        ++path.ready_pairs;
+        const bool best_tie =
+            best != nullptr && *rate == best_rate && candidate.winsHistoryTie(*best, true);
+        if (*rate > best_rate || best_tie) {
+            best = &candidate;
+            best_rate = *rate;
+        }
+    }
+    path.favored_decisions += best != nullptr;
+    return best == nullptr ? -1 : best->var;
 }
 
 BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpProblem& problem,
@@ -267,9 +331,18 @@ BranchingSelection ReliabilityBranching::selectWithInferenceCoverage(
     std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
     bool force_strong_branch, BranchingTelemetry& telemetry,
     std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage) {
+    return selectWithHistories(lp, problem, primal_values, col_lower, col_upper, node_objective,
+                               force_strong_branch, telemetry, conflict_activity, {coverage});
+}
+
+BranchingSelection ReliabilityBranching::selectWithHistories(
+    DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+    std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+    bool force_strong_branch, BranchingTelemetry& telemetry,
+    std::span<const Real> conflict_activity, BranchSelectionHistories histories) {
     return selectWithProbeSink(
         lp, problem, primal_values, col_lower, col_upper, node_objective, force_strong_branch,
-        strong_branch_probe_budget_, telemetry, conflict_activity, coverage,
+        strong_branch_probe_budget_, telemetry, conflict_activity, histories,
         [&](const StrongBranchPseudocostSample& sample) {
             updatePseudoCost(sample.variable, sample.up_direction, sample.gain_per_unit);
         });
@@ -282,7 +355,7 @@ BranchingSelection ReliabilityBranching::selectDeferred(
     std::vector<StrongBranchPseudocostSample>& samples) const {
     return selectWithProbeSink(
         lp, problem, primal_values, col_lower, col_upper, node_objective, false, probe_budget,
-        telemetry, {}, nullptr,
+        telemetry, {}, {},
         [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
 }
 
@@ -291,7 +364,7 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
     std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
     bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
-    std::span<const Real> conflict_activity, const BranchInferenceCoverage* coverage,
+    std::span<const Real> conflict_activity, BranchSelectionHistories histories,
     RecordProbe record_probe) const {
     BranchingSelection selection;
     ++telemetry.selections;
@@ -321,18 +394,18 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         Candidate c;
         c.var = j;
         c.value = value;
-        c.frac = fractionality(value);
         c.down_dist = down_dist;
         c.up_dist = up_dist;
         c.reliable = isReliable(j);
-        c.pseudo_score = directionalScore(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
+        c.objective_score = directionalScore(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
+        c.pseudo_score = c.objective_score;
         if (score_conflicts) {
             // A bounded, scale-free boost keeps LP gains relevant even when
             // many learned conflicts mention the same column.
             const Real activity = std::max<Real>(0.0, conflict_activity[j]);
             c.pseudo_score *= 2.0 - 1.0 / (1.0 + activity);
         }
-        c.prefilter_score = blendScore(c.frac, c.pseudo_score);
+        c.prefilter_score = blendScore(fractionality(value), c.pseudo_score);
         candidates.push_back(c);
     }
 
@@ -486,13 +559,29 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         return selection;
     }
 
+    const auto observeHistories = [&](Real winner_score) {
+        const auto* cutoff = histories.cutoff;
+        const bool score_cutoffs = cutoff != nullptr && cutoff->select_by_cutoff;
+        const Index cutoff_candidate =
+            cutoff != nullptr ? compareCutoffs(*cutoff, candidates, winner_score, selection) : -1;
+        if (histories.inference != nullptr) {
+            auto inference = *histories.inference;
+            inference.select_by_inference &= !score_cutoffs;
+            compareInference(inference, candidates, winner_score, selection);
+        }
+        if (score_cutoffs && cutoff_candidate >= 0) {
+            selection.cutoff_baseline = selection.variable;
+            selection.variable = cutoff_candidate;
+            auto& stats = cutoff->stats;
+            ++(selection.used_reliable_pseudocost ? stats.reliable : stats.fallback)
+                  .selection_changes;
+        }
+    };
     if (best_reliable >= 0) {
         selection.variable = best_reliable;
         selection.used_pseudocost = true;
         selection.used_reliable_pseudocost = true;
-        if (coverage != nullptr) {
-            compareInference(*coverage, candidates, best_reliable_score, selection);
-        }
+        observeHistories(best_reliable_score);
         ++telemetry.pseudocost_uses;
         ++telemetry.pseudocost_hits;
         return selection;
@@ -509,9 +598,7 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
     selection.variable = (best_it == candidates.end()) ? -1 : best_it->var;
     if (selection.variable >= 0) {
         selection.used_pseudocost = true;
-        if (coverage != nullptr) {
-            compareInference(*coverage, candidates, best_it->pseudo_score, selection);
-        }
+        observeHistories(best_it->pseudo_score);
         ++telemetry.pseudocost_uses;
     }
     return selection;

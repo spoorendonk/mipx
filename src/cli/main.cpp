@@ -56,6 +56,7 @@ void printUsage(FILE* out) {
                  "[--inference-branch-coverage (serial tree)] "
                  "[--inference-branch-score (serial tree)] "
                  "[--branch-cutoff-stats (serial tree)] "
+                 "[--branch-cutoff-score off|record|on (serial tree)] "
                  "[--serial-node-policy best-first|best-estimate|depth-biased] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--root-cut-recheck] [--root-cut-propagation] [--root-cut-inference] "
@@ -201,6 +202,7 @@ int main(int argc, char* argv[]) {
     bool inference_branch_coverage = false;
     bool inference_branch_score = false;
     bool branch_cutoff_stats = false;
+    auto branch_cutoff_score = mipx::BranchCutoffScoreMode::Off;
     std::optional<mipx::NodePolicy> serial_node_policy;
     const char* serial_node_policy_name = nullptr;
     bool cut_strengthening = false;
@@ -420,6 +422,18 @@ int main(int argc, char* argv[]) {
             inference_branch_score = true;
         } else if (arg == "--branch-cutoff-stats") {
             branch_cutoff_stats = true;
+        } else if (arg == "--branch-cutoff-score" && i + 1 < argc) {
+            const std::string_view mode = argv[++i];
+            if (mode == "off") {
+                branch_cutoff_score = mipx::BranchCutoffScoreMode::Off;
+            } else if (mode == "record") {
+                branch_cutoff_score = mipx::BranchCutoffScoreMode::RecordOnly;
+            } else if (mode == "on") {
+                branch_cutoff_score = mipx::BranchCutoffScoreMode::Score;
+            } else {
+                std::fprintf(stderr, "--branch-cutoff-score requires off, record, or on\n");
+                return 2;
+            }
         } else if (arg == "--serial-node-policy" && i + 1 < argc) {
             serial_node_policy_name = argv[++i];
             const std::string_view policy = serial_node_policy_name;
@@ -881,6 +895,7 @@ int main(int argc, char* argv[]) {
             solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
             solver.setInferenceBranchScoreEnabled(inference_branch_score);
             solver.setBranchCutoffStatsEnabled(branch_cutoff_stats);
+            solver.setBranchCutoffScoreMode(branch_cutoff_score);
             solver.setSerialNodePolicyOverride(serial_node_policy);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
@@ -1129,6 +1144,29 @@ int main(int argc, char* argv[]) {
                     };
                     report("down", &mipx::MipBranchCutoffStats::down);
                     report("up", &mipx::MipBranchCutoffStats::up);
+                }
+            }
+            if (branch_cutoff_score != mipx::BranchCutoffScoreMode::Off) {
+#ifdef MIPX_HAS_TBB
+                if (num_threads > 1) {
+                    log.log("Child cutoff branch score unavailable for parallel search\n");
+                } else
+#endif
+                {
+                    const auto& stats = solver.getBranchCutoffComparisonStats();
+                    const auto report = [&](const char* name,
+                                            const mipx::CutoffComparisonPath& path) {
+                        log.log(
+                            "Child cutoff branch score %s: decisions=%llu ready_pairs=%llu "
+                            "favored=%llu changes=%llu survived=%llu\n",
+                            name, static_cast<unsigned long long>(path.decisions),
+                            static_cast<unsigned long long>(path.ready_pairs),
+                            static_cast<unsigned long long>(path.favored_decisions),
+                            static_cast<unsigned long long>(path.selection_changes),
+                            static_cast<unsigned long long>(path.surviving_changes));
+                    };
+                    report("reliable", stats.reliable);
+                    report("fallback", stats.fallback);
                 }
             }
             if (serial_node_policy) {

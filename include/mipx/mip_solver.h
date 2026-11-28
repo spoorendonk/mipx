@@ -557,6 +557,9 @@ public:
     void setInferenceBranchScoreEnabled(bool enabled) { inference_branch_score_enabled_ = enabled; }
     /// Count qualified first-LP dispositions of actual serial variable children.
     void setBranchCutoffStatsEnabled(bool enabled) { branch_cutoff_stats_enabled_ = enabled; }
+    /// Compare smoothed cutoff rates on the serial pseudocost shortlist.
+    /// Score takes precedence over inference ranking. Both may record coverage.
+    void setBranchCutoffScoreMode(BranchCutoffScoreMode mode) { branch_cutoff_score_mode_ = mode; }
     /// Learn pseudocosts from the gains of solved child nodes (#199). On by
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.
@@ -684,6 +687,9 @@ public:
     /// Last serial solve attempt, indexed by original column before presolve.
     const std::vector<MipBranchCutoffStats>& getBranchCutoffStats() const {
         return branch_cutoff_stats_;
+    }
+    const BranchCutoffComparisonStats& getBranchCutoffComparisonStats() const {
+        return branch_cutoff_comparison_stats_;
     }
     const MipTreePresolveStats& getTreePresolveStats() const { return tree_presolve_stats_; }
     const RcFixingStats& getRcFixingStats() const { return rc_fixing_stats_; }
@@ -1066,6 +1072,7 @@ private:
     bool inference_branch_coverage_enabled_ = false;
     bool inference_branch_score_enabled_ = false;
     bool branch_cutoff_stats_enabled_ = false;
+    BranchCutoffScoreMode branch_cutoff_score_mode_ = BranchCutoffScoreMode::Off;
     Int conflict_max_pool_size_ = 512;
     Int conflict_max_age_ = 64;
     SearchProfile search_profile_ = SearchProfile::Default;
@@ -1107,6 +1114,7 @@ private:
     std::vector<MipBranchInferenceStats> branch_inference_stats_;
     BranchInferenceCoverageStats branch_inference_coverage_stats_;
     std::vector<MipBranchCutoffStats> branch_cutoff_stats_;
+    BranchCutoffComparisonStats branch_cutoff_comparison_stats_;
     MipTreePresolveStats tree_presolve_stats_{};
     MipSymmetryStats symmetry_stats_{};
     RcFixingStats rc_fixing_stats_{};
