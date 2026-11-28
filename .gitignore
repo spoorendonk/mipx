@@ -8,12 +8,13 @@ dist/
 .venv-*/
 __pycache__/
 *.pyc
-tests/data/netlib/
-tests/data/miplib/
-tests/data/mittelman_lp/
-tests/data/mittelman_mip/
-tests/data/lptestset/
-tests/data/meszaros/
+# No trailing slash: a symlink to a shared download is ignored too.
+tests/data/netlib
+tests/data/miplib
+tests/data/mittelman_lp
+tests/data/mittelman_mip
+tests/data/lptestset
+tests/data/meszaros
 tests/data/.cache/
 tests/data/**/*.mps
 tests/data/**/*.mps.gz
