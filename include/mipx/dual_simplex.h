@@ -155,7 +155,9 @@ struct DualSimplexOptions {
     // (0.5 - u_{n+i}) * multiplier * 1e-12, either sign. Logicals have no
     // cost slot here, so the move goes on the structurals of row i (c_j +=
     // delta * a_ij), the same LP on the feasible set. Cold-start perturbation
-    // only, and it comes off with it.
+    // only, and it comes off with it. A move under an ulp of c_j (|c_j|
+    // around 1e4 and up) rounds away, so on large costs it is weaker than
+    // HiGHS's; with the HiGHS shape and every cost zero there is none.
     bool cost_perturbation_logical_jitter = false;
 
     // Stall-triggered cost perturbation (#427), for the warm starts the one

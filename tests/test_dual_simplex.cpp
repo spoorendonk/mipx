@@ -1148,7 +1148,8 @@ TEST_CASE("DualSimplex: a warm start that stalls recovers under the stall cost p
 // covering LP with zero costs on every third column and the rest spread over
 // 1..1000 (so the HiGHS shape damps C and ByTheBook does not): every variant,
 // alone and together, is applied, comes off, and ends at the unperturbed
-// optimum with a feasible x.
+// optimum with a feasible x. Two seeds take different paths, and on the same
+// LP with every cost zero only ByTheBook perturbs.
 TEST_CASE("DualSimplex: cost perturbation shape variants reach the unperturbed optimum",
           "[dual_simplex][degeneracy]") {
     constexpr Index m = 30;
@@ -1186,6 +1187,11 @@ TEST_CASE("DualSimplex: cost perturbation shape variants reach the unperturbed o
     CHECK_FALSE(defaults.cost_perturbation_seeded_random);
     CHECK_FALSE(defaults.cost_perturbation_logical_jitter);
 
+    struct Run {
+        LpResult result;
+        DualSimplexSolver::DegeneracyStats stats;
+        std::vector<Real> x;
+    };
     auto solveWith = [&](Shape shape, bool seeded, uint64_t seed, bool jitter) {
         DualSimplexSolver solver;
         solver.setVerbose(false);
@@ -1201,8 +1207,6 @@ TEST_CASE("DualSimplex: cost perturbation shape variants reach the unperturbed o
         INFO("shape " << static_cast<int>(shape) << " seeded " << seeded << " seed " << seed
                       << " jitter " << jitter);
         REQUIRE(result.status == Status::Optimal);
-        CHECK(stats.cost_perturbed);
-        CHECK(stats.cost_perturbation_removals >= 1);
         const std::vector<Real> x = solver.getPrimalValues();
         REQUIRE(x.size() == static_cast<std::size_t>(n));
         Real cx = 0.0;
@@ -1220,14 +1224,40 @@ TEST_CASE("DualSimplex: cost perturbation shape variants reach the unperturbed o
             }
             CHECK(ax >= 1.0 - 1e-9);
         }
-        return result.objective;
+        return Run{result, stats, x};
     };
-    const Real base = solveWith(Shape::HiGHS, false, 0, false);
-    CHECK_THAT(solveWith(Shape::ByTheBook, false, 0, false), WithinAbs(base, 1e-6));
-    CHECK_THAT(solveWith(Shape::HiGHS, true, 0, false), WithinAbs(base, 1e-6));
-    CHECK_THAT(solveWith(Shape::HiGHS, true, 12345, false), WithinAbs(base, 1e-6));
-    CHECK_THAT(solveWith(Shape::HiGHS, false, 0, true), WithinAbs(base, 1e-6));
-    CHECK_THAT(solveWith(Shape::ByTheBook, true, 99, true), WithinAbs(base, 1e-6));
+    const Run base = solveWith(Shape::HiGHS, false, 0, false);
+    const Run book = solveWith(Shape::ByTheBook, false, 0, false);
+    const Run seed0 = solveWith(Shape::HiGHS, true, 0, false);
+    const Run seed1 = solveWith(Shape::HiGHS, true, 12345, false);
+    const Run jitter = solveWith(Shape::HiGHS, false, 0, true);
+    const Run all = solveWith(Shape::ByTheBook, true, 99, true);
+    for (const Run* r : {&base, &book, &seed0, &seed1, &jitter, &all}) {
+        CHECK(r->stats.cost_perturbed);
+        CHECK(r->stats.cost_perturbation_removals >= 1);
+        CHECK_THAT(r->result.objective, WithinAbs(base.result.objective, 1e-6));
+    }
+    // The stream changes the path (deterministically), so a seed that did
+    // nothing would show here. The jitter's 1e-12 moves on a slack basis need
+    // not change it.
+    auto samePath = [](const Run& a, const Run& b) {
+        return a.result.iterations == b.result.iterations &&
+               a.stats.dual_pivots == b.stats.dual_pivots &&
+               a.stats.dual_zero_steps == b.stats.dual_zero_steps && a.x == b.x;
+    };
+    CHECK_FALSE(samePath(seed0, seed1));
+    CHECK(samePath(solveWith(Shape::HiGHS, false, 0, false), base));
+
+    // With every cost zero the HiGHS shape's base is zero, so it does not
+    // perturb; ByTheBook's absolute term (10 Td) does, and the zero optimum
+    // stays.
+    lp.obj.assign(n, 0.0);
+    const Run zero_highs = solveWith(Shape::HiGHS, false, 0, false);
+    const Run zero_book = solveWith(Shape::ByTheBook, false, 0, false);
+    CHECK_FALSE(zero_highs.stats.cost_perturbed);
+    CHECK(zero_book.stats.cost_perturbed);
+    CHECK_THAT(zero_highs.result.objective, WithinAbs(0.0, 1e-9));
+    CHECK_THAT(zero_book.result.objective, WithinAbs(0.0, 1e-9));
 }
 
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",

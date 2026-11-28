@@ -10,9 +10,10 @@
 //   repair candidates), the tie-break by index instead of a random order and
 //   the Harris step's clamp at 0 are mipx's own;
 // - the cost perturbation against dual degeneracy: HEkk::initialiseCost in
-//   highs/simplex/HEkk.cpp. mipx draws its own random numbers, drops the
-//   logicals' jitter, and does not perturb when every cost is zero, where
-//   HiGHS perturbs as if the largest cost were 1.
+//   highs/simplex/HEkk.cpp. mipx draws its own random numbers, makes the
+//   logicals' jitter opt-in (put on the rows' structurals, #428), and does
+//   not perturb when every cost is zero, where HiGHS perturbs as if the
+//   largest cost were 1.
 //
 // HiGHS's licence:
 //
