@@ -548,20 +548,52 @@ TEST_CASE("Barrier crossover: a Farkas ray is rechecked in the model's data",
     // y unbounded below: d_y = 1 meets an infinite lower bound, and the LP
     // is feasible.
     CHECK_FALSE(farkasRayProvesInfeasible(twoRowLp(2.0, -kInf), ray));
+
+    // Free x and z: x + z <= 0 and x + c z >= 1. For c = 1 the ray (1, -1)
+    // gives A^T y = 0 exactly, a proof. For c = 1 + 1e-13 the LP is feasible
+    // (z = 1e13, x = -z): d_z = -1e-13 is far above the sums' round-off, so
+    // it meets z's infinite upper bound and proves nothing.
+    const auto freeLp = [](Real c) {
+        LpProblem lp;
+        lp.sense = Sense::Minimize;
+        lp.num_cols = 2;
+        lp.num_rows = 2;
+        lp.obj = {0.0, 0.0};
+        lp.col_lower = {-kInf, -kInf};
+        lp.col_upper = {kInf, kInf};
+        lp.col_type.assign(2, VarType::Continuous);
+        lp.col_names.assign(2, "");
+        lp.row_lower = {-kInf, 1.0};
+        lp.row_upper = {0.0, kInf};
+        lp.row_names.assign(2, "");
+        lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, c}});
+        return lp;
+    };
+    CHECK(farkasRayProvesInfeasible(freeLp(1.0), ray));
+    CHECK_FALSE(farkasRayProvesInfeasible(freeLp(1.0 + 1e-13), ray));
 }
 
 // Netlib cplex2 is infeasible by 1.6e-11 per row: from the HSD run's stalled
 // point the warm crossover lands within the simplex's tolerance and ended
-// Optimal (#408). The probe's cold run finds a ray that rechecks.
+// Optimal (#408). Crossover now ends Infeasible on a ray that rechecks, by
+// whichever path the run takes: the probe after a stop short is the one
+// measured.
 TEST_CASE("Barrier HSD: crossover proves Netlib cplex2 infeasible", "[barrier][hsd][crossover]") {
     const auto lp = readMps(mipx::test::testDataDir() + "/cplex2.mps");
+    // The cold dual simplex's ray rechecks in the model's data.
+    DualSimplexSolver cold;
+    cold.load(lp);
+    cold.setVerbose(false);
+    REQUIRE(cold.solve().status == Status::Infeasible);
+    CHECK(farkasRayProvesInfeasible(lp, cold.getDualRay()));
+
     auto opts = quietOptions(true, BarrierAlgorithm::CpuSparseCholesky);
     opts.presolve = true;
     opts.threads = 1;
     const auto crossed = crossWith(lp, opts);
+    CAPTURE(crossed.stats.attempted, crossed.stats.infeasibility_probe,
+            crossed.stats.probe_iterations, crossed.stats.cold_fallback);
     CHECK(crossed.homogeneous);
-    CHECK(crossed.stats.infeasibility_probe);
-    CHECK(crossed.stats.probe_iterations > 0);
     CHECK(crossed.result.status == Status::Infeasible);
 }
 

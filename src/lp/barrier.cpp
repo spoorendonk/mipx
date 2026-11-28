@@ -2487,19 +2487,20 @@ std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
 // margins together:
 // - kGapRel of `terms`, the sum of the magnitudes of the terms of alpha and
 //   beta, so a proof is not a sliver of the numbers it is made of;
-// - a bound on the sums' own round-off, eps * (terms summed) * `cancel`,
-//   where `cancel` also counts each d_j's spread, the sum of its |y_i a_ij|,
-//   times its bound: d_j can be the remainder of a large cancellation.
+// - a bound on the sums' own round-off, `rel` * `cancel`, with rel = eps *
+//   (terms summed) and `cancel` counting each d_j's spread, the sum of its
+//   |y_i a_ij|, times its larger finite bound: d_j can be the remainder of
+//   a large cancellation, its sign the round-off's.
 // Netlib cplex2's ray (#408) has alpha - beta = 6.0e-5 against terms of
 // 3.2e-2 and a `cancel` of 8.2e6, so both margins hold with room. A d_j
-// within kZeroRel of its spread is the ray's own round-off, from the double
-// solve that produced y: against an infinite bound it counts as zero; any
-// larger d_j that meets an infinite bound leaves d^T x unbounded below, so
-// there is no proof.
+// within `rel` of its spread has no sign the sums can tell: it counts as
+// zero, its finite bounds' share inside the round-off margin. That is the
+// one place the check is not exact: such a d_j against an infinite bound
+// may truly be a sliver off zero. Any larger d_j that meets an infinite
+// bound leaves d^T x unbounded below, so there is no proof.
 bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     using Wide = long double;
     constexpr Wide kGapRel = 1e-9L;
-    constexpr Wide kZeroRel = 1e-12L;
     if (ray.size() != static_cast<std::size_t>(lp.num_rows)) {
         return false;
     }
@@ -2532,30 +2533,37 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     if (!any) {
         return false;
     }
+    // Every product and partial sum here rounds once at most per term, and
+    // no sum runs over more terms than there are entries, rows and columns.
+    const Wide rel = std::numeric_limits<Wide>::epsilon() *
+                     (static_cast<Wide>(lp.matrix.numNonzeros()) + static_cast<Wide>(lp.num_rows) +
+                      static_cast<Wide>(lp.num_cols));
     Wide cancel = terms;
     Wide alpha = 0.0L;
     for (Index j = 0; j < lp.num_cols; ++j) {
         const auto uj = static_cast<std::size_t>(j);
-        if (d[uj] == 0.0L) {
+        if (spread[uj] == 0.0L) {
+            continue;
+        }
+        Wide reach = 0.0L;  // the larger finite |bound|
+        if (isFinite(lp.col_lower[j])) {
+            reach = std::abs(static_cast<Wide>(lp.col_lower[j]));
+        }
+        if (isFinite(lp.col_upper[j])) {
+            reach = std::max(reach, std::abs(static_cast<Wide>(lp.col_upper[j])));
+        }
+        cancel += spread[uj] * reach;
+        if (std::abs(d[uj]) <= rel * spread[uj]) {
             continue;
         }
         const Real bound = d[uj] > 0.0L ? lp.col_lower[j] : lp.col_upper[j];
         if (!isFinite(bound)) {
-            if (std::abs(d[uj]) <= kZeroRel * spread[uj]) {
-                continue;
-            }
             return false;
         }
         alpha += d[uj] * bound;
         terms += std::abs(d[uj] * bound);
-        cancel += spread[uj] * std::abs(bound);
     }
-    // Every product and partial sum above rounds once at most per term, and
-    // no sum runs over more terms than there are entries, rows and columns.
-    const Wide summed = static_cast<Wide>(lp.matrix.numNonzeros()) +
-                        static_cast<Wide>(lp.num_rows) + static_cast<Wide>(lp.num_cols);
-    const Wide round_off = std::numeric_limits<Wide>::epsilon() * summed * cancel;
-    return alpha - beta > kGapRel * terms + round_off;
+    return alpha - beta > kGapRel * terms + rel * cancel;
 }
 
 bool BarrierSolver::runCrossover(bool probe_infeasibility) {
