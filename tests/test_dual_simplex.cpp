@@ -1043,6 +1043,107 @@ TEST_CASE("DualSimplex: degeneracy stats count a cold solve's pivots",
     CHECK_FALSE(again.cost_perturbed);
 }
 
+// The stall-triggered cost perturbation (#427) on a warm start. A covering
+// LP, min c'x over sum_{j in S_i} x_j >= 1, 0 <= x <= 1, with a zero cost on
+// every fourth column: solved first with the rows slack (row lower 0), then
+// warm with the rows raised to 1. The zero-cost columns enter on zero dual
+// steps, a run of 11 with the option off.
+TEST_CASE("DualSimplex: a warm start that stalls recovers under the stall cost perturbation",
+          "[dual_simplex][degeneracy]") {
+    constexpr Index m = 30;
+    constexpr Index n = 40;
+    LpProblem lp;
+    lp.name = "warm_cover";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.num_rows = m;
+    lp.obj.resize(n);
+    for (Index j = 0; j < n; ++j) {
+        lp.obj[j] = j % 4 == 0 ? 0.0 : 1.0;
+    }
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Continuous);
+    lp.row_lower.assign(m, 0.0);
+    lp.row_upper.assign(m, kInf);
+    std::vector<Triplet> trips;
+    unsigned s = 11;
+    for (Index i = 0; i < m; ++i) {
+        for (Index j = 0; j < n; ++j) {
+            s = s * 1103515245u + 12345u;
+            if (((s >> 16) & 7u) < 2u) {
+                trips.push_back({i, j, 1.0});
+            }
+        }
+    }
+    lp.matrix = SparseMatrix(m, n, std::move(trips));
+
+    // The optimum of the raised LP, from a cold solve.
+    LpProblem raised = lp;
+    raised.row_lower.assign(m, 1.0);
+    DualSimplexSolver cold;
+    cold.setVerbose(false);
+    cold.load(raised);
+    const auto cold_result = cold.solve();
+    REQUIRE(cold_result.status == Status::Optimal);
+
+    struct Warm {
+        LpResult result;
+        DualSimplexSolver::DegeneracyStats stats;
+        std::vector<Real> x;
+    };
+    auto solveWarm = [&](bool stall) {
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        DualSimplexOptions opts = solver.getOptions();
+        opts.enable_stall_cost_perturbation = stall;
+        opts.cost_perturbation_stall_pivots = 4;
+        solver.setOptions(opts);
+        solver.load(lp);
+        REQUIRE(solver.solve().status == Status::Optimal);
+        for (Index i = 0; i < m; ++i) {
+            solver.setRowBounds(i, 1.0, kInf);
+        }
+        Warm w{solver.solve(), solver.getDegeneracyStats(), solver.getPrimalValues()};
+        return w;
+    };
+    // Off by default: the option alone switches it on.
+    CHECK_FALSE(DualSimplexOptions{}.enable_stall_cost_perturbation);
+    const Warm off = solveWarm(false);
+    const Warm on = solveWarm(true);
+    REQUIRE(off.result.status == Status::Optimal);
+    REQUIRE(on.result.status == Status::Optimal);
+    CHECK_FALSE(off.stats.cost_perturbed);
+    CHECK_FALSE(on.stats.cost_perturbed);
+    CHECK(off.stats.stall_cost_perturbations == 0);
+    CHECK(off.stats.max_dual_zero_step_streak >= 8);
+    // The stall fires, ends the run of zero steps, and comes off at the
+    // optimum, which is the cold one's and feasible for the unperturbed LP.
+    CHECK(on.stats.stall_cost_perturbations >= 1);
+    CHECK(on.stats.cost_perturbation_removals >= 1);
+    CHECK(on.stats.max_dual_zero_step_streak < off.stats.max_dual_zero_step_streak);
+    CHECK_THAT(on.result.objective, WithinAbs(cold_result.objective, 1e-9));
+    CHECK_THAT(off.result.objective, WithinAbs(cold_result.objective, 1e-9));
+    REQUIRE(on.x.size() == static_cast<std::size_t>(n));
+    Real cx = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        INFO("column " << j);
+        CHECK(on.x[j] >= -1e-9);
+        CHECK(on.x[j] <= 1.0 + 1e-9);
+        cx += lp.obj[j] * on.x[j];
+    }
+    CHECK_THAT(cx, WithinAbs(on.result.objective, 1e-9));
+    for (Index i = 0; i < m; ++i) {
+        INFO("row " << i);
+        Real ax = 0.0;
+        const auto row = lp.matrix.row(i);
+        for (Index p = 0; p < row.size(); ++p) {
+            ax += row.values[p] * on.x[row.indices[p]];
+        }
+        CHECK(ax >= 1.0 - 1e-9);
+    }
+}
+
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
           "[dual_simplex][basis]") {
     // Two structural columns are identical, so choosing both as basic creates a

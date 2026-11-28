@@ -134,6 +134,22 @@ struct DualSimplexOptions {
     bool enable_cost_perturbation = true;
     Real cost_perturbation_multiplier = 1.0;
 
+    // Stall-triggered cost perturbation (#427), for the warm starts the one
+    // above skips. Off by default. A run of cost_perturbation_stall_pivots
+    // consecutive zero dual steps (refactors do not end it, a nonzero dual
+    // step does) moves the cost of every nonbasic structural at a bound by
+    // the size above toward its dual-feasible side: up at its lower bound,
+    // down at its upper; fixed and free columns stay. The basic costs, so
+    // the duals, do not move, and the basis stays dual feasible. Each further
+    // run of that length in the same simplex pass adds it again 10 times
+    // larger, up to
+    // cost_perturbation_stall_max_activations in all. It comes off with the
+    // cold-start one, at primal feasibility. It fires on any start and needs
+    // cost_perturbation_multiplier > 0, not enable_cost_perturbation.
+    bool enable_stall_cost_perturbation = false;
+    Int cost_perturbation_stall_pivots = 8;
+    Int cost_perturbation_stall_max_activations = 3;
+
     // Deterministic anti-degeneracy reduced-cost perturbation.
     bool enable_dual_perturbation = false;
     Int dual_perturbation_stall_pivots = 64;
@@ -419,9 +435,12 @@ public:
         // price-out, a stall restart.
         Int retry_iterations = 0;
         bool cost_perturbed = false;  // the cold-start cost perturbation was applied
-        // Times the cold-start perturbation, with the zero-step and dual
-        // correction shifts held with it, came off at primal feasibility. The
-        // phase-1 cost shifts coming off are not counted.
+        // Times the stall-triggered cost perturbation was applied (#427).
+        Int stall_cost_perturbations = 0;
+        // Times the cold-start or stall-triggered perturbation, with the
+        // zero-step and dual correction shifts held with it, came off at
+        // primal feasibility. The phase-1 cost shifts coming off are not
+        // counted.
         Int cost_perturbation_removals = 0;
         Int bound_perturbation_activations = 0;
         Int bound_perturbation_escalations = 0;

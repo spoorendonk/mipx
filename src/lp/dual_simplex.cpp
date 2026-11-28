@@ -1809,8 +1809,9 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         return flipped;
     };
-    if (cold_start && options_.enable_cost_perturbation &&
-        options_.cost_perturbation_multiplier > 0.0) {
+    // The perturbation's base, multiplier * 5e-7 * C, from the costs as they
+    // stand; and the size of column j's move, (1 + u_j) (|c_j| + 1) base.
+    auto costPerturbationBase = [&]() -> Real {
         Real bigc = 0.0;
         for (Index j = 0; j < num_cols_; ++j) {
             bigc = std::max(bigc, std::abs(obj_[j]));
@@ -1829,15 +1830,22 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         if (static_cast<Real>(num_boxed) < 0.01 * static_cast<Real>(numVars())) {
             bigc = std::min(bigc, 1.0);
         }
-        const Real base = options_.cost_perturbation_multiplier * 5e-7 * bigc;
+        return options_.cost_perturbation_multiplier * 5e-7 * bigc;
+    };
+    auto costPerturbationSize = [&](Index j, Real base) -> Real {
+        const uint32_t hash = static_cast<uint32_t>(j + 1) * 2654435761u;
+        const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
+        return (1.0 + u) * (std::abs(obj_[j]) + 1.0) * base;
+    };
+    if (cold_start && options_.enable_cost_perturbation &&
+        options_.cost_perturbation_multiplier > 0.0) {
+        const Real base = costPerturbationBase();
         if (base > 0.0) {
             cost_perturb.assign(static_cast<std::size_t>(num_cols_), 0.0);
             for (Index j = 0; j < num_cols_; ++j) {
                 const Real lb = col_lower_[j];
                 const Real ub = col_upper_[j];
-                const uint32_t hash = static_cast<uint32_t>(j + 1) * 2654435761u;
-                const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
-                const Real xpert = (1.0 + u) * (std::abs(obj_[j]) + 1.0) * base;
+                const Real xpert = costPerturbationSize(j, base);
                 Real delta = 0.0;
                 if (lb == -kInf && ub == kInf) {
                     continue;  // free: no side to keep
@@ -2141,6 +2149,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     Int stall_cycle_count = 0;
     // Consecutive zero dual steps, for DegeneracyStats only (#422).
     Int dual_zero_step_streak = 0;
+    // The stall-triggered cost perturbation (#427): zero dual steps since the
+    // last nonzero one or activation, and the activations so far.
+    Int stall_cost_streak = 0;
+    Int stall_cost_activations = 0;
     Int empty_candidate_retry_streak = 0;
     // The row whose repair pivot (see the dual ratio test) was rejected as
     // numerically zero on fresh factors, or -1; cleared by the next basis
@@ -2655,6 +2667,43 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     ++degeneracy_stats_.bound_perturbation_escalations;
                     need_infeasible_rebuild = true;
                 }
+            }
+        }
+
+        // The stall-triggered cost perturbation (#427). Only nonbasic costs
+        // move, each toward the side that keeps its reduced cost dual
+        // feasible, so the duals stay as they are and only those reduced
+        // costs change. It joins cost_perturb and comes off with it.
+        if (options_.enable_stall_cost_perturbation &&
+            options_.cost_perturbation_stall_pivots > 0 &&
+            options_.cost_perturbation_multiplier > 0.0 && !in_cleanup_phase &&
+            stall_cost_streak >= options_.cost_perturbation_stall_pivots &&
+            stall_cost_activations < options_.cost_perturbation_stall_max_activations) {
+            stall_cost_streak = 0;
+            const Real base = costPerturbationBase() * std::pow(10.0, stall_cost_activations);
+            ++stall_cost_activations;
+            bool moved = false;
+            for (Index k : nonbasic_) {
+                if (k >= num_cols_ || base <= 0.0) {
+                    continue;
+                }
+                const Real lb = col_lower_[k];
+                const Real ub = col_upper_[k];
+                const BasisStatus st = var_status_[k];
+                Real delta = 0.0;
+                if (st == BasisStatus::AtLower && lb != -kInf && lb != ub) {
+                    delta = costPerturbationSize(k, base);
+                } else if (st == BasisStatus::AtUpper && ub != kInf && lb != ub) {
+                    delta = -costPerturbationSize(k, base);
+                } else {
+                    continue;
+                }
+                addCostShift(k, delta);
+                reduced_cost_[k] += delta;
+                moved = true;
+            }
+            if (moved) {
+                ++degeneracy_stats_.stall_cost_perturbations;
             }
         }
 
@@ -4222,10 +4271,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         if (std::abs(theta_d) <= kDualZeroStepTol) {
             ++degeneracy_stats_.dual_zero_steps;
             ++dual_zero_step_streak;
+            ++stall_cost_streak;
             degeneracy_stats_.max_dual_zero_step_streak =
                 std::max(degeneracy_stats_.max_dual_zero_step_streak, dual_zero_step_streak);
         } else {
             dual_zero_step_streak = 0;
+            stall_cost_streak = 0;
         }
         // Only the row-price support can have alpha_k != 0, so walking it
         // instead of every nonbasic gives the same reduced costs (each k is
