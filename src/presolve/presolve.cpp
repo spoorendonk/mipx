@@ -378,6 +378,8 @@ constexpr PresolveRuleStat kRuleStats[] = {
     // HiGHS's col_stuffing also handles cases outside this preferred-endpoint rule.
     {"mip_singleton_stuffing", &PresolveStats::mip_singleton_stuffing_changes,
      &PresolveStats::mip_singleton_stuffing_seconds},
+    {"mip_singleton_exchange", &PresolveStats::mip_singleton_exchange_changes,
+     &PresolveStats::mip_singleton_exchange_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
     // HiGHS's bench calls the rule dependent_equations.
     {"dependent_equations", &PresolveStats::dependent_equation_changes,
@@ -1940,6 +1942,134 @@ Index Presolver::stuffMipSingletonColumns(LpProblem& lp, const std::vector<bool>
                 lp.col_lower[c.col] = c.preferred_bound;
                 lp.col_upper[c.col] = c.preferred_bound;
                 next_dirty_cols[c.col] = 1;  // Ordinary fixed-column elimination and postsolve.
+                ++changes;
+            }
+        }
+    }
+    return changes;
+}
+
+// Lowering x helps all its upper rows. In its lower row, raising the
+// singleton by the same amount preserves activity until the singleton
+// hits its cap. The box certificate covers that case, and the exchange
+// never raises the objective in minimization coordinates.
+Index Presolver::fixMipSingletonExchanges(LpProblem& lp, const std::vector<bool>& col_removed,
+                                          const std::vector<bool>& row_removed,
+                                          const std::vector<Index>& col_active_nnz,
+                                          std::vector<uint8_t>& next_dirty_cols) {
+    const Real sense = lp.sense == Sense::Maximize ? -1.0 : 1.0;
+    const auto minTerm = [&](Index col, Real a) {
+        return a * (a > 0.0 ? lp.col_lower[col] : lp.col_upper[col]);
+    };
+    const auto roundDown = [](Real value) { return std::nextafter(value, -kInf); };
+    const auto isSingleton = [&](Index col, Index shared_row) {
+        if (col_active_nnz[col] > 1) {
+            for (const auto [row, coefficient] : work_->col(col)) {
+                if (row != shared_row && !row_removed[row] && coefficient != 0.0) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    std::vector<std::pair<Index, Real>> singletons;
+    std::unordered_map<Real, Real> cheapest;
+    Index changes = 0;
+    for (Index i = 0; i < lp.num_rows; ++i) {
+        const Real rhs = lp.row_lower[i];
+        if (row_removed[i] || lp.row_upper[i] != kInf || !std::isfinite(rhs)) {
+            continue;
+        }
+        singletons.clear();
+        Real minimum = 0.0;
+        Index nonfinite_terms = 0;
+        for (const auto [col, a] : work_->row(i)) {
+            if (col_removed[col] || a == 0.0) {
+                continue;
+            }
+            const Real lb = lp.col_lower[col];
+            const Real ub = lp.col_upper[col];
+            const Real cost = sense * lp.obj[col];
+            if (!std::isfinite(a) || !(lb <= ub)) {
+                minimum = -kInf;
+                break;
+            }
+            const Real term = minTerm(col, a);
+            if (std::isfinite(term)) {
+                minimum = roundDown(minimum + roundDown(term));
+            } else {
+                ++nonfinite_terms;
+            }
+            if (a > 0.0 && lp.col_type[col] == VarType::Continuous && std::isfinite(ub) &&
+                lb < ub && std::isfinite(cost) && cost >= 0.0 && isSingleton(col, i)) {
+                singletons.emplace_back(col, a);
+            }
+        }
+        if (singletons.empty() || !std::isfinite(minimum) || nonfinite_terms > 1) {
+            continue;
+        }
+
+        cheapest.clear();
+        for (const auto [col, a] : singletons) {
+            const Real term = minTerm(col, a);
+            const Real cap = a * lp.col_upper[col];
+            // Remove an upper estimate of this singleton's minimum term,
+            // or leave the sum alone if that term was excluded.
+            const bool finite_term = std::isfinite(term);
+            if (nonfinite_terms > static_cast<Index>(!finite_term) || !std::isfinite(cap)) {
+                continue;
+            }
+            const Real rest =
+                finite_term ? roundDown(minimum - std::nextafter(term, kInf)) : minimum;
+            const Real activity = roundDown(rest + roundDown(cap));
+            if (!std::isfinite(activity) || !(activity > rhs)) {
+                continue;
+            }
+            const Real cost = sense * lp.obj[col];
+            const auto [it, inserted] = cheapest.try_emplace(a, cost);
+            if (!inserted) {
+                it->second = std::min(it->second, cost);
+            }
+        }
+        if (cheapest.empty()) {
+            continue;
+        }
+
+        for (const auto [col, a] : work_->row(i)) {
+            const Real lb = lp.col_lower[col];
+            const Real cost = sense * lp.obj[col];
+            if (col_removed[col] || col_active_nnz[col] < 2 ||
+                lp.col_type[col] != VarType::Continuous || !std::isfinite(lb) ||
+                !(lb < lp.col_upper[col]) || !std::isfinite(cost)) {
+                continue;
+            }
+            const auto replacement = cheapest.find(a);
+            if (replacement == cheapest.end() || !(replacement->second < cost)) {
+                continue;
+            }
+            // The ordinary fixed-column pass folds these shifts into the
+            // sides and objective. Reject huge shifts so a batch of fixes
+            // cannot overflow those updates.
+            if (!(std::abs(a * lb) < kHugeBound && std::abs(lp.obj[col] * lb) < kHugeBound)) {
+                continue;
+            }
+            bool helps_other_rows = true;
+            bool has_other_row = false;
+            for (const auto [row, coeff] : work_->col(col)) {
+                if (row == i || row_removed[row] || coeff == 0.0) {
+                    continue;
+                }
+                has_other_row = true;
+                const Real upper = lp.row_upper[row];
+                if (!(coeff > 0.0 && std::isfinite(coeff)) || lp.row_lower[row] != -kInf ||
+                    !std::isfinite(upper) || !(std::abs(coeff * lb) < kHugeBound)) {
+                    helps_other_rows = false;
+                    break;
+                }
+            }
+            if (has_other_row && helps_other_rows) {
+                lp.col_upper[col] = lb;
+                next_dirty_cols[col] = 1;  // Ordinary fixed-column elimination and postsolve.
                 ++changes;
             }
         }
@@ -4341,6 +4471,17 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
                                                 col_active_nnz, next_dirty_cols);
             });
             stats_.mip_singleton_stuffing_changes += ch;
+            stats_.bounds_tightened += ch;
+            total_changes += ch;
+        }
+
+        if (options_.enable_mip_singleton_exchange && !native_sos2 && !lp_only &&
+            total_changes == 0 && !infeasible_) {
+            ch = timed(stats_.mip_singleton_exchange_seconds, [&] {
+                return fixMipSingletonExchanges(lp, col_removed, row_removed, col_active_nnz,
+                                                next_dirty_cols);
+            });
+            stats_.mip_singleton_exchange_changes += ch;
             stats_.bounds_tightened += ch;
             total_changes += ch;
         }

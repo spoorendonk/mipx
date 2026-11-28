@@ -827,6 +827,9 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions stuffing = o;
     stuffing.enable_mip_singleton_stuffing = true;
     cases.push_back({"MIP singleton stuffing (opt-in)", stuffing});
+    PresolveOptions exchange = o;
+    exchange.enable_mip_singleton_exchange = true;
+    cases.push_back({"MIP singleton exchange (opt-in)", exchange});
     PresolveOptions extended_dual = o;
     extended_dual.enable_extended_dual_fixing = true;
     cases.push_back({"extended dual fixing (opt-in)", extended_dual});
@@ -853,6 +856,7 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_aggregator = true;
     all.enable_zero_cost_singletons = true;
     all.enable_mip_singleton_stuffing = true;
+    all.enable_mip_singleton_exchange = true;
     all.enable_extended_dual_fixing = true;
     all.enable_dependent_equations = true;
     cases.push_back({"all opt-in but parallel columns and single equations", all});
@@ -902,6 +906,8 @@ std::vector<PresolveReduction> presolveReductions() {
          [](const PresolveOptions& o) {
              return o.enable_mip_singleton_stuffing && o.enable_dual_fixing;
          }},
+        {"MIP singleton exchange", &PresolveStats::mip_singleton_exchange_changes,
+         [](const PresolveOptions& o) { return o.enable_mip_singleton_exchange; }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes,
          [](const PresolveOptions& o) { return o.enable_activity_bound_tightening; }},
@@ -1100,6 +1106,11 @@ std::vector<LpProblem> presolveAuditModels() {
     // trades its remaining activity against the value of the binary x2.
     models.push_back(makeModel(Sense::Minimize, {-2, -1, -5, 1}, {0, 0, 0, 0}, {1, 8, 1, 1},
                                {C, C, B, B}, {{1, 1, 4, 0}, {0, 0, 1, 1}}, {-kInf, 1}, {10, kInf}));
+    // MIP singleton exchange (#465): x1 covers x0's activity in the lower
+    // row, allowing x0 to reach its lower bound and help the upper row.
+    models.push_back(makeModel(Sense::Minimize, {3, 1, 1, 5}, {1, 0, 0, 0}, {5, 6, 1, 1},
+                               {C, C, B, B}, {{1, 1, 1, 0}, {1, 0, 0, 4}, {0, 0, 1, 1}},
+                               {6, -kInf, 1}, {kInf, 6, kInf}));
     // Extended dual fixing (#366): x0 at zero cost with two down locks and
     // no up lock; x0 whose one down lock, a ranged row's lower side, holds at
     // x0 = 0 for any x1 >= 1; the same upward, maximizing.

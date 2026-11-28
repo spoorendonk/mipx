@@ -217,6 +217,8 @@ struct PresolveStats {
     /// Continuous singleton columns fixed at their preferred endpoint by
     /// MIP singleton stuffing (#450).
     Index mip_singleton_stuffing_changes = 0;
+    /// Continuous columns fixed by a finite singleton replacement (#465).
+    Index mip_singleton_exchange_changes = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -256,6 +258,7 @@ struct PresolveStats {
     Real aggregator_seconds = 0.0;
     Real zero_cost_singleton_seconds = 0.0;
     Real mip_singleton_stuffing_seconds = 0.0;
+    Real mip_singleton_exchange_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -337,6 +340,10 @@ struct PresolveOptions {
     /// columns, in decreasing order of objective gain per unit of activity.
     /// Requires enable_dual_fixing. Off by default until benchmarked.
     bool enable_mip_singleton_stuffing = false;
+    /// Fix an expensive continuous column at its lower bound when a cheaper
+    /// continuous singleton can replace it in its only lower row (#465).
+    /// MIP only, independent of enable_dual_fixing. Off by default.
+    bool enable_mip_singleton_exchange = false;
     /// Dual fixing's cases from HiGHS's dualFixing that the cost-sign rule
     /// misses (#366): a column is fixed at a finite bound its cost does not
     /// push it away from when every row that locks it the other way holds
@@ -541,6 +548,10 @@ private:
     Index stuffMipSingletonColumns(LpProblem& lp, const std::vector<bool>& col_removed,
                                    const std::vector<bool>& row_removed,
                                    const std::vector<Index>& row_active_nnz,
+                                   const std::vector<Index>& col_active_nnz,
+                                   std::vector<uint8_t>& next_dirty_cols);
+    Index fixMipSingletonExchanges(LpProblem& lp, const std::vector<bool>& col_removed,
+                                   const std::vector<bool>& row_removed,
                                    const std::vector<Index>& col_active_nnz,
                                    std::vector<uint8_t>& next_dirty_cols);
     // Root probing: fixes variables whose opposite branch propagates to

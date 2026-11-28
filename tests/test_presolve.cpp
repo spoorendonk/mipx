@@ -2779,6 +2779,96 @@ TEST_CASE("Presolve: MIP singleton stuffing takes two fitting columns", "[presol
     CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
 }
 
+TEST_CASE("Presolve: MIP singleton exchange needs a finite box certificate", "[presolve]") {
+    // x, z, y, w. The lower row holds at x = 1 and z = 6 even if y = 0.
+    LpProblem lp = rowsModel({3, 1, 1, 5}, {1, 0, 0, 0}, {5, 6, 1, 1},
+                             {{6, kInf, {{0, 1}, {1, 1}, {2, 1}}},
+                              {-kInf, 6, {{0, 1}, {3, 4}}},
+                              {1, kInf, {{2, 1}, {3, 1}}}});
+    lp.col_type[2] = lp.col_type[3] = VarType::Binary;
+    PresolveOptions options;
+    options.enable_mip_singleton_exchange = true;
+    Index expected = 0;
+    SECTION("a cheaper singleton covers both a full exchange and saturation") {
+        expected = 1;
+        const std::vector<Real> exact_before{3, 2, 1, 0};
+        const std::vector<Real> exact_after{1, 4, 1, 0};
+        const std::vector<Real> saturated_before{5, 3, 1, 0};
+        const std::vector<Real> saturated_after{1, 6, 1, 0};
+        for (const auto* point :
+             {&exact_before, &exact_after, &saturated_before, &saturated_after}) {
+            CHECK(pointViolation(lp, *point) <= 1e-9);
+        }
+        CHECK(objectiveAt(lp, exact_after) < objectiveAt(lp, exact_before));
+        CHECK(objectiveAt(lp, saturated_after) < objectiveAt(lp, saturated_before));
+    }
+    SECTION("default off") {
+        options = PresolveOptions{};
+    }
+    SECTION("maximization uses the opposite cost signs") {
+        lp.sense = Sense::Maximize;
+        for (Real& cost : lp.obj) {
+            cost = -cost;
+        }
+        expected = 1;
+    }
+    SECTION("the singleton only needs a finite upper bound") {
+        lp.col_lower[1] = -kInf;
+        options.enable_activity_bound_tightening = false;
+        expected = 1;
+    }
+    SECTION("an LP does not run this pass") {
+        lp.col_type[2] = lp.col_type[3] = VarType::Continuous;
+    }
+    SECTION("the cap leaves the box minimum short") {
+        lp.col_upper[1] = 4;
+    }
+    SECTION("exactly meeting the lower side leaves no rounding allowance") {
+        lp.col_upper[1] = 5;
+    }
+    SECTION("the replacement occurs in two rows") {
+        lp.matrix = SparseMatrix(3, 4,
+                                 std::vector<Triplet>{{0, 0, 1},
+                                                      {0, 1, 1},
+                                                      {0, 2, 1},
+                                                      {1, 0, 1},
+                                                      {1, 1, 1},
+                                                      {1, 3, 4},
+                                                      {2, 2, 1},
+                                                      {2, 3, 1}});
+        lp.row_upper[1] = 10;
+    }
+    SECTION("the other row would lose activity on its lower side") {
+        lp.row_lower[1] = 2;
+    }
+    SECTION("a stored zero does not disqualify the replacement") {
+        lp.matrix =
+            SparseMatrix(3, 4, {1, 1, 1, 1, 0, 4, 1, 1}, {0, 1, 2, 0, 1, 3, 2, 3}, {0, 3, 6, 8});
+        expected = 1;
+    }
+    SECTION("a stored zero does not give x a second occurrence") {
+        lp.matrix =
+            SparseMatrix(3, 4, {1, 1, 1, 0, 2, 5, 1, 1}, {0, 1, 2, 0, 2, 3, 2, 3}, {0, 3, 6, 8});
+    }
+
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, options);
+    CHECK(presolver.stats().mip_singleton_exchange_changes == expected);
+    const bool x_retained =
+        std::ranges::find(presolver.colMapping(), 0) != presolver.colMapping().end();
+    CHECK(x_retained == (expected == 0));
+    if (expected != 0) {
+        CHECK(full[0] == 1);
+        CHECK(full[1] == 4);
+    }
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    if (lp.hasIntegers()) {
+        CHECK(full[2] == std::round(full[2]));
+        CHECK(full[3] == std::round(full[3]));
+    }
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2
