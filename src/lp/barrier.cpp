@@ -2491,13 +2491,16 @@ std::optional<std::vector<BasisStatus>> crossoverBasis(const LpProblem& lp,
 //   (terms summed) and `cancel` counting each d_j's spread, the sum of its
 //   |y_i a_ij|, times its larger finite bound: d_j can be the remainder of
 //   a large cancellation, its sign the round-off's.
-// Netlib cplex2's ray (#408) has alpha - beta = 6.0e-5 against terms of
-// 3.2e-2 and a `cancel` of 8.2e6, so both margins hold with room. A d_j
-// within `rel` of its spread has no sign the sums can tell: it counts as
-// zero, its finite bounds' share inside the round-off margin. That is the
-// one place the check is not exact: such a d_j against an infinite bound
-// may truly be a sliver off zero. Any larger d_j that meets an infinite
-// bound leaves d^T x unbounded below, so there is no proof.
+// A d_j within its own round-off, eps * (its terms + 1) * its spread, has
+// no sign the sums can tell: it counts as zero, and twice its finite
+// bounds' share goes into `cancel`, for its value and its error. That is
+// the one place the check is not exact: such a d_j against an infinite
+// bound may truly be a sliver off zero, at long double's precision. Any
+// larger d_j that meets an infinite bound leaves d^T x unbounded below, so
+// there is no proof, even when it is the noise of the double solve that
+// produced y: a ray is only accepted where such noise meets finite bounds.
+// Netlib cplex2's ray (#408), every column in [0, 1], has alpha - beta =
+// 6.0e-5 against terms of 3.2e-2, and rel * cancel is far below either.
 bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     using Wide = long double;
     constexpr Wide kGapRel = 1e-9L;
@@ -2507,6 +2510,7 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     const auto nn = static_cast<std::size_t>(lp.num_cols);
     std::vector<Wide> d(nn, 0.0L);
     std::vector<Wide> spread(nn, 0.0L);
+    std::vector<Index> summed(nn, 0);  // terms in d_j
     Wide beta = 0.0L;
     Wide terms = 0.0L;
     bool any = false;
@@ -2528,6 +2532,7 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
             const Wide t = yi * rv.values[k];
             d[j] += t;
             spread[j] += std::abs(t);
+            ++summed[j];
         }
     }
     if (!any) {
@@ -2535,9 +2540,9 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
     }
     // Every product and partial sum here rounds once at most per term, and
     // no sum runs over more terms than there are entries, rows and columns.
-    const Wide rel = std::numeric_limits<Wide>::epsilon() *
-                     (static_cast<Wide>(lp.matrix.numNonzeros()) + static_cast<Wide>(lp.num_rows) +
-                      static_cast<Wide>(lp.num_cols));
+    constexpr Wide kEps = std::numeric_limits<Wide>::epsilon();
+    const Wide rel = kEps * (static_cast<Wide>(lp.matrix.numNonzeros()) +
+                             static_cast<Wide>(lp.num_rows) + static_cast<Wide>(lp.num_cols));
     Wide cancel = terms;
     Wide alpha = 0.0L;
     for (Index j = 0; j < lp.num_cols; ++j) {
@@ -2552,10 +2557,12 @@ bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray) {
         if (isFinite(lp.col_upper[j])) {
             reach = std::max(reach, std::abs(static_cast<Wide>(lp.col_upper[j])));
         }
-        cancel += spread[uj] * reach;
-        if (std::abs(d[uj]) <= rel * spread[uj]) {
+        const Wide own = kEps * static_cast<Wide>(summed[uj] + 1) * spread[uj];
+        if (std::abs(d[uj]) <= own) {
+            cancel += 2.0L * spread[uj] * reach;
             continue;
         }
+        cancel += spread[uj] * reach;
         const Real bound = d[uj] > 0.0L ? lp.col_lower[j] : lp.col_upper[j];
         if (!isFinite(bound)) {
             return false;

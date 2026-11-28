@@ -552,25 +552,29 @@ TEST_CASE("Barrier crossover: a Farkas ray is rechecked in the model's data",
     // Free x and z: x + z <= 0 and x + c z >= 1. For c = 1 the ray (1, -1)
     // gives A^T y = 0 exactly, a proof. For c = 1 + 1e-13 the LP is feasible
     // (z = 1e13, x = -z): d_z = -1e-13 is far above the sums' round-off, so
-    // it meets z's infinite upper bound and proves nothing.
-    const auto freeLp = [](Real c) {
+    // it meets z's infinite upper bound and proves nothing. `pad` empty
+    // columns make the LP large: d_z's round-off is its own sum's, not the
+    // whole LP's.
+    const auto freeLp = [](Real c, Index pad) {
         LpProblem lp;
         lp.sense = Sense::Minimize;
-        lp.num_cols = 2;
+        lp.num_cols = 2 + pad;
         lp.num_rows = 2;
-        lp.obj = {0.0, 0.0};
-        lp.col_lower = {-kInf, -kInf};
-        lp.col_upper = {kInf, kInf};
-        lp.col_type.assign(2, VarType::Continuous);
-        lp.col_names.assign(2, "");
+        lp.obj.assign(lp.num_cols, 0.0);
+        lp.col_lower.assign(lp.num_cols, -kInf);
+        lp.col_upper.assign(lp.num_cols, kInf);
+        lp.col_type.assign(lp.num_cols, VarType::Continuous);
+        lp.col_names.assign(lp.num_cols, "");
         lp.row_lower = {-kInf, 1.0};
         lp.row_upper = {0.0, kInf};
         lp.row_names.assign(2, "");
-        lp.matrix = SparseMatrix(2, 2, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, c}});
+        lp.matrix =
+            SparseMatrix(2, lp.num_cols, {{0, 0, 1.0}, {0, 1, 1.0}, {1, 0, 1.0}, {1, 1, c}});
         return lp;
     };
-    CHECK(farkasRayProvesInfeasible(freeLp(1.0), ray));
-    CHECK_FALSE(farkasRayProvesInfeasible(freeLp(1.0 + 1e-13), ray));
+    CHECK(farkasRayProvesInfeasible(freeLp(1.0, 0), ray));
+    CHECK_FALSE(farkasRayProvesInfeasible(freeLp(1.0 + 1e-13, 0), ray));
+    CHECK_FALSE(farkasRayProvesInfeasible(freeLp(1.0 + 1e-13, 1'000'000), ray));
 }
 
 // Netlib cplex2 is infeasible by 1.6e-11 per row: from the HSD run's stalled

@@ -118,8 +118,8 @@ BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real
 // needs rigor (#408): in long double, alpha - beta above a bound on the
 // round-off of every term that makes it up. A multiplier whose side is
 // infinite is dropped, so the proof is that of the rest of the ray. Exact
-// but for one case: an entry of A^T y within that round-off of zero counts
-// as zero, even against an infinite bound.
+// but for one case: an entry of A^T y within its own sum's round-off of
+// zero counts as zero, even against an infinite bound.
 bool farkasRayProvesInfeasible(const LpProblem& lp, std::span<const Real> ray);
 
 // GPU backends now use the device-resident path (solveBarrierGpu in barrier.h).
