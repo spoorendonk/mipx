@@ -118,7 +118,9 @@ struct BarrierOptions {
     // Starting point of the CPU Mehrotra loop (#144). Opt-in, CPU backends
     // only: a value other than Auto or Mehrotra skips the GPU path, whose
     // start is its own. The homogeneous loop starts all complementarity
-    // variables at 1 whatever this says.
+    // variables at 1 whatever this says. Under BarrierAlgorithm::Auto, a
+    // Mehrotra loop left at Auto or Mehrotra that fails on both CPU Newton
+    // systems runs once more from HiPO's start (#480).
     BarrierInitialPoint initial_point = BarrierInitialPoint::Auto;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its

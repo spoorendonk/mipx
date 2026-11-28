@@ -3,6 +3,7 @@
 #include "mipx/dual_simplex.h"
 #include "mipx/io.h"
 #include "mipx/mip_solver.h"
+#include "mipx/presolve.h"
 #include "test_paths.hpp"
 
 #include <algorithm>
@@ -352,6 +353,62 @@ TEST_CASE("BarrierSolver CPU: small Netlib LPs converge without crossover",
 
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - expected) <= 1e-6 * std::max(1.0, std::abs(expected)));
+}
+
+TEST_CASE("BarrierSolver Auto: perold solves without LP presolve", "[barrier][netlib]") {
+    // #480: on Auto, perold with no LP presolve (the CLI's --no-presolve)
+    // failed on both CPU Newton systems from Mehrotra's start and ended in
+    // an error. The rerun from HiPO's start solves it.
+    std::string path = mipx::test::testDataDir() + "/netlib/perold.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance perold not downloaded");
+    }
+    auto lp = readMps(path);
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    solver.setOptions(opts);
+    solver.load(lp);
+    auto result = solver.solve();
+
+    const Real expected = -9.3807552782e+03;
+    REQUIRE(result.status == Status::Optimal);
+    CHECK(std::abs(result.objective - expected) <= 1e-6 * std::abs(expected));
+}
+
+TEST_CASE("BarrierSolver Auto: forplan solves after LP presolve", "[barrier][netlib]") {
+    // #480: forplan after the CLI's LP presolve (activity tightening off, as
+    // for --barrier) stalls on the augmented system; Auto hands it to the
+    // normal equations, which solve it.
+    std::string path = mipx::test::testDataDir() + "/netlib/forplan.mps.gz";
+    if (!fs::exists(path)) {
+        SKIP("Netlib instance forplan not downloaded");
+    }
+    auto lp = readMps(path);
+    PresolveOptions presolve_opts;
+    presolve_opts.enable_activity_bound_tightening = false;
+    Presolver presolver;
+    presolver.setOptions(presolve_opts);
+    auto reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    solver.setOptions(opts);
+    solver.load(reduced);
+    auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+
+    const auto x = presolver.postsolve(solver.getPrimalValues());
+    REQUIRE(x.size() == static_cast<size_t>(lp.num_cols));
+    Real objective = lp.obj_offset;
+    for (Index j = 0; j < lp.num_cols; ++j) {
+        objective += lp.obj[j] * x[j];
+    }
+    const Real expected = -6.6421896127e+02;
+    CHECK(std::abs(objective - expected) <= 1e-6 * std::abs(expected));
 }
 
 // ============================================================================
@@ -747,9 +804,10 @@ TEST_CASE("BarrierSolver Auto: small sparse LP keeps the normal equations",
 TEST_CASE("BarrierSolver Auto: a failed backend hands over to the other",
           "[barrier][auto-switch][fallback]") {
     // One iteration fails the augmented run Auto picks; the dense NE then
-    // runs before the solve gives up (#140): the augmented system runs out of
-    // iterations on perold, which the NE solves. An explicit backend has no
-    // fallback.
+    // runs (#140): the augmented system runs out of iterations on some LPs
+    // the NE solves. When it fails too, the augmented system runs once more
+    // from HiPO's start (#480) before the solve gives up. An explicit backend
+    // has no fallback.
     auto lp = buildChainLp(600);
     const auto algo = GENERATE(BarrierAlgorithm::Auto, BarrierAlgorithm::CpuAugmented);
     BarrierSolver solver;
@@ -763,9 +821,13 @@ TEST_CASE("BarrierSolver Auto: a failed backend hands over to the other",
     solver.load(lp);
     (void)solver.solve();
     if (!solver.usedGpu()) {
-        CHECK(solver.usedAlgorithm() == (algo == BarrierAlgorithm::Auto
-                                             ? BarrierAlgorithm::CpuCholesky
-                                             : BarrierAlgorithm::CpuAugmented));
+        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuAugmented);
+        const std::string& error = solver.lastError();
+        const bool handed_over =
+            error.find("dense normal equations fallback also failed") != std::string::npos;
+        const bool reran = error.find("rerun from HiPO's start also failed") != std::string::npos;
+        CHECK(handed_over == (algo == BarrierAlgorithm::Auto));
+        CHECK(reran == (algo == BarrierAlgorithm::Auto));
     }
 }
 

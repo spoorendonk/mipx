@@ -2532,8 +2532,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     const auto stopped = [&] {
         return options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed);
     };
-    // One IPM run on a CPU backend; on failure last_error_ says why.
-    const auto runCpuBackend = [&](BarrierAlgorithm backend) {
+    // One IPM run on a CPU backend with `opts` (options_ but for the retry's
+    // starting point); on failure last_error_ says why.
+    const auto runCpuBackend = [&](BarrierAlgorithm backend, const BarrierOptions& opts) {
         used_algorithm_ = backend;
         auto solver = createCpuNewtonSolver(backend);
         if (options_.verbose) {
@@ -2559,7 +2560,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             if (backend_deadline.passed()) {
                 return interrupted();
             }
-            if (!solver->setup(aeq_, m, n, options_)) {
+            if (!solver->setup(aeq_, m, n, opts)) {
                 if (backend_deadline.passed()) {
                     return interrupted();
                 }
@@ -2569,11 +2570,10 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             }
             used_homogeneous_ = hsd;
             gondzio_corrections_ = 0;
-            result =
-                hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
-                                dualized_obj_sign, z, y, s, iters, gondzio_corrections_)
-                    : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
-                                     dualized_obj_sign, z, y, s, iters, gondzio_corrections_);
+            result = hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, ustd_, opts, std_obj_offset_,
+                                     dualized_obj_sign, z, y, s, iters, gondzio_corrections_)
+                         : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, opts, std_obj_offset_,
+                                          dualized_obj_sign, z, y, s, iters, gondzio_corrections_);
         } catch (const std::bad_alloc&) {
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
@@ -2586,7 +2586,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     };
 
     if (!ok) {
-        outcome = runCpuBackend(algo);
+        outcome = runCpuBackend(algo, options_);
         // Under Auto the normal equations and the augmented system each take
         // over from the other when it fails (#140): its setup, its memory, or
         // its IPM run, including a stall or the iteration limit. They fail on
@@ -2602,10 +2602,30 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                             last_error_.c_str(), newtonSystemName(other));
             }
             const std::string first_error = last_error_;
-            outcome = runCpuBackend(other);
+            outcome = runCpuBackend(other, options_);
             if (outcome == BarrierIpmOutcome::Failed && !stopped()) {
                 last_error_ = first_error + " The " + newtonSystemName(other) +
                               " fallback also failed: " + last_error_;
+            }
+            // When both fail from Mehrotra's start, the first one runs once
+            // more from HiPO's (#480). Netlib's perold without presolve fails
+            // on both from Mehrotra's and solves on the augmented system from
+            // HiPO's. Only a solve that would end in an error takes it, and
+            // the homogeneous loop keeps its own start.
+            if (outcome == BarrierIpmOutcome::Failed && !hsd && defaultInitialPoint(options_) &&
+                !stopped() && !deadline_.passed()) {
+                if (options_.verbose) {
+                    std::printf("Barrier: %s failed too; trying %s from HiPO's start.\n",
+                                newtonSystemName(other), newtonSystemName(algo));
+                }
+                const std::string both_errors = last_error_;
+                BarrierOptions hipo = options_;
+                hipo.initial_point = BarrierInitialPoint::Hipo;
+                outcome = runCpuBackend(algo, hipo);
+                if (outcome == BarrierIpmOutcome::Failed && !stopped()) {
+                    last_error_ = both_errors + " The " + newtonSystemName(algo) +
+                                  " rerun from HiPO's start also failed: " + last_error_;
+                }
             }
         }
         if (outcome == BarrierIpmOutcome::TimeLimit) {
