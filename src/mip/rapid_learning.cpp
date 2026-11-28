@@ -196,35 +196,32 @@ bool MipSolver::runRootRapidLearning(SolutionPool& solutions, const LpProblem* l
     };
     const auto import_point = [&]() {
         auto point = candidatePoint(problem_, domain, deadline);
-        auto objective = checkedPointObjective(problem_, point, budget);
+        Real objective = checkedPointObjective(problem_, point, budget).value_or(kInf);
         std::vector<Real> mapped;
-        if (objective && loaded != nullptr) {
+        if (std::isfinite(objective) && loaded != nullptr) {
             if (postsolve != nullptr) {
                 mapped = postsolve->postsolve(point);
             }
-            const auto loaded_objective =
-                checkedPointObjective(*loaded, postsolve != nullptr ? mapped : point, budget);
-            if (loaded_objective) {
-                // Both objective representations include their own offset.
-                *objective = std::max(*objective, *loaded_objective);
-            } else {
-                objective.reset();
-            }
+            const Real loaded_objective =
+                checkedPointObjective(*loaded, postsolve != nullptr ? mapped : point, budget)
+                    .value_or(kInf);
+            // Both objective representations include their own offset.
+            objective = std::max(objective, loaded_objective);
         }
         if (budget.stopped()) {
             return;
         }
-        if (!objective) {
+        if (!std::isfinite(objective)) {
             ++stats.incumbents_rejected;
             return;
         }
-        if (*objective >= solutions.bestObjective()) {
+        if (objective >= solutions.bestObjective()) {
             return;
         }
         if (incumbent_observer_ && postsolve == nullptr) {
             mapped = point;
         }
-        if (solutions.submit({std::move(point), *objective}, "root_rapid_learning", 0)) {
+        if (solutions.submit({std::move(point), objective}, "root_rapid_learning", 0)) {
             ++stats.incumbents_imported;
             if (incumbent_observer_) {
                 incumbent_observer_(mapped, "root_rapid_learning");
