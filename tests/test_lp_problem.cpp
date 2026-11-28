@@ -4,6 +4,7 @@
 #include "mipx/mip_solver.h"
 #include "test_paths.hpp"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 #include <filesystem>
@@ -978,6 +979,24 @@ TEST_CASE("SOS2 interval selectors preserve support and tighten the LP", "[lp_pr
         const auto result = solver.solve();
         REQUIRE(result.status == Status::Optimal);
         CHECK_THAT(result.objective, WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("Overlapping unnamed sets get distinct auxiliary names") {
+        lp.col_names = {"x0", "x1", "x2", "x3", "x4"};
+        lp.sos_constraints.front().name.clear();
+        lp.sos_constraints.front().vars = {0, 1, 2};
+        lp.sos_constraints.front().weights.clear();
+        lp.sos_constraints.push_back({
+            .type = LpProblem::SosConstraint::Type::Sos2,
+            .vars = {0, 3, 4},
+            .weights = {},
+            .name = {},
+        });
+        auto expanded = linearizeModelFeatures(lp, true);
+        std::ranges::sort(expanded.col_names);
+        std::ranges::sort(expanded.row_names);
+        CHECK(std::ranges::adjacent_find(expanded.col_names) == expanded.col_names.end());
+        CHECK(std::ranges::adjacent_find(expanded.row_names) == expanded.row_names.end());
     }
 
     SECTION("Sets with one or two members need no auxiliary rows or columns") {

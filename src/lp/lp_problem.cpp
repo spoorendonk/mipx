@@ -60,8 +60,9 @@ std::vector<Triplet> extractTriplets(const LpProblem& problem) {
 
 void addSos2IntervalRows(LpProblem& out, std::vector<Triplet>& trips,
                          const LpProblem::SosConstraint& sos, std::span<const Index> order) {
+    // The first selector column distinguishes sets even when their names coincide.
     const std::string base =
-        sos.name.empty() ? "sos2_" + std::to_string(sos.vars[order.front()]) : sos.name;
+        (sos.name.empty() ? "sos2" : sos.name) + "_" + std::to_string(out.num_cols);
     std::vector<Index> selectors;
     selectors.reserve(order.size() - 1);
     for (std::size_t p = 0; p + 1 < order.size(); ++p) {
