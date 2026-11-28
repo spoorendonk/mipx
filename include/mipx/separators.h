@@ -179,7 +179,7 @@ private:
     CutFamilyConfig config_{};
     GomorySeparator gomory_{};
     Int max_cuts_per_family_ = 50;
-    Real min_violation_ = 1e-5;
+    Real min_violation_ = kDefaultCutMinViolation;
     Index global_row_count_ = -1;
     std::vector<Index> local_rows_;  // sorted
     const VariableBoundStore* vb_store_ = nullptr;

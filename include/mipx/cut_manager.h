@@ -39,6 +39,12 @@ struct CutRoundPolicy {
     std::array<Int, static_cast<std::size_t>(CutFamily::Count)> per_family_cap{};
 };
 
+/// Choose cuts for a root round. Rechecking uses current violation in place of
+/// insertion efficacy and age, and applies the quota after family caps.
+[[nodiscard]] std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
+                                                std::span<const Real> primals,
+                                                bool recheck_violation);
+
 class CutManager {
 public:
     void setMode(CutEffortMode mode) { mode_ = mode; }

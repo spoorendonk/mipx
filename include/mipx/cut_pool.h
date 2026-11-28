@@ -9,6 +9,8 @@
 
 namespace mipx {
 
+inline constexpr Real kDefaultCutMinViolation = 1e-5;
+
 enum class CutFamily : Int {
     Unknown = 0,
     Gomory,
@@ -41,6 +43,9 @@ struct Cut {
     Int age = 0;          // rounds since last active (binding)
     Int activity = 0;     // number of rounds where cut was active
 };
+
+/// Unscaled violation of either bound at the given LP point.
+[[nodiscard]] Real cutViolation(const Cut& cut, std::span<const Real> primals);
 
 /// Screen a cut for numerical safety.
 ///
@@ -82,11 +87,18 @@ public:
     /// Return indices of the top-k cuts by efficacy.
     [[nodiscard]] std::vector<Index> topByEfficacy(Index k) const;
 
+    /// Rank uninstalled cuts by efficacy at this point, using the pool's minimum efficacy.
+    [[nodiscard]] std::vector<Index> violatedByEfficacy(std::span<const Real> primals,
+                                                        Real min_violation) const;
+
+    /// Record that these cuts are now rows of the LP.
+    void markInstalled(std::span<const Index> indices);
+
     /// Number of cuts in the pool.
     [[nodiscard]] Index size() const { return static_cast<Index>(cuts_.size()); }
 
     /// Access a cut by index.
-    [[nodiscard]] const Cut& operator[](Index i) const { return cuts_[i]; }
+    [[nodiscard]] const Cut& operator[](Index i) const { return cuts_[i].cut; }
 
     /// Clear all cuts.
     void clear() { cuts_.clear(); }
@@ -104,7 +116,11 @@ private:
                                                std::span<const Index> ind_b,
                                                std::span<const Real> val_b);
 
-    std::vector<Cut> cuts_;
+    struct Entry {
+        Cut cut;
+        bool installed = false;
+    };
+    std::vector<Entry> cuts_;
     Real parallelism_threshold_ = 0.9;
     Real min_efficacy_ = 1e-5;
 };

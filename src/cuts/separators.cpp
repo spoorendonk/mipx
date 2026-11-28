@@ -15,36 +15,12 @@ namespace mipx {
 
 namespace {
 
-Real computeLhs(const Cut& cut, std::span<const Real> primals) {
-    Real lhs = 0.0;
-    for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-        const Index j = cut.indices[k];
-        if (j < 0 || j >= static_cast<Index>(primals.size())) {
-            continue;
-        }
-        lhs += cut.values[k] * primals[j];
-    }
-    return lhs;
-}
-
-Real computeViolation(const Cut& cut, std::span<const Real> primals) {
-    const Real lhs = computeLhs(cut, primals);
-    Real violation = 0.0;
-    if (cut.lower > -kInf) {
-        violation = std::max(violation, cut.lower - lhs);
-    }
-    if (cut.upper < kInf) {
-        violation = std::max(violation, lhs - cut.upper);
-    }
-    return violation;
-}
-
 Real computeEfficacy(const Cut& cut, std::span<const Real> primals) {
     Real norm_sq = 0.0;
     for (Real v : cut.values) {
         norm_sq += v * v;
     }
-    return computeViolation(cut, primals) / std::sqrt(norm_sq);
+    return cutViolation(cut, primals) / std::sqrt(norm_sq);
 }
 
 }  // namespace
@@ -83,7 +59,7 @@ bool SeparatorManager::addViolatedCut(Cut cut, std::span<const Real> primals, Cu
     // Before the violation threshold: strengthening only raises violation.
     const Strengthening strengthening = maybeStrengthen(cut, primals);
 
-    const Real violation = computeViolation(cut, primals);
+    const Real violation = cutViolation(cut, primals);
     if (violation < min_violation_) {
         return false;
     }

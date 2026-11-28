@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <utility>
 
 namespace mipx {
 
@@ -56,7 +57,30 @@ bool hasFiniteBounds(const Cut& cut) {
     return true;
 }
 
+Real cutLhs(const Cut& cut, std::span<const Real> primals) {
+    Real lhs = 0.0;
+    for (std::size_t k = 0; k < cut.indices.size(); ++k) {
+        const Index j = cut.indices[k];
+        if (j >= 0 && j < static_cast<Index>(primals.size())) {
+            lhs += cut.values[k] * primals[j];
+        }
+    }
+    return lhs;
+}
+
 }  // namespace
+
+Real cutViolation(const Cut& cut, std::span<const Real> primals) {
+    const Real lhs = cutLhs(cut, primals);
+    Real violation = 0.0;
+    if (cut.lower > -kInf) {
+        violation = std::max(violation, cut.lower - lhs);
+    }
+    if (cut.upper < kInf) {
+        violation = std::max(violation, lhs - cut.upper);
+    }
+    return violation;
+}
 
 bool isNumericallySafeCut(const Cut& cut) {
     if (cut.indices.empty()) {
@@ -155,7 +179,8 @@ bool CutPool::addCut(Cut cut) {
     }
 
     // Check parallelism against existing cuts.
-    for (const auto& existing : cuts_) {
+    for (const auto& entry : cuts_) {
+        const auto& existing = entry.cut;
         Real sim = cosineSimilarity(cut.indices, cut.values, existing.indices, existing.values);
         if (sim > parallelism_threshold_) {
             // Too parallel — only keep if strictly better efficacy.
@@ -165,20 +190,14 @@ bool CutPool::addCut(Cut cut) {
         }
     }
 
-    cuts_.push_back(std::move(cut));
+    cuts_.push_back({std::move(cut)});
     return true;
 }
 
 void CutPool::ageAll(std::span<const Real> primals, Real active_tol) {
-    for (auto& cut : cuts_) {
-        // Compute activity: a^T x.
-        Real activity = 0.0;
-        for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
-            Index j = cut.indices[k];
-            if (j < static_cast<Index>(primals.size())) {
-                activity += cut.values[k] * primals[j];
-            }
-        }
+    for (auto& entry : cuts_) {
+        auto& cut = entry.cut;
+        const Real activity = cutLhs(cut, primals);
 
         // Check if the cut is active (binding).
         bool active = false;
@@ -202,7 +221,8 @@ void CutPool::ageAll(std::span<const Real> primals, Real active_tol) {
 }
 
 void CutPool::purge(Int age_threshold) {
-    std::erase_if(cuts_, [age_threshold](const Cut& c) { return c.age > age_threshold; });
+    std::erase_if(cuts_,
+                  [age_threshold](const Entry& entry) { return entry.cut.age > age_threshold; });
 }
 
 std::vector<Index> CutPool::topByEfficacy(Index k) const {
@@ -211,11 +231,51 @@ std::vector<Index> CutPool::topByEfficacy(Index k) const {
 
     // Partial sort to get top-k.
     Index n = std::min(k, size());
-    std::partial_sort(indices.begin(), indices.begin() + n, indices.end(),
-                      [this](Index a, Index b) { return cuts_[a].efficacy > cuts_[b].efficacy; });
+    std::partial_sort(
+        indices.begin(), indices.begin() + n, indices.end(),
+        [this](Index a, Index b) { return cuts_[a].cut.efficacy > cuts_[b].cut.efficacy; });
 
     indices.resize(static_cast<std::size_t>(n));
     return indices;
+}
+
+std::vector<Index> CutPool::violatedByEfficacy(std::span<const Real> primals,
+                                               Real min_violation) const {
+    std::vector<std::pair<Index, Real>> ranked;
+    for (Index i = 0; i < size(); ++i) {
+        const auto& [cut, installed] = cuts_[i];
+        if (installed) {
+            continue;
+        }
+        const Real violation = cutViolation(cut, primals);
+        if (violation < min_violation) {
+            continue;
+        }
+        const Real norm_sq =
+            std::inner_product(cut.values.begin(), cut.values.end(), cut.values.begin(), 0.0);
+        const Real efficacy = violation / std::sqrt(norm_sq);
+        if (std::isfinite(efficacy) && efficacy >= min_efficacy_) {
+            ranked.emplace_back(i, efficacy);
+        }
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) {
+            return a.second > b.second;
+        }
+        return a.first < b.first;
+    });
+    std::vector<Index> indices;
+    indices.reserve(ranked.size());
+    for (const auto& [index, efficacy] : ranked) {
+        indices.push_back(index);
+    }
+    return indices;
+}
+
+void CutPool::markInstalled(std::span<const Index> indices) {
+    for (const Index index : indices) {
+        cuts_[index].installed = true;
+    }
 }
 
 }  // namespace mipx

@@ -7,6 +7,31 @@
 
 namespace mipx {
 
+std::vector<Index> selectRootCuts(const CutPool& pool, const CutRoundPolicy& policy,
+                                  std::span<const Real> primals, bool recheck_violation) {
+    const auto ranked = recheck_violation
+                            ? pool.violatedByEfficacy(primals, kDefaultCutMinViolation)
+                            : pool.topByEfficacy(policy.max_cuts_per_round);
+    std::vector<Index> selected;
+    std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};
+    for (const Index index : ranked) {
+        if (static_cast<Int>(selected.size()) == policy.max_cuts_per_round) {
+            break;
+        }
+        const auto& cut = pool[index];
+        const auto fi = static_cast<std::size_t>(cut.family);
+        if ((!recheck_violation && cut.age > 0) || !policy.family_enabled[fi]) {
+            continue;
+        }
+        if (policy.per_family_cap[fi] > 0 && selected_by_family[fi] >= policy.per_family_cap[fi]) {
+            continue;
+        }
+        selected.push_back(index);
+        ++selected_by_family[fi];
+    }
+    return selected;
+}
+
 void CutManager::setBaseLimits(Int max_rounds, Int max_cuts_per_round) {
     base_max_rounds_ = std::max<Int>(1, max_rounds);
     base_max_cuts_per_round_ = std::max<Int>(1, max_cuts_per_round);

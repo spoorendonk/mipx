@@ -6446,7 +6446,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             dst.strengthen_efficacy_gain += src.strengthen_efficacy_gain;
         }
 
-        if (new_cuts == 0) {
+        if (new_cuts == 0 && !root_cut_recheck_) {
             break;
         }
         // Past the deadline the round's cuts are not added: the re-solve
@@ -6458,7 +6458,10 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             break;
         }
 
-        auto top_indices = pool.topByEfficacy(policy.max_cuts_per_round);
+        const auto selected_indices = selectRootCuts(pool, policy, primals, root_cut_recheck_);
+        if (selected_indices.empty()) {
+            break;
+        }
 
         std::vector<Index> starts;
         std::vector<Index> col_indices;
@@ -6467,22 +6470,10 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         std::vector<Real> upper;
         std::vector<const Cut*> selected_cuts;
         std::array<Int, static_cast<std::size_t>(CutFamily::Count)> selected_by_family{};
-        selected_by_family.fill(0);
-        Int selected_total = 0;
+        const auto selected_total = static_cast<Int>(selected_indices.size());
 
-        for (Index idx : top_indices) {
+        for (Index idx : selected_indices) {
             const auto& cut = pool[idx];
-            if (cut.age > 0) {
-                continue;
-            }
-            const auto fi = static_cast<std::size_t>(cut.family);
-            if (!policy.family_enabled[fi]) {
-                continue;
-            }
-            if (policy.per_family_cap[fi] > 0 &&
-                selected_by_family[fi] >= policy.per_family_cap[fi]) {
-                continue;
-            }
 
             starts.push_back(static_cast<Index>(col_indices.size()));
             for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -6492,12 +6483,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             lower.push_back(cut.lower);
             upper.push_back(cut.upper);
             selected_cuts.push_back(&cut);
-            selected_by_family[fi] += 1;
-            ++selected_total;
-        }
-
-        if (lower.empty()) {
-            break;
+            ++selected_by_family[static_cast<std::size_t>(cut.family)];
         }
 
         // Feed every cut entering the root LP back into the clique table:
@@ -6580,6 +6566,9 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             break;
         }
 
+        if (root_cut_recheck_) {
+            pool.markInstalled(selected_indices);
+        }
         total_cuts += cuts_this_round;
         rounds_done = round + 1;
         Real new_obj = result.objective;

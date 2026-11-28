@@ -87,6 +87,7 @@ Key options:
 | `--node-limit <n>` | 1000000 | Maximum branch-and-bound nodes |
 | `--presolve` / `--no-presolve` | on | Presolve reductions |
 | `--cuts` / `--no-cuts` | on | Cutting planes |
+| `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
 | `--barrier` | off | Use barrier for root LP |
 | `--barrier-dualize off\|on\|auto` | off | With barrier, force the compact dual with `on` or compare estimated Newton-factor work in both orientations with `auto` |
 | `--pdlp` | off | Use PDLP for root LP |

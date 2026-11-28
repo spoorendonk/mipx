@@ -293,6 +293,8 @@ public:
     void setMaxCutRounds(Int r) { max_cut_rounds_ = r; }
     void setMaxCutsPerRound(Int c) { max_cuts_per_round_ = c; }
     void setCutsEnabled(bool e) { cuts_enabled_ = e; }
+    /// Opt in to selecting uninstalled root cuts by violation at the current LP point.
+    void setRootCutRecheck(bool enabled) { root_cut_recheck_ = enabled; }
     void setCutFamilyEnabled(CutFamily family, bool enabled) {
         switch (family) {
             case CutFamily::Gomory:
@@ -754,6 +756,7 @@ private:
 
     // Cutting plane parameters.
     Int max_cut_rounds_ = 20;
+    bool root_cut_recheck_ = false;
     Int max_cuts_per_round_ = 50;
     bool cuts_enabled_ = true;
     CutFamilyConfig cut_family_config_{};

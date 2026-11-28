@@ -1,5 +1,6 @@
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
+#include "mipx/cut_manager.h"
 #include "mipx/cut_pool.h"
 #include "mipx/cut_strengthening.h"
 #include "mipx/dual_simplex.h"
@@ -71,6 +72,52 @@ TEST_CASE("CutPool: reject low efficacy", "[cuts]") {
 
     CHECK_FALSE(pool.addCut(c));
     CHECK(pool.size() == 0);
+}
+
+TEST_CASE("Root cut recheck fills family quotas with violated uninstalled cuts", "[cuts]") {
+    CutPool pool;
+    const auto add = [&](Index column, CutFamily family, Real insertion_efficacy) {
+        Cut cut;
+        cut.indices = {column};
+        cut.values = {1.0};
+        cut.upper = 1.0;
+        cut.family = family;
+        cut.efficacy = insertion_efficacy;
+        REQUIRE(pool.addCut(std::move(cut)));
+    };
+    add(0, CutFamily::Gomory, 7.0);
+    add(1, CutFamily::Gomory, 6.0);
+    add(2, CutFamily::Mir, 5.0);
+    add(3, CutFamily::Mir, 4.0);
+    add(4, CutFamily::Gomory, 2.0);
+
+    CutRoundPolicy policy;
+    const auto gomory = static_cast<std::size_t>(CutFamily::Gomory);
+    const auto mir = static_cast<std::size_t>(CutFamily::Mir);
+    policy.max_cuts_per_round = 2;
+    policy.family_enabled[gomory] = policy.family_enabled[mir] = true;
+    policy.per_family_cap[gomory] = policy.per_family_cap[mir] = 1;
+
+    const std::vector<Real> first_point{4.0, 2.0, 0.0, 2.5, 3.0};
+    CHECK(selectRootCuts(pool, policy, first_point, false) == std::vector<Index>{0});
+    const auto first = selectRootCuts(pool, policy, first_point, true);
+    REQUIRE(first == std::vector<Index>{0, 3});
+    pool.markInstalled(first);
+
+    const std::vector<Real> new_point{1.0, 2.0, 0.0, 2.5, 3.0};
+    pool.ageAll(new_point);
+    CHECK(pool[0].age == 0);
+    CHECK(selectRootCuts(pool, policy, new_point, false) == std::vector<Index>{0});
+    // Row 0 is binding, row 3 remains numerically violated in this synthetic
+    // point, and both are installed. Only the better remaining Gomory fits.
+    CHECK(selectRootCuts(pool, policy, new_point, true) == std::vector<Index>{4});
+
+    // Preceding rows can be purged without losing the installed marker.
+    const std::vector<Real> purge_point{0.0, 0.0, 0.0, 1.0, 0.0};
+    pool.ageAll(purge_point);
+    pool.purge(0);
+    REQUIRE(pool.size() == 1);
+    CHECK(selectRootCuts(pool, policy, new_point, true).empty());
 }
 
 TEST_CASE("CutPool: parallelism filtering", "[cuts]") {

@@ -40,6 +40,7 @@ void printUsage(FILE* out) {
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--cut-strengthening|--no-cut-strengthening] "
+                 "[--root-cut-recheck] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
@@ -149,6 +150,7 @@ int main(int argc, char* argv[]) {
     bool tree_pseudocosts = true;
     bool balanced_branch_score = false;
     bool cut_strengthening = false;
+    bool root_cut_recheck = false;
     // Off by default in the solver; a numeric knob left unset keeps the
     // solver's own default, so a run without these flags is unchanged.
     bool probing_enabled = false;
@@ -282,6 +284,8 @@ int main(int argc, char* argv[]) {
             cut_strengthening = true;
         } else if (arg == "--no-cut-strengthening") {
             cut_strengthening = false;
+        } else if (arg == "--root-cut-recheck") {
+            root_cut_recheck = true;
         } else if (arg == "--presolve-forcing-rows") {
             presolve_forcing_rows = true;
         } else if (arg == "--no-presolve-forcing-rows") {
@@ -649,6 +653,7 @@ int main(int argc, char* argv[]) {
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
             solver.setBalancedBranchScore(balanced_branch_score);
             solver.setCutStrengthening(cut_strengthening);
+            solver.setRootCutRecheck(root_cut_recheck);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {
                 solver.setProbingMaxRounds(*probing_rounds);
