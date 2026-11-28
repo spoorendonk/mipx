@@ -95,6 +95,7 @@ TEST_CASE("createChildren produces correct child nodes", "[branching]") {
     REQUIRE(left.branch.is_upper == true);
     REQUIRE(left.basis.size() == 2);
     REQUIRE(left.bound_changes.size() == 1);
+    REQUIRE(left.bound_changes[0].level == left.depth);
 
     // Right child: x_0 >= 3 (lower bound).
     REQUIRE(right.parent_id == 5);
@@ -104,19 +105,22 @@ TEST_CASE("createChildren produces correct child nodes", "[branching]") {
     REQUIRE(right.branch.is_upper == false);
     REQUIRE(right.basis.size() == 2);
     REQUIRE(right.bound_changes.size() == 1);
+    REQUIRE(right.bound_changes[0].level == right.depth);
 }
 
 TEST_CASE("createChildren accumulates bound changes", "[branching]") {
     BnbNode parent;
     parent.id = 2;
     parent.depth = 1;
-    parent.bound_changes = {{0, 1.0, false}};  // existing change
+    parent.bound_changes = {{0, 1.0, false, parent.depth}};
 
     auto [left, right] = createChildren(parent, 1, 3.5);
 
     REQUIRE(left.bound_changes.size() == 2);
     REQUIRE(left.bound_changes[0].variable == 0);
+    REQUIRE(left.bound_changes[0].level == 1);
     REQUIRE(left.bound_changes[1].variable == 1);
+    REQUIRE(left.bound_changes[1].level == 2);
 
     REQUIRE(right.bound_changes.size() == 2);
 }

@@ -68,12 +68,21 @@ public:
     /// fix all other literals to 0. Returns false if infeasibility detected.
     /// Outputs the (col, new_lower, new_upper) tuples for tightened variables.
     struct BoundUpdate {
-        Index col;
-        Real new_lower;
-        Real new_upper;
+        Index col = -1;
+        Real new_lower = -kInf;
+        Real new_upper = kInf;
+        Index clique = -1;
+        Index fixed_one = -1;  // Literal forcing this update, or -1 for an equality.
+        Index target = -1;     // Literal in the clique whose bound moves.
+    };
+    struct PropagationFailure {
+        Index clique = -1;
+        Index fixed_one = -1;
+        Index other_one = -1;  // Both -1 when every literal is false in an equality.
+        BoundUpdate crossing;
     };
     bool propagate(std::span<const Real> lower, std::span<const Real> upper,
-                   std::vector<BoundUpdate>& updates) const;
+                   std::vector<BoundUpdate>& updates, PropagationFailure* failure = nullptr) const;
 
     /// Clique substitutions in presolve: identify variables that can be
     /// eliminated via clique structure. Returns pairs (eliminated_var,

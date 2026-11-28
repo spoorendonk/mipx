@@ -26,9 +26,12 @@ void ObjectivePropagator::load(const LpProblem& problem) {
 // kept in one piece so the two can be read side by side.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool ObjectivePropagator::propagate(Real cutoff, std::span<const Real> lower,
-                                    std::span<const Real> upper,
-                                    std::vector<BoundUpdate>& updates) const {
+                                    std::span<const Real> upper, std::vector<BoundUpdate>& updates,
+                                    BoundUpdate* crossing) const {
     updates.clear();
+    if (crossing != nullptr) {
+        *crossing = {};
+    }
     if (!loaded_ || !std::isfinite(cutoff)) {
         return true;
     }
@@ -98,10 +101,13 @@ bool ObjectivePropagator::propagate(Real cutoff, std::span<const Real> lower,
             new_upper = std::floor(new_upper + DomainPropagator::kIntRoundTol);
         }
         if (new_lower > new_upper + kTol) {
+            if (crossing != nullptr) {
+                *crossing = {j, new_lower, new_upper, c > 0};
+            }
             return false;
         }
         if (new_lower > lower[j] + kTol || new_upper < upper[j] - kTol) {
-            updates.push_back({j, new_lower, new_upper});
+            updates.push_back({j, new_lower, new_upper, c > 0});
         }
     }
     return true;
