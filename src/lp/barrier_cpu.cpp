@@ -1616,7 +1616,10 @@ private:
             }
             d_[j] += (d_[j] >= 0 ? eps_s : -eps_s);
 
-            if (std::abs(d_[j]) < 1e-30) {
+            // The boost keeps |d| >= eps_d, so only a pivot that is not
+            // finite (a NaN slips past the boost) fails here: Auto's cue to
+            // try the normal equations (#140).
+            if (!std::isfinite(d_[j])) {
                 return false;
             }
 
@@ -1786,6 +1789,42 @@ double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions
     const double k = static_cast<double>(dense.size());
     const double schur_work = 4.0 * k * factor_entries + m * k * k + (2.0 / 3.0) * k * k * k;
     return matrix.numNonzeros() + formation + factor_work + schur_work;
+}
+
+double augmentedFactorFlops(const SparseMatrix& matrix, const BarrierOptions& options,
+                            const Deadline& deadline) {
+    const Index m = matrix.numRows();
+    const Index n = matrix.numCols();
+    const Index dim = m + n;
+    std::vector<Index> starts;
+    std::vector<Index> indices;
+    computeAugPattern(matrix, m, n, starts, indices);
+    // The ordering CpuAugmentedSolver's symbolicAnalyze() takes.
+    BarrierOrdering ordering = options.ordering;
+    if (ordering == BarrierOrdering::Auto || ordering == BarrierOrdering::CuDSS) {
+        ordering = autoSelectOrdering(dim, starts[dim]);
+    }
+    std::vector<Index> perm;
+    std::vector<Index> iperm;
+    const bool ordered = ordering == BarrierOrdering::Nd
+                             ? computeNd(dim, starts, indices, perm, iperm, deadline)
+                             : amdOrder(dim, starts, indices, perm, iperm, {}, nullptr, deadline);
+    if (!ordered) {
+        return kInf;
+    }
+    // Column counts give the factor's pattern without forming it; the
+    // supernodal layout is the sparse NE's, not the left-looking LDL''s, but
+    // the fill and the flops are the ordering's. Only the flops are wanted,
+    // so a one-byte cap ends the analysis once its layout is known, before it
+    // maps the input entries; the stats it reached hold the flops then. Its
+    // stored count is set only after the column counts, so a deadline or an
+    // out-of-memory before them gives +inf, not a partial sum.
+    SparseCholesky factor;
+    const bool analyzed = factor.analyze(dim, starts, indices, perm, 1, deadline);
+    if ((!analyzed && deadline.passed()) || factor.stats().stored == 0) {
+        return kInf;
+    }
+    return factor.stats().factor_flops;
 }
 
 std::unique_ptr<NewtonSolver> createCpuCholeskySolver() {

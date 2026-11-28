@@ -186,9 +186,58 @@ bool denseBeyondColumns(const DensityInfo& density) {
     return density.dense_rows > 10 || density.avg_ne_row_density > 20.0;
 }
 
-bool preferAugmented(const SparseMatrix& matrix, const BarrierOptions& options) {
+// The density proxy the GPU path still dispatches on under Auto. Its
+// thresholds are not validated against measurements; the CPU's rule is
+// cpuPrefersAugmented (#140).
+bool densityPrefersAugmented(const SparseMatrix& matrix, const BarrierOptions& options) {
     const auto density = detectDensity(matrix, options.dense_col_fraction);
     return density.dense_cols > 50 || denseBeyondColumns(density);
+}
+
+// Work of the dense normal equations: m^3/3 for LL' and one matrix product
+// per row to form M; +inf when M is over ne_max_bytes.
+double denseNeWork(const SparseMatrix& matrix, const BarrierOptions& options) {
+    const Index m = matrix.numRows();
+    const auto dim = static_cast<std::size_t>(m);
+    if (options.ne_max_bytes != 0 && dim > 0 && dim > options.ne_max_bytes / sizeof(Real) / dim) {
+        return kInf;
+    }
+    const double rows = m;
+    return rows * rows * rows / 3.0 + (rows + 1.0) * matrix.numNonzeros();
+}
+
+// HiGHS HiPO's threshold (kSystemRatioOpsThresh in chooseNla()): the augmented
+// system only when the normal equations take over ten times its flops.
+constexpr double kAugmentedOpsRatio = 10.0;
+
+// CPU Auto's choice between its normal equations (dense LL') and the
+// augmented system (sparse LDL') (#140): the augmented system when the dense
+// NE's work is over kAugmentedOpsRatio times the augmented factor's flops,
+// counted by a symbolic analysis. Few rows keep the NE however dense the
+// columns (fit2d: 25 rows, 10500 columns), and a sparse LP with many rows
+// goes to the augmented system, whose sparse factor beats a dense m^3/3.
+bool cpuPrefersAugmented(const SparseMatrix& matrix, const BarrierOptions& options,
+                         const Deadline& deadline) {
+    const Index m = matrix.numRows();
+    const Index n = matrix.numCols();
+    if (m == 0 || n == 0) {
+        return false;
+    }
+    const double ne = denseNeWork(matrix, options);
+    // NE over its memory cap: the augmented system whatever it costs.
+    if (!std::isfinite(ne)) {
+        return true;
+    }
+    // Any factor of the augmented system holds its lower triangle, dim + nnz
+    // entries over dim columns, so by Cauchy-Schwarz its flops (the sum of the
+    // squared column counts) are at least (dim + nnz)^2 / dim. Skip the
+    // analysis when even that bound keeps the NE.
+    const double dim = static_cast<double>(m) + n;
+    const double entries = dim + static_cast<double>(matrix.numNonzeros());
+    if (ne <= kAugmentedOpsRatio * entries * entries / dim) {
+        return false;
+    }
+    return kAugmentedOpsRatio * augmentedFactorFlops(matrix, options, deadline) < ne;
 }
 
 bool gpuAlgorithm(BarrierAlgorithm algorithm) {
@@ -202,49 +251,82 @@ bool defaultInitialPoint(const BarrierOptions& options) {
            options.initial_point == BarrierInitialPoint::Mehrotra;
 }
 
-BarrierAlgorithm barrierAlgorithm(const BarrierOptions& options, bool prefer_augmented,
-                                  bool has_upper) {
-    const auto cpu =
-        prefer_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
+BarrierAlgorithm cpuAutoAlgorithm(const SparseMatrix& matrix, const BarrierOptions& options,
+                                  const Deadline& deadline) {
+    return cpuPrefersAugmented(matrix, options, deadline) ? BarrierAlgorithm::CpuAugmented
+                                                          : BarrierAlgorithm::CpuCholesky;
+}
+
+// The backend a solve of `matrix` starts on. Auto, and a GPU backend the
+// build or the options rule out, take cpuAutoAlgorithm(); under Auto the GPU
+// takes the density proxy.
+BarrierAlgorithm barrierAlgorithm(const SparseMatrix& matrix, const BarrierOptions& options,
+                                  bool has_upper, const Deadline& deadline) {
     auto algorithm = options.algorithm;
 #ifdef MIPX_HAS_CUDSS
     if (algorithm == BarrierAlgorithm::Auto) {
-        algorithm =
-            prefer_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
+        algorithm = densityPrefersAugmented(matrix, options) ? BarrierAlgorithm::GpuAugmented
+                                                             : BarrierAlgorithm::GpuCholesky;
     }
     if (gpuAlgorithm(algorithm) && (has_upper || options.gondzio_correctors > 0 ||
                                     options.homogeneous || !defaultInitialPoint(options))) {
-        return cpu;
+        return cpuAutoAlgorithm(matrix, options, deadline);
     }
 #else
     (void)has_upper;
     if (algorithm == BarrierAlgorithm::Auto || gpuAlgorithm(algorithm)) {
-        return cpu;
+        return cpuAutoAlgorithm(matrix, options, deadline);
     }
 #endif
     return algorithm;
 }
 
+const char* newtonSystemName(BarrierAlgorithm algorithm) {
+    switch (algorithm) {
+        case BarrierAlgorithm::CpuCholesky:
+            return "dense normal equations";
+        case BarrierAlgorithm::CpuSparseCholesky:
+            return "sparse normal equations";
+        case BarrierAlgorithm::CpuAugmented:
+            return "augmented system";
+        default:
+            return "GPU";
+    }
+}
+
+std::unique_ptr<NewtonSolver> createCpuNewtonSolver(BarrierAlgorithm algorithm) {
+    switch (algorithm) {
+        case BarrierAlgorithm::CpuAugmented:
+            return createCpuAugmentedSolver();
+        case BarrierAlgorithm::CpuSparseCholesky:
+            return createCpuSparseCholeskySolver();
+        default:
+            return createCpuCholeskySolver();
+    }
+}
+
+// The CPU backend Auto falls back to when `algorithm` fails (#140).
+BarrierAlgorithm otherNewtonSystem(BarrierAlgorithm algorithm) {
+    return algorithm == BarrierAlgorithm::CpuAugmented ? BarrierAlgorithm::CpuCholesky
+                                                       : BarrierAlgorithm::CpuAugmented;
+}
+
+// Under CPU Auto this runs the augmented system's symbolic analysis, at load
+// time; past `deadline` it takes the normal equations, as a solve would.
 double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& options,
-                           bool has_upper) {
+                           bool has_upper, const Deadline& deadline) {
     const Index m = matrix.numRows();
     const Index n = matrix.numCols();
     if (m == 0 || n == 0) {
         return 0.0;
     }
-    const bool prefer_augmented = preferAugmented(matrix, options);
-    const auto algorithm = barrierAlgorithm(options, prefer_augmented, has_upper);
-    const bool augmented = algorithm == BarrierAlgorithm::CpuAugmented ||
-                           algorithm == BarrierAlgorithm::GpuAugmented ||
-                           (algorithm == BarrierAlgorithm::GpuCholesky && prefer_augmented);
+    const auto algorithm = barrierAlgorithm(matrix, options, has_upper, deadline);
+    const bool augmented =
+        algorithm == BarrierAlgorithm::CpuAugmented ||
+        algorithm == BarrierAlgorithm::GpuAugmented ||
+        (algorithm == BarrierAlgorithm::GpuCholesky && densityPrefersAugmented(matrix, options));
     if (algorithm == BarrierAlgorithm::CpuCholesky) {
-        const auto dim = static_cast<std::size_t>(m);
-        if (options.ne_max_bytes != 0 && dim > options.ne_max_bytes / sizeof(Real) / dim) {
-            return kInf;
-        }
-        const double rows = m;
-        // The dense implementation forms M with one matrix product per row.
-        return rows * rows * rows / 3.0 + (rows + 1.0) * matrix.numNonzeros();
+        return denseNeWork(matrix, options);
     }
     return estimateSparseNewtonWork(matrix, options, augmented,
                                     algorithm == BarrierAlgorithm::CpuSparseCholesky);
@@ -936,9 +1018,14 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                                     dv_out, dw_out);
             return true;
         };
+        // A direction that is not finite is a failed solve too: the augmented
+        // backend boosts every pivot and reports no breakdown of its own, so
+        // this is where one shows (#140), as hsdDirection() checks it.
         auto newton = [&](std::span<Real> dz_out, std::span<Real> dy_out, std::span<Real> ds_out,
                           std::span<Real> dv_out, std::span<Real> dw_out) {
-            return newtonFor(rp, rd, rc, ru, rw, dz_out, dy_out, ds_out, dv_out, dw_out);
+            return newtonFor(rp, rd, rc, ru, rw, dz_out, dy_out, ds_out, dv_out, dw_out) &&
+                   std::ranges::all_of(dz_out, isFinite) && std::ranges::all_of(dy_out, isFinite) &&
+                   std::ranges::all_of(ds_out, isFinite);
         };
         if (opts.verbose) {
             // The dense-column Schur complement of the sparse NE backend
@@ -1531,6 +1618,7 @@ void BarrierSolver::load(const LpProblem& problem) {
     reduced_costs_std_.clear();
     basis_orig_.clear();
     used_gpu_ = false;
+    used_algorithm_ = BarrierAlgorithm::Auto;
     rebuildTransform();
 }
 
@@ -1740,9 +1828,14 @@ void BarrierSolver::rebuildTransform() {
             transformed_infeasible_ = true;
             return false;
         }
+        // The estimates' analyses share one solve time limit: load has no
+        // deadline of its own.
+        const auto estimate_deadline =
+            Deadline::after(options_.max_solve_seconds).orStop(options_.stop_flag);
         if (options_.dualize == BarrierDualize::On ||
-            estimatedFactorWork(dual->matrix, options_, false) <
-                estimatedFactorWork(aeq_, options_, std::ranges::any_of(ustd_, isFinite))) {
+            estimatedFactorWork(dual->matrix, options_, false, estimate_deadline) <
+                estimatedFactorWork(aeq_, options_, std::ranges::any_of(ustd_, isFinite),
+                                    estimate_deadline)) {
             useDualForm(std::move(*dual));
         }
         return true;
@@ -2081,6 +2174,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     const Index n = aeq_.numCols();
     gondzio_corrections_ = 0;
     used_homogeneous_ = false;
+    used_algorithm_ = BarrierAlgorithm::Auto;
     scaled_obj_ = std_obj_offset_;
     if (dualized_) {
         if (deadline_.orStop(options_.stop_flag).stopped()) {
@@ -2139,12 +2233,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     }
     const bool has_upper = std::ranges::any_of(ustd_, isFinite);
 
-    // Density detection for backend selection.
-    const bool use_augmented = preferAugmented(aeq_, options_);
-
     // Select backend.
-    std::unique_ptr<NewtonSolver> solver;
-    auto algo = barrierAlgorithm(options_, use_augmented, has_upper);
+    auto algo = barrierAlgorithm(aeq_, options_, has_upper, deadline_.orStop(options_.stop_flag));
     [[maybe_unused]] const auto requested_algo = options_.algorithm;
     const Real dualized_obj_sign =
         dualized_ ? (original_.sense == Sense::Minimize ? -1.0 : 1.0) : 0.0;
@@ -2197,8 +2287,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 #ifdef MIPX_HAS_CUDSS
     // GPU device-resident path: handles NE/Augmented internally with auto-switching.
     if (algo == BarrierAlgorithm::GpuCholesky || algo == BarrierAlgorithm::GpuAugmented) {
-        const bool prefer_aug =
-            algo == BarrierAlgorithm::GpuAugmented || (use_augmented && !try_gpu_dense_cols);
+        const bool prefer_aug = algo == BarrierAlgorithm::GpuAugmented ||
+                                (densityPrefersAugmented(aeq_, options_) && !try_gpu_dense_cols);
         std::string gpu_error;
         // The GPU loop checks only a stop flag, so under a time limit (#275)
         // it gets one of its own, raised by a watcher at the deadline or when
@@ -2220,6 +2310,9 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 }
             });
         }
+        // Tried, so reported even when it fails and the solve stops here.
+        used_algorithm_ =
+            prefer_aug ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
         ok = solveBarrierGpu(aeq_, m, n, beq_, cstd_, gpu_opts, std_obj_offset_, prefer_aug, z, y,
                              s, iters, &gpu_error, dualized_obj_sign);
         watcher = std::jthread();  // stops and joins it
@@ -2246,8 +2339,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 }
             }
             if (requested_algo == BarrierAlgorithm::Auto) {
-                algo =
-                    use_augmented ? BarrierAlgorithm::CpuAugmented : BarrierAlgorithm::CpuCholesky;
+                algo = cpuAutoAlgorithm(aeq_, options_, deadline_.orStop(options_.stop_flag));
             } else {
                 last_error_ = gpu_fallback_error;
                 return BarrierIpmOutcome::Failed;
@@ -2256,24 +2348,17 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     }
 #endif
 
-    if (!ok && !solver) {
-        switch (algo) {
-            case BarrierAlgorithm::CpuCholesky:
-                solver = createCpuCholeskySolver();
-                break;
-            case BarrierAlgorithm::CpuAugmented:
-                solver = createCpuAugmentedSolver();
-                break;
-            case BarrierAlgorithm::CpuSparseCholesky:
-                solver = createCpuSparseCholeskySolver();
-                break;
-            default:
-                solver = createCpuCholeskySolver();
-                break;
+    const auto stopped = [&] {
+        return options_.stop_flag != nullptr && options_.stop_flag->load(std::memory_order_relaxed);
+    };
+    // One IPM run on a CPU backend; on failure last_error_ says why.
+    const auto runCpuBackend = [&](BarrierAlgorithm backend) {
+        used_algorithm_ = backend;
+        auto solver = createCpuNewtonSolver(backend);
+        if (options_.verbose) {
+            std::printf("Barrier Newton system: %s\n", newtonSystemName(backend));
         }
-    }
-
-    if (solver) {
+        BarrierIpmOutcome result = BarrierIpmOutcome::Failed;
         // A factor too large for memory ends the solve with an error status
         // rather than an exception out of solve() (#280).
         try {
@@ -2297,14 +2382,13 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
                 if (backend_deadline.passed()) {
                     return interrupted();
                 }
-                if (last_error_.empty()) {
-                    last_error_ = solver->lastError().empty() ? "Barrier backend setup failed."
-                                                              : solver->lastError();
-                }
+                last_error_ = solver->lastError().empty() ? "Barrier backend setup failed."
+                                                          : solver->lastError();
                 return BarrierIpmOutcome::Failed;
             }
             used_homogeneous_ = hsd;
-            outcome =
+            gondzio_corrections_ = 0;
+            result =
                 hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_,
                                 dualized_obj_sign, z, y, s, iters, gondzio_corrections_)
                     : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
@@ -2313,20 +2397,42 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             last_error_ = "Barrier ran out of memory in its Newton-system backend.";
             return BarrierIpmOutcome::Failed;
         }
+        if (result == BarrierIpmOutcome::Failed && !stopped()) {
+            last_error_ =
+                solver->lastError().empty() ? "Barrier solve failed." : solver->lastError();
+        }
+        return result;
+    };
+
+    if (!ok) {
+        outcome = runCpuBackend(algo);
+        // Under Auto the normal equations and the augmented system each take
+        // over from the other when it fails (#140): its setup, its memory, or
+        // its IPM run, including a stall or the iteration limit. They fail on
+        // different LPs: on Netlib the augmented system stalls on bnl2,
+        // fffff800 and forplan and runs out of iterations on perold, all of
+        // which the normal equations solve (#162). A stop or the time limit
+        // ends the solve as before, so the rerun costs at most the time left.
+        if (outcome == BarrierIpmOutcome::Failed && requested_algo == BarrierAlgorithm::Auto &&
+            !stopped() && !deadline_.passed()) {
+            const auto other = otherNewtonSystem(algo);
+            if (options_.verbose) {
+                std::printf("Barrier: %s failed (%s); trying %s.\n", newtonSystemName(algo),
+                            last_error_.c_str(), newtonSystemName(other));
+            }
+            const std::string first_error = last_error_;
+            outcome = runCpuBackend(other);
+            if (outcome == BarrierIpmOutcome::Failed && !stopped()) {
+                last_error_ = first_error + " The " + newtonSystemName(other) +
+                              " fallback also failed: " + last_error_;
+            }
+        }
         if (outcome == BarrierIpmOutcome::TimeLimit) {
             return outcome;  // no iterate to unscale or hand on
         }
         ok = outcome != BarrierIpmOutcome::Failed;
-        if (!ok && last_error_.empty() &&
-            !(options_.stop_flag != nullptr &&
-              options_.stop_flag->load(std::memory_order_relaxed))) {
-            if (!gpu_fallback_error.empty()) {
-                last_error_ = gpu_fallback_error + " CPU fallback also failed.";
-            } else if (!solver->lastError().empty()) {
-                last_error_ = solver->lastError();
-            } else {
-                last_error_ = "Barrier solve failed.";
-            }
+        if (!ok && !gpu_fallback_error.empty() && !stopped()) {
+            last_error_ = gpu_fallback_error + " CPU fallback also failed: " + last_error_;
         }
         // A failed or stopped run has no iterate that solve() reads, and one
         // whose starting point failed (a stop inside its factorization) has
@@ -2732,6 +2838,7 @@ LpResult BarrierSolver::solve() {
     crossover_iters_ = 0;
     crossover_stats_ = {};
     used_gpu_ = false;
+    used_algorithm_ = BarrierAlgorithm::Auto;
     used_homogeneous_ = false;
     deadline_ = Deadline::after(options_.max_solve_seconds);
     if (!loaded_) {

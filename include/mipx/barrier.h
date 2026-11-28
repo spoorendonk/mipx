@@ -16,9 +16,14 @@
 namespace mipx {
 
 enum class BarrierAlgorithm {
+    // On the CPU: the dense normal equations, or the augmented system when
+    // the NE's m^3/3 is over ten times the augmented factor's flops from a
+    // symbolic analysis (HiGHS HiPO's ratio); either one hands over to the
+    // other when it fails (#140). With cuDSS, the GPU backend, which still
+    // picks NE or augmented by a density proxy and switches at run time.
     Auto,
-    CpuCholesky,  // normal equations, dense LL'
-    CpuAugmented,
+    CpuCholesky,   // normal equations, dense LL'
+    CpuAugmented,  // augmented system, sparse LDL'
     GpuCholesky,
     GpuAugmented,
     CpuSparseCholesky,  // normal equations, sparse supernodal LL' (#290); opt-in
@@ -176,6 +181,12 @@ public:
     [[nodiscard]] Index standardFormCols() const { return aeq_.numCols(); }
     [[nodiscard]] bool usedDualization() const { return dualized_; }
     [[nodiscard]] bool usedGpu() const { return used_gpu_; }
+    // The Newton-system backend the last solve tried last: the one Auto
+    // chose, or the other after it failed (#140). Auto itself when none ran
+    // (an empty standard form, an error before it). On the GPU, cuDSS may still
+    // switch from the normal equations to the augmented system inside a
+    // GpuCholesky run.
+    [[nodiscard]] BarrierAlgorithm usedAlgorithm() const { return used_algorithm_; }
     // Gondzio correctors accepted over the last IPM run, for tests.
     [[nodiscard]] Int gondzioCorrections() const { return gondzio_corrections_; }
     // Whether the last IPM run was the homogeneous self-dual loop, for tests.
@@ -266,6 +277,7 @@ private:
     // accepts: the barrier reports Infeasible, not a contradiction (#408).
     bool crossover_proved_infeasible_ = false;
     bool used_gpu_ = false;
+    BarrierAlgorithm used_algorithm_ = BarrierAlgorithm::Auto;
     Int gondzio_corrections_ = 0;
     bool used_homogeneous_ = false;
     Deadline deadline_;  // of the current solve(), from max_solve_seconds

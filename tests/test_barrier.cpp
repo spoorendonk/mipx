@@ -20,6 +20,7 @@
 
 using namespace mipx;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 namespace fs = std::filesystem;
 
@@ -638,34 +639,157 @@ TEST_CASE("BarrierSolver GPU Augmented: share1b forced",
 // Auto-switching and fallback tests
 // ============================================================================
 
-TEST_CASE("BarrierSolver Auto: wide dense LP triggers augmented backend",
-          "[barrier][auto-switch]") {
-    auto lp = buildWideDenseLp();
+namespace {
 
-    // Auto backend should detect avg_ne_row_density > 20 and use augmented.
+// x_i + x_{i+1} >= 1 for i < rows, min sum of (1 + (j mod 3)) x_j: a sparse
+// LP with many rows, whose augmented factor is a band and whose dense normal
+// equations are rows^3/3 (#140).
+LpProblem buildChainLp(int rows) {
+    LpProblem lp;
+    lp.name = "barrier_chain";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = rows + 1;
+    for (int j = 0; j < lp.num_cols; ++j) {
+        lp.obj.push_back(1.0 + (j % 3));
+        lp.col_names.push_back("x" + std::to_string(j));
+    }
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, kInf);
+    lp.col_type.assign(lp.num_cols, VarType::Continuous);
+    lp.num_rows = rows;
+    lp.row_lower.assign(rows, 1.0);
+    lp.row_upper.assign(rows, kInf);
+    std::vector<Triplet> trips;
+    for (int i = 0; i < rows; ++i) {
+        lp.row_names.push_back("r" + std::to_string(i));
+        trips.push_back({i, i, 1.0});
+        trips.push_back({i, i + 1, 1.0});
+    }
+    lp.matrix = SparseMatrix(rows, lp.num_cols, std::move(trips));
+    return lp;
+}
+
+Real dualSimplexObjective(const LpProblem& lp) {
+    DualSimplexSolver ds;
+    ds.load(lp);
+    ds.setVerbose(false);
+    const auto result = ds.solve();
+    REQUIRE(result.status == Status::Optimal);
+    return result.objective;
+}
+
+}  // namespace
+
+// Auto on the CPU weighs the dense normal equations' m^3/3 against the
+// augmented factor's flops from a symbolic analysis (#140). The GPU keeps
+// its own dispatch, so these check the CPU choice only.
+TEST_CASE("BarrierSolver Auto: wide dense LP keeps the normal equations",
+          "[barrier][auto-switch]") {
+    // Two rows and 40 dense columns: the NE is 2x2 however dense the columns
+    // are (the fit2d archetype, where the augmented system took minutes).
+    auto lp = buildWideDenseLp();
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
     opts.algorithm = BarrierAlgorithm::Auto;
     solver.setOptions(opts);
     solver.load(lp);
-    auto result = solver.solve();
+    const auto result = solver.solve();
 
-    // Cross-check with dual simplex.
-    DualSimplexSolver ds;
-    ds.load(lp);
-    ds.setVerbose(false);
-    auto ds_result = ds.solve();
-
-    REQUIRE(ds_result.status == Status::Optimal);
-    // Auto dispatches this wide dense LP to the CPU augmented backend, which is
-    // not yet numerically stable (#162) and whose auto dispatch is still open
-    // (#140). Same root cause as the CPU-augmented tests above, which already
-    // skip. The assertions below stay live and fire as soon as it works (#193).
-    if (result.status != Status::Optimal) {
-        SKIP("Auto dispatches to the CPU augmented backend, not yet stable (#162, #140).");
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(dualSimplexObjective(lp), 1e-4));
+    if (!solver.usedGpu()) {
+        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuCholesky);
     }
-    CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
+}
+
+TEST_CASE("BarrierSolver Auto: sparse LP with many rows takes the augmented system",
+          "[barrier][auto-switch]") {
+    // 600 rows: the dense NE is 7e7 flops, the augmented band a few thousand.
+    auto lp = buildChainLp(600);
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.algorithm = BarrierAlgorithm::Auto;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinRel(dualSimplexObjective(lp), 1e-6));
+    if (!solver.usedGpu()) {
+        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuAugmented);
+    }
+}
+
+TEST_CASE("BarrierSolver Auto: small sparse LP keeps the normal equations",
+          "[barrier][auto-switch]") {
+    // At 10 rows (21 standard-form columns with the slacks, 30 nonzeros) the
+    // dense NE's ~660 flops are under ten times the augmented factor's lower
+    // bound (~120), so no symbolic analysis runs.
+    auto lp = buildChainLp(10);
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.algorithm = BarrierAlgorithm::Auto;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinRel(dualSimplexObjective(lp), 1e-6));
+    if (!solver.usedGpu()) {
+        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuCholesky);
+    }
+}
+
+TEST_CASE("BarrierSolver Auto: a failed backend hands over to the other",
+          "[barrier][auto-switch][fallback]") {
+    // One iteration fails the augmented run Auto picks; the dense NE then
+    // runs before the solve gives up (#140): the augmented system runs out of
+    // iterations on perold, which the NE solves. An explicit backend has no
+    // fallback.
+    auto lp = buildChainLp(600);
+    const auto algo = GENERATE(BarrierAlgorithm::Auto, BarrierAlgorithm::CpuAugmented);
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.crossover = false;
+    opts.max_iter = 1;
+    opts.algorithm = algo;
+    solver.setOptions(opts);
+    solver.load(lp);
+    (void)solver.solve();
+    if (!solver.usedGpu()) {
+        CHECK(solver.usedAlgorithm() == (algo == BarrierAlgorithm::Auto
+                                             ? BarrierAlgorithm::CpuCholesky
+                                             : BarrierAlgorithm::CpuAugmented));
+    }
+}
+
+TEST_CASE("BarrierSolver Auto: normal equations over their memory cap take the augmented system",
+          "[barrier][auto-switch]") {
+    // The 2x2 NE of the wide dense LP would win, but a cap below its 32 bytes
+    // rules it out before any setup, as a dense NE over the machine's memory.
+    auto lp = buildWideDenseLp();
+    BarrierSolver solver;
+    BarrierOptions opts;
+    opts.verbose = false;
+    opts.presolve = false;
+    opts.ne_max_bytes = 16;
+    opts.algorithm = BarrierAlgorithm::Auto;
+    solver.setOptions(opts);
+    solver.load(lp);
+    const auto result = solver.solve();
+
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(dualSimplexObjective(lp), 1e-4));
+    if (!solver.usedGpu()) {
+        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuAugmented);
+    }
 }
 
 TEST_CASE("BarrierSolver: dual simplex fallback on max_iter=1", "[barrier][fallback]") {
@@ -916,12 +1040,10 @@ TEST_CASE("BarrierSolver crossover: wide dense LP", "[barrier][crossover]") {
     solver.load(lp);
     auto result = solver.solve();
 
-    // Auto dispatches this wide dense LP to the CPU augmented backend, which is
-    // not yet numerically stable (#162) and whose auto dispatch is still open
-    // (#140). Same root cause as the CPU-augmented tests above, which already
-    // skip. The assertions below stay live and fire as soon as it works (#193).
+    // CPU Auto keeps this wide dense LP on the dense NE (#140); a GPU build
+    // may still send it to an augmented backend, not yet stable (#162).
     if (result.status != Status::Optimal) {
-        SKIP("Auto dispatches to the CPU augmented backend, not yet stable (#162, #140).");
+        SKIP("Auto took an augmented backend, not yet stable (#162).");
     }
 
     auto basis = solver.getBasis();
@@ -1001,11 +1123,12 @@ TEST_CASE("BarrierSolver: ND ordering gives correct result", "[barrier][ordering
 TEST_CASE("BarrierSolver: AMD ordering on wide dense LP", "[barrier][ordering]") {
     auto lp = buildWideDenseLp();
 
-    // Use Auto algorithm so the backend can pick augmented for dense NE.
+    // The augmented system takes the ordering; Auto would keep the dense NE,
+    // which takes none (#140).
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.algorithm = BarrierAlgorithm::Auto;
+    opts.algorithm = BarrierAlgorithm::CpuAugmented;
     opts.ordering = BarrierOrdering::Amd;
     solver.setOptions(opts);
     solver.load(lp);
@@ -1018,12 +1141,10 @@ TEST_CASE("BarrierSolver: AMD ordering on wide dense LP", "[barrier][ordering]")
     auto ds_result = ds.solve();
 
     REQUIRE(ds_result.status == Status::Optimal);
-    // Auto dispatches this wide dense LP to the CPU augmented backend, which is
-    // not yet numerically stable (#162) and whose auto dispatch is still open
-    // (#140). Same root cause as the CPU-augmented tests above, which already
-    // skip. The assertions below stay live and fire as soon as it works (#193).
+    // The CPU augmented backend is not yet numerically stable (#162); the
+    // assertion below stays live and fires as soon as it works (#193).
     if (result.status != Status::Optimal) {
-        SKIP("Auto dispatches to the CPU augmented backend, not yet stable (#162, #140).");
+        SKIP("The CPU augmented backend is not yet stable (#162).");
     }
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
 }
@@ -1031,10 +1152,11 @@ TEST_CASE("BarrierSolver: AMD ordering on wide dense LP", "[barrier][ordering]")
 TEST_CASE("BarrierSolver: ND ordering on wide dense LP", "[barrier][ordering]") {
     auto lp = buildWideDenseLp();
 
+    // As in the AMD test: the augmented system takes the ordering.
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
-    opts.algorithm = BarrierAlgorithm::Auto;
+    opts.algorithm = BarrierAlgorithm::CpuAugmented;
     opts.ordering = BarrierOrdering::Nd;
     solver.setOptions(opts);
     solver.load(lp);
@@ -1046,12 +1168,10 @@ TEST_CASE("BarrierSolver: ND ordering on wide dense LP", "[barrier][ordering]") 
     auto ds_result = ds.solve();
 
     REQUIRE(ds_result.status == Status::Optimal);
-    // Auto dispatches this wide dense LP to the CPU augmented backend, which is
-    // not yet numerically stable (#162) and whose auto dispatch is still open
-    // (#140). Same root cause as the CPU-augmented tests above, which already
-    // skip. The assertions below stay live and fire as soon as it works (#193).
+    // The CPU augmented backend is not yet numerically stable (#162); the
+    // assertion below stays live and fires as soon as it works (#193).
     if (result.status != Status::Optimal) {
-        SKIP("Auto dispatches to the CPU augmented backend, not yet stable (#162, #140).");
+        SKIP("The CPU augmented backend is not yet stable (#162).");
     }
     CHECK_THAT(result.objective, WithinAbs(ds_result.objective, 1e-4));
 }

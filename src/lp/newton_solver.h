@@ -80,6 +80,13 @@ std::unique_ptr<NewtonSolver> createCpuAugmentedSolver();
 double estimateSparseNewtonWork(const SparseMatrix& matrix, const BarrierOptions& options,
                                 bool augmented, bool peel_dense_columns);
 
+// Flops of the augmented system's factorization, sum of squared column
+// counts, from a symbolic analysis under the ordering its CPU backend takes
+// (#140); +inf when the ordering or the column counts fail, run out of
+// memory or run past the deadline.
+double augmentedFactorFlops(const SparseMatrix& matrix, const BarrierOptions& options,
+                            const Deadline& deadline);
+
 // The denominator of the homogeneous self-dual loop's dtau (#370), given
 // u = (u_z, u_y) solved from (b, c, 0) at the iterate (z, s, tau, kappa):
 // max(b'u_y - c'u_z, q) + kappa / tau, with q = u_z' S Z^-1 u_z. For an exact

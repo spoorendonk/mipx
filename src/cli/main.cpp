@@ -76,6 +76,7 @@ void printUsage(FILE* out) {
                  "[--pdlp-restart-kkt-decay F] [--pdlp-adaptive-eval-frequency] "
                  "[--pdlp-restart-first-step-anchor] "
                  "[--barrier-ordering auto|amd|nd|cudss] [--barrier-ne dense|sparse] "
+                 "[--barrier-augmented] "
                  "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--barrier-gpu-dense-cols N] "
@@ -121,6 +122,7 @@ int main(int argc, char* argv[]) {
     mipx::BarrierOrdering barrier_ordering = mipx::BarrierOrdering::Auto;
     mipx::BarrierDualize barrier_dualize = mipx::BarrierDualize::Off;
     bool barrier_sparse_ne = false;
+    bool barrier_augmented = false;
     mipx::Int barrier_dense_cols = mipx::BarrierOptions{}.ne_max_dense_cols;
     mipx::Int barrier_gpu_dense_cols = mipx::BarrierOptions{}.gpu_ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
@@ -508,6 +510,10 @@ int main(int argc, char* argv[]) {
                 std::fprintf(stderr, "Unknown barrier normal-equations factor: %s\n", mode.c_str());
                 return 1;
             }
+        } else if (arg == "--barrier-augmented") {
+            // The CPU augmented system with its sparse LDL' (#140), whatever
+            // Auto would choose; it overrides --barrier-ne.
+            barrier_augmented = true;
         } else if (arg == "--barrier-dense-cols" && i + 1 < argc) {
             // Most dense columns the sparse NE factor leaves out and solves by
             // Schur complement (#314); 0 keeps every column in the factor.
@@ -846,9 +852,11 @@ int main(int argc, char* argv[]) {
                     mipx::BarrierSolver solver;
                     mipx::BarrierOptions bopts;
                     bopts.verbose = verbose;
-                    bopts.algorithm = barrier_sparse_ne ? mipx::BarrierAlgorithm::CpuSparseCholesky
-                                      : barrier_gpu     ? mipx::BarrierAlgorithm::Auto
-                                                        : mipx::BarrierAlgorithm::CpuCholesky;
+                    bopts.algorithm = barrier_augmented ? mipx::BarrierAlgorithm::CpuAugmented
+                                      : barrier_sparse_ne
+                                          ? mipx::BarrierAlgorithm::CpuSparseCholesky
+                                      : barrier_gpu ? mipx::BarrierAlgorithm::Auto
+                                                    : mipx::BarrierAlgorithm::CpuCholesky;
                     bopts.ordering = barrier_ordering;
                     bopts.dualize = barrier_dualize;
                     bopts.ne_max_dense_cols = barrier_dense_cols;
