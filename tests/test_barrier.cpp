@@ -806,10 +806,11 @@ TEST_CASE("BarrierSolver Auto: a failed backend hands over to the other",
     // One iteration fails the augmented run Auto picks; the dense NE then
     // runs (#140): the augmented system runs out of iterations on some LPs
     // the NE solves. When it fails too, the augmented system runs once more
-    // from HiPO's start (#480) before the solve gives up. An explicit backend
-    // has no fallback.
+    // from HiPO's start (#480) before the solve gives up, unless the start is
+    // pinned to Mehrotra's. An explicit backend has no fallback.
     auto lp = buildChainLp(600);
     const auto algo = GENERATE(BarrierAlgorithm::Auto, BarrierAlgorithm::CpuAugmented);
+    const auto start = GENERATE(BarrierInitialPoint::Auto, BarrierInitialPoint::Mehrotra);
     BarrierSolver solver;
     BarrierOptions opts;
     opts.verbose = false;
@@ -817,17 +818,22 @@ TEST_CASE("BarrierSolver Auto: a failed backend hands over to the other",
     opts.crossover = false;
     opts.max_iter = 1;
     opts.algorithm = algo;
+    opts.initial_point = start;
     solver.setOptions(opts);
     solver.load(lp);
     (void)solver.solve();
     if (!solver.usedGpu()) {
-        CHECK(solver.usedAlgorithm() == BarrierAlgorithm::CpuAugmented);
+        const bool auto_algo = algo == BarrierAlgorithm::Auto;
+        const bool expect_rerun = auto_algo && start == BarrierInitialPoint::Auto;
+        CHECK(solver.usedAlgorithm() == (auto_algo && !expect_rerun
+                                             ? BarrierAlgorithm::CpuCholesky
+                                             : BarrierAlgorithm::CpuAugmented));
         const std::string& error = solver.lastError();
         const bool handed_over =
             error.find("dense normal equations fallback also failed") != std::string::npos;
         const bool reran = error.find("rerun from HiPO's start also failed") != std::string::npos;
-        CHECK(handed_over == (algo == BarrierAlgorithm::Auto));
-        CHECK(reran == (algo == BarrierAlgorithm::Auto));
+        CHECK(handed_over == auto_algo);
+        CHECK(reran == expect_rerun);
     }
 }
 

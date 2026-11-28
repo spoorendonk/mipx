@@ -42,7 +42,9 @@ enum class BarrierDualize { Off, On, Auto };
 // The starting point of the CPU Mehrotra loop (#144).
 enum class BarrierInitialPoint {
     // Mehrotra's: on Netlib neither start beats the other on the whole, so
-    // Auto keeps the one that was there (#144)
+    // Auto keeps the one that was there (#144). Under BarrierAlgorithm::Auto,
+    // a solve that fails on both CPU Newton systems reruns once from HiPO's
+    // (#480); Mehrotra pins the start.
     Auto,
     Mehrotra,  // least-squares z and (y, s), shifted positive and centred
     // HiGHS HiPO's variant of Mehrotra's: shifts of at least 1, centring sums
@@ -119,8 +121,8 @@ struct BarrierOptions {
     // only: a value other than Auto or Mehrotra skips the GPU path, whose
     // start is its own. The homogeneous loop starts all complementarity
     // variables at 1 whatever this says. Under BarrierAlgorithm::Auto, a
-    // Mehrotra loop left at Auto or Mehrotra that fails on both CPU Newton
-    // systems runs once more from HiPO's start (#480).
+    // Mehrotra loop left at Auto that fails on both CPU Newton systems runs
+    // once more from HiPO's start (#480).
     BarrierInitialPoint initial_point = BarrierInitialPoint::Auto;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its
