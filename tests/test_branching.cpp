@@ -175,6 +175,73 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
 }
 
+TEST_CASE("ReliabilityBranching gives sibling probes the same reliability view", "[branching]") {
+    LpProblem lp;
+    lp.num_cols = 3;
+    lp.obj = {0.0, 0.0, 1.0};
+    lp.col_lower = {0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, kInf};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous};
+    lp.num_rows = 4;
+    // Both siblings have x = 0.5 at optimum. Fixing x costs 3 when z = 0,
+    // and 1 when z = 1 because the steeper rows are then slack.
+    lp.row_lower = {1.0, -1.0, 3.0, -3.0};
+    lp.row_upper.assign(4, kInf);
+    lp.matrix = SparseMatrix(4, 3,
+                             std::vector<Triplet>{{0, 0, 2.0},
+                                                  {0, 2, 1.0},
+                                                  {1, 0, -2.0},
+                                                  {1, 2, 1.0},
+                                                  {2, 0, 6.0},
+                                                  {2, 1, 3.0},
+                                                  {2, 2, 1.0},
+                                                  {3, 0, -6.0},
+                                                  {3, 1, 3.0},
+                                                  {3, 2, 1.0}});
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    for (Int n = 0; n < 3; ++n) {
+        branching.updatePseudoCost(0, false, 1.0);
+        branching.updatePseudoCost(0, true, 1.0);
+    }
+    REQUIRE_FALSE(branching.isReliable(0));
+
+    std::vector<StrongBranchPseudocostSample> samples;
+    for (const Real fixed : {0.0, 1.0}) {
+        auto sibling = lp;
+        sibling.col_lower[1] = sibling.col_upper[1] = fixed;
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        solver.load(sibling);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        const auto primals = solver.getPrimalValues();
+        REQUIRE_THAT(primals[0], Catch::Matchers::WithinAbs(0.5, 1e-12));
+        BranchingTelemetry telemetry;
+        const auto selection =
+            branching.selectDeferred(solver, sibling, primals, sibling.col_lower, sibling.col_upper,
+                                     result.objective, 2, telemetry, samples);
+        CHECK(selection.variable == 0);
+        CHECK(telemetry.strong_branch_probes == 2);
+        CHECK(telemetry.pseudocost_updates_strong == 2);
+        CHECK(telemetry.pseudocost_updates_tree == 0);
+        CHECK_FALSE(branching.isReliable(0));
+        CHECK(branching.upReliability(0) == 3);
+        CHECK(branching.downReliability(0) == 3);
+    }
+    REQUIRE(samples.size() == 4);
+    for (const auto& sample : samples) {
+        REQUIRE(sample.variable == 0);
+        branching.updatePseudoCost(sample.variable, sample.up_direction, sample.gain_per_unit);
+    }
+    CHECK(branching.isReliable(0));
+    CHECK(branching.upReliability(0) == 5);
+    CHECK(branching.downReliability(0) == 5);
+    CHECK_THAT(branching.upPseudoCost(0), Catch::Matchers::WithinAbs(2.2, 1e-12));
+    CHECK_THAT(branching.downPseudoCost(0), Catch::Matchers::WithinAbs(2.2, 1e-12));
+}
+
 TEST_CASE("Balanced branch scoring prefers gains in both pseudocost directions", "[branching]") {
     LpProblem lp;
     lp.num_cols = 2;

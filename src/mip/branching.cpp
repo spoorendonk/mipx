@@ -169,6 +169,29 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                                                 std::span<const Real> col_upper,
                                                 Real node_objective, bool force_strong_branch,
                                                 BranchingTelemetry& telemetry) {
+    return selectWithProbeSink(
+        lp, problem, primal_values, col_lower, col_upper, node_objective, force_strong_branch,
+        strong_branch_probe_budget_, telemetry, [&](const StrongBranchPseudocostSample& sample) {
+            updatePseudoCost(sample.variable, sample.up_direction, sample.gain_per_unit);
+        });
+}
+
+BranchingSelection ReliabilityBranching::selectDeferred(
+    DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+    std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+    Int probe_budget, BranchingTelemetry& telemetry,
+    std::vector<StrongBranchPseudocostSample>& samples) const {
+    return selectWithProbeSink(
+        lp, problem, primal_values, col_lower, col_upper, node_objective, false, probe_budget,
+        telemetry, [&](const StrongBranchPseudocostSample& sample) { samples.push_back(sample); });
+}
+
+template <typename RecordProbe>
+BranchingSelection ReliabilityBranching::selectWithProbeSink(
+    DualSimplexSolver& lp, const LpProblem& problem, std::span<const Real> primal_values,
+    std::span<const Real> col_lower, std::span<const Real> col_upper, Real node_objective,
+    bool force_strong_branch, Int probe_budget, BranchingTelemetry& telemetry,
+    RecordProbe record_probe) const {
     BranchingSelection selection;
     ++telemetry.selections;
 
@@ -242,8 +265,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
         }
     }
 
-    const bool run_strong_branch =
-        (force_strong_branch || best_reliable < 0) && strong_branch_probe_budget_ >= 2;
+    const bool run_strong_branch = (force_strong_branch || best_reliable < 0) && probe_budget >= 2;
     Index best_strong = -1;
     Real best_strong_score = -std::numeric_limits<Real>::infinity();
 
@@ -259,7 +281,6 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
         // child's LP bound, so the partial gain is the better estimate. Only a
         // proven Infeasible gets the infeasible gain. Falling back to
         // pseudocosts there instead lost gt2 its optimum within 60s (#222).
-        Int probe_budget = strong_branch_probe_budget_;
         for (const auto& c : candidates) {
             if (probe_budget < 2)
                 break;
@@ -300,7 +321,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 down_gain = kStrongInfeasibleGain;
             }
             if (c.down_dist > 1e-8) {
-                updatePseudoCost(c.var, false, down_gain / c.down_dist);
+                record_probe({c.var, false, down_gain / c.down_dist});
                 ++telemetry.pseudocost_updates_strong;
             }
             --probe_budget;
@@ -335,7 +356,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 up_gain = kStrongInfeasibleGain;
             }
             if (c.up_dist > 1e-8) {
-                updatePseudoCost(c.var, true, up_gain / c.up_dist);
+                record_probe({c.var, true, up_gain / c.up_dist});
                 ++telemetry.pseudocost_updates_strong;
             }
             --probe_budget;

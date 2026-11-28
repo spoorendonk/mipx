@@ -72,6 +72,27 @@ struct BranchingTelemetry {
     /// Child nodes whose LP ended infeasible, cut off or without an optimum,
     /// so gave no gain to record.
     Int pseudocost_tree_skipped = 0;
+
+    BranchingTelemetry& operator+=(const BranchingTelemetry& other) {
+        selections += other.selections;
+        strong_branch_calls += other.strong_branch_calls;
+        strong_branch_probes += other.strong_branch_probes;
+        strong_branch_probe_iters += other.strong_branch_probe_iters;
+        strong_branch_probe_work_units += other.strong_branch_probe_work_units;
+        pseudocost_uses += other.pseudocost_uses;
+        pseudocost_hits += other.pseudocost_hits;
+        pseudocost_updates_strong += other.pseudocost_updates_strong;
+        pseudocost_updates_tree += other.pseudocost_updates_tree;
+        pseudocost_tree_skipped += other.pseudocost_tree_skipped;
+        return *this;
+    }
+};
+
+/// One directional observation from a strong-branch probe.
+struct StrongBranchPseudocostSample {
+    Index variable = -1;
+    bool up_direction = false;
+    Real gain_per_unit = 0.0;
 };
 
 /// What a solved child node's LP says about the branching that created it:
@@ -139,7 +160,25 @@ public:
                               std::span<const Real> col_upper, Real node_objective,
                               bool force_strong_branch, BranchingTelemetry& telemetry);
 
+    /// Read the batch's pseudocosts and collect this node's probe observations
+    /// for ordered application after every node in the batch has finished.
+    BranchingSelection selectDeferred(DualSimplexSolver& lp, const LpProblem& problem,
+                                      std::span<const Real> primal_values,
+                                      std::span<const Real> col_lower,
+                                      std::span<const Real> col_upper, Real node_objective,
+                                      Int probe_budget, BranchingTelemetry& telemetry,
+                                      std::vector<StrongBranchPseudocostSample>& samples) const;
+
 private:
+    template <typename RecordProbe>
+    BranchingSelection selectWithProbeSink(DualSimplexSolver& lp, const LpProblem& problem,
+                                           std::span<const Real> primal_values,
+                                           std::span<const Real> col_lower,
+                                           std::span<const Real> col_upper, Real node_objective,
+                                           bool force_strong_branch, Int probe_budget,
+                                           BranchingTelemetry& telemetry,
+                                           RecordProbe record_probe) const;
+
     struct PseudoCost {
         Real up = 0.0;
         Real down = 0.0;

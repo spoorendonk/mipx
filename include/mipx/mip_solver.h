@@ -424,6 +424,8 @@ public:
     void setParallelMode(ParallelMode mode) { parallel_mode_ = mode; }
     /// Keep opportunistic TBB workers available while other workers own nodes.
     void setPersistentTreeWorkers(bool enabled) { persistent_tree_workers_ = enabled; }
+    /// Use a fixed pseudocost view within each deterministic TBB tree batch.
+    void setDeterministicBatchBranching(bool enabled) { deterministic_batch_branching_ = enabled; }
     void setHeuristicMode(HeuristicRuntimeMode mode) {
         parallel_mode_ = (mode == HeuristicRuntimeMode::Opportunistic)
                              ? ParallelMode::Opportunistic
@@ -741,12 +743,19 @@ private:
     void logProgress(Int nodes, Int open, Int lp_iters, Real incumbent, Real best_bound,
                      double elapsed, bool new_incumbent = false, Int int_inf = -1) const;
 
+    struct DeferredBranching {
+        std::optional<TreePseudocostSample> tree_sample;
+        BranchingTelemetry telemetry;
+        std::vector<StrongBranchPseudocostSample> probe_samples;
+    };
+
     /// Process a single node. Returns true if children were created.
     ///
     /// The node's LP outcome is a pseudocost sample for the branching that
-    /// created it. By default it is recorded at once; with deferred_pseudocost
-    /// set it is stored there instead (nullopt when the LP was not solved), for
-    /// a caller that must apply samples in a deterministic order.
+    /// created it. Deterministic batch tasks store the sample in
+    /// deferred_branching for ordered application after the batch. With batch
+    /// branching enabled, selection and estimates also read the stable shared
+    /// rule, and probe samples are deferred alongside the tree sample.
     bool processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent_snapshot,
                      std::vector<BnbNode>& children_out, Real& node_obj_out,
                      std::vector<Real>& node_primals_out, Int& node_iters_out,
@@ -754,7 +763,7 @@ private:
                      std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                      NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                      Int strong_branch_budget_override = -1,
-                     std::optional<TreePseudocostSample>* deferred_pseudocost = nullptr);
+                     DeferredBranching* deferred_branching = nullptr);
     /// Re-solve from a cold basis a node LP that ended without a verdict;
     /// returns `first` unchanged when it has one (#283), or when the time
     /// limit stopped it: no time is left to retry in (#351).
@@ -876,6 +885,7 @@ private:
     BarrierDualize barrier_dualize_ = BarrierDualize::Off;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
     bool persistent_tree_workers_ = false;
+    bool deterministic_batch_branching_ = false;
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
     Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;

@@ -653,6 +653,54 @@ TEST_CASE("Parallel: deterministic mode reports reproducible work-units metric",
     CHECK(b.time_seconds >= 0.0);
 }
 
+TEST_CASE("Parallel: deterministic batch branching repeats its search work",
+          "[parallel][tbb][branching]") {
+    const auto lp = buildSearchStagnationMip();
+    for (const Int threads : {2, 4, 8}) {
+        CAPTURE(threads);
+        const auto run = [&] {
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setPresolve(false);
+            solver.setCutsEnabled(false);
+            solver.setSymmetryEnabled(false);
+            solver.setNumThreads(threads);
+            solver.setParallelMode(ParallelMode::Deterministic);
+            solver.setDeterministicBatchBranching(true);
+            solver.setSearchProfile(SearchProfile::Stable);
+            solver.setNodeLimit(60);
+            solver.setHeuristicSeed(1);
+            solver.load(lp);
+            const auto result = solver.solve();
+            return std::pair{result, solver.getBranchingStats()};
+        };
+
+        const auto [expected, expected_branching] = run();
+        REQUIRE(expected.status == Status::NodeLimit);
+        REQUIRE(expected.nodes == 60);
+        REQUIRE(expected_branching.strong_branch_calls > 1);
+        REQUIRE(expected_branching.pseudocost_updates_strong > 0);
+        REQUIRE(expected_branching.pseudocost_updates_tree > 0);
+        for (Int repeat = 0; repeat < 8; ++repeat) {
+            const auto [result, branching] = run();
+            CHECK(result.status == expected.status);
+            CHECK(result.objective == expected.objective);
+            CHECK(result.best_bound == expected.best_bound);
+            CHECK(result.nodes == expected.nodes);
+            CHECK(result.lp_iterations == expected.lp_iterations);
+            CHECK(result.work_units == expected.work_units);
+            CHECK(branching.strong_branch_probes == expected_branching.strong_branch_probes);
+            CHECK(branching.strong_branch_probe_iters ==
+                  expected_branching.strong_branch_probe_iters);
+            CHECK(branching.strong_branch_probe_work_units ==
+                  expected_branching.strong_branch_probe_work_units);
+            CHECK(branching.pseudocost_updates_strong ==
+                  expected_branching.pseudocost_updates_strong);
+            CHECK(branching.pseudocost_updates_tree == expected_branching.pseudocost_updates_tree);
+        }
+    }
+}
+
 TEST_CASE("Parallel: deterministic aggressive search updates search controls",
           "[parallel][tbb][search]") {
     auto lp = buildSearchStagnationMip();

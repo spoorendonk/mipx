@@ -2252,11 +2252,9 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                             std::vector<Real>& current_upper, std::vector<Index>& touched_vars,
                             NodeScratch& node_scratch, NodeWorkStats& node_stats, Int& int_inf_out,
                             Int strong_branch_budget_override,
-                            std::optional<TreePseudocostSample>* deferred_pseudocost) {
+                            DeferredBranching* deferred_branching) {
     children_out.clear();
-    if (deferred_pseudocost != nullptr) {
-        deferred_pseudocost->reset();
-    }
+    const bool stable_branching = deferred_branching != nullptr && deterministic_batch_branching_;
     node_iters_out = 0;
     node_work_out = 0.0;
     int_inf_out = -1;
@@ -2628,8 +2626,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                             node_result.objective >= pruneBound(incumbent_snapshot);
         const auto sample = TreePseudocostSample::fromChild(node, node_result.status,
                                                             node_result.objective, cutoff);
-        if (deferred_pseudocost != nullptr) {
-            *deferred_pseudocost = sample;
+        if (deferred_branching != nullptr) {
+            deferred_branching->tree_sample = sample;
         } else {
             std::lock_guard<std::mutex> lock(branching_mutex_);
             branching_rule_.updateFromChild(sample, branching_stats_);
@@ -3204,11 +3202,15 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     const auto solvedNode = [&]() {
         BnbNode solved_node = std::move(node);
         solved_node.lp_bound = node_obj_out;
-        {
-            std::lock_guard<std::mutex> lock(branching_mutex_);
-            solved_node.estimate =
-                pseudocostNodeEstimate(branching_rule_, problem_, node_primals_out, node_obj_out);
-        }
+        const auto estimate = [&] {
+            std::unique_lock lock(branching_mutex_, std::defer_lock);
+            if (!stable_branching) {
+                lock.lock();
+            }
+            return pseudocostNodeEstimate(branching_rule_, problem_, node_primals_out,
+                                          node_obj_out);
+        };
+        solved_node.estimate = estimate();
         solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
         if (temp_local_rows.empty()) {
             solved_node.basis = lp.getBasis();
@@ -3322,15 +3324,24 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
 
     if (branch_var < 0) {
-        {
+        const Real probe_reference = pre_lp_tightenings == 0 ? node_result.objective : node_obj_out;
+        if (stable_branching) {
+            const Int budget = strong_branching_enabled_ && strong_branch_budget_override >= 2
+                                   ? strong_branch_budget_override
+                                   : branching_rule_.strongBranchProbeBudget();
+            branch_var =
+                branching_rule_
+                    .selectDeferred(lp, problem_, node_primals_out, current_lower, current_upper,
+                                    probe_reference, budget, deferred_branching->telemetry,
+                                    deferred_branching->probe_samples)
+                    .variable;
+        } else {
             std::lock_guard<std::mutex> lock(branching_mutex_);
             const Int saved_budget = branching_rule_.strongBranchProbeBudget();
             if (strong_branching_enabled_ && strong_branch_budget_override >= 2 &&
                 strong_branch_budget_override != saved_budget) {
                 branching_rule_.setStrongBranchProbeBudget(strong_branch_budget_override);
             }
-            const Real probe_reference =
-                pre_lp_tightenings == 0 ? node_result.objective : node_obj_out;
             auto selection =
                 branching_rule_.select(lp, problem_, node_primals_out, current_lower, current_upper,
                                        probe_reference, false, branching_stats_);
@@ -3810,7 +3821,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             Int node_iters = 0;
             double node_work = 0.0;
             Int node_int_inf = -1;
-            std::optional<TreePseudocostSample> pseudocost_sample;
+            DeferredBranching branching;
         };
 
         if (verbose_) {
@@ -3922,19 +3933,24 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                     task.node_primals, task.node_iters, task.node_work, worker_ctx.current_lower,
                     worker_ctx.current_upper, worker_ctx.touched_vars, worker_ctx.node_scratch,
                     worker_ctx.node_stats, task.node_int_inf, task.strong_branch_budget,
-                    &task.pseudocost_sample);
+                    &task.branching);
             });
 
             for (Int i = 0; i < batch_size; ++i) {
                 auto& task = tasks[static_cast<std::size_t>(i)];
                 auto& worker_ctx = workers[static_cast<std::size_t>(task.worker_id)];
-                // Tree pseudocost samples are applied here, in task order, so they
-                // add no worker-order dependence. Strong-branch probes inside
-                // select() still update pseudocosts concurrently during the batch,
-                // as they did before tree samples existed.
-                if (task.pseudocost_sample.has_value()) {
-                    std::lock_guard<std::mutex> lock(branching_mutex_);
-                    branching_rule_.updateFromChild(*task.pseudocost_sample, branching_stats_);
+                // Tree observations commit in task order. The opt-in also
+                // defers probe observations, keeping every sample even if
+                // another task probed the same column and direction.
+                if (task.branching.tree_sample.has_value()) {
+                    branching_rule_.updateFromChild(*task.branching.tree_sample, branching_stats_);
+                }
+                if (deterministic_batch_branching_) {
+                    for (const auto& sample : task.branching.probe_samples) {
+                        branching_rule_.updatePseudoCost(sample.variable, sample.up_direction,
+                                                         sample.gain_per_unit);
+                    }
+                    branching_stats_ += task.branching.telemetry;
                 }
                 total_lp_iters += task.node_iters;
                 total_work += task.node_work;
