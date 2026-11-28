@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -133,6 +134,29 @@ struct DualSimplexOptions {
     // dual infeasibilities that leaves. Applied on a cold start only.
     bool enable_cost_perturbation = true;
     Real cost_perturbation_multiplier = 1.0;
+
+    // Variants of the perturbation's shape (#428), each opt-in; the defaults
+    // are the shape above. They change the stall-triggered one below too.
+    //
+    // ByTheBook sizes column j's move as multiplier * (1e-5 |c_j| +
+    // 1e-7 max|c| + 10 * the dual tolerance) * (1 + u_j), after the account of
+    // HiGHS's perturbation in Bach, Black, Huiberts and Kafer, "Beyond
+    // Smoothed Analysis: Analyzing the Simplex Method by the Book"
+    // (arXiv:2510.21613): max |c| undamped, no boxed-rate cap, and an
+    // absolute term that moves zero costs at any cost scale.
+    enum class CostPerturbationShape { HiGHS, ByTheBook };
+    CostPerturbationShape cost_perturbation_shape = CostPerturbationShape::HiGHS;
+    // u_j from a splitmix64 stream seeded with cost_perturbation_seed at each
+    // solve, column j taking the j-th draw and logical i the (n + i)-th, in
+    // place of the per-index multiplicative hash. Deterministic either way.
+    bool cost_perturbation_seeded_random = false;
+    uint64_t cost_perturbation_seed = 0;
+    // HiGHS's jitter on the logicals' zero costs: logical i's cost moves by
+    // (0.5 - u_{n+i}) * multiplier * 1e-12, either sign. Logicals have no
+    // cost slot here, so the move goes on the structurals of row i (c_j +=
+    // delta * a_ij), the same LP on the feasible set. Cold-start perturbation
+    // only, and it comes off with it.
+    bool cost_perturbation_logical_jitter = false;
 
     // Stall-triggered cost perturbation (#427), for the warm starts the one
     // above skips. Off by default. A run of cost_perturbation_stall_pivots

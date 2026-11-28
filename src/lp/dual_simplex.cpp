@@ -1720,8 +1720,10 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     // under 1% of the variables are boxed; each structural with a finite
     // bound moves by (1 + |c_j|) * 5e-7 * C * (1 + u_j), u_j in [0, 1), the
     // way that keeps it dual feasible at that bound. HiGHS also gives the
-    // logicals a +-5e-13 jitter; logicals here have no cost slot, so they are
-    // left out. The perturbation comes off once the perturbed LP is optimal.
+    // logicals a +-5e-13 jitter; logicals here have no cost slot, so that is
+    // opt-in (cost_perturbation_logical_jitter, #428), through the rows, as
+    // are the other shapes of #428. The perturbation comes off once the
+    // perturbed LP is optimal.
     std::vector<Real> cost_perturb;
     bool has_cost_perturb = false;
     // The costs as this solve found them. Shifts and the perturbation come
@@ -1809,14 +1811,39 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         }
         return flipped;
     };
-    // The perturbation's base, multiplier * 5e-7 * C, and the size of column
-    // j's move, (1 + u_j) (|c_j| + 1) base, both from the costs at entry: a
-    // stall mid-solve (#427) is sized without the shifts held by then.
-    auto costPerturbationBase = [&]() -> Real {
-        Real bigc = 0.0;
-        for (Index j = 0; j < num_cols_; ++j) {
-            bigc = std::max(bigc, std::abs(obj_at_entry[static_cast<std::size_t>(j)]));
+    // The perturbation's base and the size of column j's move, both from the
+    // costs at entry: a stall mid-solve (#427) is sized without the shifts
+    // held by then. The HiGHS shape: base = multiplier * 5e-7 * C, size
+    // (1 + u_j) (|c_j| + 1) base. ByTheBook (#428): base = multiplier, size
+    // (1 + u_j) (1e-5 |c_j| + 1e-7 max|c| + 10 Td) base. A stall scales the
+    // base by 10^k either way.
+    using Shape = DualSimplexOptions::CostPerturbationShape;
+    const bool by_the_book = options_.cost_perturbation_shape == Shape::ByTheBook;
+    Real max_abs_cost_at_entry = 0.0;
+    for (Real c : obj_at_entry) {
+        max_abs_cost_at_entry = std::max(max_abs_cost_at_entry, std::abs(c));
+    }
+    // u_k in [0, 1) for variable k (logicals after the columns): the
+    // multiplicative hash, or the k-th draw of a splitmix64 stream seeded
+    // with cost_perturbation_seed (#428), which is counter based and so needs
+    // no state.
+    auto costPerturbationRandom = [&](Index k) -> Real {
+        if (options_.cost_perturbation_seeded_random) {
+            uint64_t z = options_.cost_perturbation_seed +
+                         (static_cast<uint64_t>(k) + 1) * 0x9e3779b97f4a7c15ULL;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+            z ^= z >> 31;
+            return static_cast<Real>(z >> 11) * 0x1.0p-53;
         }
+        const uint32_t hash = static_cast<uint32_t>(k + 1) * 2654435761u;
+        return static_cast<Real>(hash >> 8) / 16777216.0;
+    };
+    auto costPerturbationBase = [&]() -> Real {
+        if (by_the_book) {
+            return options_.cost_perturbation_multiplier;
+        }
+        Real bigc = max_abs_cost_at_entry;
         if (bigc > 100.0) {
             bigc = std::sqrt(std::sqrt(bigc));
         }
@@ -1834,9 +1861,13 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         return options_.cost_perturbation_multiplier * 5e-7 * bigc;
     };
     auto costPerturbationSize = [&](Index j, Real base) -> Real {
-        const uint32_t hash = static_cast<uint32_t>(j + 1) * 2654435761u;
-        const Real u = static_cast<Real>(hash >> 8) / 16777216.0;
-        return (1.0 + u) * (std::abs(obj_at_entry[static_cast<std::size_t>(j)]) + 1.0) * base;
+        const Real u = costPerturbationRandom(j);
+        const Real abs_c = std::abs(obj_at_entry[static_cast<std::size_t>(j)]);
+        if (by_the_book) {
+            return (1.0 + u) * (1e-5 * abs_c + 1e-7 * max_abs_cost_at_entry + 10.0 * kDualTol) *
+                   base;
+        }
+        return (1.0 + u) * (abs_c + 1.0) * base;
     };
     if (cold_start && options_.enable_cost_perturbation &&
         options_.cost_perturbation_multiplier > 0.0) {
@@ -1860,6 +1891,21 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
                 cost_perturb[static_cast<std::size_t>(j)] = delta;
                 obj_[j] += delta;
+            }
+            // HiGHS's jitter on the logicals' zero costs (#428), through the
+            // structurals of each row, as correctDualInfeasibilities does.
+            if (options_.cost_perturbation_logical_jitter) {
+                const Real row_base = options_.cost_perturbation_multiplier * 1e-12;
+                for (Index i = 0; i < num_rows_; ++i) {
+                    const Real jitter = (0.5 - costPerturbationRandom(num_cols_ + i)) * row_base;
+                    const auto rv = matrix_.row(i);
+                    for (Index p = 0; p < rv.size(); ++p) {
+                        const Index j = rv.indices[p];
+                        const Real d = jitter * rv.values[p];
+                        cost_perturb[static_cast<std::size_t>(j)] += d;
+                        obj_[j] += d;
+                    }
+                }
             }
             has_cost_perturb = true;
             degeneracy_stats_.cost_perturbed = true;

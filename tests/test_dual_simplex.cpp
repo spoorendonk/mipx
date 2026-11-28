@@ -1144,6 +1144,92 @@ TEST_CASE("DualSimplex: a warm start that stalls recovers under the stall cost p
     }
 }
 
+// The cost perturbation's shape variants (#428), each opt-in, on a cold
+// covering LP with zero costs on every third column and the rest spread over
+// 1..1000 (so the HiGHS shape damps C and ByTheBook does not): every variant,
+// alone and together, is applied, comes off, and ends at the unperturbed
+// optimum with a feasible x.
+TEST_CASE("DualSimplex: cost perturbation shape variants reach the unperturbed optimum",
+          "[dual_simplex][degeneracy]") {
+    constexpr Index m = 30;
+    constexpr Index n = 45;
+    LpProblem lp;
+    lp.name = "cover_shapes";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = n;
+    lp.num_rows = m;
+    lp.obj.resize(n);
+    for (Index j = 0; j < n; ++j) {
+        lp.obj[j] = j % 3 == 0 ? 0.0 : static_cast<Real>(1 + (j * 37) % 1000);
+    }
+    lp.col_lower.assign(n, 0.0);
+    lp.col_upper.assign(n, 1.0);
+    lp.col_type.assign(n, VarType::Continuous);
+    lp.row_lower.assign(m, 1.0);
+    lp.row_upper.assign(m, kInf);
+    std::vector<Triplet> trips;
+    unsigned s = 7;
+    for (Index i = 0; i < m; ++i) {
+        for (Index j = 0; j < n; ++j) {
+            s = s * 1103515245u + 12345u;
+            if (((s >> 16) & 7u) < 2u) {
+                trips.push_back({i, j, 1.0 + static_cast<Real>((s >> 8) & 3u)});
+            }
+        }
+    }
+    lp.matrix = SparseMatrix(m, n, std::move(trips));
+
+    using Shape = DualSimplexOptions::CostPerturbationShape;
+    const DualSimplexOptions defaults;
+    CHECK(defaults.enable_cost_perturbation);
+    CHECK(defaults.cost_perturbation_shape == Shape::HiGHS);
+    CHECK_FALSE(defaults.cost_perturbation_seeded_random);
+    CHECK_FALSE(defaults.cost_perturbation_logical_jitter);
+
+    auto solveWith = [&](Shape shape, bool seeded, uint64_t seed, bool jitter) {
+        DualSimplexSolver solver;
+        solver.setVerbose(false);
+        DualSimplexOptions opts = solver.getOptions();
+        opts.cost_perturbation_shape = shape;
+        opts.cost_perturbation_seeded_random = seeded;
+        opts.cost_perturbation_seed = seed;
+        opts.cost_perturbation_logical_jitter = jitter;
+        solver.setOptions(opts);
+        solver.load(lp);
+        const LpResult result = solver.solve();
+        const auto stats = solver.getDegeneracyStats();
+        INFO("shape " << static_cast<int>(shape) << " seeded " << seeded << " seed " << seed
+                      << " jitter " << jitter);
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(stats.cost_perturbed);
+        CHECK(stats.cost_perturbation_removals >= 1);
+        const std::vector<Real> x = solver.getPrimalValues();
+        REQUIRE(x.size() == static_cast<std::size_t>(n));
+        Real cx = 0.0;
+        for (Index j = 0; j < n; ++j) {
+            CHECK(x[j] >= -1e-9);
+            CHECK(x[j] <= 1.0 + 1e-9);
+            cx += lp.obj[j] * x[j];
+        }
+        CHECK_THAT(cx, WithinAbs(result.objective, 1e-6));
+        for (Index i = 0; i < m; ++i) {
+            Real ax = 0.0;
+            const auto row = lp.matrix.row(i);
+            for (Index p = 0; p < row.size(); ++p) {
+                ax += row.values[p] * x[row.indices[p]];
+            }
+            CHECK(ax >= 1.0 - 1e-9);
+        }
+        return result.objective;
+    };
+    const Real base = solveWith(Shape::HiGHS, false, 0, false);
+    CHECK_THAT(solveWith(Shape::ByTheBook, false, 0, false), WithinAbs(base, 1e-6));
+    CHECK_THAT(solveWith(Shape::HiGHS, true, 0, false), WithinAbs(base, 1e-6));
+    CHECK_THAT(solveWith(Shape::HiGHS, true, 12345, false), WithinAbs(base, 1e-6));
+    CHECK_THAT(solveWith(Shape::HiGHS, false, 0, true), WithinAbs(base, 1e-6));
+    CHECK_THAT(solveWith(Shape::ByTheBook, true, 99, true), WithinAbs(base, 1e-6));
+}
+
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",
           "[dual_simplex][basis]") {
     // Two structural columns are identical, so choosing both as basic creates a
