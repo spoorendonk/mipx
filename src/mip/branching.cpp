@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <optional>
 
 namespace mipx {
@@ -161,18 +162,70 @@ Real ReliabilityBranching::safeDownCost(Index var) const {
     return downPseudoCost(var);
 }
 
-Real ReliabilityBranching::directionalScore(Real down_gain, Real up_gain) const {
-    const Real larger_gain = std::max(down_gain, up_gain);
-    if (!balanced_score_) {
-        return larger_gain;
+std::partial_ordering ReliabilityBranching::RankScore::operator<=>(const RankScore& other) const {
+    if (exponent != other.exponent) {
+        return exponent <=> other.exponent;
     }
-    return 0.8 * std::min(down_gain, up_gain) + 0.2 * larger_gain;
+    return mantissa <=> other.mantissa;
 }
 
-Real ReliabilityBranching::blendScore(Real frac, Real pseudo_score) {
-    const Real frac_term = 0.5 - std::abs(frac - 0.5);
-    const Real pseudo_term = std::log1p(std::max<Real>(0.0, pseudo_score));
-    return frac_term + 0.15 * pseudo_term;
+ReliabilityBranching::RankScore ReliabilityBranching::RankScore::weightedBy(Real factor) const {
+    if (exponent == kScalarExponent) {
+        return {mantissa * factor};
+    }
+    if (mantissa == 0.0) {
+        return *this;
+    }
+    int shift = 0;
+    const Real weighted = std::frexp(mantissa * factor, &shift);
+    return {weighted, exponent + shift};
+}
+
+Real ReliabilityBranching::RankScore::log1p() const {
+    if (exponent == kScalarExponent) {
+        return std::log1p(std::max<Real>(0.0, mantissa));
+    }
+    if (mantissa == 0.0) {
+        return 0.0;
+    }
+    if (exponent <= std::numeric_limits<Real>::max_exponent) {
+        return std::log1p(std::ldexp(mantissa, exponent));
+    }
+    // log(1 + x) = log(x) + log(1 + 1/x), without representing x.
+    return std::log(mantissa) + exponent * std::numbers::ln2_v<Real> +
+           std::log1p(std::ldexp(1.0 / mantissa, -exponent));
+}
+
+Real ReliabilityBranching::RankScore::gapFrom(RankScore winner) const {
+    if (*this == winner) {
+        return 0.0;
+    }
+    const Real aligned = exponent == winner.exponent || mantissa == 0.0
+                             ? mantissa
+                             : std::ldexp(mantissa, exponent - winner.exponent);
+    return (winner.mantissa - aligned) / winner.mantissa;
+}
+
+ReliabilityBranching::RankScore ReliabilityBranching::directionalScore(BranchScoreMode mode,
+                                                                       Real down_gain,
+                                                                       Real up_gain) {
+    if (mode == BranchScoreMode::Product) {
+        if (down_gain == 0.0 || up_gain == 0.0) {
+            return {0.0, RankScore::kZeroProductExponent};
+        }
+        int down_exp = 0;
+        int up_exp = 0;
+        int shift = 0;
+        const Real down = std::frexp(down_gain, &down_exp);
+        const Real up = std::frexp(up_gain, &up_exp);
+        const Real mantissa = std::frexp(down * up, &shift);
+        return {mantissa, down_exp + up_exp + shift};
+    }
+    const Real larger_gain = std::max(down_gain, up_gain);
+    if (mode == BranchScoreMode::Balanced) {
+        return {0.8 * std::min(down_gain, up_gain) + 0.2 * larger_gain};
+    }
+    return {larger_gain};
 }
 
 void BranchInferenceCoverageStats::recordArbitration(const BranchingSelection& selection,
@@ -191,8 +244,8 @@ void BranchCutoffComparisonStats::recordArbitration(const BranchingSelection& se
 
 void ReliabilityBranching::compareInference(const BranchInferenceCoverage& coverage,
                                             std::span<const Candidate> candidates,
-                                            Real winner_score, BranchingSelection& selection) {
-    if (!std::isfinite(winner_score)) {
+                                            RankScore winner_score, BranchingSelection& selection) {
+    if (!winner_score.isFinite()) {
         return;
     }
     const Index winner = selection.variable;
@@ -218,12 +271,10 @@ void ReliabilityBranching::compareInference(const BranchInferenceCoverage& cover
     Real best_mean = winner_mean.value_or(0.0);
     for (const auto& candidate : candidates) {
         if (candidate.var == winner || (reliable && !candidate.reliable) ||
-            !std::isfinite(candidate.pseudo_score)) {
+            !candidate.pseudo_score.isFinite()) {
             continue;
         }
-        const Real gap = candidate.pseudo_score == winner_score
-                             ? 0.0
-                             : (winner_score - candidate.pseudo_score) / winner_score;
+        const Real gap = candidate.pseudo_score.gapFrom(winner_score);
         if (gap > InferenceCoveragePath::kGapPercents.back() / 100.0) {
             continue;
         }
@@ -259,9 +310,10 @@ void ReliabilityBranching::compareInference(const BranchInferenceCoverage& cover
 }
 
 Index ReliabilityBranching::compareCutoffs(const BranchCutoffComparison& comparison,
-                                           std::span<const Candidate> candidates, Real winner_score,
+                                           std::span<const Candidate> candidates,
+                                           RankScore winner_score,
                                            const BranchingSelection& selection) {
-    if (!std::isfinite(winner_score)) {
+    if (!winner_score.isFinite()) {
         return -1;
     }
     const Index winner = selection.variable;
@@ -294,10 +346,10 @@ Index ReliabilityBranching::compareCutoffs(const BranchCutoffComparison& compari
     }
     const Candidate* best = nullptr;
     Real best_rate = *winner_rate;
-    const Real minimum_score = winner_score * (1.0 - kNearTieRelativeGap);
+    const RankScore minimum_score = winner_score.weightedBy(1.0 - kNearTieRelativeGap);
     for (const auto& candidate : candidates) {
         if (candidate.var == winner || (reliable && !candidate.reliable) ||
-            !std::isfinite(candidate.pseudo_score) || candidate.pseudo_score < minimum_score) {
+            !candidate.pseudo_score.isFinite() || candidate.pseudo_score < minimum_score) {
             continue;
         }
         const auto rate = weakerRate(candidate.var);
@@ -419,15 +471,8 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         c.down_dist = down_dist;
         c.up_dist = up_dist;
         c.reliable = isReliable(j);
-        c.objective_score = directionalScore(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
-        c.pseudo_score = c.objective_score;
-        if (score_conflicts) {
-            // A bounded, scale-free boost keeps LP gains relevant even when
-            // many learned conflicts mention the same column.
-            const Real activity = std::max<Real>(0.0, conflict_activity[j]);
-            c.pseudo_score *= 2.0 - 1.0 / (1.0 + activity);
-        }
-        c.prefilter_score = blendScore(fractionality(value), c.pseudo_score);
+        c.down_gain = down_dist * safeDownCost(j);
+        c.up_gain = up_dist * safeUpCost(j);
         candidates.push_back(c);
     }
 
@@ -451,46 +496,141 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
         }
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
-        if (a.prefilter_score != b.prefilter_score) {
-            return a.prefilter_score > b.prefilter_score;
-        }
-        return a.var < b.var;
-    });
-
-    const Index max_candidates =
-        std::min<Index>(static_cast<Index>(candidates.size()), strong_branch_max_candidates_);
-    candidates.resize(static_cast<std::size_t>(max_candidates));
-
-    Index best_reliable = -1;
-    Real best_reliable_score = -std::numeric_limits<Real>::infinity();
-    for (const auto& c : candidates) {
-        if (!c.reliable)
-            continue;
-        if (c.pseudo_score > best_reliable_score) {
-            best_reliable_score = c.pseudo_score;
-            best_reliable = c.var;
-        }
+    auto mode = score_mode_;
+    if (mode == BranchScoreMode::Product && std::ranges::any_of(candidates, [](const Candidate& c) {
+            return !std::isfinite(c.down_gain) || !std::isfinite(c.up_gain);
+        })) {
+        mode = BranchScoreMode::LargerGain;
     }
 
-    const bool run_strong_branch = (force_strong_branch || best_reliable < 0) && probe_budget >= 2;
-    Index best_strong = -1;
-    Real best_strong_score = -std::numeric_limits<Real>::infinity();
+    const auto makeShortlist = [&] {
+        for (auto& c : candidates) {
+            c.objective_score = directionalScore(mode, c.down_gain, c.up_gain);
+            c.pseudo_score = c.objective_score;
+            if (score_conflicts) {
+                // Bound the conflict boost so LP gains remain relevant.
+                const Real activity = std::max<Real>(0.0, conflict_activity[c.var]);
+                c.pseudo_score = c.pseudo_score.weightedBy(2.0 - 1.0 / (1.0 + activity));
+            }
+            c.prefilter_score =
+                0.5 - std::abs(fractionality(c.value) - 0.5) + 0.15 * c.pseudo_score.log1p();
+        }
+        std::ranges::sort(candidates, [](const Candidate& a, const Candidate& b) {
+            if (a.prefilter_score != b.prefilter_score) {
+                return a.prefilter_score > b.prefilter_score;
+            }
+            return a.var < b.var;
+        });
+        return std::span<const Candidate>(candidates)
+            .first(std::min(candidates.size(),
+                            static_cast<std::size_t>(strong_branch_max_candidates_)));
+    };
+    auto shortlist = makeShortlist();
+    const auto bestReliable = [&]() -> const Candidate* {
+        const Candidate* best = nullptr;
+        for (const auto& c : shortlist) {
+            const RankScore best_score =
+                best ? best->pseudo_score : RankScore{-kInf, c.pseudo_score.exponent};
+            if (c.reliable && c.pseudo_score > best_score) {
+                best = &c;
+            }
+        }
+        return best;
+    };
 
-    if (run_strong_branch) {
-        ++telemetry.strong_branch_calls;
+    const bool may_retry = mode == BranchScoreMode::Product && probe_budget >= 2;
+    const Candidate* best_reliable = bestReliable();
+
+    struct CachedProbe {
+        Index variable;
+        bool up;
+        LpResult result;
+    };
+    std::vector<CachedProbe> cached_probes;
+    std::vector<StrongBranchPseudocostSample> pending_samples;
+    Int fresh_probes_remaining = probe_budget;
+    Int distinct_probed = 0;
+    bool started_probing = false;
+    const auto strongWinner = [&]() -> std::optional<Index> {
+        if ((!force_strong_branch && best_reliable != nullptr) || probe_budget < 2) {
+            return -1;
+        }
+        telemetry.strong_branch_calls += !started_probing;
+        started_probing = true;
 
         const auto saved_basis = lp.getBasis();
         const Int old_limit = lp.getIterationLimit();
         lp.setIterationLimit(strong_branch_iter_limit_);
 
-        // A probe stopped by the iteration limit still scores its child by the
-        // objective it reached: dual simplex moves the objective toward the
-        // child's LP bound, so the partial gain is the better estimate. Only a
-        // proven Infeasible gets the infeasible gain. Falling back to
-        // pseudocosts there instead lost gt2 its optimum within 60s (#222).
-        for (const auto& c : candidates) {
-            if (probe_budget < 2)
+        const auto cachedResult = [&](Index variable, bool up) -> const LpResult* {
+            const auto cached = std::ranges::find_if(cached_probes, [&](const CachedProbe& p) {
+                return p.variable == variable && p.up == up;
+            });
+            return cached == cached_probes.end() ? nullptr : &cached->result;
+        };
+        const auto probeDirection = [&](const Candidate& c, bool up, Real lower, Real upper,
+                                        const LpResult* cached) {
+            if (cached != nullptr) {
+                return *cached;
+            }
+            --fresh_probes_remaining;
+            lp.setBasis(saved_basis);
+            lp.setColBounds(c.var, lower, upper);
+            const auto probe = lp.solve();
+            ++telemetry.strong_branch_probes;
+            telemetry.strong_branch_probe_iters += probe.iterations;
+            telemetry.strong_branch_probe_work_units += probe.work_units;
+            lp.setColBounds(c.var, col_lower[c.var], col_upper[c.var]);
+            if (mode == BranchScoreMode::Product) {
+                cached_probes.push_back({c.var, up, probe});
+            }
+            return probe;
+        };
+        const auto probeGain = [&](const LpResult& probe, Real predicted) {
+            if (probe.status == Status::Infeasible) {
+                return kStrongInfeasibleGain;
+            }
+            // Keep iteration-limited probes eligible using their partial
+            // gain, as in the original reliability rule (#222).
+            if (probe.status == Status::Optimal || probe.status == Status::IterLimit) {
+                const Real gain = probe.objective - node_objective;
+                return mode == BranchScoreMode::Product && !std::isfinite(gain)
+                           ? gain
+                           : std::max<Real>(0.0, gain);
+            }
+            return predicted;
+        };
+        const bool replay = may_retry && mode != BranchScoreMode::Product;
+        const auto record = [&](const Candidate& c, bool up, const LpResult& probe, Real gain) {
+            const StrongBranchPseudocostSample sample{c.var, up,
+                                                      gain / (up ? c.up_dist : c.down_dist)};
+            if (score_mode_ != BranchScoreMode::Product) {
+                record_probe(sample);
+                ++telemetry.pseudocost_updates_strong;
+                return;
+            }
+            const bool observed = probe.status == Status::Infeasible ||
+                                  (probe.status == Status::Optimal &&
+                                   std::isfinite(probe.objective - node_objective));
+            if (observed && std::isfinite(sample.gain_per_unit) &&
+                !(replay && std::ranges::any_of(pending_samples, [&](const auto& previous) {
+                      return previous.variable == c.var && previous.up_direction == up;
+                  }))) {
+                pending_samples.push_back(sample);
+            }
+        };
+
+        std::optional<Index> winner = -1;
+        std::optional<RankScore> best_score;
+        const auto consider = [&](Index variable, RankScore score) {
+            if (score > best_score.value_or(RankScore{-kInf, score.exponent})) {
+                best_score = score;
+                winner = variable;
+            }
+        };
+        Int remaining = probe_budget;
+        for (const auto& c : shortlist) {
+            if (remaining < 2)
                 break;
             if (!force_strong_branch && c.reliable)
                 continue;
@@ -499,101 +639,88 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
             const Real orig_ub = col_upper[c.var];
             const Real down_ub = std::floor(c.value);
             const Real up_lb = std::ceil(c.value);
+            const bool solve_down = down_ub >= orig_lb - 1e-12;
+            const bool solve_up = up_lb <= orig_ub + 1e-12;
+            const LpResult* cached_down = replay ? cachedResult(c.var, false) : nullptr;
+            const LpResult* cached_up = replay ? cachedResult(c.var, true) : nullptr;
+            const Int fresh_needed =
+                (solve_down && cached_down == nullptr) + (solve_up && cached_up == nullptr);
+            const bool new_candidate =
+                fresh_needed > 0 && cached_down == nullptr && cached_up == nullptr;
+            if (replay && (fresh_needed > fresh_probes_remaining ||
+                           (new_candidate && distinct_probed >= strong_branch_max_candidates_))) {
+                continue;
+            }
+            distinct_probed += new_candidate;
 
-            Real down_gain = 0.0;
-            Real up_gain = 0.0;
+            const auto down = solve_down ? probeDirection(c, false, orig_lb, down_ub, cached_down)
+                                         : LpResult{Status::Infeasible};
+            if (down.status == Status::TimeLimit) {
+                break;
+            }
+            const Real down_gain = probeGain(down, c.down_gain);
+            if (mode == BranchScoreMode::Product && !std::isfinite(down_gain)) {
+                winner.reset();
+                break;
+            }
+            record(c, false, down, down_gain);
+            --remaining;
 
-            if (down_ub >= orig_lb - 1e-12) {
-                lp.setBasis(saved_basis);
-                lp.setColBounds(c.var, orig_lb, down_ub);
-                const auto down = lp.solve();
-                ++telemetry.strong_branch_probes;
-                telemetry.strong_branch_probe_iters += down.iterations;
-                telemetry.strong_branch_probe_work_units += down.work_units;
-                lp.setColBounds(c.var, orig_lb, orig_ub);
-
-                if (down.status == Status::TimeLimit) {
-                    // The MIP's deadline passed mid-probe (#351): no time is
-                    // left for more, and a cut-short probe teaches the
-                    // pseudocosts nothing. Choose among those probed.
-                    break;
+            const auto up = solve_up ? probeDirection(c, true, up_lb, orig_ub, cached_up)
+                                     : LpResult{Status::Infeasible};
+            if (up.status == Status::TimeLimit) {
+                // The down sample stands. The unobserved up gain is zero
+                // when an already strong down gain makes this pair eligible.
+                // In product mode this competes as a zero product.
+                if (down_gain >= kStrongInfeasibleGain) {
+                    consider(c.var, directionalScore(mode, down_gain, 0.0));
                 }
-                if (down.status == Status::Infeasible) {
-                    down_gain = kStrongInfeasibleGain;
-                } else if (down.status == Status::Optimal || down.status == Status::IterLimit) {
-                    down_gain = std::max<Real>(0.0, down.objective - node_objective);
-                } else {
-                    down_gain = c.down_dist * safeDownCost(c.var);
-                }
-            } else {
-                down_gain = kStrongInfeasibleGain;
+                break;
             }
-            if (c.down_dist > 1e-8) {
-                record_probe({c.var, false, down_gain / c.down_dist});
-                ++telemetry.pseudocost_updates_strong;
+            const Real up_gain = probeGain(up, c.up_gain);
+            if (mode == BranchScoreMode::Product && !std::isfinite(up_gain)) {
+                winner.reset();
+                break;
             }
-            --probe_budget;
-
-            if (up_lb <= orig_ub + 1e-12) {
-                lp.setBasis(saved_basis);
-                lp.setColBounds(c.var, up_lb, orig_ub);
-                const auto up = lp.solve();
-                ++telemetry.strong_branch_probes;
-                telemetry.strong_branch_probe_iters += up.iterations;
-                telemetry.strong_branch_probe_work_units += up.work_units;
-                lp.setColBounds(c.var, orig_lb, orig_ub);
-
-                if (up.status == Status::TimeLimit) {
-                    // The down sample stands. A gain of this size can
-                    // compete even using zero for the unobserved up gain.
-                    const Real lower_score = directionalScore(down_gain, 0.0);
-                    if (down_gain >= kStrongInfeasibleGain && lower_score > best_strong_score) {
-                        best_strong_score = lower_score;
-                        best_strong = c.var;
-                    }
-                    break;
-                }
-                if (up.status == Status::Infeasible) {
-                    up_gain = kStrongInfeasibleGain;
-                } else if (up.status == Status::Optimal || up.status == Status::IterLimit) {
-                    up_gain = std::max<Real>(0.0, up.objective - node_objective);
-                } else {
-                    up_gain = c.up_dist * safeUpCost(c.var);
-                }
-            } else {
-                up_gain = kStrongInfeasibleGain;
-            }
-            if (c.up_dist > 1e-8) {
-                record_probe({c.var, true, up_gain / c.up_dist});
-                ++telemetry.pseudocost_updates_strong;
-            }
-            --probe_budget;
-
-            const Real strong_score = directionalScore(down_gain, up_gain);
-            if (strong_score > best_strong_score) {
-                best_strong_score = strong_score;
-                best_strong = c.var;
-            }
+            record(c, true, up, up_gain);
+            --remaining;
+            consider(c.var, directionalScore(mode, down_gain, up_gain));
         }
 
         lp.setIterationLimit(old_limit);
         lp.setBasis(saved_basis);
-    }
+        return winner;
+    };
 
-    if (best_strong >= 0) {
-        selection.variable = best_strong;
+    auto best_strong = strongWinner();
+    if (!best_strong) {
+        // Rebuild the shortlist before ranking. Reuse matching outcomes
+        // and share the physical solve and candidate caps across both passes.
+        mode = BranchScoreMode::LargerGain;
+        shortlist = makeShortlist();
+        best_reliable = bestReliable();
+        best_strong = strongWinner();
+    }
+    // The ranking can discard a candidate, but a completed direction still
+    // supplies one valid observation from the LP that was actually solved.
+    for (const auto& sample : pending_samples) {
+        record_probe(sample);
+        ++telemetry.pseudocost_updates_strong;
+    }
+    if (best_strong.value_or(-1) >= 0) {
+        selection.variable = *best_strong;
         return selection;
     }
 
-    const auto observeHistories = [&](Real winner_score) {
+    const auto observeHistories = [&](RankScore winner_score) {
         const auto* cutoff = histories.cutoff;
         const bool score_cutoffs = cutoff != nullptr && cutoff->select_by_cutoff;
         const Index cutoff_candidate =
-            cutoff != nullptr ? compareCutoffs(*cutoff, candidates, winner_score, selection) : -1;
+            cutoff != nullptr ? compareCutoffs(*cutoff, shortlist, winner_score, selection) : -1;
         if (histories.inference != nullptr) {
             auto inference = *histories.inference;
             inference.select_by_inference &= !score_cutoffs;
-            compareInference(inference, candidates, winner_score, selection);
+            compareInference(inference, shortlist, winner_score, selection);
         }
         if (score_cutoffs && cutoff_candidate >= 0) {
             selection.cutoff_baseline = selection.variable;
@@ -603,17 +730,17 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
                   .selection_changes;
         }
     };
-    if (best_reliable >= 0) {
-        selection.variable = best_reliable;
+    if (best_reliable != nullptr) {
+        selection.variable = best_reliable->var;
         selection.used_pseudocost = true;
         selection.used_reliable_pseudocost = true;
-        observeHistories(best_reliable_score);
+        observeHistories(best_reliable->pseudo_score);
         ++telemetry.pseudocost_uses;
         ++telemetry.pseudocost_hits;
         return selection;
     }
 
-    const auto best_it = std::max_element(candidates.begin(), candidates.end(),
+    const auto best_it = std::max_element(shortlist.begin(), shortlist.end(),
                                           [](const Candidate& a, const Candidate& b) {
                                               if (a.pseudo_score != b.pseudo_score) {
                                                   return a.pseudo_score < b.pseudo_score;
@@ -621,7 +748,7 @@ BranchingSelection ReliabilityBranching::selectWithProbeSink(
                                               return a.var > b.var;
                                           });
 
-    selection.variable = (best_it == candidates.end()) ? -1 : best_it->var;
+    selection.variable = (best_it == shortlist.end()) ? -1 : best_it->var;
     if (selection.variable >= 0) {
         selection.used_pseudocost = true;
         observeHistories(best_it->pseudo_score);

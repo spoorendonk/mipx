@@ -597,6 +597,8 @@ public:
     /// Give the weaker branch direction more weight in reliability branching.
     /// Off by default, which scores a branch by its larger directional gain.
     void setBalancedBranchScore(bool enabled) { branching_rule_.setBalancedScore(enabled); }
+    /// Choose the directional gain score used by reliability branching.
+    void setBranchScoreMode(BranchScoreMode mode) { branching_rule_.setScoreMode(mode); }
     /// Measure the first domain propagation pass of each serial variable-branch child.
     void setDirectionalInferenceEnabled(bool enabled) { directional_inference_enabled_ = enabled; }
     /// Measure live sample coverage at serial tree pseudocost decisions after the root.

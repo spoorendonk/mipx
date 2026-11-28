@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <limits>
 
 using namespace mipx;
 
@@ -459,7 +460,8 @@ TEST_CASE("ReliabilityBranching gives sibling probes the same reliability view",
     CHECK_THAT(branching.downPseudoCost(0), Catch::Matchers::WithinAbs(2.2, 1e-12));
 }
 
-TEST_CASE("Balanced branch scoring prefers gains in both pseudocost directions", "[branching]") {
+TEST_CASE("Balanced and product scoring prefer gains in both pseudocost directions",
+          "[branching]") {
     LpProblem lp;
     lp.num_cols = 2;
     lp.col_type = {VarType::Binary, VarType::Binary};
@@ -481,8 +483,47 @@ TEST_CASE("Balanced branch scoring prefers gains in both pseudocost directions",
     branching.setBalancedScore(true);
     CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry)
               .variable == 1);
-    CHECK(telemetry.pseudocost_hits == 2);
+    branching.setScoreMode(BranchScoreMode::Product);
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry)
+              .variable == 1);
+    CHECK(telemetry.pseudocost_hits == 3);
     CHECK(telemetry.strong_branch_probes == 0);
+}
+
+TEST_CASE("Product scoring retains extreme finite predicted products in the shortlist",
+          "[branching]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    const std::vector<Real> primals = {0.5, 0.5};
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setStrongBranchProbeBudget(0);
+    branching.setStrongBranchMaxCandidates(GENERATE(1, 2));
+    branching.setReliabilityThreshold(GENERATE(1, 2));
+    const Real large = std::numeric_limits<Real>::max();
+    branching.updatePseudoCost(0, false, large / 8.0);
+    branching.updatePseudoCost(0, true, large);
+    branching.updatePseudoCost(1, false, large / 2.0);
+    branching.updatePseudoCost(1, true, large / 2.0);
+
+    BranchingTelemetry telemetry;
+    const auto select = [&] {
+        return branching
+            .select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry)
+            .variable;
+    };
+    CHECK(select() == 0);
+    branching.setScoreMode(BranchScoreMode::Product);
+    CHECK(select() == 1);
+
+    // Two finite samples overflow the legacy running sum. Do not use
+    // product score for any candidate in this decision.
+    branching.updatePseudoCost(0, true, large);
+    CHECK(select() == 0);
 }
 
 TEST_CASE("Conflict activity changes pseudocost ranking without changing observations",
@@ -530,7 +571,7 @@ TEST_CASE("Conflict activity changes pseudocost ranking without changing observa
     CHECK(telemetry.pseudocost_updates_tree == 0);
 }
 
-TEST_CASE("Balanced branch scoring prefers gains in both strong probes", "[branching]") {
+TEST_CASE("Balanced and product scoring prefer gains in both strong probes", "[branching]") {
     LpProblem lp;
     lp.sense = Sense::Minimize;
     lp.num_cols = 4;
@@ -575,7 +616,153 @@ TEST_CASE("Balanced branch scoring prefers gains in both strong probes", "[branc
               .select(solver, lp, primals, lp.col_lower, lp.col_upper, root.objective, true,
                       telemetry)
               .variable == 1);
-    CHECK(telemetry.strong_branch_probes == 8);
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(BranchScoreMode::Product);
+    CHECK(branching
+              .select(solver, lp, primals, lp.col_lower, lp.col_upper, root.objective, true,
+                      telemetry)
+              .variable == 1);
+    CHECK(telemetry.strong_branch_probes == 12);
+}
+
+namespace {
+
+class ScriptedBranchProbes : public DualSimplexSolver {
+public:
+    explicit ScriptedBranchProbes(std::vector<LpResult> results) : results_(std::move(results)) {}
+    LpResult solve() override { return results_.at(next_++); }
+
+private:
+    std::size_t next_ = 0;
+    std::vector<LpResult> results_;
+};
+
+LpProblem twoBinaryProbeProblem() {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+    return lp;
+}
+
+}  // namespace
+
+TEST_CASE("Product probe ranking keeps zero products and ordinary ties", "[branching]") {
+    auto lp = twoBinaryProbeProblem();
+    const Real large = std::numeric_limits<Real>::max() / 4.0;
+    const Real tiny = std::numeric_limits<Real>::denorm_min();
+    const auto [gains, expected] =
+        GENERATE_COPY((std::pair{std::array<Real, 4>{0.0, 20.0, 1.0, 1.0}, 1}),
+                      (std::pair{std::array<Real, 4>{0.0, 20.0, 1.0, 0.0}, 0}),
+                      (std::pair{std::array<Real, 4>{2.0, 8.0, 4.0, 4.0}, 0}),
+                      (std::pair{std::array<Real, 4>{large / 2.0, large, large, large}, 1}),
+                      (std::pair{std::array<Real, 4>{tiny, tiny, tiny, 2.0 * tiny}, 1}));
+    ScriptedBranchProbes solver({{Status::Optimal, gains[0]},
+                                 {Status::Optimal, gains[1]},
+                                 {Status::Optimal, gains[2]},
+                                 {Status::Optimal, gains[3]}});
+    solver.load(lp);
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(BranchScoreMode::Product);
+    BranchingTelemetry telemetry;
+    const std::vector<Real> primals = {0.5, 0.5};
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, true, telemetry)
+              .variable == expected);
+    CHECK(telemetry.strong_branch_probes == 4);
+}
+
+TEST_CASE("Nonfinite product probe restarts ranking on the larger-gain shortlist", "[branching]") {
+    auto lp = twoBinaryProbeProblem();
+    const bool reuse_probe = GENERATE(false, true);
+    const Int probe_budget = GENERATE(2, 8);
+    const Real bad = GENERATE(kInf, std::numeric_limits<Real>::quiet_NaN());
+    // Candidate 1 wins the product prefilter. Candidate 0 wins the
+    // larger-gain prefilter. Overlapping shortlists reuse the outcomes.
+    std::vector<LpResult> results = {{Status::Optimal, bad}};
+    if (reuse_probe) {
+        if (probe_budget > 2) {
+            results.push_back({Status::Optimal, 5.0});
+            results.push_back({Status::Optimal, 5.0});
+        }
+        results.push_back({Status::Optimal, 2.0});
+    }
+    ScriptedBranchProbes solver(std::move(results));
+    solver.load(lp);
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(BranchScoreMode::Product);
+    branching.setStrongBranchProbeBudget(probe_budget);
+    branching.setStrongBranchMaxCandidates(reuse_probe ? 2 : 1);
+    branching.updatePseudoCost(0, false, 2.0);
+    branching.updatePseudoCost(0, true, 28.0);
+    branching.updatePseudoCost(1, false, 8.0);
+    branching.updatePseudoCost(1, true, 8.0);
+    BranchingTelemetry telemetry;
+    const std::vector<Real> primals = {0.5, 0.5};
+    const Index expected = reuse_probe && (std::isinf(bad) || probe_budget == 2) ? 1 : 0;
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, true, telemetry)
+              .variable == expected);
+    CHECK(telemetry.strong_branch_calls == 1);
+    const Int expected_probes = reuse_probe ? (probe_budget == 2 ? 2 : 4) : 1;
+    CHECK(telemetry.strong_branch_probes == expected_probes);
+    CHECK(branching.downReliability(1) == 1);
+    CHECK(branching.upReliability(1) == (reuse_probe ? 2 : 1));
+}
+
+TEST_CASE("Product probe ranking keeps limited gains without observing missing directions",
+          "[branching]") {
+    auto lp = twoBinaryProbeProblem();
+    // The first pair wins on its partial down gain. The second contributes
+    // a completed infeasible direction, followed by an interrupted probe.
+    ScriptedBranchProbes solver(
+        {{Status::IterLimit, 10.0}, {Status::Error}, {Status::Infeasible}, {Status::TimeLimit}});
+    solver.load(lp);
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(BranchScoreMode::Product);
+    BranchingTelemetry telemetry;
+    const std::vector<Real> primals = {0.5, 0.5};
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, true, telemetry)
+              .variable == 0);
+    CHECK(telemetry.strong_branch_probes == 4);
+    CHECK(telemetry.pseudocost_updates_strong == 1);
+    CHECK(branching.downReliability(0) == 0);
+    CHECK(branching.upReliability(0) == 0);
+    CHECK(branching.downReliability(1) == 1);
+    CHECK(branching.upReliability(1) == 0);
+}
+
+TEST_CASE("Product fallback keeps completed directions from the discarded shortlist",
+          "[branching]") {
+    auto lp = twoBinaryProbeProblem();
+    ScriptedBranchProbes solver({{Status::Optimal, 5.0}, {Status::Optimal, kInf}});
+    solver.load(lp);
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setScoreMode(BranchScoreMode::Product);
+    branching.setStrongBranchMaxCandidates(1);
+    branching.setStrongBranchProbeBudget(2);
+    branching.updatePseudoCost(0, false, 2.0);
+    branching.updatePseudoCost(0, true, 28.0);
+    branching.updatePseudoCost(1, false, 8.0);
+    branching.updatePseudoCost(1, true, 8.0);
+    BranchingTelemetry telemetry;
+    const std::vector<Real> primals = {0.5, 0.5};
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, true, telemetry)
+              .variable == 0);
+    CHECK(telemetry.strong_branch_probes == 2);
+    CHECK(telemetry.pseudocost_updates_strong == 1);
+    CHECK(branching.downReliability(0) == 1);
+    CHECK(branching.downReliability(1) == 2);
+    CHECK(branching.downPseudoCost(1) == 9.0);
+    CHECK(branching.upReliability(1) == 1);
 }
 
 TEST_CASE("Balanced branch scoring retains a strong down gain when the up probe stops",

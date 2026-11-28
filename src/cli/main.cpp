@@ -52,6 +52,7 @@ void printUsage(FILE* out) {
                  "[--objective-integrality|--no-objective-integrality] "
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
+                 "[--branch-score max|balanced|product (last score option wins, default max)] "
                  "[--directional-inference (serial tree)] "
                  "[--inference-branch-coverage (serial tree)] "
                  "[--inference-branch-score (serial tree)] "
@@ -203,7 +204,7 @@ int main(int argc, char* argv[]) {
     bool objective_propagation = false;
     bool objective_integrality = false;
     bool tree_pseudocosts = true;
-    bool balanced_branch_score = false;
+    auto branch_score_mode = mipx::BranchScoreMode::LargerGain;
     bool directional_inference = false;
     bool inference_branch_coverage = false;
     bool inference_branch_score = false;
@@ -456,9 +457,21 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--no-tree-pseudocosts") {
             tree_pseudocosts = false;
         } else if (arg == "--balanced-branch-score") {
-            balanced_branch_score = true;
+            branch_score_mode = mipx::BranchScoreMode::Balanced;
         } else if (arg == "--no-balanced-branch-score") {
-            balanced_branch_score = false;
+            branch_score_mode = mipx::BranchScoreMode::LargerGain;
+        } else if (arg == "--branch-score" && i + 1 < argc) {
+            const std::string_view mode = argv[++i];
+            if (mode == "max") {
+                branch_score_mode = mipx::BranchScoreMode::LargerGain;
+            } else if (mode == "balanced") {
+                branch_score_mode = mipx::BranchScoreMode::Balanced;
+            } else if (mode == "product") {
+                branch_score_mode = mipx::BranchScoreMode::Product;
+            } else {
+                std::fprintf(stderr, "--branch-score requires max, balanced, or product\n");
+                return 1;
+            }
         } else if (arg == "--directional-inference") {
             directional_inference = true;
         } else if (arg == "--inference-branch-coverage") {
@@ -939,7 +952,7 @@ int main(int argc, char* argv[]) {
             solver.setObjectivePropagationEnabled(objective_propagation);
             solver.setObjectiveIntegralityEnabled(objective_integrality);
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
-            solver.setBalancedBranchScore(balanced_branch_score);
+            solver.setBranchScoreMode(branch_score_mode);
             solver.setDirectionalInferenceEnabled(directional_inference);
             solver.setInferenceBranchCoverageEnabled(inference_branch_coverage);
             solver.setInferenceBranchScoreEnabled(inference_branch_score);
@@ -1039,8 +1052,12 @@ int main(int argc, char* argv[]) {
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
                 tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
                 objective_propagation ? "on" : "off", objective_integrality ? "on" : "off",
-                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off",
+                tree_pseudocosts ? "on" : "off",
+                branch_score_mode == mipx::BranchScoreMode::Balanced ? "on" : "off",
                 geometric_restarts ? "on" : "off");
+            if (branch_score_mode == mipx::BranchScoreMode::Product) {
+                log.log("Reliability branch score: product\n");
+            }
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");

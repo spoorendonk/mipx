@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <compare>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -225,6 +226,8 @@ struct TreePseudocostSample {
     }
 };
 
+enum class BranchScoreMode { LargerGain, Balanced, Product };
+
 class ReliabilityBranching {
 public:
     static constexpr Int kDefaultStrongBranchProbeBudget = 8;
@@ -232,7 +235,10 @@ public:
     ReliabilityBranching() = default;
 
     void reset(Index num_cols);
-    void setBalancedScore(bool enabled) { balanced_score_ = enabled; }
+    void setScoreMode(BranchScoreMode mode) { score_mode_ = mode; }
+    void setBalancedScore(bool enabled) {
+        setScoreMode(enabled ? BranchScoreMode::Balanced : BranchScoreMode::LargerGain);
+    }
     void setReliabilityThreshold(Int t) { reliability_threshold_ = std::max<Int>(1, t); }
     void setStrongBranchMaxCandidates(Int c) {
         strong_branch_max_candidates_ = std::max<Int>(1, c);
@@ -320,28 +326,46 @@ private:
         Int down_count = 0;
     };
 
+    // Scalar modes keep their ordinary Real score. Product scores keep
+    // a normalized mantissa and exponent, even outside the range of Real.
+    struct RankScore {
+        static constexpr Int kScalarExponent = std::numeric_limits<Int>::max();
+        static constexpr Int kZeroProductExponent = std::numeric_limits<Int>::min();
+        Real mantissa = 0.0;
+        Int exponent = kScalarExponent;
+
+        std::partial_ordering operator<=>(const RankScore& other) const;
+        bool operator==(const RankScore& other) const = default;
+        [[nodiscard]] bool isFinite() const { return std::isfinite(mantissa); }
+        [[nodiscard]] RankScore weightedBy(Real factor) const;
+        [[nodiscard]] Real log1p() const;
+        [[nodiscard]] Real gapFrom(RankScore winner) const;
+    };
+
     struct Candidate {
         Index var = -1;
         Real value = 0.0;
         Real down_dist = 0.0;
         Real up_dist = 0.0;
-        Real objective_score = 0.0;
-        Real pseudo_score = 0.0;
+        Real down_gain = 0.0;
+        Real up_gain = 0.0;
+        RankScore objective_score;
+        RankScore pseudo_score;
         Real prefilter_score = 0.0;
         bool reliable = false;
 
         [[nodiscard]] bool winsHistoryTie(const Candidate& other, bool objective_only) const {
-            const Real score = objective_only ? objective_score : pseudo_score;
-            const Real other_score = objective_only ? other.objective_score : other.pseudo_score;
+            const auto score = objective_only ? objective_score : pseudo_score;
+            const auto other_score = objective_only ? other.objective_score : other.pseudo_score;
             return score > other_score || (score == other_score && var < other.var);
         }
     };
 
     static void compareInference(const BranchInferenceCoverage& coverage,
-                                 std::span<const Candidate> candidates, Real winner_score,
+                                 std::span<const Candidate> candidates, RankScore winner_score,
                                  BranchingSelection& selection);
     static Index compareCutoffs(const BranchCutoffComparison& comparison,
-                                std::span<const Candidate> candidates, Real winner_score,
+                                std::span<const Candidate> candidates, RankScore winner_score,
                                 const BranchingSelection& selection);
 
     [[nodiscard]] bool inRange(Index var) const {
@@ -350,8 +374,8 @@ private:
 
     [[nodiscard]] Real safeUpCost(Index var) const;
     [[nodiscard]] Real safeDownCost(Index var) const;
-    [[nodiscard]] Real directionalScore(Real down_gain, Real up_gain) const;
-    [[nodiscard]] static Real blendScore(Real frac, Real pseudo_score);
+    [[nodiscard]] static RankScore directionalScore(BranchScoreMode mode, Real down_gain,
+                                                    Real up_gain);
 
     const SymmetryManager* symmetry_manager_ = nullptr;
     [[nodiscard]] bool isCanonicalCandidate(Index var, std::span<const Real> primal_values) const {
@@ -371,7 +395,7 @@ private:
     Int strong_branch_probe_budget_ = kDefaultStrongBranchProbeBudget;  // Directional probes.
     Int strong_branch_iter_limit_ = 60;
     Real pseudocost_fallback_ = 1.0;
-    bool balanced_score_ = false;
+    BranchScoreMode score_mode_ = BranchScoreMode::LargerGain;
     static constexpr Real kStrongInfeasibleGain = 1e4;
 };
 
