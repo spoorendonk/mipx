@@ -628,6 +628,8 @@ public:
     void setConflictWatchesEnabled(bool enabled) { conflict_watches_enabled_ = enabled; }
     /// Collect extra comparison counters for serial conflict benchmarks.
     void setConflictBenchStats(bool enabled) { conflict_bench_stats_ = enabled; }
+    /// Emit phase and search observations for verbose serial rapid-learning benchmarks.
+    void setRapidLearningBenchStats(bool enabled) { rapid_learning_bench_stats_ = enabled; }
 
     /// Record propagation explanations in the node domains (off by default).
     void setBoundReasonsEnabled(bool enabled) { bound_reasons_enabled_ = enabled; }
@@ -1268,6 +1270,7 @@ private:
     bool conflict_activity_branching_enabled_ = false;
     bool conflict_watches_enabled_ = false;
     bool conflict_bench_stats_ = false;
+    bool rapid_learning_bench_stats_ = false;
     bool bound_reasons_enabled_ = false;
     bool bound_conflict_learning_enabled_ = false;
     bool reconvergence_cuts_enabled_ = false;

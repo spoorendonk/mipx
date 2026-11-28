@@ -4228,6 +4228,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     Int nodes_since_incumbent = 0;
     Int last_restart_node = nodes_explored;
     Int restart_min_nodes = restart_stagnation_nodes_;
+    Int last_bench_restart_node = nodes_explored;
+    double restart_seconds = 0.0;
     const bool budget_restarts = restart_overhead_.limit.has_value();
     std::optional<Int> last_incumbent_node;
     if (budget_restarts && std::isfinite(incumbent)) {
@@ -4283,6 +4285,12 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
 
         Real best_bound = queue.bestBound();
+        if (rapid_learning_bench_stats_ && (nodes_explored == 1 || nodes_explored % 128 == 0)) {
+            const Real proof_bound =
+                std::min({best_bound, incumbent, lp_stats_.dropped_node_bound});
+            log_.log("Rapid bench bound: node=%d lp_iters=%d seconds=%.9g value=%.17g\n",
+                     nodes_explored, total_lp_iters, elapsed(), log_obj_sign_ * proof_bound);
+        }
         if (incumbent < kInf && computeGap(incumbent, best_bound) < gap_tol_) {
             if (verbose_) {
                 log_.log("Gap tolerance reached.\n");
@@ -4321,6 +4329,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         std::optional<OverheadBudget::Phase> restart_phase;
         std::uint64_t preparation_work = 0;
         bool prepared = triggered && large_frontier && spaced;
+        const bool measure_restart = rapid_learning_bench_stats_ && prepared;
+        const double restart_started = measure_restart ? elapsed() : 0.0;
         if (prepared && budget_restarts) {
             const auto now = Deadline::Clock::now();
             restart_phase = restart_overhead_.start(timeLeft(now), now);
@@ -4356,6 +4366,7 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
                 ++restart_overhead_stats_.skipped_budget;
             }
         }
+        const Int required_spacing = geometric_restarts_enabled_ ? restart_min_nodes : 0;
         if (prepared) {
             // Exact-safe restart: reset the queue policy without discarding any
             // unexplored nodes. Dropping queued nodes would turn restart into a
@@ -4395,6 +4406,16 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
         if (restart_phase && preparation_work > 0) {
             restart_overhead_.charge(*restart_phase, Deadline::Clock::now(), preparation_work);
+        }
+        if (measure_restart) {
+            restart_seconds += elapsed() - restart_started;
+            if (prepared) {
+                log_.log(
+                    "Rapid bench restart: node=%d conflict=%d spacing=%d required=%d open=%d\n",
+                    nodes_explored, conflict_restart, nodes_explored - last_bench_restart_node,
+                    required_spacing, queue.size());
+                last_bench_restart_node = nodes_explored;
+            }
         }
         if (solve_expired) {
             if (verbose_) {
@@ -4640,6 +4661,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         }
     }
 
+    if (rapid_learning_bench_stats_) {
+        log_.log("Rapid bench phase: name=restart seconds=%.9g\n", restart_seconds);
+    }
     if (policy_stats &&
         (policy_stats->nodes_selected > 0 || policy_stats->nodes_pruned_from_queue > 0)) {
         policy_stats->policy = serial_node_policy_override_;
@@ -5642,6 +5666,15 @@ MipResult MipSolver::solveMinimizationOnce() {
         auto now = std::chrono::steady_clock::now();
         return std::chrono::duration<double>(now - start_time).count();
     };
+    if (rapid_learning_bench_stats_) {
+        log_.log("Rapid bench attempt: start\n");
+    }
+    const auto bench_phase_start = [&] { return rapid_learning_bench_stats_ ? elapsed() : 0.0; };
+    const auto bench_phase_end = [&](const char* name, double start) {
+        if (rapid_learning_bench_stats_) {
+            log_.log("Rapid bench phase: name=%s seconds=%.9g\n", name, elapsed() - start);
+        }
+    };
     auto canonicalReportedWork = [&](double work_units) -> double { return work_units; };
 
     // Print banner before presolve (uses original problem dimensions).
@@ -5908,6 +5941,10 @@ MipResult MipSolver::solveMinimizationOnce() {
         if (incumbent_observer_ && isAcceptableIncumbent(result.solution)) {
             incumbent_observer_(result.solution, "presolve");
         }
+        if (rapid_learning_bench_stats_) {
+            log_.log("Rapid bench incumbent: source=presolve seconds=%.9g value=%.17g\n",
+                     result.time_seconds, log_obj_sign_ * result.objective);
+        }
         return result;
     }
 
@@ -6053,6 +6090,7 @@ MipResult MipSolver::solveMinimizationOnce() {
 
     // Root probing: discover implications, variable bounds, and fixings.
     if ((probing_enabled_ || systematic_probing_enabled_) && !discrete_vars.empty()) {
+        const double bench_start = bench_phase_start();
         std::optional<OverheadBudget::Phase> phase;
         if (systematic_probing_enabled_ && root_learning_overhead_.limit) {
             const auto now = Deadline::Clock::now();
@@ -6068,6 +6106,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             root_learning_overhead_.charge(*phase, Deadline::Clock::now(),
                                            probing_stats_.variables_probed);
         }
+        bench_phase_end("probing", bench_start);
         total_work += systematic_probing_enabled_
                           ? static_cast<double>(probing_stats_.row_visits +
                                                 probing_stats_.implication_candidates) *
@@ -6103,9 +6142,22 @@ MipResult MipSolver::solveMinimizationOnce() {
         }
     }
 
+    bool bench_incumbent_seen = false;
+    const auto record_bench_incumbent = [&](const HeuristicSolution& point,
+                                            const std::string& source) {
+        if (!bench_incumbent_seen) {
+            bench_incumbent_seen = true;
+            log_.log("Rapid bench incumbent: source=%s seconds=%.9g value=%.17g\n", source.c_str(),
+                     elapsed(), log_obj_sign_ * point.objective);
+        }
+    };
     SolutionPool solution_pool(problem_.sense);
+    if (rapid_learning_bench_stats_) {
+        solution_pool.setObserver(record_bench_incumbent);
+    }
     if (root_rapid_learning_enabled_ && !discrete_vars.empty() &&
         rapid_learning_stats_.stop == RapidLearningStop::NotRun) {
+        const double bench_start = bench_phase_start();
         const auto now = Deadline::Clock::now();
         const auto phase = root_learning_overhead_.start(timeLeft(now), now);
         const bool can_learn = root_rapid_learning_max_nodes_ > 0 &&
@@ -6121,6 +6173,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             root_learning_overhead_.charge(phase, Deadline::Clock::now(),
                                            rapid_learning_stats_.nodes);
         }
+        bench_phase_end("rapid_learning", bench_start);
         root_learning_clauses_active_ = rapid_learning_stats_.conflicts_imported > 0;
         total_work +=
             (static_cast<double>(rapid_learning_stats_.row_visits) + rapid_learning_stats_.nodes) *
@@ -6394,6 +6447,9 @@ MipResult MipSolver::solveMinimizationOnce() {
             constexpr uint64_t kNoFirstFeasibleWorkTick = std::numeric_limits<uint64_t>::max();
             std::atomic<uint64_t> first_feasible_work_tick{kNoFirstFeasibleWorkTick};
             SolutionPool pre_root_pool(problem_.sense);
+            if (rapid_learning_bench_stats_) {
+                pre_root_pool.setObserver(record_bench_incumbent);
+            }
             if (incumbent < kInf) {
                 pre_root_pool.submit({best_solution, incumbent}, "root_rapid_learning", 0);
             }
@@ -7252,6 +7308,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     const bool ran_root_lookahead = root_lp_lookahead_enabled_ && !discrete_vars.empty() &&
                                     root_lp_lookahead_stats_.stop == RootLpLookaheadStop::NotRun;
     if (ran_root_lookahead) {
+        const double bench_start = bench_phase_start();
         const auto now = Deadline::Clock::now();
         const auto phase = root_learning_overhead_.start(timeLeft(now), now);
         const bool can_learn = root_lp_lookahead_work_ > 0 && phase.canStart();
@@ -7262,6 +7319,7 @@ MipResult MipSolver::solveMinimizationOnce() {
                                            static_cast<std::uint64_t>(stats.row_visits) +
                                                stats.lp_solves + stats.lp_iterations);
         }
+        bench_phase_end("lookahead", bench_start);
         root_learning_clauses_active_ |= stats.conflicts_imported > 0;
         total_lp_iters += stats.lp_iterations;
         total_work +=

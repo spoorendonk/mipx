@@ -42,6 +42,7 @@ void printUsage(FILE* out) {
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
                  "[--conflict-lp-proofs|--no-conflict-lp-proofs] "
                  "[--print-conflict-bench-stats (serial)] "
+                 "[--print-rapid-learning-bench-stats (verbose serial)] "
                  "[--pre-lp-propagation|--no-pre-lp-propagation] "
                  "[--pre-lp-propagation-bounds|--no-pre-lp-propagation-bounds] "
                  "[--tree-presolve|--no-tree-presolve] "
@@ -201,6 +202,7 @@ int main(int argc, char* argv[]) {
     bool conflict_ray_shortening = false;
     bool conflict_lp_proofs = false;
     bool print_conflict_bench_stats = false;
+    bool print_rapid_learning_bench_stats = false;
     bool pre_lp_propagation = false;
     bool pre_lp_propagation_bounds = false;
     bool tree_presolve_enabled = true;
@@ -375,6 +377,8 @@ int main(int argc, char* argv[]) {
             conflict_lp_proofs = false;
         } else if (arg == "--print-conflict-bench-stats") {
             print_conflict_bench_stats = true;
+        } else if (arg == "--print-rapid-learning-bench-stats") {
+            print_rapid_learning_bench_stats = true;
         } else if (arg == "--pre-lp-propagation") {
             pre_lp_propagation = true;
         } else if (arg == "--no-pre-lp-propagation") {
@@ -941,8 +945,11 @@ int main(int argc, char* argv[]) {
         if (lp.hasIntegers() || mipx::hasAdvancedModelFeatures(lp)) {
             // MIP solve — MipSolver prints its own banner.
             mipx::MipSolver solver;
+            const bool collect_rapid_learning_bench_stats =
+                print_rapid_learning_bench_stats && verbose && num_threads <= 1;
             const bool collect_conflict_bench_stats =
-                print_conflict_bench_stats && num_threads <= 1;
+                (print_conflict_bench_stats || collect_rapid_learning_bench_stats) &&
+                num_threads <= 1;
             solver.setNumThreads(num_threads);
             if (time_limit >= 0.0) {
                 solver.setTimeLimit(time_limit);
@@ -994,6 +1001,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
             solver.setConflictLpProofsEnabled(conflict_lp_proofs);
             solver.setConflictBenchStats(collect_conflict_bench_stats);
+            solver.setRapidLearningBenchStats(collect_rapid_learning_bench_stats);
             solver.setPreLpPropagationEnabled(pre_lp_propagation);
             solver.setPreLpPropagationBoundsEnabled(pre_lp_propagation_bounds);
             solver.setTreePresolveEnabled(tree_presolve_enabled);
@@ -1179,6 +1187,17 @@ int main(int argc, char* argv[]) {
                     stats.lp_combined_proofs_learned, stats.bound_conflicts_learned,
                     stats.reconvergence_cuts_added, stats.branch_score_overrides,
                     solver.getSearchStats().conflict_restarts);
+            }
+            if (collect_rapid_learning_bench_stats) {
+                const auto& stats = solver.getSearchStats();
+                log.log(
+                    "Rapid bench summary: restarts=%d dropped=%d promotions=%d no_incumbent=%d "
+                    "no_match=%d branch_eligible=%d branch_changes=%d root_branch=%d "
+                    "seconds=%.9g\n",
+                    stats.restarts, stats.restart_nodes_dropped, stats.incumbent_restart_promotions,
+                    stats.incumbent_restart_no_incumbent, stats.incumbent_restart_no_match,
+                    stats.restart_branch_eligible, stats.restart_branch_changes,
+                    solver.getBranchingStats().root_branch_variable, result.time_seconds);
             }
             if (systematic_probing) {
                 const auto& stats = solver.getProbingStats();
