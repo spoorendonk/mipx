@@ -151,6 +151,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
     basis_start_stats_ = {};
     nonbasic_pos_.clear();
     bound_perturb_active_ = false;
+    bound_perturb_outward_ = false;
     bound_perturb_activations_ = 0;
     bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
@@ -1358,6 +1359,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
     status_ = Status::Error;
     solve_start_ = std::chrono::steady_clock::now();
     bound_perturb_active_ = false;
+    bound_perturb_outward_ = false;
     bound_perturb_activations_ = 0;
     bound_perturb_level_ = 0;
     lower_bound_perturb_.clear();
@@ -2300,6 +2302,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             return;
         }
         bound_perturb_active_ = false;
+        bound_perturb_outward_ = false;
         std::fill(lower_bound_perturb_.begin(), lower_bound_perturb_.end(), 0.0);
         std::fill(upper_bound_perturb_.begin(), upper_bound_perturb_.end(), 0.0);
     };
@@ -2394,14 +2397,64 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
         return true;
     };
 
+    // The a priori outward perturbation (#425), after HiGHS's
+    // HEkk::initialiseBound for its primal simplex: each finite bound v moves
+    // outward by base * expand_factor^level * r_k * max(1, |v|), r_k in
+    // [0, 1) from a fixed-seed hash of k. Widening keeps a feasible basis
+    // feasible, and nonbasics stay where they are (inside the wider box), so
+    // no primal value moves; a variable that leaves the basis while it is on
+    // is parked on its widened bound, which snapNonbasicToBounds() undoes.
+    auto activateOutwardBoundPerturbation = [&](Int level) -> bool {
+        const Real base = options_.primal_bound_perturbation_base;
+        if (!(base > 0.0)) {
+            return false;
+        }
+        const Real expand_factor = std::max(1.0, options_.bound_perturbation_expand_factor);
+        Real scale = base;
+        for (Int i = 0; i < level; ++i) {
+            scale *= expand_factor;
+        }
+        const Index n = numVars();
+        lower_bound_perturb_.assign(static_cast<std::size_t>(n), 0.0);
+        upper_bound_perturb_.assign(static_cast<std::size_t>(n), 0.0);
+        for (Index k = 0; k < n; ++k) {
+            const std::size_t ks = static_cast<std::size_t>(k);
+            // splitmix64 of k: r in [0, 1), the same on every solve.
+            uint64_t z = static_cast<uint64_t>(k) + 0x9e3779b97f4a7c15ull;
+            z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+            z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+            z ^= z >> 31;
+            const Real r = static_cast<Real>(z >> 11) * 0x1.0p-53;
+            const Real lb = base_var_lower[ks];
+            const Real ub = base_var_upper[ks];
+            if (lb != -kInf) {
+                lower_bound_perturb_[ks] = -scale * r * std::max(1.0, std::abs(lb));
+            }
+            if (ub != kInf) {
+                upper_bound_perturb_[ks] = -scale * r * std::max(1.0, std::abs(ub));
+            }
+        }
+        bound_perturb_active_ = true;
+        bound_perturb_outward_ = true;
+        nonbasic_off_bounds = true;
+        bound_perturb_level_ = level;
+        return true;
+    };
+
     // Escalate perturbation to the next level if degeneracy persists.
     auto escalateBoundPerturbation = [&]() -> bool {
         const Int max_level = std::max<Int>(0, options_.bound_perturbation_max_level);
         if (bound_perturb_level_ >= max_level) {
             return false;
         }
+        if (bound_perturb_outward_) {
+            return activateOutwardBoundPerturbation(bound_perturb_level_ + 1);
+        }
         return activateBoundPerturbation(bound_perturb_level_ + 1);
     };
+    // The outward perturbation goes on once per pass, so a cleanup that
+    // returns to the primal phase does not perturb again.
+    bool outward_perturbation_applied = false;
 
     // Log header.
     if (verbose_) {
@@ -2472,13 +2525,20 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 break;
             }
             if (degenerate_pivot_streak == 0) {
-                // Degeneracy resolved: de-activate perturbation.
-                clearBoundPerturbation();
-                bound_perturb_level_ = 0;
-                need_infeasible_rebuild = true;
+                if (bound_perturb_outward_) {
+                    // The outward perturbation stays until the optimum; the
+                    // next escalation waits for a new stall.
+                    bound_perturb_streak_mark = 0;
+                } else {
+                    // Degeneracy resolved: de-activate perturbation.
+                    clearBoundPerturbation();
+                    bound_perturb_level_ = 0;
+                    need_infeasible_rebuild = true;
+                }
             }
         }
-        if (options_.enable_bound_perturbation && options_.bound_perturbation_stall_pivots > 0 &&
+        if ((options_.enable_bound_perturbation || bound_perturb_outward_) &&
+            options_.bound_perturbation_stall_pivots > 0 &&
             degenerate_pivot_streak >= options_.bound_perturbation_stall_pivots) {
             if (!bound_perturb_active_) {
                 // First activation at level 0.
@@ -2934,6 +2994,20 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 }
                 status_ = Status::Optimal;
                 break;
+            }
+
+            // First primal pivot of the pass: widen the bounds first (#425).
+            // The bound lambdas read the perturbation pointers taken at the
+            // top of the loop, so price again there.
+            if (options_.enable_primal_bound_perturbation && !outward_perturbation_applied &&
+                !bound_perturb_active_ && !in_cleanup_phase) {
+                outward_perturbation_applied = true;
+                if (activateOutwardBoundPerturbation(0)) {
+                    ++degeneracy_stats_.primal_bound_perturbation_activations;
+                    bound_perturb_streak_mark = degenerate_pivot_streak;
+                    need_infeasible_rebuild = true;
+                    continue;
+                }
             }
 
             const Real worst_dual_inf_abs = std::abs(worst_rc);
@@ -5221,6 +5295,7 @@ void DualSimplexSolver::addCols(std::span<const Index> starts, std::span<const I
     dual_ray_.clear();  // a new column can break a Farkas proof
     primal_ray_.clear();
     bound_perturb_active_ = false;
+    bound_perturb_outward_ = false;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
 
@@ -5372,6 +5447,7 @@ void DualSimplexSolver::removeCols(std::span<const Index> cols) {
     dual_ray_.clear();
     primal_ray_.clear();
     bound_perturb_active_ = false;
+    bound_perturb_outward_ = false;
     lower_bound_perturb_.clear();
     upper_bound_perturb_.clear();
 

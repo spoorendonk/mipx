@@ -155,6 +155,20 @@ struct DualSimplexOptions {
     // removing perturbation at optimality.
     Int bound_perturbation_cleanup_iter_limit = 500;
 
+    // A priori outward bound perturbation for the primal phase (#425), after
+    // HiGHS's HEkk::initialiseBound for its primal simplex and Bach, Black,
+    // Huiberts, Kafer, arXiv:2510.21613 (outward, random, kept until an
+    // apparent optimum). Off by default. The first time a solve reaches the
+    // primal-feasible, dual-infeasible phase, every finite bound moves
+    // outward by base * r_k * max(1, |bound|), r_k in [0, 1) from a fixed
+    // seed, so the basis stays feasible and nothing moves. It replaces the
+    // stall-triggered perturbation while it is on: a stall of
+    // bound_perturbation_stall_pivots escalates it by
+    // bound_perturbation_expand_factor, up to bound_perturbation_max_level.
+    // It comes off at the apparent optimum, through the same cleanup.
+    bool enable_primal_bound_perturbation = false;
+    Real primal_bound_perturbation_base = 5e-7;
+
     // Stall-triggered deterministic restart/re-crash.
     bool enable_stall_restart = false;
     Int stall_restart_pivots = 2000;
@@ -390,6 +404,9 @@ public:
         Int cost_perturbation_removals = 0;
         Int bound_perturbation_activations = 0;
         Int bound_perturbation_escalations = 0;
+        // Times the a priori outward perturbation (#425) was applied; its
+        // escalations count in bound_perturbation_escalations.
+        Int primal_bound_perturbation_activations = 0;
         // Cleanups entered at an apparent optimum after the bound
         // perturbation came off or nonbasics were put back on their bounds.
         Int cleanup_phases = 0;
@@ -604,7 +621,10 @@ private:
     WorkUnits work_;
     bool bound_perturb_active_ = false;
     Int bound_perturb_activations_ = 0;
-    Int bound_perturb_level_ = 0;   // current escalation level (0 = initial)
+    Int bound_perturb_level_ = 0;  // current escalation level (0 = initial)
+    // The active bound perturbation is the a priori outward one (#425):
+    // negative entries in the perturbation arrays, kept until an optimum.
+    bool bound_perturb_outward_ = false;
     Int bfrt_high_flip_iters_ = 0;  // consecutive iterations with high flip count
     // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
     AdaptiveHarrisStats adaptive_harris_stats_{};
@@ -613,8 +633,11 @@ private:
     // reset each solve().
     RowPriceStats row_price_stats_{};
     DseFallbackStats dse_fallback_stats_{};
-    std::vector<Real> lower_bound_perturb_;  // additive to finite lowers
-    std::vector<Real> upper_bound_perturb_;  // subtractive from finite uppers
+    // Added to finite lowers and subtracted from finite uppers: positive
+    // shrinks the box (the stall-triggered perturbation), negative widens it
+    // (the outward one).
+    std::vector<Real> lower_bound_perturb_;
+    std::vector<Real> upper_bound_perturb_;
     DualSimplexOptions options_{};
 };
 

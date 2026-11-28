@@ -791,6 +791,65 @@ TEST_CASE("Regression #298: an optimum reached under bound perturbation is a ver
     CHECK(stats.bound_perturbation_activations >= 1);
 }
 
+// The a priori outward bound perturbation (#425) on Beale's cycling example:
+// the slack basis is primal feasible and degenerate, so the solve goes
+// straight to the primal phase, where the perturbation comes on before the
+// first pivot and off at the optimum. The stall trigger and the cost
+// perturbation are off, so only the outward perturbation acts.
+TEST_CASE("DualSimplex: outward bound perturbation solves Beale's cycling LP",
+          "[dual_simplex][degeneracy]") {
+    // min -3/4 x1 + 20 x2 - 1/2 x3 + 6 x4
+    //   1/4 x1 -  8 x2 -     x3 + 9 x4 <= 0
+    //   1/2 x1 - 12 x2 - 1/2 x3 + 3 x4 <= 0
+    //                        x3        <= 1,  x >= 0;  optimum -5/4 at x1 = x3 = 1.
+    LpProblem lp;
+    lp.name = "beale";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {-0.75, 20.0, -0.5, 6.0};
+    lp.col_lower.assign(4, 0.0);
+    lp.col_upper.assign(4, kInf);
+    lp.col_type.assign(4, VarType::Continuous);
+    lp.num_rows = 3;
+    lp.row_lower.assign(3, -kInf);
+    lp.row_upper = {0.0, 0.0, 1.0};
+    lp.matrix = SparseMatrix(3, 4, {0.25, -8.0, -1.0, 9.0, 0.5, -12.0, -0.5, 3.0, 1.0},
+                             {0, 1, 2, 3, 0, 1, 2, 3, 2}, {0, 4, 8, 9});
+
+    auto solveWith = [&](bool outward) {
+        DualSimplexSolver solver;
+        DualSimplexOptions opts = solver.getOptions();
+        opts.enable_bound_perturbation = false;
+        opts.enable_cost_perturbation = false;
+        opts.enable_primal_bound_perturbation = outward;
+        solver.setOptions(opts);
+        solver.setVerbose(false);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-1.25, 1e-9));
+        // Feasible for the unperturbed LP.
+        const auto x = solver.getPrimalValues();
+        REQUIRE(x.size() == 4);
+        for (Index j = 0; j < 4; ++j) {
+            INFO("column " << j);
+            CHECK(x[j] >= -1e-9);
+        }
+        CHECK(0.25 * x[0] - 8.0 * x[1] - x[2] + 9.0 * x[3] <= 1e-9);
+        CHECK(0.5 * x[0] - 12.0 * x[1] - 0.5 * x[2] + 3.0 * x[3] <= 1e-9);
+        CHECK(x[2] <= 1.0 + 1e-9);
+        const auto& stats = solver.getDegeneracyStats();
+        CHECK(stats.dual_pivots + stats.primal_pivots + stats.retry_iterations ==
+              result.iterations);
+        CHECK(stats.bound_perturbation_activations == 0);
+        return stats.primal_bound_perturbation_activations;
+    };
+    // Off by default: the option alone switches it on.
+    CHECK_FALSE(DualSimplexOptions{}.enable_primal_bound_perturbation);
+    CHECK(solveWith(false) == 0);
+    CHECK(solveWith(true) == 1);
+}
+
 // The degeneracy counters (#422) add up on a cold dual-phase solve and start
 // again with the next solve().
 TEST_CASE("DualSimplex: degeneracy stats count a cold solve's pivots",
