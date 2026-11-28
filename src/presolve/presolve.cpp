@@ -4258,12 +4258,14 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         stats_.implied_equation_changes += ch;
         total_changes += ch;
 
-        ch = timed(stats_.activity_bound_tightening_seconds, [&] {
-            return activityBoundTightening(lp, col_removed, row_removed, dirty_row_list,
-                                           next_dirty_rows, next_dirty_cols);
-        });
-        stats_.activity_bound_tightening_changes += ch;
-        total_changes += ch;
+        if (options_.enable_activity_bound_tightening) {
+            ch = timed(stats_.activity_bound_tightening_seconds, [&] {
+                return activityBoundTightening(lp, col_removed, row_removed, dirty_row_list,
+                                               next_dirty_rows, next_dirty_cols);
+            });
+            stats_.activity_bound_tightening_changes += ch;
+            total_changes += ch;
+        }
 
         if (dominated_columns) {
             ch = timed(stats_.dominated_col_seconds, [&] {
@@ -4448,10 +4450,12 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 }
 
 // Activity bound tightening and singleton rows write the bounds they derive
-// into the LP, so a half-bounded column comes out boxed. The barrier gives
-// every boxed column a row of its own and factors a dense m x m matrix, so on
-// ship08l the 2706 bounds activity tightening made explicit took its standard
-// form from 680 rows to 3197 and its solve from 0.6 s to 150 s (#279).
+// into the LP and can box one-sided columns. With explicit upper bounds the
+// barrier gives each boxed column a row of its own, so on ship08l activity
+// tightening took its standard form from 680 rows to 3197 and its dense solve
+// from 0.6 s to 150 s (#279). This pass can only relax bounds implied by the
+// remaining rows. The CLI skips activity tightening for barrier LPs because
+// the bounds that survived this pass also hurt crossover on d2q06c (#444).
 //
 // A tightened bound that a remaining row implies, given the other columns'
 // current bounds, cuts nothing off the reduced LP, so putting the original

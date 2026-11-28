@@ -383,6 +383,8 @@ struct PresolveOptions {
     Int probing_max_rounds = 2;
     Int probing_max_probes_per_round = 5000;
     double probing_time_limit = 5.0;  // seconds
+    /// Derive column bounds from row activities inside the reduction loop.
+    bool enable_activity_bound_tightening = true;
 };
 
 // ---- Presolver --------------------------------------------------------------

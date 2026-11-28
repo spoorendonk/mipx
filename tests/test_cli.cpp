@@ -240,6 +240,22 @@ TEST_CASE("CLI: --time-limit reaches the barrier", "[cli][barrier]") {
     CHECK(run.mentions("Objective: none"));
 }
 
+TEST_CASE("CLI: activity bound tightening is skipped for barrier LPs", "[cli][barrier]") {
+    const std::string model = "'" + testDataDir() + "/presolve_activity_bounds.lp'";
+    const auto dual = runSolver(model + " --dual");
+    const auto barrier = runSolver(model + " --barrier --no-gpu");
+
+    for (const auto* run : {&dual, &barrier}) {
+        INFO(run->output);
+        CHECK(run->exit_code == 0);
+        CHECK(run->mentions("Presolve: 1 vars removed"));
+        CHECK(run->mentions("Status: Optimal"));
+        CHECK(run->mentions("Objective: -1.6000000000e+01"));
+    }
+    CHECK(dual.mentions("activity_bound_tightening="));
+    CHECK_FALSE(barrier.mentions("activity_bound_tightening="));
+}
+
 TEST_CASE("CLI: an LP whose postsolved point misses a row is solved again", "[cli]") {
     // Issue #257: the LP path postsolved and printed Optimal unchecked. The
     // model's postsolve rebuilds x2 through a 1e6 coefficient from an x1 off

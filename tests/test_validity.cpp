@@ -794,6 +794,9 @@ std::vector<PresolveCase> presolveCases() {
     std::vector<PresolveCase> cases;
     PresolveOptions o;
     cases.push_back({"default", o});
+    PresolveOptions barrier = o;
+    barrier.enable_activity_bound_tightening = false;
+    cases.push_back({"barrier LP presolve options", barrier});
     PresolveOptions core = o;
     core.enable_forcing_rows = false;
     core.enable_dual_fixing = false;
@@ -900,7 +903,8 @@ std::vector<PresolveReduction> presolveReductions() {
              return o.enable_mip_singleton_stuffing && o.enable_dual_fixing;
          }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
-        {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
+        {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes,
+         [](const PresolveOptions& o) { return o.enable_activity_bound_tightening; }},
         {"dual fixing", &PresolveStats::dual_fixing_changes,
          [](const PresolveOptions& o) { return o.enable_dual_fixing; }},
         {"extended dual fixing", &PresolveStats::extended_dual_fixing_changes,
@@ -1038,10 +1042,10 @@ std::vector<LpProblem> presolveAuditModels() {
         spec.max_int = 3;
         models.push_back(randomModel(rng, spec));
     }
-    // An LP: x0 + x1 <= 4 bounds both columns, and activity tightening makes
-    // those bounds explicit, which the row still implies.
+    // An LP: x0 + x1 <= 4 still implies both upper bounds. The singleton row
+    // supplies x0 <= 4 even when activity tightening is disabled (#444).
     models.push_back(makeModel(Sense::Minimize, {-1, -2}, {0, 0}, {kInf, kInf}, {C, C},
-                               {{1, 1}, {1, -1}}, {-kInf, -1}, {4, kInf}));
+                               {{1, 1}, {1, -1}, {1, 0}}, {-kInf, -1, -kInf}, {4, kInf, 4}));
     std::mt19937 lp_rng(279);
     for (int t = 0; t < 50; ++t) {
         ModelSpec spec;

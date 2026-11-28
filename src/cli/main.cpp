@@ -804,6 +804,9 @@ int main(int argc, char* argv[]) {
                     tbb_str, simd_str);
 
             // Presolve.
+            // Activity tightening can box one-sided columns, adding rows to
+            // the barrier's standard form or degrading its crossover basis (#444).
+            presolve_opts.enable_activity_bound_tightening = lp_mode != LpMode::Barrier;
             mipx::Presolver presolver;
             presolver.setOptions(presolve_opts);
             auto working = lp;
