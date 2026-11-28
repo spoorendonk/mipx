@@ -8,6 +8,7 @@
 #include "mipx/presolve.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -53,6 +54,7 @@ void printUsage(FILE* out) {
                  "[--parallel-mode deterministic|opportunistic] [--seed N] "
                  "[--persistent-tree-workers (opportunistic TBB tree)] "
                  "[--heur-deterministic|--heur-opportunistic] "
+                 "[--root-feasjump-restarts N] "
                  "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
                  "[--pre-root-rounds N] [--pre-root-no-early-stop] "
                  "[--pre-root-lplight|--no-pre-root-lplight] "
@@ -134,6 +136,7 @@ int main(int argc, char* argv[]) {
     uint64_t heuristic_seed = 1;
     mipx::Int root_heur_max_int_inf = 12;
     mipx::Int root_heur_max_int_vars = 96;
+    std::optional<mipx::Int> root_feasjump_restarts;
     bool pre_root_lpfree = false;
     double pre_root_work = 5.0e4;
     mipx::Int pre_root_rounds = 24;
@@ -343,6 +346,18 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--root-heur-max-int-vars" && i + 1 < argc) {
             root_heur_max_int_vars =
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
+        } else if (arg == "--root-feasjump-restarts" && i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            mipx::Int restarts = 0;
+            const auto end = value.data() + value.size();
+            const auto [parsed, ec] = std::from_chars(value.data(), end, restarts);
+            if (ec != std::errc{} || parsed != end || restarts < 0 ||
+                restarts > mipx::MipSolver::kDefaultRootFeasibilityJumpRestarts) {
+                std::fprintf(stderr, "--root-feasjump-restarts requires an integer from 0 to %d\n",
+                             mipx::MipSolver::kDefaultRootFeasibilityJumpRestarts);
+                return 1;
+            }
+            root_feasjump_restarts = restarts;
         } else if (arg == "--pre-root-lpfree") {
             pre_root_lpfree = true;
         } else if (arg == "--no-pre-root-lpfree") {
@@ -641,6 +656,9 @@ int main(int argc, char* argv[]) {
             solver.setPersistentTreeWorkers(persistent_tree_workers);
             solver.setHeuristicSeed(heuristic_seed);
             solver.setRootHeuristicThresholds(root_heur_max_int_inf, root_heur_max_int_vars);
+            if (root_feasjump_restarts) {
+                solver.setRootFeasibilityJumpRestarts(*root_feasjump_restarts);
+            }
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
             solver.setPreRootLpFreeWorkBudget(pre_root_work);
             solver.setPreRootLpFreeMaxRounds(pre_root_rounds);

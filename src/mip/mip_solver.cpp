@@ -1580,7 +1580,7 @@ HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
     config.root_local_branching_neighborhood_large = kRootLocalBranchingNeighborhoodLarge;
     config.root_local_branching_min_binary_vars = kRootLocalBranchingMinBinaryVars;
     config.root_feasjump_max_iterations = kRootFeasJumpMaxIterations;
-    config.root_feasjump_max_restarts = kRootFeasJumpMaxRestarts;
+    config.root_feasjump_max_restarts = root_feasjump_max_restarts_;
     config.root_crossover_subproblem_iter_limit = kRootCrossoverSubproblemIterLimit;
     config.root_crossover_min_fixed_vars = kRootCrossoverMinFixedVars;
     config.root_proximity_subproblem_iter_limit = kRootProximitySubproblemIterLimit;

@@ -267,6 +267,29 @@ TEST_CASE("CLI: a MIP stopped before any incumbent reports no objective", "[cli]
     CHECK_FALSE(run.mentions("Objective: 0"));
 }
 
+TEST_CASE("CLI: zero root feasibility-jump restarts skips the call", "[cli][heuristics]") {
+    const std::string base =
+        "'" + testDataDir() + "/no_incumbent_mip.lp' --no-presolve --no-cuts --node-limit 1 ";
+    const auto by_default = runSolver(base);
+    const auto one = runSolver(base + "--root-feasjump-restarts 1");
+    const auto disabled = runSolver(base + "--root-feasjump-restarts 0");
+
+    for (const auto* run : {&by_default, &one, &disabled}) {
+        CHECK(run->exit_code == 0);
+        CHECK(run->mentions("Objective: none"));
+    }
+    CHECK(by_default.mentions("feasjump=1/0"));
+    CHECK(one.mentions("feasjump=1/0"));
+    CHECK(disabled.mentions("feasjump=0/0"));
+
+    for (const char* invalid : {"-1", "5", "1x", "99999999999999999999"}) {
+        INFO(invalid);
+        const auto run = runSolver(base + "--root-feasjump-restarts " + invalid);
+        CHECK(run.exit_code != 0);
+        CHECK(run.mentions("--root-feasjump-restarts requires an integer from 0 to 4"));
+    }
+}
+
 TEST_CASE("CLI: an infeasible MIP reports no objective", "[cli]") {
     const auto run = runSolver("'" + testDataDir() + "/infeasible_mip.lp' --quiet");
 

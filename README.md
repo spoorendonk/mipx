@@ -88,6 +88,7 @@ Key options:
 | `--presolve` / `--no-presolve` | on | Presolve reductions |
 | `--cuts` / `--no-cuts` | on | Cutting planes |
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
+| `--root-feasjump-restarts <n>` | 4 | Cap root feasibility-jump passes at 0 through 4, including the initial pass. Use 0 to skip the heuristic |
 | `--barrier` | off | Use barrier for root LP |
 | `--barrier-dualize off\|on\|auto` | off | With barrier, force the compact dual with `on` or compare estimated Newton-factor work in both orientations with `auto` |
 | `--pdlp` | off | Use PDLP for root LP |

@@ -184,6 +184,8 @@ NB_MODULE(_core, m) {
         .def("set_parallel_mode", &MipSolver::setParallelMode, "mode"_a)
         .def("set_heuristic_mode", &MipSolver::setHeuristicMode, "mode"_a)
         .def("set_heuristic_seed", &MipSolver::setHeuristicSeed, "seed"_a)
+        .def("set_root_feasibility_jump_restarts", &MipSolver::setRootFeasibilityJumpRestarts,
+             "restarts"_a)
         .def("set_pre_root_lpfree_enabled", &MipSolver::setPreRootLpFreeEnabled, "enabled"_a)
         .def("set_pre_root_lplight_enabled", &MipSolver::setPreRootLpLightEnabled, "enabled"_a)
         .def("set_pre_root_portfolio_enabled", &MipSolver::setPreRootPortfolioEnabled, "enabled"_a)

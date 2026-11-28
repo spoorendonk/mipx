@@ -377,6 +377,12 @@ public:
         root_heuristic_max_int_inf_ = std::max<Int>(1, max_int_inf);
         root_heuristic_max_int_vars_ = std::max<Int>(1, max_int_vars);
     }
+    static constexpr Int kDefaultRootFeasibilityJumpRestarts = 4;
+    /// Cap root feasibility-jump passes at 0 through the default. Zero skips the call.
+    void setRootFeasibilityJumpRestarts(Int restarts) {
+        root_feasjump_max_restarts_ =
+            std::clamp<Int>(restarts, 0, kDefaultRootFeasibilityJumpRestarts);
+    }
     void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
     void setPreRootLpFreeWorkBudget(double max_work_units) {
         pre_root_lp_free_work_budget_ = std::max(1.0, max_work_units);
@@ -776,6 +782,7 @@ private:
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
     Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;
+    Int root_feasjump_max_restarts_ = kDefaultRootFeasibilityJumpRestarts;
     bool pre_root_lp_free_enabled_ = false;
     bool pre_root_lp_free_early_stop_ = true;
     Int pre_root_lp_free_max_rounds_ = 24;
@@ -903,7 +910,6 @@ private:
     static constexpr Int kRootLocalBranchingNeighborhoodLarge = 24;
     static constexpr Int kRootLocalBranchingMinBinaryVars = 8;
     static constexpr Int kRootFeasJumpMaxIterations = 500;
-    static constexpr Int kRootFeasJumpMaxRestarts = 4;
     static constexpr Int kRootCrossoverSubproblemIterLimit = 40;
     static constexpr Int kRootCrossoverMinFixedVars = 4;
     static constexpr Int kRootProximitySubproblemIterLimit = 40;

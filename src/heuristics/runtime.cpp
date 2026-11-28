@@ -457,7 +457,8 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(const RootHeuristicConte
         }
 
         // Feasibility jump (no LP needed, but more expensive).
-        if (allowRootCall(ctx.total_work_units + out.work_units)) {
+        if (config_.root_feasjump_max_restarts > 0 &&
+            allowRootCall(ctx.total_work_units + out.work_units)) {
             ++out.calls;
             ++out.feasjump_calls;
             ++stats_.calls;
