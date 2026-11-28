@@ -3190,6 +3190,56 @@ TEST_CASE("MipSolver: aggressive search profile switches and restarts", "[mip][s
     CHECK(policy_stats.nodes_selected == pinned.nodes - 1);
 }
 
+TEST_CASE("MipSolver: geometric serial restart spacing starts fresh on every solve",
+          "[mip][search]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setCutsEnabled(false);
+    solver.setPresolve(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRestartsEnabled(true);
+    solver.setSerialNodePolicyOverride(NodePolicy::BestFirst);
+    solver.setRestartControls(8, 2);
+    solver.load(buildSearchStagnationMip());
+
+    const auto baseline = solver.solve();
+    REQUIRE(baseline.status == Status::Infeasible);
+    REQUIRE(solver.getSearchStats().restarts > 3);
+
+    solver.setGeometricRestartsEnabled(true);
+    // The root counts towards the node limit. A limit at the boundary
+    // prevents another loop iteration, so the first restart needs limit 10.
+    constexpr std::array<std::pair<Int, Int>, 6> cases{
+        {{9, 0}, {10, 1}, {25, 1}, {26, 2}, {57, 2}, {58, 3}}};
+    for (const auto& [limit, expected_restarts] : cases) {
+        CAPTURE(limit);
+        solver.setNodeLimit(limit);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::NodeLimit);
+        CHECK(result.nodes == limit);
+        CHECK(solver.getSearchStats().restarts == expected_restarts);
+        CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+    }
+
+    solver.setNodeLimit(baseline.nodes + 1);
+    const auto spaced = solver.solve();
+    CHECK(spaced.status == baseline.status);
+    CHECK(spaced.nodes == baseline.nodes);
+    CHECK(solver.getSearchStats().restarts >= 3);
+    CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+
+    solver.setRestartControls(8, baseline.nodes);
+    CHECK(solver.solve().status == baseline.status);
+    CHECK(solver.getSearchStats().restarts == 0);
+
+    solver.setRestartControls(8, 2);
+    solver.setSearchProfile(SearchProfile::Stable);
+    CHECK(solver.solve().status == baseline.status);
+    CHECK(solver.getSearchStats().restarts == 0);
+}
+
 TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
           "[mip][conflicts][search]") {
     MipSolver solver;
@@ -3246,6 +3296,38 @@ TEST_CASE("MipSolver: conflict restarts preserve open nodes and learned state",
     CHECK(solver.getBranchingStats().pseudocost_updates_tree == branching.pseudocost_updates_tree);
     CHECK(solver.getBranchingStats().pseudocost_hits == branching.pseudocost_hits);
     CHECK(solver.getBranchingStats().strong_branch_probes == branching.strong_branch_probes);
+
+    // Conflict activity alone fired several times above. A minimum interval
+    // longer than the entire search defers all of those restarts.
+    REQUIRE(baseline.nodes < 10000);
+    solver.setGeometricRestartsEnabled(true);
+    const auto deferred = solver.solve();
+    CHECK(deferred.status == baseline.status);
+    CHECK(deferred.objective == baseline.objective);
+    CHECK(deferred.nodes == baseline.nodes);
+    CHECK(solver.getSearchStats().restarts == 0);
+    CHECK(solver.getConflictStats().bound_conflicts_learned == conflicts.bound_conflicts_learned);
+
+    // Allow only the conflict trigger. Give the fixture time to publish
+    // conflicts before checking each side of the first spacing boundary.
+    solver.setRestartControls(32, 2);
+    solver.setConflictRestartThreshold(1);
+    solver.setNodeLimit(33);
+    solver.setGeometricRestartsEnabled(false);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getSearchStats().conflict_restarts > 0);
+    solver.setGeometricRestartsEnabled(true);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getSearchStats().conflict_restarts == 0);
+    solver.setNodeLimit(34);
+    REQUIRE(solver.solve().status == Status::NodeLimit);
+    CHECK(solver.getSearchStats().conflict_restarts == 1);
+    CHECK(solver.getSearchStats().restart_nodes_dropped == 0);
+
+    solver.setGeometricRestartsEnabled(false);
+    solver.setRestartControls(10000, 2);
+    solver.setConflictRestartThreshold(2);
+    solver.setNodeLimit(std::numeric_limits<Int>::max());
 
     solver.setSerialNodePolicyOverride(std::nullopt);
     const auto scheduled = solver.solve();

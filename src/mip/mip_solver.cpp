@@ -3735,6 +3735,8 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
     Int rins_skip_few_fix = 0;
     Int rins_fixed_sum = 0;
     Int nodes_since_incumbent = 0;
+    Int last_restart_node = nodes_explored;
+    Int restart_min_nodes = restart_stagnation_nodes_;
 
     auto* policy_stats =
         serial_node_policy_override_ && !queue.empty() ? &serial_node_policy_stats_ : nullptr;
@@ -3803,7 +3805,9 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
         const bool stagnation_restart =
             allow_restarts && nodes_since_incumbent >= restart_stagnation_nodes_;
         if ((stagnation_restart || conflict_restart) && search_profile_ != SearchProfile::Stable &&
-            queue.size() > restart_keep_nodes_) {
+            queue.size() > restart_keep_nodes_ &&
+            (!geometric_restarts_enabled_ ||
+             nodes_explored - last_restart_node >= restart_min_nodes)) {
             // Exact-safe restart: reset the queue policy without discarding any
             // unexplored nodes. Dropping queued nodes would turn restart into a
             // heuristic truncation and can produce invalid "optimal" claims.
@@ -3811,6 +3815,11 @@ void MipSolver::solveSerial(DualSimplexSolver& lp, NodeQueue& queue, Int& nodes_
             queue.setPolicy(serial_node_policy_override_.value_or(NodePolicy::BestFirst));
             search_stats_.restart_nodes_dropped += open - queue.size();
             ++search_stats_.restarts;
+            if (geometric_restarts_enabled_) {
+                last_restart_node = nodes_explored;
+                constexpr Int max_nodes = std::numeric_limits<Int>::max();
+                restart_min_nodes += std::min(restart_min_nodes, max_nodes - restart_min_nodes);
+            }
             if (conflict_restart) {
                 ++search_stats_.conflict_restarts;
                 search_stats_.last_conflict_restart_activity = conflict_restart_activity_;

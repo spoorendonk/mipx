@@ -547,6 +547,9 @@ public:
     /// Pass nullopt for the profile schedule. DepthFirst is not a supported override.
     void setSerialNodePolicyOverride(std::optional<NodePolicy> policy);
     void setRestartsEnabled(bool enabled) { restarts_enabled_ = enabled; }
+    /// Opt in to spacing enabled serial restart triggers. The minimum starts
+    /// at the stagnation interval and doubles after each restart.
+    void setGeometricRestartsEnabled(bool enabled) { geometric_restarts_enabled_ = enabled; }
     /// Opt in to exact-safe serial restarts on recent learned conflicts.
     /// Evidence decays by 0.995 per node, gains one per nonempty published
     /// conflict, and resets on any restart.
@@ -1017,6 +1020,7 @@ private:
     SearchProfile search_profile_ = SearchProfile::Default;
     std::optional<NodePolicy> serial_node_policy_override_;
     bool restarts_enabled_ = false;
+    bool geometric_restarts_enabled_ = false;
     Int restart_stagnation_nodes_ = 96;
     Int restart_keep_nodes_ = 32;
     Int conflict_restart_threshold_ = 0;

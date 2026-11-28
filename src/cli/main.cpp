@@ -33,6 +33,7 @@ void printUsage(FILE* out) {
                  "[--conflict-watches|--no-conflict-watches] "
                  "[--conflict-activity-branching|--no-conflict-activity-branching] "
                  "[--conflict-restart-threshold N] "
+                 "[--geometric-restarts|--no-geometric-restarts] "
                  "[--bound-conflict-learning|--no-bound-conflict-learning] "
                  "[--reconvergence-cuts|--no-reconvergence-cuts] "
                  "[--conflict-ray-shortening|--no-conflict-ray-shortening] "
@@ -170,6 +171,7 @@ int main(int argc, char* argv[]) {
     bool conflict_watches = false;
     bool conflict_activity_branching = false;
     mipx::Int conflict_restart_threshold = 0;
+    bool geometric_restarts = false;
     bool bound_conflict_learning = false;
     bool reconvergence_cuts = false;
     bool conflict_ray_shortening = false;
@@ -274,6 +276,10 @@ int main(int argc, char* argv[]) {
                              "--conflict-restart-threshold requires a nonnegative integer\n");
                 return 1;
             }
+        } else if (arg == "--geometric-restarts") {
+            geometric_restarts = true;
+        } else if (arg == "--no-geometric-restarts") {
+            geometric_restarts = false;
         } else if (arg == "--bound-conflict-learning") {
             bound_conflict_learning = true;
         } else if (arg == "--no-bound-conflict-learning") {
@@ -807,6 +813,7 @@ int main(int argc, char* argv[]) {
             solver.setConflictWatchesEnabled(conflict_watches);
             solver.setConflictActivityBranchingEnabled(conflict_activity_branching);
             solver.setConflictRestartThreshold(conflict_restart_threshold);
+            solver.setGeometricRestartsEnabled(geometric_restarts);
             solver.setBoundConflictLearningEnabled(bound_conflict_learning);
             solver.setReconvergenceCutsEnabled(reconvergence_cuts);
             solver.setConflictRayShorteningEnabled(conflict_ray_shortening);
@@ -881,7 +888,7 @@ int main(int argc, char* argv[]) {
                 "tree_presolve=%s tree_presolve_min_frac=%d "
                 "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s "
                 "cut_strengthening=%s objective_propagation=%s objective_integrality=%s "
-                "tree_pseudocosts=%s balanced_branch_score=%s\n",
+                "tree_pseudocosts=%s balanced_branch_score=%s geometric_restarts_requested=%s\n",
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
                 conflict_ray_shortening && conflicts_enabled && num_threads <= 1 ? "on" : "off",
@@ -893,7 +900,8 @@ int main(int argc, char* argv[]) {
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
                 tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
                 objective_propagation ? "on" : "off", objective_integrality ? "on" : "off",
-                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off");
+                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off",
+                geometric_restarts ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");
