@@ -2077,6 +2077,9 @@ void MipSolver::publishConflict(ConflictClause clause, ConflictSource source) {
     conflict_stats_.lp_infeasible_conflicts += source == ConflictSource::LpInfeasible;
     conflict_stats_.bound_infeasible_conflicts += source == ConflictSource::BoundInfeasible;
 
+    clause.pseudocost_id = source == ConflictSource::LpCutoff && clause.literals.size() == 1
+                               ? conflict_stats_.learned
+                               : 0;
     clause.rapid_learning = source == ConflictSource::RootRapidLearning;
     if (conflict_restart_threshold_ > 0 && !clause.literals.empty() &&
         source != ConflictSource::RootProbe && source != ConflictSource::RootLpLookahead &&
@@ -2202,9 +2205,10 @@ void MipSolver::recordConflictCutoff(ConflictClause& clause) {
 
 bool MipSolver::propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff,
                                         std::vector<Real>& lower, std::vector<Real>& upper,
-                                        std::vector<Index>& touched) {
+                                        std::vector<Index>& touched, Int& pseudocost_clause) {
     // A single scan at node entry. Interleaving clauses and the other
     // propagators on subsequent bound changes belongs to #119.
+    const auto initially_touched = touched.size();
     for (auto& clause : conflict_pool_) {
         if (!clause.bound_scope) {
             continue;
@@ -2228,6 +2232,7 @@ bool MipSolver::propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff,
                 lower[col] = lb;
                 upper[col] = ub;
                 lp.setColBounds(col, lb, ub);
+                pseudocost_clause = touched.size() == initially_touched ? clause.pseudocost_id : 0;
                 touched.push_back(col);
                 continue;
             }
@@ -2804,6 +2809,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // Objective propagation: the root domain re-propagated against the
     // incumbent cutoff, recomputed here the first time a node sees a lower
     // incumbent and replayed on every node like the global RC fixings.
+    bool objective_bounds_applied = false;
     if (objective_propagator_.loaded()) {
         if (objective_cutoff_bounds_.refresh(objectivePropagationCutoff(incumbent_snapshot))) {
             obj_prop_repropagations_.fetch_add(1, std::memory_order_relaxed);
@@ -2812,6 +2818,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         obj_tightened.clear();
         const bool obj_ok =
             objective_cutoff_bounds_.enforce(current_lower, current_upper, obj_tightened);
+        objective_bounds_applied = !obj_tightened.empty();
         for (Index j : obj_tightened) {
             lp.setColBounds(j, current_lower[j], current_upper[j]);
             touched_vars.push_back(j);
@@ -2855,14 +2862,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         return false;
     }
     bool bound_conflict_tightened = false;
+    Int pseudocost_clause = 0;
     const bool use_root_learning = use_conflicts && root_learning_clauses_active_;
     if (use_bound_conflicts || use_lp_proofs || use_root_learning) {
         const auto before = touched_vars.size();
         if (!propagateBoundConflicts(lp, conflict_cutoff, current_lower, current_upper,
-                                     touched_vars)) {
+                                     touched_vars, pseudocost_clause)) {
             return false;
         }
-        bound_conflict_tightened = touched_vars.size() != before;
+        const auto after = touched_vars.size();
+        bound_conflict_tightened = after != before;
         if ((use_lp_proofs || use_root_learning) && bound_conflict_tightened &&
             std::isfinite(conflict_cutoff)) {
             // A later path fallback may depend on a cutoff-scoped clause or antecedent.
@@ -2870,6 +2879,11 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         }
         if (bound_conflict_tightened && !applySos2Bounds()) {
             return false;
+        }
+        // Objective bounds can change with the incumbent independently of
+        // the unary clause. SOS2 may add deductions after the clause scan.
+        if (objective_bounds_applied || touched_vars.size() != after) {
+            pseudocost_clause = 0;
         }
     }
 
@@ -2970,8 +2984,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             }
         }
     }
-    const bool pre_lp_tightened =
-        pre_lp_tightenings > 0 || bound_conflict_tightened || probing_implication_tightened;
+    const bool other_pre_lp_tightened = pre_lp_tightenings > 0 || probing_implication_tightened;
+    const bool pre_lp_tightened = other_pre_lp_tightened || bound_conflict_tightened;
+    const bool local_pre_lp_tightened =
+        other_pre_lp_tightened || (bound_conflict_tightened && pseudocost_clause == 0);
 
     // Set basis for warm-start.
     t0 = std::chrono::steady_clock::now();
@@ -3042,16 +3058,21 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // at the cutoff, so the gain says more about the incumbent than about
     // the branching. A caller that runs nodes concurrently but must stay
     // deterministic collects the sample instead and applies it in batch order.
-    // The pre-LP deductions are local. A sample using them would compare
-    // LPs whose domains differ by more than the branch decision.
-    if (tree_pseudocosts_enabled_ && !pre_lp_tightened) {
+    // A sample from a local deduction can include more than the effect of
+    // the branch. A unary cutoff clause establishes the same bound in both
+    // LPs when both applied it, so it can be part of the common domain.
+    if (tree_pseudocosts_enabled_ && !local_pre_lp_tightened &&
+        node.parent_pseudocost_clause == pseudocost_clause) {
         const auto sample = TreePseudocostSample::fromChild(node, node_result.status,
                                                             node_result.objective, cutoff);
         if (deferred_branching != nullptr) {
             deferred_branching->tree_sample = sample;
         } else {
             std::lock_guard<std::mutex> lock(branching_mutex_);
-            branching_rule_.updateFromChild(sample, branching_stats_);
+            const bool updated = branching_rule_.updateFromChild(sample, branching_stats_);
+            if (updated && pseudocost_clause != 0) {
+                ++conflict_stats_.lp_cutoff_unit_pseudocost_updates;
+            }
         }
     }
 
@@ -3080,7 +3101,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     // can raise the objective with cuts the children do inherit, so a sample
     // after such rounds overstates the gain a little; that is preferred to
     // understating it as zero, which would still count toward reliability.
-    const Real children_reference_objective = pre_lp_tightened ? -kInf : node_result.objective;
+    const Real children_reference_objective =
+        local_pre_lp_tightened ? -kInf : node_result.objective;
     node_primals_out = lp.getPrimalValues();
 
     // Count integer infeasibilities (fractional integer variables).
@@ -4015,6 +4037,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     right.lp_bound = node_obj_out;
     left.parent_objective = children_reference_objective;
     right.parent_objective = children_reference_objective;
+    left.parent_pseudocost_clause = right.parent_pseudocost_clause =
+        local_pre_lp_tightened ? 0 : pseudocost_clause;
     left.estimate = right.estimate = estimate;
 
     children_out.push_back(std::move(left));
@@ -7743,10 +7767,11 @@ MipResult MipSolver::solveMinimizationOnce() {
                 conflict_stats_.bound_conflict_tightenings, conflict_stats_.bound_conflict_cutoffs);
         }
         if (conflict_lp_proofs_enabled_) {
-            log_.log("Conflict LP proofs: active=%s cutoff=%d combined=%d\n",
+            log_.log("Conflict LP proofs: active=%s cutoff=%d combined=%d unit_pc_updates=%d\n",
                      lpConflictProofsActive() ? "yes" : "no",
                      conflict_stats_.lp_cutoff_proofs_learned,
-                     conflict_stats_.lp_combined_proofs_learned);
+                     conflict_stats_.lp_combined_proofs_learned,
+                     conflict_stats_.lp_cutoff_unit_pseudocost_updates);
         }
         if (reconvergence_cuts_enabled_) {
             log_.log("Reconvergence cuts: added=%d\n", conflict_stats_.reconvergence_cuts_added);

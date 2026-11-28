@@ -43,6 +43,9 @@ struct BnbNode {
 
     /// Local cuts inherited along this subtree branch.
     std::vector<Cut> local_cuts;
+
+    /// Unary cutoff clause used in the LP for parent_objective, if any.
+    Int parent_pseudocost_clause = 0;
 };
 
 /// Node selection policies.

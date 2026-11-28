@@ -2919,6 +2919,34 @@ TEST_CASE("A combined cutoff proof resolves two propagated bounds to their branc
                                         {.cutoff = cutoff}, true));
 }
 
+TEST_CASE("MIPLIB gt2 keeps pseudocost samples from a shared cutoff unit",
+          "[mip][miplib][conflicts]") {
+    const auto path = mipx::test::testDataDir() + "/miplib/gt2.mps.gz";
+    if (!std::filesystem::exists(path)) {
+        SKIP("gt2.mps.gz not found (run download_miplib.sh --small)");
+    }
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setNumThreads(1);
+    solver.setParallelMode(ParallelMode::Deterministic);
+    solver.setHeuristicSeed(1);
+    solver.setRootLpPolicy(RootLpPolicy::DualDefault);
+    solver.setConflictLpProofsEnabled(true);
+    solver.setGapTolerance(0.0);
+    solver.setNodeLimit(1000);
+    solver.setTimeLimit(kInf);
+    solver.load(readMps(path));
+    const auto result = solver.solve();
+
+    REQUIRE((result.status == Status::Optimal || result.status == Status::NodeLimit));
+    REQUIRE_FALSE(result.solution.empty());
+    constexpr Real optimum = 21166.0;
+    CHECK(result.best_bound <= optimum + 1e-6);
+    CHECK(result.objective >= optimum - 1e-6);
+    CHECK(solver.getConflictStats().lp_cutoff_unit_pseudocost_updates > 0);
+}
+
 TEST_CASE("A Farkas conflict can need propagation as well as the LP rows", "[mip][conflicts]") {
     // x=1 fixes a=b=0 by rounding. Neither of the sum rows can detect the
     // resulting contradiction alone: p+q+r >= 2, p+q+r-a-b <= 1.

@@ -183,6 +183,7 @@ struct MipConflictStats {
     std::optional<Real> root_bound_before_tree = std::nullopt;
     bool bound_conflict_learning_in_tree = false;
     bool reconvergence_cuts_in_tree = false;
+    Int lp_cutoff_unit_pseudocost_updates = 0;
 };
 
 struct MipPreRootStats {
@@ -1041,7 +1042,8 @@ private:
                model_continuous_vars_ == 0;
     }
     bool propagateBoundConflicts(DualSimplexSolver& lp, Real cutoff, std::vector<Real>& lower,
-                                 std::vector<Real>& upper, std::vector<Index>& touched);
+                                 std::vector<Real>& upper, std::vector<Index>& touched,
+                                 Int& pseudocost_clause);
     bool isConflictTriggered(const NodeScratch& node_scratch);
     Index selectConflictAwareBranchVariable(std::span<const Real> primals,
                                             std::span<const Real> current_lower,
@@ -1106,6 +1108,7 @@ private:
         std::vector<ConflictLiteral> literals;
         Int age = 0;
         Int hits = 0;
+        Int pseudocost_id = 0;
         bool ray_shortened = false;
         bool rapid_learning = false;
         std::uint64_t watch_id = 0;
