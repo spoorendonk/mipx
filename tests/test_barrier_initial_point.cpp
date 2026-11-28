@@ -49,8 +49,8 @@ LpProblem smallLp() {
 }
 
 // min -x1  s.t.  x1 - x2 = 0,  0 <= x1, x2 <= 1. With the bounds in the IPM
-// the standard form's b is zero, which HiPO's start guards and Mehrotra's
-// meets by its unit fallback. Optimum x1 = x2 = 1, objective -1.
+// the standard form's b is zero, which HiPO's start guards; Mehrotra's gets a
+// positive point from the bound slacks. Optimum x1 = x2 = 1, objective -1.
 LpProblem zeroRhsLp() {
     LpProblem lp;
     lp.sense = Sense::Minimize;
@@ -59,6 +59,26 @@ LpProblem zeroRhsLp() {
     lp.obj = {-1.0, 0.0};
     lp.col_lower = {0.0, 0.0};
     lp.col_upper = {1.0, 1.0};
+    lp.col_type.assign(2, VarType::Continuous);
+    lp.col_names.assign(2, "");
+    lp.row_lower = {0.0};
+    lp.row_upper = {0.0};
+    lp.row_names.assign(1, "");
+    lp.matrix = SparseMatrix(1, 2, {{0, 0, 1.0}, {0, 1, -1.0}});
+    return lp;
+}
+
+// min x1  s.t.  x1 - x2 = 0,  x1, x2 >= 0: b = 0 and no bounded column, so
+// Mehrotra's least-squares z is zero and its centring falls back to the unit
+// start. Optimum x1 = x2 = 0, objective 0.
+LpProblem zeroRhsUnboundedLp() {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.num_rows = 1;
+    lp.obj = {1.0, 0.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
     lp.col_type.assign(2, VarType::Continuous);
     lp.col_names.assign(2, "");
     lp.row_lower = {0.0};
@@ -117,6 +137,10 @@ TEST_CASE("Barrier initial point: a zero right-hand side", "[barrier][initial_po
     const auto result = solveWith(zeroRhsLp(), quietOptions(start, algo, true));
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - (-1.0)) <= 1e-6);
+    // Mehrotra's unit fallback, and HiPO's guard on the same b = 0.
+    const auto fallback = solveWith(zeroRhsUnboundedLp(), quietOptions(start, algo, false));
+    REQUIRE(fallback.status == Status::Optimal);
+    CHECK(std::abs(fallback.objective) <= 1e-6);
 }
 
 TEST_CASE("Barrier initial point: Netlib LPs reach their objectives from HiPO's start",
