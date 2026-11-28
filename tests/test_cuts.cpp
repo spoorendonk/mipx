@@ -2041,6 +2041,47 @@ TEST_CASE("MipSolver: setCutFamilyEnabled reaches every cut family", "[cuts][fam
     CHECK(all.multi_row);
 }
 
+TEST_CASE("MipSolver: root recheck installs carried cuts in a round with no new cuts",
+          "[cuts][integration]") {
+    LpProblem lp;
+    lp.num_rows = 4;
+    lp.num_cols = 8;
+    lp.obj = {-2.0, -1.0, -2.0, -1.0, -2.0, -1.0, -2.0, -1.0};
+    lp.col_lower.assign(lp.num_cols, 0.0);
+    lp.col_upper.assign(lp.num_cols, 1.0);
+    lp.col_type.assign(lp.num_cols, VarType::Integer);
+    lp.row_lower.assign(lp.num_rows, -kInf);
+    lp.row_upper.assign(lp.num_rows, 3.0);
+    std::vector<Triplet> terms;
+    for (Index row = 0; row < lp.num_rows; ++row) {
+        terms.push_back({row, 2 * row, 2.0});
+        terms.push_back({row, 2 * row + 1, 2.0});
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, std::move(terms));
+
+    for (const bool recheck : {false, true}) {
+        CAPTURE(recheck);
+        MipSolver solver;
+        solver.setVerbose(false);
+        solver.setPresolve(false);
+        solver.setMaxCutsPerRound(8);  // Auto allows two per family.
+        solver.setCutFamilyConfig(allCutFamilies(false));
+        solver.setCutFamilyEnabled(CutFamily::Cover, true);
+        solver.setRootCutRecheck(recheck);
+        solver.load(lp);
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(-8.0, 1e-6));
+
+        // The first separation produces all four independent cover cuts.
+        // At the next LP point, the remaining two are regenerated at the
+        // same efficacy and the pool rejects them as duplicates.
+        CHECK(solver.getRootCutFamilyStats().at(CutFamily::Cover).accepted == 4);
+        CHECK(solver.getCutStats().root_rounds == (recheck ? 2 : 1));
+        CHECK(solver.getCutStats().root_cuts_added == (recheck ? 4 : 2));
+    }
+}
+
 TEST_CASE("MipSolver: every cut family off adds no root cuts", "[cuts][families][integration]") {
     const auto lp = buildStrongCgKnapsackMip();
 

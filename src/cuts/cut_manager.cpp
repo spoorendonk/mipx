@@ -149,7 +149,7 @@ void CutManager::recordRound(
     const CutSeparationStats& separation_stats,
     const std::array<Int, static_cast<std::size_t>(CutFamily::Count)>& selected_by_family,
     Real lp_delta, Real orthogonality, double separation_seconds, double reopt_work, bool is_root,
-    Index depth) {
+    Index depth, bool allow_carried_cuts) {
     ++node_rounds_used_;
     const Int total_selected =
         std::accumulate(selected_by_family.begin(), selected_by_family.end(), 0);
@@ -170,7 +170,9 @@ void CutManager::recordRound(
         kpi.rejected += rejected;
         kpi.separation_seconds += round.time_seconds;
 
-        const Real avg_eff = selected > 0 ? round.efficacy_sum / static_cast<Real>(selected) : 0.0;
+        const Int efficacy_count = allow_carried_cuts ? round.accepted : selected;
+        const Real avg_eff =
+            efficacy_count > 0 ? round.efficacy_sum / static_cast<Real>(efficacy_count) : 0.0;
         kpi.efficacy_ema = kEmaAlpha * avg_eff + (1.0 - kEmaAlpha) * kpi.efficacy_ema;
 
         Real fam_delta = 0.0;
@@ -195,7 +197,7 @@ void CutManager::recordRound(
     }
 
     if (mode_ == CutEffortMode::Auto) {
-        applyAutoAdjustments(is_root, depth);
+        applyAutoAdjustments(is_root, depth, allow_carried_cuts);
     }
 }
 
@@ -211,7 +213,7 @@ void CutManager::setFamilyEnabled(CutFamily family, bool enabled) {
     family_kpis_[familyIndex(family)].enabled = enabled;
 }
 
-void CutManager::applyAutoAdjustments(bool is_root, Index depth) {
+void CutManager::applyAutoAdjustments(bool is_root, Index depth, bool allow_carried_cuts) {
     for (std::size_t fi = 0; fi < family_kpis_.size(); ++fi) {
         const CutFamily family = static_cast<CutFamily>(fi);
         if (family == CutFamily::Unknown || family == CutFamily::Count)
@@ -228,7 +230,10 @@ void CutManager::applyAutoAdjustments(bool is_root, Index depth) {
                 ++kpi.demotions;
             }
         } else {
-            if (kpi.roi_ema > kPromoteRoi && (kpi.generated - kpi.rejected) > 0) {
+            // A probe can improve the LP using cuts admitted in earlier rounds.
+            const Int productive_cuts =
+                allow_carried_cuts ? kpi.accepted : kpi.generated - kpi.rejected;
+            if (kpi.roi_ema > kPromoteRoi && productive_cuts > 0) {
                 kpi.enabled = true;
                 ++kpi.promotions;
             }

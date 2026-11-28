@@ -6589,7 +6589,7 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             total_family_stats.families[fi].lp_delta += src.lp_delta;
         }
         cut_manager.recordRound(round_family_stats, selected_by_family, improvement, orthogonality,
-                                separation_seconds, result.work_units, true, 0);
+                                separation_seconds, result.work_units, true, 0, root_cut_recheck_);
 
         auto new_primals = lp.getPrimalValues();
         pool.ageAll(new_primals);

@@ -62,7 +62,7 @@ public:
         const CutSeparationStats& separation_stats,
         const std::array<Int, static_cast<std::size_t>(CutFamily::Count)>& selected_by_family,
         Real lp_delta, Real orthogonality, double separation_seconds, double reopt_work,
-        bool is_root, Index depth);
+        bool is_root, Index depth, bool allow_carried_cuts = false);
 
     [[nodiscard]] bool familyEnabled(CutFamily family) const;
     void setFamilyEnabled(CutFamily family, bool enabled);
@@ -76,7 +76,7 @@ private:
     [[nodiscard]] static std::size_t familyIndex(CutFamily family) {
         return static_cast<std::size_t>(family);
     }
-    void applyAutoAdjustments(bool is_root, Index depth);
+    void applyAutoAdjustments(bool is_root, Index depth, bool allow_carried_cuts);
     [[nodiscard]] bool conservativeFamilyEnabled(CutFamily family, bool is_root, Index depth) const;
 
     CutEffortMode mode_ = CutEffortMode::Auto;
