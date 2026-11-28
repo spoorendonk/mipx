@@ -1,6 +1,6 @@
 # mipx
 
-A branch-and-cut MIP solver built from scratch in C++23 with Python bindings.
+A branch-and-cut MIP solver built from scratch in C++ with Python bindings.
 
 > **Work in progress.** This project is under active development.
 > Built entirely with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
