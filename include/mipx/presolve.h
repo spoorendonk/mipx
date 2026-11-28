@@ -334,7 +334,7 @@ struct PresolveOptions {
     /// In a MIP's one-sided row, fix the continuous singleton columns whose
     /// preferred endpoints fit even at the worst activity of the other
     /// columns, in decreasing order of objective gain per unit of activity.
-    /// Off by default until benchmarked.
+    /// Requires enable_dual_fixing. Off by default until benchmarked.
     bool enable_mip_singleton_stuffing = false;
     /// Dual fixing's cases from HiGHS's dualFixing that the cost-sign rule
     /// misses (#366): a column is fixed at a finite bound its cost does not

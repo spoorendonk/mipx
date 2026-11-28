@@ -896,7 +896,9 @@ std::vector<PresolveReduction> presolveReductions() {
         {"zero-cost singletons", &PresolveStats::zero_cost_singleton_changes,
          [](const PresolveOptions& o) { return o.enable_zero_cost_singletons; }},
         {"MIP singleton stuffing", &PresolveStats::mip_singleton_stuffing_changes,
-         [](const PresolveOptions& o) { return o.enable_mip_singleton_stuffing; }},
+         [](const PresolveOptions& o) {
+             return o.enable_mip_singleton_stuffing && o.enable_dual_fixing;
+         }},
         {"implied equations", &PresolveStats::implied_equation_changes, always},
         {"activity bound tightening", &PresolveStats::activity_bound_tightening_changes, always},
         {"dual fixing", &PresolveStats::dual_fixing_changes,

@@ -2723,6 +2723,9 @@ TEST_CASE("Presolve: MIP singleton stuffing fixes only a certified prefix", "[pr
     SECTION("higher objective gain takes the first unit") {
         expected = 1;
     }
+    SECTION("dual fixing disabled") {
+        options.enable_dual_fixing = false;
+    }
     SECTION("maximization with a lower row side and the lower preferred bound") {
         lp = rowsModel({-2, 1, 5, -1}, {-1, 0, 0, 0}, {0, 8, 1, 1},
                        {{-10, kInf, {{0, 1}, {1, -1}, {2, -4}}}, {1, kInf, {{2, 1}, {3, 1}}}});
@@ -2753,6 +2756,27 @@ TEST_CASE("Presolve: MIP singleton stuffing fixes only a certified prefix", "[pr
         CHECK(full[0] == expected_x);
         CHECK(std::ranges::find(presolver.colMapping(), 0) == presolver.colMapping().end());
     }
+}
+
+TEST_CASE("Presolve: MIP singleton stuffing takes two fitting columns", "[presolve]") {
+    LpProblem lp =
+        rowsModel({-2, -2, -1, -5, 1}, {0, 0, 0, 0, 0}, {1, 1, 8, 1, 1},
+                  {{-kInf, 10, {{0, 1}, {1, 1}, {2, 1}, {3, 4}}}, {1, kInf, {{3, 1}, {4, 1}}}});
+    lp.col_type[3] = lp.col_type[4] = VarType::Binary;
+    SECTION("both columns in a tied group fit") {}
+    SECTION("two distinct groups fit") {
+        lp.obj[0] = -3.0;
+    }
+
+    PresolveOptions options;
+    options.enable_mip_singleton_stuffing = true;
+    Presolver presolver;
+    const auto full = presolveSolvePostsolve(lp, presolver, options);
+    CHECK(presolver.stats().mip_singleton_stuffing_changes == 2);
+    CHECK(full[0] == 1.0);
+    CHECK(full[1] == 1.0);
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
 }
 
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {

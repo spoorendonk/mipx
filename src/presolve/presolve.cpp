@@ -374,6 +374,7 @@ constexpr PresolveRuleStat kRuleStats[] = {
     {"aggregator", &PresolveStats::aggregator_changes, &PresolveStats::aggregator_seconds},
     {"zero_cost_singleton", &PresolveStats::zero_cost_singleton_changes,
      &PresolveStats::zero_cost_singleton_seconds},
+    // HiGHS's col_stuffing also handles cases outside this preferred-endpoint rule.
     {"mip_singleton_stuffing", &PresolveStats::mip_singleton_stuffing_changes,
      &PresolveStats::mip_singleton_stuffing_seconds},
     {"probing", &PresolveStats::probing_changes, &PresolveStats::probing_seconds},
@@ -4314,8 +4315,8 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
         // Scan once the other reductions have stalled. Columns that appeared
         // in an eliminated equation and another row can become singletons.
-        if (options_.enable_mip_singleton_stuffing && !lp_only && total_changes == 0 &&
-            !infeasible_) {
+        if (options_.enable_mip_singleton_stuffing && options_.enable_dual_fixing && !lp_only &&
+            total_changes == 0 && !infeasible_) {
             ch = timed(stats_.mip_singleton_stuffing_seconds, [&] {
                 return stuffMipSingletonColumns(lp, col_removed, row_removed, row_active_nnz,
                                                 col_active_nnz, next_dirty_cols);
