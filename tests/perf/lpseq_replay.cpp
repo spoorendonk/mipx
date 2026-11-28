@@ -426,7 +426,9 @@ int run(const Options& opt) {
         }
     };
     check_distinct(same_file);
-    const auto open = [](std::ofstream& f, const std::string& path) {
+    // Checked again after each open, so a clash stops the run before it
+    // truncates a file outside the clash.
+    const auto open = [&](std::ofstream& f, const std::string& path) {
         if (path.empty()) {
             return;
         }
@@ -434,6 +436,7 @@ int run(const Options& opt) {
         if (!f) {
             lpseq::fail(path + ": cannot write");
         }
+        check_distinct(same_existing_file);
     };
     std::ofstream dual_stats;
     std::ofstream refactor_csv;
@@ -443,7 +446,6 @@ int run(const Options& opt) {
     open(refactor_csv, opt.refactor_csv);
     open(edit_csv, opt.edit_csv);
     open(csv_file, opt.csv);
-    check_distinct(same_existing_file);
 
     std::ostream* out = csv_file.is_open() ? static_cast<std::ostream*>(&csv_file) : &std::cout;
     *out << lpseq::kCsvHeader;

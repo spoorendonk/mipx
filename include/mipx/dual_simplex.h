@@ -579,7 +579,7 @@ private:
 
     // Refactorize the basis, counting it in refactor_stats_ under @p trigger
     // (#517); the no-deadline form is an edit call's, counted in
-    // pending_edit_refactors_ until the next solve().
+    // pending_edit_refactors_ until the next solve() (a load() drops it).
     void refactorize();
     [[nodiscard]] bool refactorize(const Deadline& deadline, Int RefactorStats::* trigger);
 
@@ -779,7 +779,7 @@ private:
     AdaptiveHarrisStats adaptive_harris_stats_{};
     DegeneracyStats degeneracy_stats_{};
     RefactorStats refactor_stats_{};
-    Int pending_edit_refactors_ = 0;  // edit calls' since the last solve()
+    Int pending_edit_refactors_ = 0;  // edit calls' since the last solve() or load()
     // Hyper-sparse row-price (#131) path tracking and density history,
     // reset each solve().
     RowPriceStats row_price_stats_{};
