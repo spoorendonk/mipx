@@ -33,6 +33,18 @@ enum class BarrierOrdering {
 
 enum class BarrierDualize { Off, On, Auto };
 
+// The starting point of the CPU Mehrotra loop (#144).
+enum class BarrierInitialPoint {
+    // Mehrotra's: on Netlib neither start beats the other on the whole, so
+    // Auto keeps the one that was there (#144)
+    Auto,
+    Mehrotra,  // least-squares z and (y, s), shifted positive and centred
+    // HiGHS HiPO's variant of Mehrotra's: shifts of at least 1, centring sums
+    // from 1, a guard on b = 0 or c = 0, and a bounded column's reduced cost
+    // split in halves
+    Hipo,
+};
+
 // How an interior-point run ended. NearOptimal is a run that stopped short of
 // primal_dual_tol but whose best iterate is close enough to start crossover.
 // TimeLimit is a run stopped by BarrierOptions::max_solve_seconds.
@@ -95,6 +107,11 @@ struct BarrierOptions {
     // implicit_upper_bounds on a model with upper bounds: the solve then runs
     // Mehrotra's loop and says so when verbose.
     bool homogeneous = false;
+    // Starting point of the CPU Mehrotra loop (#144). Opt-in, CPU backends
+    // only: a value other than Auto or Mehrotra skips the GPU path, whose
+    // start is its own. The homogeneous loop keeps its start (z = s = 1,
+    // tau = kappa = 1) whatever this says.
+    BarrierInitialPoint initial_point = BarrierInitialPoint::Auto;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its
     // factorizations, and solve() then returns Status::TimeLimit; crossover

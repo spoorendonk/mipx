@@ -30,6 +30,7 @@ add_executable(mipx-tests
     test_barrier_dense_cols.cpp
     test_barrier_implicit_bounds.cpp
     test_barrier_gondzio.cpp
+    test_barrier_initial_point.cpp
     test_barrier_hsd.cpp
     test_barrier_gap.cpp
     test_barrier_time_limit.cpp

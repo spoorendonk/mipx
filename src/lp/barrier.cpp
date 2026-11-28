@@ -196,6 +196,12 @@ bool gpuAlgorithm(BarrierAlgorithm algorithm) {
            algorithm == BarrierAlgorithm::GpuAugmented;
 }
 
+// The GPU loop's start is Mehrotra's own; any other is the CPU loop's (#144).
+bool defaultInitialPoint(const BarrierOptions& options) {
+    return options.initial_point == BarrierInitialPoint::Auto ||
+           options.initial_point == BarrierInitialPoint::Mehrotra;
+}
+
 BarrierAlgorithm barrierAlgorithm(const BarrierOptions& options, bool prefer_augmented,
                                   bool has_upper) {
     const auto cpu =
@@ -206,8 +212,8 @@ BarrierAlgorithm barrierAlgorithm(const BarrierOptions& options, bool prefer_aug
         algorithm =
             prefer_augmented ? BarrierAlgorithm::GpuAugmented : BarrierAlgorithm::GpuCholesky;
     }
-    if (gpuAlgorithm(algorithm) &&
-        (has_upper || options.gondzio_correctors > 0 || options.homogeneous)) {
+    if (gpuAlgorithm(algorithm) && (has_upper || options.gondzio_correctors > 0 ||
+                                    options.homogeneous || !defaultInitialPoint(options))) {
         return cpu;
     }
 #else
@@ -248,6 +254,22 @@ double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& opt
 // Shared Mehrotra predictor-corrector IPM loop
 // ============================================================================
 
+// z = s = 1, y = 0, and v = w = 1 on the bounded columns, whatever u is: the
+// loop carries u - z - v as a residual.
+void unitStartingPoint(size_t m, size_t n, std::span<const Index> upper_cols, std::vector<Real>& z,
+                       std::vector<Real>& y, std::vector<Real>& s, std::vector<Real>& v,
+                       std::vector<Real>& w) {
+    z.assign(n, 1.0);
+    s.assign(n, 1.0);
+    y.assign(m, 0.0);
+    v.assign(n, 0.0);
+    w.assign(n, 0.0);
+    for (const Index j : upper_cols) {
+        v[j] = 1.0;
+        w[j] = 1.0;
+    }
+}
+
 // Mehrotra's starting point (Mehrotra 1992, sec. 7; Wright, "Primal-Dual
 // Interior-Point Methods", ch. 10): the least-squares solutions of A z = b and
 // A'y + s = c, shifted to be positive and then centred. A start at z = s = 1
@@ -259,18 +281,50 @@ double estimatedFactorWork(const SparseMatrix& matrix, const BarrierOptions& opt
 // least-squares reduced cost split into its positive and negative parts. The
 // shifts and centring then run over (z, v) and (s, w) together, which keeps
 // s - w and so the dual residual.
-bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::span<const Real> c,
-                           std::span<const Real> u, std::span<const Index> upper_cols, Real reg,
-                           std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
-                           std::vector<Real>& v, std::vector<Real>& w) {
-    const auto m = b.size();
-    const auto n = c.size();
+//
+// BarrierInitialPoint::Hipo (#144) is the variant of HiGHS's HiPO IPM
+// (Solver::startingPoint in highs/ipm/hipo/ipm/Solver.cpp, ERGO-Code/HiGHS,
+// MIT): b and c each get 1e-3 added to every entry when their 2-norm is
+// below 1e-6; a bounded column splits its reduced cost r as s = r/2,
+// w = -r/2; each shift is 1 + max(0, -1.5 min), so it is at least 1; and the
+// centring sums start at 1, not 0. Its fallback to the unguarded c, for a
+// guarded c much larger than the shifted point, cannot fire on an LP: the
+// shifted point is at least 1. HiPO keeps x apart from its bound slack
+// and shifts only the slack; here z is both, so the shift moves z, as
+// Mehrotra's does. On Netlib it is no better than Mehrotra's on the whole,
+// better on some LPs and worse on others (#144), so Auto keeps Mehrotra's.
+bool mehrotraStartingPoint(NewtonSolver& solver, bool hipo, std::span<const Real> b_in,
+                           std::span<const Real> c_in, std::span<const Real> u,
+                           std::span<const Index> upper_cols, Real reg, std::vector<Real>& z,
+                           std::vector<Real>& y, std::vector<Real>& s, std::vector<Real>& v,
+                           std::vector<Real>& w) {
+    const auto m = b_in.size();
+    const auto n = c_in.size();
     const std::vector<Real> ones(n, 1.0);
     const std::vector<Real> zero_m(m, 0.0);
     const std::vector<Real> zero_n(n, 0.0);
     std::vector<Real> dz(n);
     std::vector<Real> dy(m);
     std::vector<Real> ds(n);
+
+    // HiPO's guard on a zero right-hand side or objective.
+    auto guarded = [hipo](std::span<const Real> x) {
+        std::vector<Real> out(x.begin(), x.end());
+        if (hipo) {
+            Real sq = 0.0;
+            for (const Real xi : out) {
+                sq += xi * xi;
+            }
+            if (std::sqrt(sq) < 1e-6) {
+                for (Real& xi : out) {
+                    xi += 1e-3;
+                }
+            }
+        }
+        return out;
+    };
+    const std::vector<Real> b = guarded(b_in);
+    const std::vector<Real> c = guarded(c_in);
 
     // With z = s = 1 the Newton matrix is A A' (+ reg I). Retry with boosted
     // regularization, as the main loop does.
@@ -292,8 +346,13 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
     w.assign(n, 0.0);
     for (const Index j : upper_cols) {
         v[j] = u[j] - z[j];
-        w[j] = std::max(-s[j], 0.0);
-        s[j] = std::max(s[j], 0.0);
+        if (hipo) {
+            w[j] = -0.5 * s[j];
+            s[j] *= 0.5;
+        } else {
+            w[j] = std::max(-s[j], 0.0);
+            s[j] = std::max(s[j], 0.0);
+        }
     }
 
     Real min_z = 0.0;
@@ -304,12 +363,14 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
     }
     for (const Index j : upper_cols) {
         min_z = std::min(min_z, v[j]);
+        min_s = std::min(min_s, w[j]);
     }
-    const Real shift_z = -1.5 * min_z;
-    const Real shift_s = -1.5 * min_s;
-    Real sum_z = 0.0;
-    Real sum_s = 0.0;
-    Real zs = 0.0;
+    const Real floor = hipo ? 1.0 : 0.0;
+    const Real shift_z = floor - 1.5 * min_z;
+    const Real shift_s = floor - 1.5 * min_s;
+    Real sum_z = floor;
+    Real sum_s = floor;
+    Real zs = floor;
     for (size_t j = 0; j < n; ++j) {
         z[j] += shift_z;
         s[j] += shift_s;
@@ -326,14 +387,9 @@ bool mehrotraStartingPoint(NewtonSolver& solver, std::span<const Real> b, std::s
     }
     // The centring shifts are undefined when z or s is zero everywhere
     // (b = 0 or c in the row space of A); fall back to a unit start then.
+    // HiPO's floor keeps all three positive.
     if (!(sum_z > 0.0) || !(sum_s > 0.0) || !(zs > 0.0) || !std::isfinite(zs)) {
-        z.assign(n, 1.0);
-        s.assign(n, 1.0);
-        y.assign(m, 0.0);
-        for (const Index j : upper_cols) {
-            v[j] = 1.0;
-            w[j] = 1.0;
-        }
+        unitStartingPoint(m, n, upper_cols, z, y, s, v, w);
         return true;
     }
     const Real centre_z = 0.5 * zs / sum_s;
@@ -693,7 +749,8 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
     auto interrupted = [&] {
         return deadline.stopped() ? BarrierIpmOutcome::Failed : BarrierIpmOutcome::TimeLimit;
     };
-    if (!mehrotraStartingPoint(solver, b, c, u, upper_cols, reg, z, y, s, v, w)) {
+    if (!mehrotraStartingPoint(solver, opts.initial_point == BarrierInitialPoint::Hipo, b, c, u,
+                               upper_cols, reg, z, y, s, v, w)) {
         iters = 0;
         return deadline.passed() ? interrupted() : BarrierIpmOutcome::Failed;
     }
@@ -1485,7 +1542,8 @@ void BarrierSolver::setOptions(const BarrierOptions& options) {
          options.ne_max_bytes != options_.ne_max_bytes ||
          options.ne_max_dense_cols != options_.ne_max_dense_cols ||
          options.gondzio_correctors != options_.gondzio_correctors ||
-         options.homogeneous != options_.homogeneous);
+         options.homogeneous != options_.homogeneous ||
+         options.initial_point != options_.initial_point);
     const bool reshape = options.dualize != options_.dualize ||
                          options.presolve != options_.presolve ||
                          options.implicit_upper_bounds != options_.implicit_upper_bounds ||
@@ -2105,7 +2163,8 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
 #endif
 
     // The GPU path solves the standard form without upper bounds; implicit
-    // ones (#299) and Gondzio's correctors (#293) are in the CPU loop only.
+    // ones (#299), Gondzio's correctors (#293) and starting points other than
+    // Mehrotra's (#144) are in the CPU loop only.
     // The CPU backend is the one a build without CUDA picks under Auto; the
     // CPU default itself (dense or sparse NE) is #295's.
     // The homogeneous self-dual loop (#370) runs the plain standard form,
@@ -2117,12 +2176,17 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             "Barrier: the homogeneous self-dual loop does not yet take implicit upper bounds; "
             "using Mehrotra's loop.\n");
     }
+    if (hsd && !defaultInitialPoint(options_) && options_.verbose) {
+        std::printf(
+            "Barrier: the homogeneous self-dual loop keeps its own starting point; "
+            "ignoring the initial point option.\n");
+    }
 #ifdef MIPX_HAS_CUDSS
     if (options_.verbose && !gpuAlgorithm(algo) &&
         (requested_algo == BarrierAlgorithm::Auto || gpuAlgorithm(requested_algo))) {
         std::printf(
-            "Barrier: implicit upper bounds, Gondzio correctors and the homogeneous loop are "
-            "CPU-only; using the CPU backend.\n");
+            "Barrier: implicit upper bounds, Gondzio correctors, the homogeneous loop and "
+            "starting points other than Mehrotra's are CPU-only; using the CPU backend.\n");
     }
 #endif
 

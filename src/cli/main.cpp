@@ -74,7 +74,7 @@ void printUsage(FILE* out) {
                  "[--barrier-dualize off|on|auto] "
                  "[--barrier-dense-cols N] [--barrier-implicit-bounds] [--barrier-gondzio N] "
                  "[--barrier-gpu-dense-cols N] "
-                 "[--barrier-hsd] "
+                 "[--barrier-hsd] [--barrier-initial-point auto|mehrotra|hipo] "
                  "[--gpu|--no-gpu] [--gpu-min-rows N] [--gpu-min-nnz N] "
                  "[--relax-integrality] "
                  "[--verbose|--quiet] [--print-backend] [--print-det-heur-gate]\n"
@@ -120,6 +120,7 @@ int main(int argc, char* argv[]) {
     mipx::Int barrier_gpu_dense_cols = mipx::BarrierOptions{}.gpu_ne_max_dense_cols;
     bool barrier_implicit_bounds = false;
     bool barrier_hsd = false;
+    auto barrier_initial_point = mipx::BarrierInitialPoint::Auto;
     mipx::Int barrier_gondzio = 0;
     mipx::PdlpOptions pdlp_options;
     bool relax_integrality = false;
@@ -497,6 +498,19 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--barrier-hsd") {
             // The CPU IPM on the homogeneous self-dual model (#370).
             barrier_hsd = true;
+        } else if (arg == "--barrier-initial-point" && i + 1 < argc) {
+            // Starting point of the CPU Mehrotra loop (#144).
+            const std::string mode = argv[++i];
+            if (mode == "auto") {
+                barrier_initial_point = mipx::BarrierInitialPoint::Auto;
+            } else if (mode == "mehrotra") {
+                barrier_initial_point = mipx::BarrierInitialPoint::Mehrotra;
+            } else if (mode == "hipo") {
+                barrier_initial_point = mipx::BarrierInitialPoint::Hipo;
+            } else {
+                std::fprintf(stderr, "Unknown barrier initial point: %s\n", mode.c_str());
+                return 1;
+            }
         } else if (arg == "--format" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "auto") {
@@ -807,6 +821,7 @@ int main(int argc, char* argv[]) {
                     bopts.implicit_upper_bounds = barrier_implicit_bounds;
                     bopts.gondzio_correctors = barrier_gondzio;
                     bopts.homogeneous = barrier_hsd;
+                    bopts.initial_point = barrier_initial_point;
                     bopts.threads = std::max(1, num_threads);
                     bopts.max_solve_seconds = seconds;  // #275
                     solver.setOptions(bopts);
