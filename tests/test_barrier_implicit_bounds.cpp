@@ -84,7 +84,8 @@ TEST_CASE("Barrier implicit bounds: reduced cost at an upper bound is negative",
     // Minimisation: a column at its upper bound has reduced cost c - A'y <= 0,
     // here -1; the basic one has 0. Maximisation flips the signs.
     const bool maximize = GENERATE(false, true);
-    INFO("maximize " << maximize);
+    const bool homogeneous = GENERATE(false, true);
+    INFO("maximize " << maximize << " homogeneous " << homogeneous);
     auto lp = boxedLp();
     if (maximize) {
         lp.sense = Sense::Maximize;
@@ -93,9 +94,12 @@ TEST_CASE("Barrier implicit bounds: reduced cost at an upper bound is negative",
         }
     }
     BarrierSolver solver;
-    solver.setOptions(quietOptions(true));
+    auto opts = quietOptions(true);
+    opts.homogeneous = homogeneous;
+    solver.setOptions(opts);
     solver.load(lp);
     const auto result = solver.solve();
+    CHECK(solver.usedHomogeneous() == homogeneous);
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(maximize ? 4.5 : -4.5, 1e-6));
     const auto rc = solver.getReducedCosts();
@@ -113,13 +117,17 @@ TEST_CASE("Barrier implicit bounds: ranged row slack carries the range",
     auto lp = makeLp(Sense::Maximize, {0.0, 1.0}, {0.0, 0.0}, {10.0, kInf}, {1.0, -kInf},
                      {2.0, 4.0}, {{0, 0, 1.0}, {0, 1, -1.0}, {1, 0, 1.0}, {1, 1, 1.0}});
     const bool implicit = GENERATE(false, true);
-    INFO("implicit " << implicit);
+    const bool homogeneous = GENERATE(false, true);
+    INFO("implicit " << implicit << " homogeneous " << homogeneous);
     BarrierSolver solver;
-    solver.setOptions(quietOptions(implicit));
+    auto opts = quietOptions(implicit);
+    opts.homogeneous = homogeneous;
+    solver.setOptions(opts);
     solver.load(lp);
     // Explicit: two LP rows, the range row and x's bound row.
     CHECK(solver.standardFormRows() == (implicit ? 2 : 4));
     const auto result = solver.solve();
+    CHECK(solver.usedHomogeneous() == homogeneous);
     REQUIRE(result.status == Status::Optimal);
     CHECK_THAT(result.objective, WithinAbs(1.5, 1e-6));
     const auto x = solver.getPrimalValues();

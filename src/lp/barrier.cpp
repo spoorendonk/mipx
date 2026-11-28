@@ -536,6 +536,22 @@ struct UpperBoundStep {
             dw[j] = (rw[j] - w[j] * dv[j]) / v[j];
         }
     }
+
+    bool solve(NewtonSolver& solver, std::span<const Index> cols, std::span<const Real> z,
+               std::span<const Real> s, std::span<const Real> v, std::span<const Real> w,
+               std::span<const Real> rp, std::span<const Real> rd, std::span<const Real> rc,
+               std::span<const Real> ru, std::span<const Real> rw, std::span<Real> dz,
+               std::span<Real> dy, std::span<Real> ds, std::span<Real> dv, std::span<Real> dw) {
+        if (cols.empty()) {
+            return solver.solveNewton(rp, rd, rc, dz, dy, ds);
+        }
+        fold(cols, z, v, w, rd, rc, ru, rw);
+        if (!solver.solveNewton(rp, rd_eff, rc_eff, dz, dy, ds)) {
+            return false;
+        }
+        recover(cols, z, s, v, w, rc, ru, rw, dz, ds, dv, dw);
+        return true;
+    }
 };
 
 inline Real maxStepOn(std::span<const Index> cols, std::span<const Real> x,
@@ -702,23 +718,24 @@ Int gondzioCorrectorCount(Int cap, const NewtonSolver::FactorStats& st) {
 
 // Gondzio's correctors in the homogeneous self-dual loop (#335): those of
 // GondzioCorrectors, with the same constants and targets, on the HSD
-// model's pairs (z, s) and (tau, kappa) and its one step length for every
+// model's pairs (z, s), (v, w), and (tau, kappa) and its one step length for every
 // variable. A corrector is the HSD direction for the residuals
-// (0, 0, 0, t_c, t_k), eta = 0: its solve reuses the iteration's
+// complementarity targets t_c, t_w, t_k, eta = 0: its solve reuses the iteration's
 // factorization and u, d_m = p_m + dtau_m u. d + d_m is then the Newton
 // direction for the same eta and complementarity residuals rc + t_c,
-// rk + t_k, so it keeps the reduction of rp, rd and rg that d has, and is
+// rw + t_w, rk + t_k, so it keeps the feasibility residual reduction of d, and is
 // taken when its step grows by kAcceptFraction of the increase aimed at.
 struct HsdGondzioCorrectors {
+    std::span<const Index> cols;
+    std::span<const Real> z, s, v, w;
     std::vector<Real> t_c{}, mz{}, my{}, ms{}, tz{}, ts{};
+    std::vector<Real> t_w{}, mv{}, mw{}, tv{}, tw{};
 
-    // solve(t_c, t_k, mz, my, ms, dtau_m, dkappa_m): the corrector's solve;
-    // step(dz, ds, dtau, dkappa): the largest step in [0, 1] keeping z, s,
-    // tau and kappa nonnegative. d = (dz, dy, ds, dtau, dkappa) is updated
-    // in place; returns the correctors taken.
+    // Updates the direction in place using the corrector's solve and the
+    // largest step in [0, 1] that keeps all pairs nonnegative.
     template <class Solve, class Step>
-    Int correct(Int k_max, Real sigma_mu, std::span<const Real> z, std::span<const Real> s,
-                Real tau, Real kappa, std::span<Real> dz, std::span<Real> dy, std::span<Real> ds,
+    Int correct(Int k_max, Real sigma_mu, Real tau, Real kappa, std::span<Real> dz,
+                std::span<Real> dy, std::span<Real> ds, std::span<Real> dv, std::span<Real> dw,
                 Real& dtau, Real& dkappa, const Solve& solve, const Step& step) {
         // As in GondzioCorrectors: no neighbourhood to aim at.
         if (!(sigma_mu > 0.0)) {
@@ -730,11 +747,16 @@ struct HsdGondzioCorrectors {
             for (auto* vec : {&t_c, &mz, &ms, &tz, &ts}) {
                 vec->assign(n, 0.0);
             }
+            if (!cols.empty()) {
+                for (auto* vec : {&t_w, &mv, &mw, &tv, &tw}) {
+                    vec->assign(n, 0.0);
+                }
+            }
             my.assign(m, 0.0);
         }
         const Real lo = GondzioCorrectors::kBetaMin * sigma_mu;
         const Real hi = GondzioCorrectors::kBetaMax * sigma_mu;
-        Real a = step(dz, ds, dtau, dkappa);
+        Real a = step(dz, ds, dv, dw, dtau, dkappa);
         Int used = 0;
         while (used < k_max && a < 1.0) {
             const Real aim = std::min(a + GondzioCorrectors::kAspiration, 1.0);
@@ -742,25 +764,37 @@ struct HsdGondzioCorrectors {
                 t_c[j] =
                     GondzioCorrectors::target((z[j] + aim * dz[j]) * (s[j] + aim * ds[j]), lo, hi);
             }
+            for (const Index j : cols) {
+                t_w[j] =
+                    GondzioCorrectors::target((v[j] + aim * dv[j]) * (w[j] + aim * dw[j]), lo, hi);
+            }
             const Real t_k =
                 GondzioCorrectors::target((tau + aim * dtau) * (kappa + aim * dkappa), lo, hi);
             Real dtau_m = 0.0;
             Real dkappa_m = 0.0;
-            if (!solve(t_c, t_k, mz, my, ms, dtau_m, dkappa_m)) {
+            if (!solve(t_c, t_w, t_k, mz, my, ms, mv, mw, dtau_m, dkappa_m)) {
                 break;
             }
             for (std::size_t j = 0; j < n; ++j) {
                 tz[j] = dz[j] + mz[j];
                 ts[j] = ds[j] + ms[j];
             }
+            for (const Index j : cols) {
+                tv[j] = dv[j] + mv[j];
+                tw[j] = dw[j] + mw[j];
+            }
             const Real ttau = dtau + dtau_m;
             const Real tkappa = dkappa + dkappa_m;
-            const Real new_a = step(tz, ts, ttau, tkappa);
+            const Real new_a = step(tz, ts, tv, tw, ttau, tkappa);
             if (!(new_a >= a + GondzioCorrectors::kAcceptFraction * (aim - a))) {
                 break;
             }
             std::copy(tz.begin(), tz.end(), dz.begin());
             std::copy(ts.begin(), ts.end(), ds.begin());
+            for (const Index j : cols) {
+                dv[j] = tv[j];
+                dw[j] = tw[j];
+            }
             for (std::size_t i = 0; i < m; ++i) {
                 dy[i] += my[i];
             }
@@ -1006,17 +1040,8 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
                              std::span<const Real> rw_in, std::span<Real> dz_out,
                              std::span<Real> dy_out, std::span<Real> ds_out, std::span<Real> dv_out,
                              std::span<Real> dw_out) {
-            if (!bounded) {
-                return solver.solveNewton(rp_in, rd_in, rc_in, dz_out, dy_out, ds_out);
-            }
-            ub_step.fold(upper_cols, z, v, w, rd_in, rc_in, ru_in, rw_in);
-            if (!solver.solveNewton(rp_in, ub_step.rd_eff, ub_step.rc_eff, dz_out, dy_out,
-                                    ds_out)) {
-                return false;
-            }
-            UpperBoundStep::recover(upper_cols, z, s, v, w, rc_in, ru_in, rw_in, dz_out, ds_out,
-                                    dv_out, dw_out);
-            return true;
+            return ub_step.solve(solver, upper_cols, z, s, v, w, rp_in, rd_in, rc_in, ru_in, rw_in,
+                                 dz_out, dy_out, ds_out, dv_out, dw_out);
         };
         // A direction that is not finite is a failed solve too: the augmented
         // backend boosts every pivot and reports no breakdown of its own, so
@@ -1146,14 +1171,21 @@ BarrierIpmOutcome runMehrotraIpm(NewtonSolver& solver, const SparseMatrix& A,
 // S u_z + Z u_s = 0, b'u_y - c'u_z = -u_z'u_s = u_z' S Z^-1 u_z. One step
 // length for every variable, as in the paper. Gondzio's correctors follow
 // Mehrotra's when opts.gondzio_correctors > 0 (HsdGondzioCorrectors, #335).
-// Plain standard form only: no implicit upper bounds. An infeasible LP or
-// dual ends on hsdInfeasibility's certificate (#371); a run that reaches
-// neither that nor optimality ends Failed, by the stall test or the
-// iteration limit.
+// For finite bounds (#443), apply Andersen's model (MOSEK TR-1-2009,
+// equations (3) and (6), https://docs.mosek.com/whitepapers/homolo.pdf)
+// to the equalities z_j + v_j = u_j with dual multipliers -w_j:
+//   z_j + v_j - u_j tau = 0,  A'y + s - w - c tau = 0,
+//   -c'z + b'y - u'w - kappa = 0,  v'w = 0.
+// The two Newton solves then use bound-row RHS u and eta (u tau - z - v),
+// respectively. UpperBoundStep eliminates both bound variables from the
+// backend's system, so it still factors only the original standard form.
+// The gap row adds u'p_w to the numerator and -u'u_w to the denominator;
+// the energy bound also gains u_v' W V^-1 u_v.
 BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::span<const Real> b,
-                            std::span<const Real> c, const BarrierOptions& opts, Real obj_offset,
-                            Real dualized_obj_sign, std::vector<Real>& z, std::vector<Real>& y,
-                            std::vector<Real>& s, Int& iters, Int& corrections) {
+                            std::span<const Real> c, std::span<const Real> u,
+                            const BarrierOptions& opts, Real obj_offset, Real dualized_obj_sign,
+                            std::vector<Real>& z, std::vector<Real>& y, std::vector<Real>& s,
+                            Int& iters, Int& corrections) {
     const Index m = A.numRows();
     const Index n = A.numCols();
     const auto mm = static_cast<size_t>(m);
@@ -1167,9 +1199,8 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     std::vector<Real> rc(nn);
     std::vector<Real> rp_eta(mm);
     std::vector<Real> rd_eta(nn);
-    const std::vector<Real> zero_m(mm, 0.0);
     const std::vector<Real> zero_n(nn, 0.0);
-    // u: the solve for (b, c, 0); p: the one for the direction's residuals.
+    // The unit-tau solve (u_z, u_y, ...) and the residual solve (p_z, p_y, ...).
     std::vector<Real> uz(nn);
     std::vector<Real> uy(mm);
     std::vector<Real> us(nn);
@@ -1182,6 +1213,43 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     std::vector<Real> dz_aff(nn);
     std::vector<Real> dy_aff(mm);
     std::vector<Real> ds_aff(nn);
+
+    std::vector<Index> upper_cols;
+    Real bound_rhs_norm = 0.0;
+    for (Index j = 0; j < n; ++j) {
+        if (isFinite(u[j])) {
+            upper_cols.push_back(j);
+            bound_rhs_norm = std::max(bound_rhs_norm, std::abs(u[j]));
+        }
+    }
+    const bool bounded = !upper_cols.empty();
+    const auto nb = bounded ? nn : 0;
+    std::vector<Real> v(nb, 1.0);
+    std::vector<Real> w(nb, 1.0);
+    std::vector<Real> ru(nb);
+    std::vector<Real> rw(nb);
+    std::vector<Real> ru_eta(nb);
+    std::vector<Real> uv(nb);
+    std::vector<Real> uw(nb);
+    std::vector<Real> pv(nb);
+    std::vector<Real> pw(nb);
+    std::vector<Real> dv(nb);
+    std::vector<Real> dw(nb);
+    std::vector<Real> dv_aff(nb);
+    std::vector<Real> dw_aff(nb);
+    UpperBoundStep ub_step;
+    auto boundDot = [&](std::span<const Real> dual) {
+        Real result = 0.0;
+        for (const Index j : upper_cols) {
+            result += u[j] * dual[j];
+        }
+        return result;
+    };
+    auto reducedCosts = [&](std::vector<Real>& out, Real t) {
+        for (const Index j : upper_cols) {
+            out[j] -= w[j] / t;
+        }
+    };
 
     // The time limit and the stop flag, as in runMehrotraIpm.
     const Deadline& deadline = solver.deadline();
@@ -1196,7 +1264,7 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     Real kappa = 1.0;
     // The product of the rescalings applied so far (see the end of the loop).
     Real scale_total = 1.0;
-    HsdGondzioCorrectors gondzio;
+    HsdGondzioCorrectors gondzio{upper_cols, z, s, v, w};
     Int gondzio_k = -1;  // set once the backend has factorized
 
     // out = in / t, the LP point of a homogeneous iterate.
@@ -1234,9 +1302,10 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
     Int stall_count = 0;
     constexpr Int max_stall = 10;
 
-    const Real inv_b = 1.0 / (1.0 + infNorm(b));
+    const Real inv_b = 1.0 / (1.0 + std::max(infNorm(b), bound_rhs_norm));
     const Real inv_c = 1.0 / (1.0 + infNorm(c));
-    const Real n_compl = static_cast<Real>(n) + 1.0;  // the pairs (z, s) and (tau, kappa)
+    const Real lp_pairs = static_cast<Real>(n) + static_cast<Real>(upper_cols.size());
+    const Real n_compl = lp_pairs + 1.0;
 
     for (Int iter = 0; iter < opts.max_iter; ++iter) {
         if (opts.stop_flag != nullptr && opts.stop_flag->load(std::memory_order_relaxed)) {
@@ -1255,10 +1324,24 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         for (Index j = 0; j < n; ++j) {
             rd[j] = c[j] * tau - at_y[j] - s[j];
         }
+        Real zs = dot(z, s);
+        Real upper_res = 0.0;
+        Real upper_ray_res = 0.0;
+        for (const Index j : upper_cols) {
+            // The Farkas check sees the original columns of the explicit
+            // row model, A'y - w. Its added columns have dual activity -w <= 0.
+            at_y[j] -= w[j];
+            rd[j] += w[j];
+            const Real activity = z[j] + v[j];
+            ru[j] = u[j] * tau - activity;
+            upper_res = std::max(upper_res, isFinite(ru[j]) ? std::abs(ru[j]) : kInf);
+            // At tau = 0 the upper rows require z_j + v_j = 0.
+            upper_ray_res = std::max(upper_ray_res, isFinite(activity) ? activity : kInf);
+            zs += v[j] * w[j];
+        }
         const Real ctz = dot(c, z);
-        const Real bty = dot(b, y);
+        const Real bty = dot(b, y) - boundDot(w);
         const Real rg = kappa + ctz - bty;
-        const Real zs = dot(z, s);
         const Real mu = (zs + tau * kappa) / n_compl;
 
         // The measures of the LP point (z, y, s) / tau, scaled as in
@@ -1266,7 +1349,7 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         // |pobj - dobj|: (c'z - b'y) tau = z's - y'rp + z'rd, and on a run
         // whose tau ends small the residual terms can cancel z's, so the
         // objectives agree while x's is far above tolerance (pilot87).
-        const Real pinf = infNorm(rp) / tau * inv_b;
+        const Real pinf = std::max(infNorm(rp), upper_res) / tau * inv_b;
         const Real dinf = infNorm(rd) / tau * inv_c;
         const Real pobj = obj_offset + ctz / tau;
         const Real gap = zs / (tau * tau) / (1.0 + std::abs(pobj));
@@ -1285,11 +1368,12 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         if (pinf < opts.primal_dual_tol && dinf < opts.primal_dual_tol &&
             gap < opts.primal_dual_tol) {
             iters = iter;
-            for (std::vector<Real>* v : {&z, &y, &s}) {
-                for (Real& e : *v) {
+            for (std::vector<Real>* values : {&z, &y, &s}) {
+                for (Real& e : *values) {
                     e /= tau;
                 }
             }
+            reducedCosts(s, tau);
             return BarrierIpmOutcome::Optimal;
         }
 
@@ -1299,25 +1383,29 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         // start's mu of 1 (z = s = 1, tau = kappa = 1).
         const Real big = std::max(tau, kappa);
         const Real mu_rel = mu / (big * big);
-        if (const auto cert = hsdInfeasibility(b, c, az, at_y, tau, kappa, mu_rel, ctz, bty,
-                                               opts.primal_dual_tol, opts.verbose);
+        if (const auto cert =
+                hsdInfeasibility(b, c, az, at_y, tau, kappa, mu_rel, ctz, bty, opts.primal_dual_tol,
+                                 opts.verbose, bound_rhs_norm, upper_ray_res);
             cert != BarrierIpmOutcome::Failed) {
             iters = iter;
             if (opts.verbose) {
-                std::printf("HSD: %s infeasible at tau=%.2e kappa=%.2e (c'z=% .3e b'y=% .3e)\n",
-                            cert == BarrierIpmOutcome::PrimalInfeasible ? "primal" : "dual", tau,
-                            kappa, ctz, bty);
+                std::printf(
+                    "HSD: %s infeasible at tau=%.2e kappa=%.2e (primal obj=% .3e "
+                    "dual obj=% .3e)\n",
+                    cert == BarrierIpmOutcome::PrimalInfeasible ? "primal" : "dual", tau, kappa,
+                    ctz, bty);
             }
             return cert;
         }
 
-        const Real gap_mu = gap / std::max<Real>(static_cast<Real>(n), 1.0);
+        const Real gap_mu = gap / std::max(lp_pairs, 1.0);
         const Real err = std::max({pinf, dinf, gap_mu});
         if (err < best_err) {
             best_err = err;
             unscale(best_z, z, tau);
             unscale(best_y, y, tau);
             unscale(best_s, s, tau);
+            reducedCosts(best_s, tau);
         }
 
         const Real tol = opts.primal_dual_tol;
@@ -1346,9 +1434,14 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
             return interrupted();
         }
 
-        if (!solver.factorize(z, s, reg)) {
+        if (bounded) {
+            ub_step.scaling(upper_cols, z, s, v, w);
+        }
+        const std::span<const Real> z_fac = bounded ? ub_step.z_eff : z;
+        const std::span<const Real> s_fac = bounded ? ub_step.s_eff : s;
+        if (!solver.factorize(z_fac, s_fac, reg)) {
             // Retry with boosted regularization, unless out of time.
-            if (deadline.passed() || !solver.factorize(z, s, reg * 100.0)) {
+            if (deadline.passed() || !solver.factorize(z_fac, s_fac, reg * 100.0)) {
                 if (deadline.passed()) {
                     iters = iter;
                     return interrupted();
@@ -1359,40 +1452,59 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         if (gondzio_k < 0) {
             gondzio_k = gondzioCorrectorCount(opts.gondzio_correctors, solver.factorStats());
         }
-        if (!solver.solveNewton(b, c, zero_n, uz, uy, us)) {
+        if (!ub_step.solve(solver, upper_cols, z, s, v, w, b, c, zero_n, u, zero_n, uz, uy, us, uv,
+                           uw)) {
             return stopShort(iter);
         }
         // b'u_y - c'u_z as computed keeps the gap row exact for the computed
         // direction (well above q on fffff800); q bounds it below (blend's
         // last step on the dense backend went below zero).
-        const Real denom = hsdGapDenominator(b, c, uz, uy, z, s, tau, kappa);
+        Real bound_energy = 0.0;
+        for (const Index j : upper_cols) {
+            bound_energy += w[j] * uv[j] * uv[j] / v[j];
+        }
+        const Real denom =
+            hsdGapDenominator(b, c, uz, uy, z, s, tau, kappa, boundDot(uw), bound_energy);
         if (!(denom > 0.0) || !std::isfinite(denom)) {
             return stopShort(iter);
         }
 
-        // One direction for eta, rc (set by the caller) and rk.
-        Real dtau = 0.0;
-        Real dkappa = 0.0;
-        auto direction = [&](Real eta, Real rk, std::span<Real> dz_out, std::span<Real> dy_out,
-                             std::span<Real> ds_out) {
+        auto direction = [&](Real eta, std::span<const Real> rc_in, std::span<const Real> rw_in,
+                             Real rk, std::span<Real> dz_out, std::span<Real> dy_out,
+                             std::span<Real> ds_out, std::span<Real> dv_out, std::span<Real> dw_out,
+                             Real& dtau, Real& dkappa) {
             for (Index i = 0; i < m; ++i) {
                 rp_eta[i] = eta * rp[i];
             }
             for (Index j = 0; j < n; ++j) {
                 rd_eta[j] = eta * rd[j];
             }
-            if (!solver.solveNewton(rp_eta, rd_eta, rc, pz, py, ps)) {
+            for (const Index j : upper_cols) {
+                ru_eta[j] = eta * ru[j];
+            }
+            if (!ub_step.solve(solver, upper_cols, z, s, v, w, rp_eta, rd_eta, rc_in, ru_eta, rw_in,
+                               pz, py, ps, pv, pw) ||
+                !hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, eta * rg, rk, dz_out,
+                              dy_out, ds_out, dtau, dkappa, boundDot(pw))) {
                 return false;
             }
-            return hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, eta * rg, rk,
-                                dz_out, dy_out, ds_out, dtau, dkappa);
+            for (const Index j : upper_cols) {
+                dv_out[j] = pv[j] + dtau * uv[j];
+                dw_out[j] = pw[j] + dtau * uw[j];
+                if (!isFinite(dv_out[j]) || !isFinite(dw_out[j])) {
+                    return false;
+                }
+            }
+            return true;
         };
-        // The largest step in [0, 1] keeping z, s, tau and kappa positive,
-        // times fraction.
-        auto stepFor = [&](std::span<const Real> dz_in, std::span<const Real> ds_in, Real dt,
+        // The largest step that stays inside all three kinds of pairs.
+        auto stepFor = [&](std::span<const Real> dz_in, std::span<const Real> ds_in,
+                           std::span<const Real> dv_in, std::span<const Real> dw_in, Real dt,
                            Real dk, Real fraction) {
             Real alpha = std::min(maxStepToBoundary(z, dz_in, fraction),
                                   maxStepToBoundary(s, ds_in, fraction));
+            alpha = maxStepOn(upper_cols, v, dv_in, fraction, alpha);
+            alpha = maxStepOn(upper_cols, w, dw_in, fraction, alpha);
             if (dt < 0.0) {
                 alpha = std::min(alpha, -fraction * tau / dt);
             }
@@ -1406,15 +1518,22 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         for (Index j = 0; j < n; ++j) {
             rc[j] = -z[j] * s[j];
         }
-        if (!direction(1.0, -tau * kappa, dz_aff, dy_aff, ds_aff)) {
+        for (const Index j : upper_cols) {
+            rw[j] = -v[j] * w[j];
+        }
+        Real dtau_aff = 0.0;
+        Real dkappa_aff = 0.0;
+        if (!direction(1.0, rc, rw, -tau * kappa, dz_aff, dy_aff, ds_aff, dv_aff, dw_aff, dtau_aff,
+                       dkappa_aff)) {
             return stopShort(iter);
         }
-        const Real dtau_aff = dtau;
-        const Real dkappa_aff = dkappa;
-        const Real alpha_aff = stepFor(dz_aff, ds_aff, dtau_aff, dkappa_aff, 1.0);
+        const Real alpha_aff = stepFor(dz_aff, ds_aff, dv_aff, dw_aff, dtau_aff, dkappa_aff, 1.0);
         Real mu_aff = (tau + alpha_aff * dtau_aff) * (kappa + alpha_aff * dkappa_aff);
         for (Index j = 0; j < n; ++j) {
             mu_aff += (z[j] + alpha_aff * dz_aff[j]) * (s[j] + alpha_aff * ds_aff[j]);
+        }
+        for (const Index j : upper_cols) {
+            mu_aff += (v[j] + alpha_aff * dv_aff[j]) * (w[j] + alpha_aff * dw_aff[j]);
         }
         mu_aff /= n_compl;
         const Real sigma =
@@ -1424,31 +1543,35 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         for (Index j = 0; j < n; ++j) {
             rc[j] = sigma * mu - z[j] * s[j] - dz_aff[j] * ds_aff[j];
         }
+        for (const Index j : upper_cols) {
+            rw[j] = sigma * mu - v[j] * w[j] - dv_aff[j] * dw_aff[j];
+        }
         const Real rk = sigma * mu - tau * kappa - dtau_aff * dkappa_aff;
-        if (!direction(1.0 - sigma, rk, dz, dy, ds)) {
+        Real dtau = 0.0;
+        Real dkappa = 0.0;
+        if (!direction(1.0 - sigma, rc, rw, rk, dz, dy, ds, dv, dw, dtau, dkappa)) {
             return stopShort(iter);
         }
         if (gondzio_k > 0) {
-            // The corrector for (0, 0, 0, t_c, t_k), as direction() at eta = 0.
-            auto corrector = [&](std::span<const Real> t_c, Real t_k, std::span<Real> mz,
-                                 std::span<Real> my, std::span<Real> ms, Real& dtau_m,
+            auto corrector = [&](std::span<const Real> t_c, std::span<const Real> t_w, Real t_k,
+                                 std::span<Real> mz, std::span<Real> my, std::span<Real> ms,
+                                 std::span<Real> mv, std::span<Real> mw, Real& dtau_m,
                                  Real& dkappa_m) {
-                if (!solver.solveNewton(zero_m, zero_n, t_c, pz, py, ps)) {
-                    return false;
-                }
-                return hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, 0.0, t_k, mz,
-                                    my, ms, dtau_m, dkappa_m);
+                return direction(0.0, t_c, t_w, t_k, mz, my, ms, mv, mw, dtau_m, dkappa_m);
             };
-            auto fullStep = [&](std::span<const Real> dz_in, std::span<const Real> ds_in, Real dt,
-                                Real dk) { return stepFor(dz_in, ds_in, dt, dk, 1.0); };
-            const Int used = gondzio.correct(gondzio_k, sigma * mu, z, s, tau, kappa, dz, dy, ds,
+            auto fullStep = [&](std::span<const Real> dz_in, std::span<const Real> ds_in,
+                                std::span<const Real> dv_in, std::span<const Real> dw_in, Real dt,
+                                Real dk) {
+                return stepFor(dz_in, ds_in, dv_in, dw_in, dt, dk, 1.0);
+            };
+            const Int used = gondzio.correct(gondzio_k, sigma * mu, tau, kappa, dz, dy, ds, dv, dw,
                                              dtau, dkappa, corrector, fullStep);
             corrections += used;
             if (opts.verbose) {
                 std::printf("        gondzio correctors: %d of %d\n", used, gondzio_k);
             }
         }
-        const Real alpha = stepFor(dz, ds, dtau, dkappa, opts.step_fraction);
+        const Real alpha = stepFor(dz, ds, dv, dw, dtau, dkappa, opts.step_fraction);
 
         if (opts.verbose) {
             std::printf(
@@ -1468,22 +1591,24 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
         kappa = std::max(kappa + alpha * dkappa, 1e-12);
 
         // Rescale the iterate to max(tau, kappa) = 1. The model is
-        // homogeneous: at lambda (z, y, s, tau, kappa) the residuals scale by
-        // lambda and rc, rk by lambda^2, so u, the dtau denominator, sigma
-        // and the step length are unchanged and the direction scales by
-        // lambda. The LP point (z, y, s) / tau is therefore the same in exact
-        // arithmetic (the regularized matrix A Z S^-1 A' + reg I is the same
-        // at every scale). What it changes is the scale the 1e-12 clamps on
-        // z, s, tau and kappa act on: tau's limit is small on
-        // an LP whose solution is large, and without this they stop the run
-        // at mu ~ 1e-12 far above tolerance (fffff800, forplan). With
-        // tau = 1 the iterate is the LP point; with kappa = 1 (tau -> 0)
-        // b'y - c'z = kappa - rg tends to 1 as rg falls (#371).
+        // homogeneous: when the iterate scales by lambda the feasibility
+        // residuals scale by lambda and the pair products by lambda^2, so u, the dtau denominator,
+        // sigma and the step length are unchanged and the direction scales by lambda. The LP point
+        // (z, y, s) / tau is therefore the same in exact arithmetic (the regularized matrix A Z
+        // S^-1 A' + reg I is the same at every scale). What it changes is the scale the 1e-12
+        // clamps on z, s, tau and kappa act on: tau's limit is small on an LP whose solution is
+        // large, and without this they stop the run at mu ~ 1e-12 far above tolerance (fffff800,
+        // forplan). With tau = 1 the iterate is the LP point; with kappa = 1 (tau -> 0) b'y - c'z =
+        // kappa - rg tends to 1 as rg falls (#371).
         const Real scale = 1.0 / std::max(tau, kappa);
-        for (std::vector<Real>* v : {&z, &y, &s}) {
-            for (Real& e : *v) {
+        for (std::vector<Real>* values : {&z, &y, &s}) {
+            for (Real& e : *values) {
                 e *= scale;
             }
+        }
+        for (const Index j : upper_cols) {
+            v[j] = std::max(v[j] + alpha * dv[j], 1e-12) * scale;
+            w[j] = std::max(w[j] + alpha * dw[j], 1e-12) * scale;
         }
         tau *= scale;
         kappa *= scale;
@@ -1497,20 +1622,20 @@ BarrierIpmOutcome runHsdIpm(NewtonSolver& solver, const SparseMatrix& A, std::sp
 
 Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::span<const Real> uz,
                        std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
-                       Real tau, Real kappa) {
+                       Real tau, Real kappa, Real bound_dual, Real bound_energy) {
     Real q = 0.0;
     for (size_t j = 0; j < uz.size(); ++j) {
         q += s[j] * uz[j] * uz[j] / z[j];
     }
-    return std::max(dot(b, uy) - dot(c, uz), q) + kappa / tau;
+    return std::max(dot(b, uy) - dot(c, uz) - bound_dual, q + bound_energy) + kappa / tau;
 }
 
 bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<const Real> pz,
                   std::span<const Real> py, std::span<const Real> ps, std::span<const Real> uz,
                   std::span<const Real> uy, std::span<const Real> us, Real tau, Real kappa,
                   Real denom, Real eta_rg, Real rk, std::span<Real> dz, std::span<Real> dy,
-                  std::span<Real> ds, Real& dtau, Real& dkappa) {
-    dtau = (eta_rg + dot(c, pz) - dot(b, py) + rk / tau) / denom;
+                  std::span<Real> ds, Real& dtau, Real& dkappa, Real bound_dual) {
+    dtau = (eta_rg + dot(c, pz) - dot(b, py) + bound_dual + rk / tau) / denom;
     dkappa = (rk - kappa * dtau) / tau;
     bool finite = std::isfinite(dtau) && std::isfinite(dkappa);
     for (size_t j = 0; j < dz.size(); ++j) {
@@ -1550,18 +1675,21 @@ bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<co
 // and one with c ~ 1e9 as unbounded. Both ratios are invariant under scaling
 // the iterate. Primal is checked first. A dual ray proves the dual
 // infeasible, so the LP is infeasible or unbounded: solve() settles which.
+// For the implicit upper rows the caller supplies their contributions in
+// bty = b'y - u'w, at_y = A'y - w, and the norms of u and z + v on those rows.
+// The slack columns have dual activity -w <= 0. The added rows require both
+// z and v to vanish on boxed columns of a dual infeasibility certificate.
 // A nonfinite ray residual cannot certify its verdict. Failed means neither.
 BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
                                    std::span<const Real> az, std::span<const Real> at_y, Real tau,
                                    Real kappa, Real mu_rel, Real ctz, Real bty, Real tol,
-                                   bool verbose) {
+                                   bool verbose, Real bound_rhs_norm, Real bound_ray_res) {
     if (!(tau <= tol * kappa) || !(mu_rel <= tol)) {
         return BarrierIpmOutcome::Failed;
     }
     if (!std::isfinite(ctz) || !std::isfinite(bty)) {
         if (verbose) {
-            std::printf("HSD rays: nonfinite objective dot product (b'y=% .3e, c'z=% .3e)\n", bty,
-                        ctz);
+            std::printf("HSD rays: nonfinite objective (dual=% .3e, primal=% .3e)\n", bty, ctz);
         }
         return BarrierIpmOutcome::Failed;
     }
@@ -1575,25 +1703,28 @@ BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real
         }
         return out;
     };
-    const Real primal_bound = tol * bty / std::max(1.0, infNorm(b));
+    const Real primal_bound = tol * bty / std::max({1.0, infNorm(b), bound_rhs_norm});
     const Real primal_res = bty > 0.0 || verbose ? rayNorm(at_y, [](Real v) { return v; }) : 0.0;
     const bool primal = bty > 0.0 && primal_res <= primal_bound;
     if (primal && !verbose) {
         return BarrierIpmOutcome::PrimalInfeasible;
     }
     const Real dual_bound = -tol * ctz / std::max(1.0, infNorm(c));
-    const Real dual_res =
-        ctz < 0.0 || verbose ? rayNorm(az, [](Real v) { return std::abs(v); }) : 0.0;
+    const Real dual_res = ctz < 0.0 || verbose
+                              ? std::max(rayNorm(
+                                             az, [](Real v) { return std::abs(v); }),
+                                         bound_ray_res)
+                              : 0.0;
     if (verbose) {
         std::printf(
-            "HSD rays: b'y=% .3e, max(0, max A'y)=%.3e, limit=% .3e; "
-            "c'z=% .3e, |Az|=%.3e, limit=% .3e\n",
+            "HSD rays: dual objective=% .3e, dual ray violation=%.3e, limit=% .3e; "
+            "primal objective=% .3e, primal ray violation=%.3e, limit=% .3e\n",
             bty, primal_res, primal_bound, ctz, dual_res, dual_bound);
     }
     if (primal) {
         return BarrierIpmOutcome::PrimalInfeasible;
     }
-    if (ctz < 0.0 && dual_res <= dual_bound) {
+    if (ctz < 0.0 && isFinite(bound_ray_res) && dual_res <= dual_bound) {
         return BarrierIpmOutcome::DualInfeasible;
     }
     return BarrierIpmOutcome::Failed;
@@ -2257,15 +2388,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
     // Mehrotra's (#144) are in the CPU loop only.
     // The CPU backend is the one a build without CUDA picks under Auto; the
     // CPU default itself (dense or sparse NE) is #295's.
-    // The homogeneous self-dual loop (#370) runs the plain standard form,
-    // Gondzio's correctors included (#335); with upper bounds in the IPM the
-    // solve keeps Mehrotra's loop.
-    const bool hsd = options_.homogeneous && !has_upper;
-    if (options_.homogeneous && !hsd && options_.verbose) {
-        std::printf(
-            "Barrier: the homogeneous self-dual loop does not yet take implicit upper bounds; "
-            "using Mehrotra's loop.\n");
-    }
+    const bool hsd = options_.homogeneous;
     if (hsd && !defaultInitialPoint(options_) && options_.verbose) {
         std::printf(
             "Barrier: the homogeneous self-dual loop keeps its own starting point; "
@@ -2389,7 +2512,7 @@ BarrierIpmOutcome BarrierSolver::solveStandardForm(std::vector<Real>& z, std::ve
             used_homogeneous_ = hsd;
             gondzio_corrections_ = 0;
             result =
-                hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, options_, std_obj_offset_,
+                hsd ? runHsdIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
                                 dualized_obj_sign, z, y, s, iters, gondzio_corrections_)
                     : runMehrotraIpm(*solver, aeq_, beq_, cstd_, ustd_, options_, std_obj_offset_,
                                      dualized_obj_sign, z, y, s, iters, gondzio_corrections_);

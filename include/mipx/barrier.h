@@ -108,14 +108,13 @@ struct BarrierOptions {
     // The CPU IPM on the homogeneous self-dual model (#292; Xu, Hung & Ye
     // 1996, as in Andersen & Andersen 2000) instead of Mehrotra's loop on the
     // LP itself, with gondzio_correctors too (#335). Opt-in, CPU backends
-    // only: on, the GPU path is skipped. Not yet combined with
-    // implicit_upper_bounds on a model with upper bounds: the solve then runs
-    // Mehrotra's loop and says so when verbose.
+    // only: on, the GPU path is skipped. Combines with implicit_upper_bounds
+    // (#443), keeping upper-bound pairs in the homogeneous loop.
     bool homogeneous = false;
     // Starting point of the CPU Mehrotra loop (#144). Opt-in, CPU backends
     // only: a value other than Auto or Mehrotra skips the GPU path, whose
-    // start is its own. The homogeneous loop keeps its start (z = s = 1,
-    // tau = kappa = 1) whatever this says.
+    // start is its own. The homogeneous loop starts all complementarity
+    // variables at 1 whatever this says.
     BarrierInitialPoint initial_point = BarrierInitialPoint::Auto;
     // Wall-clock limit on solve() in seconds, crossover included; below 0:
     // none (#275). The CPU IPM checks it every iteration and inside its

@@ -92,10 +92,12 @@ double augmentedFactorFlops(const SparseMatrix& matrix, const BarrierOptions& op
 // max(b'u_y - c'u_z, q) + kappa / tau, with q = u_z' S Z^-1 u_z. For an exact
 // solve b'u_y - c'u_z = q; the backends' regularization and pivot shifts add
 // u_y'(reg I + shifts) u_y >= 0, and rounding near the optimum can take the
-// computed value below q, even below zero, where q bounds it.
+// computed value below q, even below zero, where q bounds it. With implicit
+// bounds, subtract bound_dual = u' u_w from the gap term and add bound_energy
+// = u_v' W V^-1 u_v to q.
 Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::span<const Real> uz,
                        std::span<const Real> uy, std::span<const Real> z, std::span<const Real> s,
-                       Real tau, Real kappa);
+                       Real tau, Real kappa, Real bound_dual = 0.0, Real bound_energy = 0.0);
 
 // One direction of the homogeneous self-dual loop (#370, #335) from the
 // backend's two solves at the iterate's (tau, kappa): p = (p_z, p_y, p_s) for
@@ -103,22 +105,28 @@ Real hsdGapDenominator(std::span<const Real> b, std::span<const Real> c, std::sp
 // dtau = (eta_rg + c'p_z - b'p_y + rk / tau) / denom,
 // dkappa = (rk - kappa dtau) / tau and d = p + dtau u, where eta_rg is eta
 // times the gap residual (zero for a Gondzio corrector, whose rk is t_k).
+// With implicit bounds the residual solve also uses (eta ru, rw) and the
+// unit-tau solve uses (u, 0) on the upper rows. The numerator gains
+// bound_dual = u' p_w, where u here is the vector of upper bounds.
 // Returns false if dtau, dkappa or an entry of d is not finite.
 bool hsdDirection(std::span<const Real> b, std::span<const Real> c, std::span<const Real> pz,
                   std::span<const Real> py, std::span<const Real> ps, std::span<const Real> uz,
                   std::span<const Real> uy, std::span<const Real> us, Real tau, Real kappa,
                   Real denom, Real eta_rg, Real rk, std::span<Real> dz, std::span<Real> dy,
-                  std::span<Real> ds, Real& dtau, Real& dkappa);
+                  std::span<Real> ds, Real& dtau, Real& dkappa, Real bound_dual = 0.0);
 
 // The HSD loop's infeasibility test (#371) at an iterate (z, y, s, tau,
 // kappa) with az = A z, at_y = A'y, c'z and b'y, and mu_rel its mu relative
 // to the starting one (scale-invariant, see the definition):
 // PrimalInfeasible or DualInfeasible on a Farkas ray within tol, else
-// Failed. No verdict unless tau <= tol kappa and mu_rel <= tol.
+// Failed. No verdict unless tau <= tol kappa and mu_rel <= tol. For implicit
+// bounds at_y and bty include the bounds' dual terms. bound_rhs_norm is the
+// norm of the upper bounds, and bound_ray_res the norm of their ray activity.
 BarrierIpmOutcome hsdInfeasibility(std::span<const Real> b, std::span<const Real> c,
                                    std::span<const Real> az, std::span<const Real> at_y, Real tau,
                                    Real kappa, Real mu_rel, Real ctz, Real bty, Real tol,
-                                   bool verbose = false);
+                                   bool verbose = false, Real bound_rhs_norm = 0.0,
+                                   Real bound_ray_res = 0.0);
 
 // Whether `ray`, one multiplier per row of `lp`, proves `lp` infeasible in its
 // own data, rechecked as getDualRay()'s contract leaves to a consumer that

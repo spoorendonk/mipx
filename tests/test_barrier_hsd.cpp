@@ -220,14 +220,84 @@ TEST_CASE("Barrier HSD: a direction solves all five rows of the HSD Newton syste
     CHECK(std::isfinite(dtau));
 }
 
+TEST_CASE("Barrier HSD: bounded direction solves the upper rows and gap row", "[barrier][hsd]") {
+    // One boxed column with A = [1]. The two solves for fixed dtau have
+    // dz determined by the equality and dv by the upper row, so we can
+    // compute p and the unit-tau direction directly.
+    const std::vector<Real> b{1.25};
+    const std::vector<Real> c{2.0};
+    const std::vector<Real> z{1.0};
+    const std::vector<Real> s{0.5};
+    const Real upper = 3.25;
+    const Real v = 2.0;
+    const Real w = 1.5;
+    const Real tau = 0.8;
+    const Real kappa = 0.3;
+    const Real eta = GENERATE(0.0, 0.6);
+    const Real rp = 0.3;
+    const Real rd = -0.1;
+    const Real ru = 0.7;
+    const Real rg = 0.15;
+    const Real rc = 0.25;
+    const Real rw = -0.2;
+    const Real rk = -0.375;
+
+    const std::vector<Real> uz{b[0]};
+    const Real uv = upper - uz[0];
+    const std::vector<Real> us{-s[0] * uz[0] / z[0]};
+    const Real uw = -w * uv / v;
+    const std::vector<Real> uy{c[0] - us[0] + uw};
+
+    const std::vector<Real> pz{eta * rp};
+    const Real pv = eta * ru - pz[0];
+    const std::vector<Real> ps{(rc - s[0] * pz[0]) / z[0]};
+    const Real pw = (rw - w * pv) / v;
+    const std::vector<Real> py{eta * rd - ps[0] + pw};
+
+    const auto denominator = [&](std::span<const Real> dual) {
+        return hsdGapDenominator(b, c, uz, dual, z, s, tau, kappa, upper * uw, w * uv * uv / v);
+    };
+    constexpr Real kTol = 1e-12;
+    const Real denom = denominator(uy);
+    CHECK(std::abs(denom - 4.15625) <= kTol);
+    // Force each side of the denominator's max to win to check both upper terms.
+    const std::vector<Real> regularized_y{uy[0] + 1.0};
+    const std::vector<Real> rounded_y{uy[0] - 1.0};
+    CHECK(std::abs(denominator(regularized_y) - (denom + b[0])) <= kTol);
+    CHECK(std::abs(denominator(rounded_y) - denom) <= kTol);
+    std::vector<Real> dz(1), dy(1), ds(1);
+    Real dtau = 0.0;
+    Real dkappa = 0.0;
+    REQUIRE(hsdDirection(b, c, pz, py, ps, uz, uy, us, tau, kappa, denom, eta * rg, rk, dz, dy, ds,
+                         dtau, dkappa, upper * pw));
+    REQUIRE(std::abs(dtau) > 1e-3);
+    const Real dv = pv + dtau * uv;
+    const Real dw = pw + dtau * uw;
+    CHECK(std::abs(dz[0] - b[0] * dtau - eta * rp) <= kTol);
+    CHECK(std::abs(dy[0] + ds[0] - dw - c[0] * dtau - eta * rd) <= kTol);
+    CHECK(std::abs(dz[0] + dv - upper * dtau - eta * ru) <= kTol);
+    CHECK(std::abs(s[0] * dz[0] + z[0] * ds[0] - rc) <= kTol);
+    CHECK(std::abs(w * dv + v * dw - rw) <= kTol);
+    CHECK(std::abs(-c[0] * dz[0] + b[0] * dy[0] - upper * dw - dkappa - eta * rg) <= kTol);
+    CHECK(std::abs(kappa * dtau + tau * dkappa - rk) <= kTol);
+}
+
 TEST_CASE("Barrier HSD: small LP reaches its optimum on the IPM's own point", "[barrier][hsd]") {
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
-    INFO("algo " << static_cast<int>(algo));
+    const bool implicit = GENERATE(false, true);
+    INFO("algo " << static_cast<int>(algo) << " implicit " << implicit);
+    auto opts = quietOptions(true, algo);
+    opts.implicit_upper_bounds = implicit;
+    BarrierSolver solver;
+    solver.setOptions(opts);
+    solver.load(smallLp());
+    CHECK(solver.standardFormRows() == (implicit ? 2 : 4));
     // Crossover is off: the objective is that of the HSD loop's x = z / tau.
-    const auto [result, primals, homogeneous] = solveWith(smallLp(), quietOptions(true, algo));
-    CHECK(homogeneous);
+    const auto result = solver.solve();
+    CHECK(solver.usedHomogeneous());
     REQUIRE(result.status == Status::Optimal);
     CHECK(std::abs(result.objective - (-3.5)) <= 1e-6);
+    const auto primals = solver.getPrimalValues();
     REQUIRE(primals.size() == 3);
     CHECK(std::abs(primals[0] - 1.0) <= 1e-6);
     CHECK(std::abs(primals[1] - 1.5) <= 1e-6);
@@ -398,20 +468,28 @@ TEST_CASE("Barrier HSD: an infeasible LP ends Infeasible, an unbounded one Unbou
           "[barrier][hsd]") {
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
     const bool crossover = GENERATE(false, true);
-    INFO("algo " << static_cast<int>(algo) << " crossover " << crossover);
+    const bool implicit = GENERATE(false, true);
+    INFO("algo " << static_cast<int>(algo) << " crossover " << crossover << " implicit "
+                 << implicit);
     auto opts = quietOptions(true, algo);
     opts.crossover = crossover;
+    opts.implicit_upper_bounds = implicit;
     const auto infeasible = solveWith(infeasibleLp(), opts);
     CHECK(infeasible.homogeneous);
     CHECK(infeasible.result.status == Status::Infeasible);
     const auto unbounded = solveWith(unboundedLp(), opts);
     CHECK(unbounded.homogeneous);
     CHECK(unbounded.result.status == Status::Unbounded);
-    // Infeasible through its upper bounds, which the HSD loop's standard form
-    // carries as rows: x + y >= 5 with x, y <= 2.
+    // Infeasible through its upper bounds: x + y >= 5 with x, y <= 2.
     const auto bounded = solveWith(readLp(mipx::test::testDataDir() + "/infeasible_lp.lp"), opts);
     CHECK(bounded.homogeneous);
     CHECK(bounded.result.status == Status::Infeasible);
+    // The dual ray can still move y, but its boxed x component must vanish.
+    auto mixed = unboundedLp();
+    mixed.col_upper[0] = 2.0;
+    const auto mixed_result = solveWith(mixed, opts);
+    CHECK(mixed_result.homogeneous);
+    CHECK(mixed_result.result.status == Status::Unbounded);
     // Infeasible both ways (x - y >= d, y - x >= d, min -x - y): Infeasible,
     // whichever ray the loop meets first. With d = 1e-3 the primal ray is
     // weak and the dual one came first, reading Unbounded before the
@@ -466,6 +544,8 @@ TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hs
           BarrierIpmOutcome::Failed);
     CHECK(hsdInfeasibility(b, c, az_far, at_y_violated, tau, 1.0, mu, 0.0, 1.0, tol) ==
           BarrierIpmOutcome::PrimalInfeasible);
+    CHECK(hsdInfeasibility(b, c, az_far, at_y_violated, tau, 1.0, mu, 0.0, 1.0, tol, false, 1e9) ==
+          BarrierIpmOutcome::Failed);
     // No verdict before the run gets there: tau above tol kappa, or mu above
     // tol mu0, whatever the rays.
     CHECK(hsdInfeasibility(b, c, az_ray, at_y, 1e-3, 1.0, mu, -1.0, 1.0, tol) ==
@@ -498,6 +578,12 @@ TEST_CASE("Barrier HSD: infeasibility test reads the Farkas rays", "[barrier][hs
     CHECK(hsdInfeasibility(b, c, az_nan, at_y, tau, 1.0, mu, -1.0, 0.0, tol) ==
           BarrierIpmOutcome::Failed);
     CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, nan, tol) ==
+          BarrierIpmOutcome::Failed);
+    // Upper rows are part of the explicit-form tolerance. Their activity
+    // can veto an otherwise acceptable dual infeasibility ray.
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, 0.0, tol, false, 2.0,
+                           2.0 * tol) == BarrierIpmOutcome::Failed);
+    CHECK(hsdInfeasibility(b, c, az_ray, at_y, tau, 1.0, mu, -1.0, 0.0, tol, false, 2.0, nan) ==
           BarrierIpmOutcome::Failed);
 }
 
@@ -601,21 +687,14 @@ TEST_CASE("Barrier HSD: crossover proves Netlib cplex2 infeasible", "[barrier][h
     CHECK(crossed.result.status == Status::Infeasible);
 }
 
-TEST_CASE("Barrier HSD: implicit upper bounds fall back to Mehrotra's loop", "[barrier][hsd]") {
-    auto opts = quietOptions(true, BarrierAlgorithm::CpuCholesky);
-    opts.implicit_upper_bounds = true;
-    const auto [result, primals, homogeneous] = solveWith(smallLp(), opts);
-    CHECK_FALSE(homogeneous);
-    REQUIRE(result.status == Status::Optimal);
-    CHECK(std::abs(result.objective - (-3.5)) <= 1e-6);
-}
-
 // Gondzio's correctors in the homogeneous loop (#335): the same optimum
 // as without them, with correctors taken.
 TEST_CASE("Barrier HSD: Gondzio correctors run in the homogeneous loop", "[barrier][hsd]") {
     const auto algo = GENERATE(BarrierAlgorithm::CpuCholesky, BarrierAlgorithm::CpuSparseCholesky);
-    INFO("algo " << static_cast<int>(algo));
+    const bool implicit = GENERATE(false, true);
+    INFO("algo " << static_cast<int>(algo) << " implicit " << implicit);
     auto opts = quietOptions(true, algo);
+    opts.implicit_upper_bounds = implicit;
     opts.gondzio_correctors = 4;
     BarrierSolver solver;
     solver.setOptions(opts);
