@@ -365,6 +365,8 @@ public:
         // Legacy — thresholds now controlled via BarrierAlgorithm dispatch.
     }
     void setParallelMode(ParallelMode mode) { parallel_mode_ = mode; }
+    /// Keep opportunistic TBB workers available while other workers own nodes.
+    void setPersistentTreeWorkers(bool enabled) { persistent_tree_workers_ = enabled; }
     void setHeuristicMode(HeuristicRuntimeMode mode) {
         parallel_mode_ = (mode == HeuristicRuntimeMode::Opportunistic)
                              ? ParallelMode::Opportunistic
@@ -770,6 +772,7 @@ private:
     BarrierOrdering barrier_ordering_ = BarrierOrdering::Auto;
     BarrierDualize barrier_dualize_ = BarrierDualize::Off;
     ParallelMode parallel_mode_ = ParallelMode::Deterministic;
+    bool persistent_tree_workers_ = false;
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
     Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;

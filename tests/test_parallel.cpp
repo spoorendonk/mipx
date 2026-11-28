@@ -370,6 +370,36 @@ TEST_CASE("Parallel: opportunistic heuristic mode remains valid", "[parallel][tb
            result.status == Status::TimeLimit));
 }
 
+TEST_CASE("Parallel: persistent opportunistic workers respect the shared node budget",
+          "[parallel][tbb]") {
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setNumThreads(8);
+    solver.setParallelMode(ParallelMode::Opportunistic);
+    solver.setPersistentTreeWorkers(true);
+    solver.load(buildSearchStagnationMip());
+
+    SECTION("the limit counts active reservations") {
+        solver.setNodeLimit(7);
+        const auto limited = solver.solve();
+        CHECK(limited.status == Status::NodeLimit);
+        CHECK(limited.nodes == 7);
+        CHECK(limited.best_bound == 0.0);
+        CHECK(limited.solution.empty());
+    }
+
+    SECTION("an empty frontier eventually proves infeasibility") {
+        const auto complete = solver.solve();
+        CHECK(complete.status == Status::Infeasible);
+        CHECK(complete.nodes > 7);
+    }
+}
+
 TEST_CASE("Parallel: deterministic multi-thread pre-root LP-free is reproducible",
           "[parallel][tbb][heuristics][preroot][deterministic]") {
     auto lp = buildBranchingMip();

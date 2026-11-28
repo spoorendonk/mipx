@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
@@ -27,6 +28,7 @@
 
 #ifdef MIPX_HAS_TBB
 #include <tbb/parallel_for.h>
+#include <tbb/task_arena.h>
 #include <tbb/task_group.h>
 #endif
 
@@ -3373,7 +3375,6 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     constexpr uint64_t kDetLogQuantumTicks = 1000000;     // 1.0 deterministic work units
     std::atomic<uint64_t> det_heur_next_tick{kDetHeurGateQuantumTicks};
     std::mutex stats_mutex;
-    double last_log_time = -kLogInterval;  // ensure first log fires
     Int rins_calls = 0;
     Int rins_solves = 0;
     Int rins_found = 0;
@@ -3694,6 +3695,30 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         log_.log("Parallel tree search with %d threads\n", actual_threads);
     }
 
+    const bool persistent = persistent_tree_workers_;
+    std::condition_variable queue_changed;
+    // The queue lock also protects reservations and their inherited LP bounds.
+    std::vector<Real> active_bounds(persistent ? static_cast<std::size_t>(actual_threads) : 0,
+                                    kInf);
+    Int active_nodes = 0;
+    Int peak_active = 0;
+    uint64_t idle_waits = 0;
+    auto active_bound = [&] {
+        return *std::min_element(active_bounds.begin(), active_bounds.end());
+    };
+    auto stop_dispatch = [&] {
+        should_stop.store(true, std::memory_order_relaxed);
+        if (persistent) {
+            queue_changed.notify_all();
+        }
+    };
+    auto read_incumbent = [&] {
+        std::lock_guard<std::mutex> lock(incumbent_mutex);
+        return incumbent;
+    };
+    std::mutex progress_mutex;
+    double last_log_time = -kLogInterval;
+
     // Worker function.
     auto worker = [&](Int thread_id) {
         // Create thread-local LP solver by loading problem fresh.
@@ -3728,53 +3753,65 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
         Int local_rins_fixed_sum = 0;
 
         while (!should_stop.load(std::memory_order_relaxed)) {
-            // Check limits.
-            if (atomic_nodes.load(std::memory_order_relaxed) >= node_limit_) {
-                should_stop.store(true, std::memory_order_relaxed);
-                break;
-            }
-            if (elapsed() >= time_limit_) {
-                should_stop.store(true, std::memory_order_relaxed);
+            if (!persistent && (atomic_nodes.load(std::memory_order_relaxed) >= node_limit_ ||
+                                elapsed() >= time_limit_)) {
+                stop_dispatch();
                 break;
             }
 
-            // Get a node from the shared queue.
-            BnbNode node;
+            std::optional<BnbNode> node;
+            Int node_num = 0;
             {
-                Real inc = kInf;
-                {
-                    std::lock_guard<std::mutex> incumbent_lock(incumbent_mutex);
-                    inc = incumbent;
-                }
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                if (queue.empty()) {
-                    break;
-                }
-
-                if (inc < kInf) {
-                    queue.prune(pruneBound(inc));
-                    if (queue.empty()) {
+                Real inc = persistent ? kInf : read_incumbent();
+                std::unique_lock lock(queue_mutex);
+                while (!persistent || !should_stop.load(std::memory_order_relaxed)) {
+                    if (persistent &&
+                        (atomic_nodes.load(std::memory_order_relaxed) >= node_limit_ ||
+                         elapsed() >= time_limit_)) {
+                        stop_dispatch();
                         break;
                     }
-                }
 
-                Real best_bound = queue.bestBound();
-                if (inc < kInf && computeGap(inc, best_bound) < gap_tol_) {
-                    should_stop.store(true, std::memory_order_relaxed);
+                    if (persistent) {
+                        inc = read_incumbent();
+                    }
+                    if (inc < kInf) {
+                        queue.prune(pruneBound(inc));
+                    }
+                    if (queue.empty()) {
+                        if (!persistent || active_nodes == 0) {
+                            break;
+                        }
+                        ++idle_waits;
+                        queue_changed.wait(lock);
+                        continue;
+                    }
+
+                    const Real queued_bound = queue.bestBound();
+                    const Real best_bound =
+                        persistent ? std::min(queued_bound, active_bound()) : queued_bound;
+                    if (inc < kInf && computeGap(inc, best_bound) < gap_tol_) {
+                        stop_dispatch();
+                        break;
+                    }
+                    node.emplace(queue.pop());
+                    if (persistent) {
+                        active_bounds[static_cast<std::size_t>(thread_id)] = node->lp_bound;
+                        peak_active = std::max(peak_active, ++active_nodes);
+                        node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
+                    }
                     break;
                 }
-
-                node = queue.pop();
             }
-
-            Int node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (!node) {
+                break;
+            }
+            if (!persistent) {
+                node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
+            }
 
             // Get current incumbent for pruning.
-            Real inc_snapshot;
-            {
-                std::lock_guard<std::mutex> lock(incumbent_mutex);
-                inc_snapshot = incumbent;
-            }
+            const Real inc_snapshot = read_incumbent();
 
             // Process node.
             std::vector<BnbNode> children;
@@ -3785,7 +3822,7 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             Int node_int_inf = -1;
 
             bool branched =
-                processNode(local_lp, node, inc_snapshot, children, node_obj, node_primals,
+                processNode(local_lp, *node, inc_snapshot, children, node_obj, node_primals,
                             node_iters, node_work, current_lower, current_upper, touched_vars,
                             local_node_scratch, local_node_stats, node_int_inf);
             atomic_lp_iters.fetch_add(node_iters, std::memory_order_relaxed);
@@ -3893,30 +3930,45 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 }
             }
 
-            // Push children to shared queue.
-            if (!children.empty()) {
+            // Publish children and release their parent's bound in one frontier update.
+            bool wake_workers = false;
+            if (persistent || !children.empty()) {
                 std::lock_guard<std::mutex> lock(queue_mutex);
                 for (auto& child : children) {
                     queue.push(std::move(child));
                 }
+                if (persistent) {
+                    active_bounds[static_cast<std::size_t>(thread_id)] = kInf;
+                    --active_nodes;
+                    wake_workers = !children.empty() || active_nodes == 0;
+                }
+            }
+            if (wake_workers) {
+                queue_changed.notify_all();
             }
 
             // Log progress: new incumbent or periodic heartbeat (time-based).
-            double now = elapsed();
-            if (verbose_ && (found_incumbent || (now - last_log_time >= kLogInterval))) {
-                last_log_time = now;
-                Real log_incumbent = kInf;
-                {
-                    std::lock_guard<std::mutex> lock(incumbent_mutex);
-                    log_incumbent = incumbent;
+            if (verbose_) {
+                std::lock_guard<std::mutex> log_lock(progress_mutex);
+                const double now = elapsed();
+                if (!found_incumbent && now - last_log_time < kLogInterval) {
+                    continue;
                 }
+                last_log_time = now;
+                const Real log_incumbent = read_incumbent();
                 Int open_nodes = 0;
                 Real best_bound = root_bound;
                 {
                     std::lock_guard<std::mutex> lock(queue_mutex);
                     open_nodes = queue.size();
-                    best_bound = queue.empty() ? (log_incumbent < kInf ? log_incumbent : root_bound)
-                                               : queue.bestBound();
+                    best_bound = queue.bestBound();
+                    if (persistent) {
+                        open_nodes += active_nodes;
+                        best_bound = std::min(best_bound, active_bound());
+                    }
+                    if (best_bound == kInf) {
+                        best_bound = log_incumbent < kInf ? log_incumbent : root_bound;
+                    }
                 }
                 logProgress(atomic_nodes.load(), open_nodes, atomic_lp_iters.load(), log_incumbent,
                             best_bound, elapsed(), found_incumbent, node_int_inf);
@@ -3941,7 +3993,21 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     // Launch worker threads.
     tbb::task_group tg;
     for (Int t = 0; t < actual_threads; ++t) {
-        tg.run([&worker, t]() { worker(t); });
+        tg.run([&, t]() {
+            if (!persistent) {
+                worker(t);
+                return;
+            }
+            try {
+                // Nested TBB work must not run a peer task that could wait for this node.
+                tbb::this_task_arena::isolate([&] { worker(t); });
+            } catch (...) {
+                // A failing worker may own a node that would otherwise keep peers asleep.
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                stop_dispatch();
+                throw;
+            }
+        });
     }
     tg.wait();
 
@@ -3951,6 +4017,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
     total_work = atomic_work.units();
 
     if (verbose_) {
+        if (persistent) {
+            log_.log("Persistent frontier: peak_active=%d idle_waits=%llu\n", peak_active,
+                     static_cast<unsigned long long>(idle_waits));
+        }
         if (rins_calls > 0) {
             double avg_fixed =
                 static_cast<double>(rins_fixed_sum) / static_cast<double>(rins_calls);

@@ -51,6 +51,7 @@ void printUsage(FILE* out) {
                  "[--presolve-dual-fixing|--no-presolve-dual-fixing] "
                  "[--presolve-coeff-tightening|--no-presolve-coeff-tightening] "
                  "[--parallel-mode deterministic|opportunistic] [--seed N] "
+                 "[--persistent-tree-workers (opportunistic TBB tree)] "
                  "[--heur-deterministic|--heur-opportunistic] "
                  "[--pre-root-lpfree|--no-pre-root-lpfree] [--pre-root-work W] "
                  "[--pre-root-rounds N] [--pre-root-no-early-stop] "
@@ -129,6 +130,7 @@ int main(int argc, char* argv[]) {
     mipx::Int barrier_gpu_min_rows = 512;
     mipx::Int barrier_gpu_min_nnz = 10000;
     mipx::ParallelMode parallel_mode = mipx::ParallelMode::Deterministic;
+    bool persistent_tree_workers = false;
     uint64_t heuristic_seed = 1;
     mipx::Int root_heur_max_int_inf = 12;
     mipx::Int root_heur_max_int_vars = 96;
@@ -331,6 +333,8 @@ int main(int argc, char* argv[]) {
             parallel_mode = mipx::ParallelMode::Deterministic;
         } else if (arg == "--heur-opportunistic") {
             parallel_mode = mipx::ParallelMode::Opportunistic;
+        } else if (arg == "--persistent-tree-workers") {
+            persistent_tree_workers = true;
         } else if (arg == "--seed" && i + 1 < argc) {
             heuristic_seed = static_cast<uint64_t>(std::strtoull(argv[++i], nullptr, 10));
         } else if (arg == "--root-heur-max-int-inf" && i + 1 < argc) {
@@ -634,6 +638,7 @@ int main(int argc, char* argv[]) {
             solver.setBarrierDualize(barrier_dualize);
             solver.setBarrierGpuThresholds(barrier_gpu_min_rows, barrier_gpu_min_nnz);
             solver.setParallelMode(parallel_mode);
+            solver.setPersistentTreeWorkers(persistent_tree_workers);
             solver.setHeuristicSeed(heuristic_seed);
             solver.setRootHeuristicThresholds(root_heur_max_int_inf, root_heur_max_int_vars);
             solver.setPreRootLpFreeEnabled(pre_root_lpfree);
