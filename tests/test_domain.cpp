@@ -1,7 +1,10 @@
 #include "mipx/clique_table.h"
 #include "mipx/conflict_graph.h"
 #include "mipx/domain.h"
+#include "mipx/implication_graph.h"
+#include "mipx/objective_propagator.h"
 
+#include <algorithm>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -33,6 +36,316 @@ LpProblem makeProblem(Index num_cols, Index num_rows, std::vector<Triplet> tripl
 }
 
 }  // namespace
+
+TEST_CASE("Bound reasons: row antecedents survive tighter bounds and undo", "[domain][reasons]") {
+    // -x + y <= 0. A reason for y's upper bound uses x's upper bound.
+    const auto prob = makeProblem(2, 1, {{0, 0, -1}, {0, 1, 1}}, {-kInf}, {0}, {0, 0}, {10, 10},
+                                  {VarType::Integer, VarType::Integer});
+    DomainPropagator dp;
+    dp.load(prob);
+    CHECK(dp.boundReasons() == nullptr);
+    dp.load(prob, true);
+    const auto& trail = *dp.boundReasons();
+    dp.setBranchBound(0, true, 4, 1);
+    REQUIRE(dp.propagate());
+    const auto x4 = trail.current(0, true);
+    const auto y4 = trail.current(1, true);
+    CHECK(trail.reason(x4).source == BoundReasonSource::Branch);
+    CHECK(trail.reason(x4).level == 1);
+    CHECK(std::ranges::equal(trail.reason(y4).supports.ids(), std::vector{x4}));
+
+    dp.pushCheckpoint();
+    dp.setBranchBound(0, true, 2, 2);
+    REQUIRE(dp.propagate());
+    const auto x2 = trail.current(0, true);
+    const auto y2 = trail.current(1, true);
+    const auto& row = trail.reason(y2);
+    CHECK(row.endpoint.col == 1);
+    CHECK(row.endpoint.is_upper);
+    CHECK(row.endpoint.value == 2);
+    CHECK(row.source == BoundReasonSource::Row);
+    CHECK(row.source_index == 0);
+    CHECK(row.level == 2);
+    CHECK_FALSE(row.scope.node_local);
+    CHECK(row.scope.cutoff == kInf);
+    CHECK(std::ranges::equal(row.supports.ids(), std::vector{x2}));
+    CHECK(row.previous == y4);
+    CHECK(std::ranges::equal(trail.reason(y4).supports.ids(), std::vector{x4}));
+
+    dp.setBranchBound(1, false, 3, 3);
+    REQUIRE(trail.contradiction());
+    CHECK(trail.contradiction()->source == BoundReasonSource::Crossing);
+    CHECK(std::ranges::equal(trail.contradiction()->supports.ids(),
+                             std::vector{trail.current(1, false), y2}));
+    dp.popCheckpoint();
+    CHECK_FALSE(trail.contradiction());
+    CHECK(dp.getUpper(1) == 4);
+    CHECK(trail.current(0, true) == x4);
+    CHECK(trail.current(1, true) == y4);
+}
+
+TEST_CASE("Bound reasons: implications retain each edge in a chain", "[domain][reasons]") {
+    // a <= x fixes x from the branch a >= 1, then x => !y => z.
+    const auto prob = makeProblem(4, 1, {{0, 3, 1}, {0, 0, -1}}, {-kInf}, {0}, {0, 0, 0, 0},
+                                  {1, 1, 1, 1}, std::vector(4, VarType::Binary));
+    ImplicationGraph graph;
+    graph.init(4, {0, 1, 2, 3});
+    REQUIRE(graph.addImplication(0, true, 1, false));
+    REQUIRE(graph.addImplication(1, false, 2, true));
+    DomainPropagator dp;
+    dp.load(prob, true);
+    dp.setImplicationGraph(&graph);
+    dp.setBranchBound(3, false, 1, 1);
+    REQUIRE(dp.propagate());
+    const auto& trail = *dp.boundReasons();
+    const auto x = trail.current(0, false);
+    const auto y = trail.current(1, true);
+    const auto z = trail.current(2, false);
+    CHECK(trail.reason(x).source == BoundReasonSource::Row);
+    CHECK(std::ranges::equal(trail.reason(x).supports.ids(), std::vector{trail.current(3, false)}));
+    CHECK(trail.reason(y).source == BoundReasonSource::Implication);
+    CHECK(trail.reason(y).source_index == 0);
+    CHECK(trail.reason(y).endpoint.value == 0);
+    CHECK(std::ranges::equal(trail.reason(y).supports.ids(), std::vector{x}));
+    CHECK(trail.reason(z).source == BoundReasonSource::Implication);
+    CHECK(trail.reason(z).source_index == 1);
+    CHECK(trail.reason(z).endpoint.value == 1);
+    CHECK(trail.reason(z).level == 1);
+    CHECK(std::ranges::equal(trail.reason(z).supports.ids(), std::vector{y}));
+}
+
+TEST_CASE("Bound reasons: clique records the forcing literal", "[domain][reasons]") {
+    const auto binaries = std::vector(3, VarType::Binary);
+    const auto packing = makeProblem(3, 1, {{0, 0, 1}, {0, 1, 1}, {0, 2, 1}}, {-kInf}, {1},
+                                     {0, 0, 0}, {1, 1, 1}, binaries);
+    const auto domain = makeProblem(3, 0, {}, {}, {}, {0, 0, 0}, {1, 1, 1}, binaries);
+    ConflictGraph graph;
+    graph.build(packing);
+    CliqueTable table;
+    table.build(packing, graph);
+    DomainPropagator dp;
+    dp.load(domain, true);
+    dp.setCliqueTable(&table);
+    dp.setBranchBound(1, false, 1, 1);
+    REQUIRE(dp.propagate());
+    const auto& trail = *dp.boundReasons();
+    const auto& reason = trail.reason(trail.current(0, true));
+    CHECK(reason.source == BoundReasonSource::Clique);
+    CHECK(reason.endpoint.value == 0);
+    CHECK(std::ranges::equal(reason.supports.ids(), std::vector{trail.current(1, false)}));
+    CHECK(table.clique(reason.source_index).literals.size() >= 2);
+
+    dp.load(domain, true);
+    dp.setBranchBound(0, false, 1, 1);
+    dp.setBranchBound(1, false, 1, 2);
+    CHECK_FALSE(dp.propagate());
+    const auto& crossed = *dp.boundReasons();
+    REQUIRE(crossed.contradiction());
+    CHECK(crossed.contradiction()->source == BoundReasonSource::Clique);
+    CHECK(std::ranges::distance(crossed.contradiction()->supports.ids()) == 2);
+    for (auto id : crossed.contradiction()->supports.ids()) {
+        CHECK(crossed.reason(id).source == BoundReasonSource::Branch);
+        CHECK(crossed.reason(id).endpoint.value == 1);
+    }
+}
+
+TEST_CASE("Bound reasons: equality clique uses all other false literals", "[domain][reasons]") {
+    const auto binaries = std::vector(3, VarType::Binary);
+    const auto partition = makeProblem(3, 1, {{0, 0, 1}, {0, 1, 1}, {0, 2, 1}}, {1}, {1}, {0, 0, 0},
+                                       {1, 1, 1}, binaries);
+    const auto domain = makeProblem(3, 0, {}, {}, {}, {0, 0, 0}, {1, 1, 1}, binaries);
+    ConflictGraph graph;
+    graph.build(partition);
+    CliqueTable table;
+    table.build(partition, graph);
+    DomainPropagator dp;
+    dp.load(domain, true);
+    dp.setCliqueTable(&table);
+    dp.setBranchBound(0, true, 0, 1);
+    dp.setBranchBound(2, true, 0, 2);
+    REQUIRE(dp.propagate());
+    const auto& trail = *dp.boundReasons();
+    const auto& reason = trail.reason(trail.current(1, false));
+    CHECK(reason.source == BoundReasonSource::Clique);
+    CHECK(reason.endpoint.value == 1);
+    CHECK(reason.level == 2);
+    CHECK(std::ranges::equal(reason.supports.ids(),
+                             std::vector{trail.current(0, true), trail.current(2, true)}));
+    CHECK(table.clique(reason.source_index).is_equality);
+}
+
+TEST_CASE("Bound reasons: cutoff and local proof scopes compose", "[domain][reasons]") {
+    // -x + y <= 1.5 (the objective cutoff), and z <= y (a local row).
+    auto prob = makeProblem(3, 1, {{0, 1, -1}, {0, 2, 1}}, {-kInf}, {0}, {0, 0, 0}, {1, 5, 5},
+                            {VarType::Binary, VarType::Integer, VarType::Integer});
+    prob.obj = {-1, 1, 0};
+    ObjectivePropagator objective;
+    objective.load(prob);
+    DomainPropagator dp;
+    dp.load(prob, true, 0);
+    dp.setObjectiveCutoff(&objective, 1.5);
+    dp.setReasonLevel(2);
+    dp.setBranchBound(0, true, 0, 1);
+    REQUIRE(dp.propagate());
+    const auto& trail = *dp.boundReasons();
+    const auto y = trail.current(1, true);
+    const auto& cutoff = trail.reason(y);
+    CHECK(cutoff.source == BoundReasonSource::Objective);
+    CHECK(cutoff.endpoint.value == 1);
+    CHECK(cutoff.level == 1);
+    CHECK(std::ranges::equal(cutoff.supports.ids(), std::vector{trail.current(0, true)}));
+    CHECK_FALSE(cutoff.scope.node_local);
+    CHECK(cutoff.scope.cutoff == 1.5);
+    const auto& local = trail.reason(trail.current(2, true));
+    CHECK(local.source == BoundReasonSource::Row);
+    CHECK(local.endpoint.value == 1);
+    CHECK(local.level == 2);
+    CHECK(std::ranges::equal(local.supports.ids(), std::vector{y}));
+    CHECK(local.scope.node_local);
+    CHECK(local.scope.cutoff == 1.5);
+
+    dp.load(prob, true, 0);
+    dp.setBranchBound(0, true, 0, 1);
+    dp.setBranchBound(1, false, 2, 2);
+    CHECK_FALSE(dp.propagate());
+    REQUIRE(dp.boundReasons()->contradiction());
+    const auto& conflict = *dp.boundReasons()->contradiction();
+    CHECK(conflict.source == BoundReasonSource::Objective);
+    CHECK(conflict.scope.cutoff == 1.5);
+    CHECK_FALSE(conflict.scope.node_local);
+}
+
+TEST_CASE("Bound reasons: unclassified bounds stay opaque", "[domain][reasons]") {
+    const auto prob = makeProblem(1, 0, {}, {}, {}, {0}, {5}, {VarType::Integer});
+    DomainPropagator dp;
+    dp.load(prob, true);
+    dp.setReasonLevel(2);
+    dp.setBound(0, 3, 5);
+    dp.setBranchBound(0, true, 2, 2);
+    const auto& trail = *dp.boundReasons();
+    REQUIRE(trail.contradiction());
+    const auto& conflict = *trail.contradiction();
+    CHECK(conflict.scope.node_local);
+    const auto lower = trail.current(0, false);
+    CHECK(std::ranges::equal(conflict.supports.ids(), std::vector{lower, trail.current(0, true)}));
+    CHECK(trail.reason(lower).source == BoundReasonSource::Opaque);
+    CHECK(trail.reason(lower).endpoint.value == 3);
+    CHECK(trail.reason(lower).level == 2);
+    CHECK(trail.reason(lower).supports.ids().empty());
+
+    dp.load(prob);
+    CHECK(dp.boundReasons() == nullptr);
+}
+
+TEST_CASE("Bound reasons: importing the path preserves row visit order", "[domain][reasons]") {
+    // x0 <= x1 and x2 <= x3. Imported column order differs from path order.
+    const auto prob =
+        makeProblem(4, 2, {{0, 0, 1}, {0, 1, -1}, {1, 2, 1}, {1, 3, -1}}, {-kInf, -kInf}, {0, 0},
+                    {0, 0, 0, 0}, {10, 10, 10, 10}, std::vector(4, VarType::Integer));
+    const std::vector<BranchDecision> path{{2, 1, false, 1}, {0, 2, false, 2}, {0, 3, false, 3}};
+    DomainPropagator plain;
+    plain.load(prob);
+    plain.setBound(0, 4, 10);
+    plain.setBound(2, 1, 10);
+    REQUIRE(plain.propagate(1));
+
+    DomainPropagator traced;
+    traced.load(prob, true);
+    traced.setReasonLevel(4);
+    traced.setBound(0, 4, 10, path);
+    traced.setBound(2, 1, 10, path);
+    REQUIRE(traced.propagate(1));
+    CHECK(traced.numTightened() == plain.numTightened());
+    CHECK(traced.getLower(1) == plain.getLower(1));
+    CHECK(traced.getLower(3) == plain.getLower(3));
+    CHECK(traced.getLower(3) == 1);
+
+    const auto& trail = *traced.boundReasons();
+    const auto& opaque = trail.reason(trail.current(0, false));
+    CHECK(opaque.source == BoundReasonSource::Opaque);
+    CHECK(opaque.level == 4);
+    const auto& last_branch = trail.reason(opaque.previous);
+    CHECK(last_branch.source == BoundReasonSource::Branch);
+    CHECK(last_branch.level == 3);
+    CHECK(last_branch.endpoint.value == 3);
+    CHECK(trail.reason(last_branch.previous).level == 2);
+    CHECK(trail.reason(last_branch.previous).endpoint.value == 2);
+}
+
+TEST_CASE("Bound reasons: rejected objective crossing leaves the domain intact",
+          "[domain][reasons]") {
+    auto prob = makeProblem(1, 0, {}, {}, {}, {0.5}, {2}, {VarType::Integer});
+    prob.obj = {1};
+    ObjectivePropagator objective;
+    objective.load(prob);
+    DomainPropagator dp;
+    dp.load(prob, true);
+    dp.setObjectiveCutoff(&objective, 0.75);
+    const auto& trail = *dp.boundReasons();
+    const auto lower_before = trail.current(0, false);
+    const auto upper_before = trail.current(0, true);
+    dp.pushCheckpoint();
+    CHECK_FALSE(dp.propagate());
+    REQUIRE(trail.contradiction());
+    const auto& crossing = *trail.contradiction();
+    CHECK(crossing.source == BoundReasonSource::Crossing);
+    CHECK(crossing.scope.cutoff == 0.75);
+    auto supports = crossing.supports.ids();
+    REQUIRE(std::ranges::distance(supports) == 2);
+    for (auto id : supports) {
+        const auto& reason = trail.reason(id);
+        CHECK(reason.previous == (reason.endpoint.is_upper ? upper_before : lower_before));
+        CHECK(reason.endpoint.value == (reason.endpoint.is_upper ? 0 : 1));
+        CHECK(reason.source == (reason.endpoint.is_upper ? BoundReasonSource::Objective
+                                                         : BoundReasonSource::IntegerRounding));
+    }
+    CHECK(dp.getLower(0) == 0.5);
+    CHECK(dp.getUpper(0) == 2);
+    CHECK(dp.numTightened() == 0);
+    CHECK(trail.current(0, false) == lower_before);
+    CHECK(trail.current(0, true) == upper_before);
+    dp.popCheckpoint();
+    CHECK_FALSE(trail.contradiction());
+    CHECK(trail.current(0, false) == lower_before);
+    CHECK(trail.current(0, true) == upper_before);
+}
+
+TEST_CASE("Bound reasons: rejected clique crossing keeps the original endpoint",
+          "[domain][reasons]") {
+    const auto binaries = std::vector(2, VarType::Binary);
+    const auto packing =
+        makeProblem(2, 1, {{0, 0, 1}, {0, 1, 1}}, {-kInf}, {1}, {0, 0}, {1, 1}, binaries);
+    const auto domain = makeProblem(2, 0, {}, {}, {}, {0, 0.5}, {1, 1}, binaries);
+    ConflictGraph graph;
+    graph.build(packing);
+    CliqueTable table;
+    table.build(packing, graph);
+    DomainPropagator dp;
+    dp.load(domain, true);
+    dp.setCliqueTable(&table);
+    dp.setBranchBound(0, false, 1, 1);
+    const auto& trail = *dp.boundReasons();
+    const auto upper_before = trail.current(1, true);
+    dp.pushCheckpoint();
+    CHECK_FALSE(dp.propagate());
+    REQUIRE(trail.contradiction());
+    CHECK(trail.contradiction()->source == BoundReasonSource::Crossing);
+    auto supports = trail.contradiction()->supports.ids();
+    REQUIRE(std::ranges::distance(supports) == 2);
+    auto support = supports.begin();
+    CHECK(*support == trail.current(1, false));
+    ++support;
+    const auto& rejected = trail.reason(*support);
+    CHECK(rejected.previous == upper_before);
+    CHECK(rejected.source == BoundReasonSource::Clique);
+    CHECK(rejected.endpoint.value == 0);
+    CHECK(std::ranges::equal(rejected.supports.ids(), std::vector{trail.current(0, false)}));
+    CHECK(dp.getUpper(1) == 1);
+    CHECK(dp.numTightened() == 0);
+    dp.popCheckpoint();
+    CHECK_FALSE(trail.contradiction());
+    CHECK(trail.current(1, true) == upper_before);
+}
 
 TEST_CASE("Domain: simple bound tightening", "[domain]") {
     // x + y <= 5, x >= 3, y >= 0

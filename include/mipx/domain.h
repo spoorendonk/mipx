@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mipx/bound_reasons.h"
+#include "mipx/branch_decision.h"
 #include "mipx/core.h"
 #include "mipx/lp_problem.h"
 #include "mipx/sparse_matrix.h"
@@ -27,16 +29,26 @@ public:
     /// stops tightening early.
     static constexpr Int kMaxRowRounds = 100;
 
-    /// Initialize with problem data.
-    void load(const LpProblem& problem);
+    /// Initialize with problem data. When recording, rows after global_rows
+    /// are local to this domain. A negative global_rows makes all rows global.
+    void load(const LpProblem& problem, bool record_reasons = false, Index global_rows = -1);
+
+    [[nodiscard]] const BoundReasonTrail* boundReasons() const {
+        return reasons_ ? &*reasons_ : nullptr;
+    }
+    void setReasonLevel(Int level) { reason_level_ = level; }
+    void setBranchBound(Index col, bool is_upper, Real value, Int level);
 
     /// Set an implication graph to use during propagation. Optional.
     /// The graph pointer must remain valid for the lifetime of the propagator.
-    void setImplicationGraph(const ImplicationGraph* graph) { implication_graph_ = graph; }
+    void setImplicationGraph(const ImplicationGraph* graph, BoundReasonScope scope = {}) {
+        implication_graph_ = graph;
+        implication_scope_ = scope;
+    }
 
     /// Attach a clique table for clique-based propagation.
     /// The clique table must outlive the propagator.
-    void setCliqueTable(const CliqueTable* table);
+    void setCliqueTable(const CliqueTable* table, BoundReasonScope scope = {});
 
     /// True once a clique table has been attached. Lets a caller assert that
     /// the attachment actually happened rather than assuming it.
@@ -45,6 +57,7 @@ public:
     /// Attach the objective cutoff row c^T x + offset <= cutoff (#117). It is
     /// propagated after the rows and cliques reach a fixpoint, and whatever it
     /// tightens is fed back to them. The propagator must outlive this object.
+    /// Restore any deductions made at the old cutoff before weakening it.
     void setObjectiveCutoff(const ObjectivePropagator* objective, Real cutoff);
 
     /// Bounds the objective row tightened since load().
@@ -54,8 +67,9 @@ public:
     /// domain cannot hold a point better than the cutoff.
     [[nodiscard]] bool objectiveInfeasible() const { return objective_infeasible_; }
 
-    /// Set variable bounds.
-    void setBound(Index col, Real lower, Real upper);
+    /// Set variable bounds. A supplied path explains the bounds imported
+    /// here without separately applying or scheduling each decision.
+    void setBound(Index col, Real lower, Real upper, std::span<const BranchDecision> path = {});
 
     /// Get variable bounds.
     [[nodiscard]] Real getLower(Index col) const;
@@ -74,6 +88,15 @@ public:
     [[nodiscard]] Int numTightened() const;
 
 private:
+    void setBound(Index col, Real lower, Real upper, std::span<const BranchDecision> path,
+                  bool branch, Int level);
+    void recordInputBound(BoundEndpoint endpoint, std::span<const BranchDecision> path, bool branch,
+                          Int level);
+    [[nodiscard]] bool checkCrossing(Index col);
+    BoundReasonId recordRounding(Index col, bool is_upper, Real value, bool applied = true);
+    [[nodiscard]] BoundReasonSupports::Snapshot activityReasons(SparseVectorView row,
+                                                                bool minimum) const;
+
     /// Propagate a single row. Returns false if infeasibility detected.
     bool propagateRow(Index row);
 
@@ -116,8 +139,16 @@ private:
         Real old_lower;
         Real old_upper;
     };
+    struct Checkpoint {
+        Index changes;
+        Int level;
+    };
     std::vector<BoundChange> changes_;
-    std::vector<Index> checkpoint_stack_;
+    std::vector<Checkpoint> checkpoint_stack_;
+
+    std::optional<BoundReasonTrail> reasons_;
+    Int reason_level_ = 0;
+    Index global_rows_ = 0;
 
     // Propagation queue
     std::vector<bool> row_in_queue_;
@@ -125,9 +156,11 @@ private:
 
     // Optional implication graph for enhanced propagation.
     const ImplicationGraph* implication_graph_ = nullptr;
+    BoundReasonScope implication_scope_;
 
     // Clique table for clique-based propagation (not owned).
     const CliqueTable* clique_table_ = nullptr;
+    BoundReasonScope clique_scope_;
 
     // Objective cutoff row (not owned).
     const ObjectivePropagator* objective_ = nullptr;

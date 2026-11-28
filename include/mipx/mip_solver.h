@@ -485,6 +485,9 @@ public:
     void setConflictsEnabled(bool enabled) { conflicts_enabled_ = enabled; }
     /// Index learned path no-goods in the serial tree. Off by default.
     void setConflictWatchesEnabled(bool enabled) { conflict_watches_enabled_ = enabled; }
+
+    /// Record propagation explanations in the node domains (off by default).
+    void setBoundReasonsEnabled(bool enabled) { bound_reasons_enabled_ = enabled; }
     /// Shorten serial tree no-goods with rechecked LP infeasibility rays. Off by default.
     void setConflictRayShorteningEnabled(bool enabled) {
         conflict_ray_shortening_enabled_ = enabled;
@@ -930,6 +933,7 @@ private:
     bool pre_root_portfolio_enabled_ = true;
     bool conflicts_enabled_ = true;
     bool conflict_watches_enabled_ = false;
+    bool bound_reasons_enabled_ = false;
     bool conflict_ray_shortening_enabled_ = false;
     bool strong_branching_enabled_ = true;
     bool tree_pseudocosts_enabled_ = true;

@@ -20,6 +20,7 @@ add_library(mipx STATIC
     io/lp_reader.cpp
     io/model_reader.cpp
     io/solu_reader.cpp
+    mip/bound_reasons.cpp
     mip/domain.cpp
     mip/implication_graph.cpp
     mip/variable_bounds.cpp
