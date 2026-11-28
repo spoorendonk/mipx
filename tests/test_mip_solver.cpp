@@ -1311,6 +1311,108 @@ TEST_CASE("MipSolver: exact refinement off mode does not evaluate certificate ro
     CHECK(stats.evaluation_work_units == 0.0);
 }
 
+TEST_CASE("MipSolver: root cut propagation carries discrete bounds across cut rounds",
+          "[mip][cuts][domain]") {
+    // The original rows imply no column bound by activity. The first cut
+    // forces x=1, which makes z fractional in the re-solved LP. The next
+    // separation then produces a bound fixing z=1 as well.
+    LpProblem lp;
+    lp.num_cols = 4;
+    lp.obj = {1.0, 0.0, 1.0, 0.0};
+    lp.col_lower.assign(4, 0.0);
+    lp.col_upper.assign(4, 1.0);
+    lp.col_type.assign(4, VarType::Binary);
+    lp.num_rows = 4;
+    lp.row_lower = {1.0, 0.0, -0.5, 0.0};
+    lp.row_upper.assign(4, kInf);
+    lp.matrix = SparseMatrix(4, 4,
+                             {{0, 0, 1.0},
+                              {0, 1, 1.0},
+                              {1, 0, 1.0},
+                              {1, 1, -1.0},
+                              {2, 0, -1.0},
+                              {2, 2, 1.0},
+                              {2, 3, 1.0},
+                              {3, 2, 1.0},
+                              {3, 3, -1.0}});
+    DomainPropagator original_rows;
+    original_rows.load(lp);
+    REQUIRE(original_rows.propagate());
+    CHECK(original_rows.numTightened() == 0);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    solver.load(lp);
+
+    REQUIRE(solver.solve().status == Status::Optimal);
+    CHECK(solver.getCutStats().root_cut_bound_tightenings == 0);
+
+    solver.setRootCutPropagationEnabled(true);
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto result = solver.solve();
+        REQUIRE(result.status == Status::Optimal);
+        CHECK_THAT(result.objective, WithinAbs(2.0, 1e-8));
+        REQUIRE(result.solution.size() == 4);
+        CHECK_THAT(result.solution[0], WithinAbs(1.0, 1e-8));
+        CHECK_THAT(result.solution[2], WithinAbs(1.0, 1e-8));
+        const auto& cuts = solver.getCutStats();
+        CHECK(cuts.root_rounds == 2);
+        CHECK(cuts.root_cut_bound_tightenings == 2);
+        CHECK(cuts.root_cut_bound_tightenings_backed_out == 0);
+        const auto& certificate = solver.getExactRefinementStats();
+        CHECK(certificate.rows_evaluated == lp.num_rows + cuts.root_cuts_added);
+        CHECK(certificate.certificate_passed);
+    }
+}
+
+TEST_CASE("MipSolver: a backed-out root cut batch discards its propagated bounds",
+          "[mip][cuts][domain]") {
+    // An installed x>=1 cut forces x=1 by propagation. The two rows with
+    // free columns imply x<=0.75 jointly, which the LP detects but interval
+    // propagation on either row cannot detect.
+    LpProblem lp;
+    lp.num_cols = 4;
+    lp.obj = {1.0, 0.0, 0.0, 0.0};
+    lp.col_lower = {0.0, 0.0, -kInf, -kInf};
+    lp.col_upper = {1.0, 1.0, kInf, kInf};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous, VarType::Continuous};
+    lp.num_rows = 4;
+    lp.row_lower = {1.0, 0.0, -kInf, -kInf};
+    lp.row_upper = {kInf, kInf, 0.75, 0.0};
+    lp.matrix = SparseMatrix(4, 4,
+                             {{0, 0, 1.0},
+                              {0, 1, 1.0},
+                              {1, 0, 1.0},
+                              {1, 1, -1.0},
+                              {2, 0, 1.0},
+                              {2, 2, 1.0},
+                              {2, 3, -1.0},
+                              {3, 2, -1.0},
+                              {3, 3, 1.0}});
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setRootCutPropagationEnabled(true);
+    solver.setExactRefinementMode(ExactRefinementMode::On);
+    solver.load(lp);
+
+    REQUIRE(solver.solve().status == Status::Infeasible);
+    const auto& cuts = solver.getCutStats();
+    CHECK(cuts.root_rounds_backed_out == 1);
+    CHECK(cuts.root_cuts_added == 0);
+    CHECK(cuts.root_cut_bound_tightenings == 0);
+    CHECK(cuts.root_cut_bound_tightenings_backed_out == 1);
+    const auto& certificate = solver.getExactRefinementStats();
+    CHECK(certificate.rows_evaluated == lp.num_rows);
+    CHECK(certificate.max_col_violation_before == 0.0);
+    CHECK(certificate.certificate_passed);
+}
+
 TEST_CASE("MipSolver: deterministic heuristic mode reproduces with same seed",
           "[mip][heuristics]") {
     auto lp = buildRootFractionalHeuristicMip();

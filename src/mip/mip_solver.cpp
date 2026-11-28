@@ -4716,20 +4716,18 @@ MipResult MipSolver::solveMinimizationOnce() {
         problem_ = std::move(working_problem);
         refreshTreePresolveProfile();
     }
-    // Root reduced-cost fixing tightens problem_ in place, and those bounds are
-    // derived from this solve's incumbent. Keep the pre-fixing bounds so a
-    // second solve() on the same object does not start inside the first
-    // solve's optimality box.
-    std::vector<Real> rc_root_saved_lower;
-    std::vector<Real> rc_root_saved_upper;
+    // Root cut propagation and root reduced-cost fixing can both tighten
+    // problem_ in place. Restore the loaded bounds before a repeated solve.
+    std::vector<Real> saved_root_lower;
+    std::vector<Real> saved_root_upper;
 
     bool problem_restored = false;
     auto restoreProblem = [&]() {
-        if (!rc_root_saved_lower.empty()) {
-            problem_.col_lower = std::move(rc_root_saved_lower);
-            problem_.col_upper = std::move(rc_root_saved_upper);
-            rc_root_saved_lower.clear();
-            rc_root_saved_upper.clear();
+        if (!saved_root_lower.empty()) {
+            problem_.col_lower = std::move(saved_root_lower);
+            problem_.col_upper = std::move(saved_root_upper);
+            saved_root_lower.clear();
+            saved_root_upper.clear();
         }
         if (!using_transformed_problem) {
             return;
@@ -5942,6 +5940,15 @@ MipResult MipSolver::solveMinimizationOnce() {
     lp.setVerbose(false);
     if (cuts_enabled_ && problem_.hasIntegers()) {
         if (root_used_dual || !root_basis.empty()) {
+            if (root_cut_propagation_enabled_ && cut_effort_mode_ != CutEffortMode::Off &&
+                max_cut_rounds_ > 0) {
+                if (root_certificate_problem_ptr == nullptr) {
+                    root_certificate_problem = problem_;
+                    root_certificate_problem_ptr = &root_certificate_problem;
+                }
+                saved_root_lower = problem_.col_lower;
+                saved_root_upper = problem_.col_upper;
+            }
             t0 = std::chrono::steady_clock::now();
             Int cuts_added =
                 runCuttingPlanes(lp, total_lp_iters, total_work, root_certificate_problem_ptr);
@@ -6242,8 +6249,10 @@ MipResult MipSolver::solveMinimizationOnce() {
         // root_reduced_costs is the snapshot taken with root_basis, not a fresh
         // lp.getReducedCosts(): the heuristic portfolio above may have left the
         // solver's cached duals belonging to one of its subproblems.
-        rc_root_saved_lower = problem_.col_lower;
-        rc_root_saved_upper = problem_.col_upper;
+        if (saved_root_lower.empty()) {
+            saved_root_lower = problem_.col_lower;
+            saved_root_upper = problem_.col_upper;
+        }
         std::vector<Index> rc_tightened;
         bool rc_feasible =
             rc_fixer_.applyGlobalFixing(root_reduced_costs, root_primals, root_bound, incumbent,
@@ -6683,6 +6692,19 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
     Real start_obj = lp.getObjective();
     const Index initial_rows = lp.numRows();
     const auto initial_basis = lp.getBasis();
+    struct ColumnBounds {
+        Index col;
+        Real lower;
+        Real upper;
+    };
+    std::vector<ColumnBounds> retained_bound_undo;
+    std::vector<ColumnBounds> proposed_bounds;
+    auto setRootBounds = [&](const ColumnBounds& bound) {
+        problem_.col_lower[bound.col] = bound.lower;
+        problem_.col_upper[bound.col] = bound.upper;
+        certificate_problem->col_lower[bound.col] = bound.lower;
+        certificate_problem->col_upper[bound.col] = bound.upper;
+    };
     Int stagnation_rounds = 0;
     double cut_node_work = 0.0;
 
@@ -6837,6 +6859,26 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
         const auto pre_round_basis = lp.getBasis();
         lp.addRows(starts, col_indices, values, lower, upper);
 
+        proposed_bounds.clear();
+        if (root_cut_propagation_enabled_ && certificate_problem != nullptr) {
+            DomainPropagator propagator;
+            propagator.load(*certificate_problem);
+            // The mirror has exactly the rows in the LP. A full-pass visit
+            // budget bounds the work even if rows keep waking one another.
+            // Leave any propagation contradiction to the regular cut solve
+            // and its back-out path.
+            if (propagator.propagate(certificate_problem->num_rows)) {
+                for (Index j = 0; j < problem_.num_cols; ++j) {
+                    const Real lb = propagator.getLower(j);
+                    const Real ub = propagator.getUpper(j);
+                    if (lb <= ub && (lb > problem_.col_lower[j] || ub < problem_.col_upper[j])) {
+                        proposed_bounds.push_back({j, lb, ub});
+                        lp.setColBounds(j, lb, ub);
+                    }
+                }
+            }
+        }
+
         // A re-solve the deadline stops is backed out below like any other
         // that ends without an optimum. The back-out's own re-solve runs
         // without a limit on purpose: it restores the previous LP's optimal
@@ -6859,10 +6901,24 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             // the safe one to continue from.
             // Should the previous round's LP not re-solve either, go back to
             // the LP the cuts started from, whose point the caller still has.
+            for (const auto& bound : proposed_bounds) {
+                const Index j = bound.col;
+                lp.setColBounds(j, problem_.col_lower[j], problem_.col_upper[j]);
+            }
+            cut_stats_.root_cut_bound_tightenings_backed_out +=
+                static_cast<Int>(proposed_bounds.size());
             const Status restored =
                 backOutCutRows(lp, lp.numRows() - cuts_this_round, pre_round_basis,
                                certificate_problem, total_lp_iters, total_work);
             if (restored != Status::Optimal && total_cuts > 0) {
+                for (auto it = retained_bound_undo.rbegin(); it != retained_bound_undo.rend();
+                     ++it) {
+                    lp.setColBounds(it->col, it->lower, it->upper);
+                    setRootBounds(*it);
+                }
+                cut_stats_.root_cut_bound_tightenings_backed_out +=
+                    static_cast<Int>(retained_bound_undo.size());
+                retained_bound_undo.clear();
                 backOutCutRows(lp, initial_rows, initial_basis, certificate_problem, total_lp_iters,
                                total_work);
                 total_cuts = 0;
@@ -6876,6 +6932,11 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
             break;
         }
 
+        for (const auto& bound : proposed_bounds) {
+            const Index j = bound.col;
+            retained_bound_undo.push_back({j, problem_.col_lower[j], problem_.col_upper[j]});
+            setRootBounds(bound);
+        }
         if (root_cut_recheck_) {
             pool.markInstalled(selected_indices);
         }
@@ -6911,6 +6972,10 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
                 "reopt_work=%.1f policy={%s}\n",
                 round + 1, selected_total, improvement, orthogonality, result.work_units,
                 cut_manager.summarizeState().c_str());
+            if (root_cut_propagation_enabled_) {
+                log_.log("  cut-round %d propagation: tightened=%d bound=%.10e\n", round + 1,
+                         static_cast<Int>(proposed_bounds.size()), log_obj_sign_ * new_obj);
+            }
         }
 
         if (result.work_units > cut_per_round_work_budget_) {
@@ -6978,6 +7043,12 @@ Int MipSolver::runCuttingPlanes(DualSimplexSolver& lp, Int& total_lp_iters, doub
 
     cut_stats_.root_rounds += rounds_done;
     cut_stats_.root_cuts_added += total_cuts;
+    cut_stats_.root_cut_bound_tightenings += static_cast<Int>(retained_bound_undo.size());
+    if (verbose_ && root_cut_propagation_enabled_) {
+        log_.log("Root cut propagation: tightenings=%d backed_out=%d\n",
+                 cut_stats_.root_cut_bound_tightenings,
+                 cut_stats_.root_cut_bound_tightenings_backed_out);
+    }
     root_cut_family_stats_ = total_family_stats;
 
     return total_cuts;

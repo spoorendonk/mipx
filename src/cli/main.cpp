@@ -43,7 +43,8 @@ void printUsage(FILE* out) {
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
                  "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--cut-strengthening|--no-cut-strengthening] "
-                 "[--root-cut-recheck] [--sos2-adjacent-intervals|--sos2-native-branching] "
+                 "[--root-cut-recheck] [--root-cut-propagation] "
+                 "[--sos2-adjacent-intervals|--sos2-native-branching] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
@@ -162,6 +163,7 @@ int main(int argc, char* argv[]) {
     bool balanced_branch_score = false;
     bool cut_strengthening = false;
     bool root_cut_recheck = false;
+    bool root_cut_propagation = false;
     bool sos2_adjacent_intervals = false;
     bool sos2_native_branching = false;
     // Off by default in the solver; a numeric knob left unset keeps the
@@ -307,6 +309,8 @@ int main(int argc, char* argv[]) {
             cut_strengthening = false;
         } else if (arg == "--root-cut-recheck") {
             root_cut_recheck = true;
+        } else if (arg == "--root-cut-propagation") {
+            root_cut_propagation = true;
         } else if (arg == "--sos2-adjacent-intervals") {
             sos2_adjacent_intervals = true;
         } else if (arg == "--sos2-native-branching") {
@@ -703,6 +707,7 @@ int main(int argc, char* argv[]) {
             solver.setBalancedBranchScore(balanced_branch_score);
             solver.setCutStrengthening(cut_strengthening);
             solver.setRootCutRecheck(root_cut_recheck);
+            solver.setRootCutPropagationEnabled(root_cut_propagation);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {
                 solver.setProbingMaxRounds(*probing_rounds);

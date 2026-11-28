@@ -129,6 +129,22 @@ def test_root_feasibility_jump_pass_limit() -> None:
             solver.set_root_feasibility_jump_restarts(passes)
 
 
+def test_root_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
+    path = tmp_path / "root_cut.lp"
+    path.write_text(
+        "Minimize\n obj: x\nSubject To\n r1: x + y >= 1\n r2: x - y >= 0\n"
+        "Binary\n x y\nEnd\n"
+    )
+    solver = mipx.MipSolver()
+    solver.set_verbose(False)
+    solver.set_presolve(False)
+    solver.set_root_cut_propagation_enabled(True)
+    solver.load(mipx.read_lp(str(path)))
+    result = solver.solve()
+    assert result.status == mipx.Status.Optimal
+    assert result.objective == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     "call",
     [
