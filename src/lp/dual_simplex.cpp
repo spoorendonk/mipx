@@ -205,6 +205,7 @@ void DualSimplexSolver::load(const LpProblem& problem) {
 
 bool DualSimplexSolver::loadUntil(const LpProblem& problem, const Deadline& deadline) {
     optimal_basis_current_ = false;
+    pending_edit_refactors_ = 0;  // the edits were the replaced model's
     loaded_ = false;
     has_basis_ = false;
     factors_available_ = false;

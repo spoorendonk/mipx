@@ -56,7 +56,7 @@ foreach(row IN LISTS rows)
 endforeach()
 string(JOIN "\n" data ${rows})
 if(NOT data MATCHES "\n2,dual-warm,[0-9]+,0,")
-    message(FATAL_ERROR "The second dual-warm solve did not start warm")
+    message(FATAL_ERROR "The dual-warm solve of seq 2 did not start warm")
 endif()
 
 file(READ "${STATS}" saved_stats)
@@ -70,3 +70,15 @@ file(READ "${STATS}" retained_stats)
 if(NOT retained_stats STREQUAL saved_stats)
     message(FATAL_ERROR "The rejected replay modified the existing CSV")
 endif()
+
+# The same check covers every pair of output files.
+foreach(pair "--dual-stats-csv;--refactor-csv" "--refactor-csv;--edit-csv")
+    list(GET pair 0 first)
+    list(GET pair 1 second)
+    execute_process(
+        COMMAND "${REPLAY}" "${SEQUENCE}" ${first} "${REFACTOR}" ${second} "${REFACTOR}"
+        RESULT_VARIABLE result ERROR_VARIABLE replay_error)
+    if(NOT result STREQUAL "2" OR NOT replay_error MATCHES "must name different files")
+        message(FATAL_ERROR "The replay must reject ${first} and ${second} on one file")
+    endif()
+endforeach()

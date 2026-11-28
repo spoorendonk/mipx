@@ -509,13 +509,15 @@ public:
     /// them (#517), summed over all of its passes (cold retry, unscaled
     /// clean-up included). Each counts an attempt, so one that fails or
     /// throws is counted too. edits counts those of the edit calls since
-    /// the solve before it (removeCols swapping a basic column out).
+    /// the solve before it or the last load() (removeCols swapping a basic
+    /// column out).
     struct RefactorStats {
         // Each pass's first factorization of the basis it starts from: the
         // warm basis after the edits, or a cold start's crash basis.
         Int start = 0;
         // Scheduled: the LU's update count reached lu_update_limit, or its
-        // Forrest-Tomlin updates cost twice the base factors (small bases).
+        // Forrest-Tomlin updates cost more than twice the base factors
+        // (small bases only).
         Int update_limit = 0;
         Int update_cost = 0;
         // Numerical trouble: an updated U entry passed the growth limit; a

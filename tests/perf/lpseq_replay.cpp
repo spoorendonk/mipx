@@ -24,6 +24,7 @@
 #include "mipx/lp_problem.h"
 #include "mipx/pdlp.h"
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -399,54 +400,52 @@ int run(const Options& opt) {
         arms.push_back(std::move(a));
     }
 
+    // Every output file must be a file of its own, checked before any is
+    // opened and again once all are, as a dangling symlink can start
+    // resolving to a file just created.
+    namespace fs = std::filesystem;
+    const std::array<const std::string*, 4> outputs = {&opt.csv, &opt.dual_stats_csv,
+                                                       &opt.refactor_csv, &opt.edit_csv};
+    const auto same_existing_file = [](const std::string& a, const std::string& b) {
+        return !a.empty() && !b.empty() && fs::exists(a) && fs::exists(b) && fs::equivalent(a, b);
+    };
+    const auto same_file = [&](const std::string& a, const std::string& b) {
+        return !a.empty() && !b.empty() &&
+               (fs::weakly_canonical(fs::absolute(a)) == fs::weakly_canonical(fs::absolute(b)) ||
+                same_existing_file(a, b));
+    };
+    const auto check_distinct = [&](const auto& same) {
+        for (std::size_t i = 0; i < outputs.size(); ++i) {
+            for (std::size_t j = i + 1; j < outputs.size(); ++j) {
+                if (same(*outputs[i], *outputs[j])) {
+                    lpseq::fail(
+                        "--csv, --dual-stats-csv, --refactor-csv and --edit-csv must name "
+                        "different files");
+                }
+            }
+        }
+    };
+    check_distinct(same_file);
+    const auto open = [](std::ofstream& f, const std::string& path) {
+        if (path.empty()) {
+            return;
+        }
+        f.open(path);
+        if (!f) {
+            lpseq::fail(path + ": cannot write");
+        }
+    };
     std::ofstream dual_stats;
     std::ofstream refactor_csv;
-    {
-        namespace fs = std::filesystem;
-        const auto same_existing_file = [](const std::string& a, const std::string& b) {
-            return !a.empty() && !b.empty() && fs::exists(a) && fs::exists(b) &&
-                   fs::equivalent(a, b);
-        };
-        const auto same_file = [&](const std::string& a, const std::string& b) {
-            return !a.empty() && !b.empty() &&
-                   (fs::weakly_canonical(fs::absolute(a)) ==
-                        fs::weakly_canonical(fs::absolute(b)) ||
-                    same_existing_file(a, b));
-        };
-        constexpr auto kSameOutputFile =
-            "--csv, --dual-stats-csv and --refactor-csv must name different files";
-        if (same_file(opt.csv, opt.dual_stats_csv) || same_file(opt.csv, opt.refactor_csv) ||
-            same_file(opt.dual_stats_csv, opt.refactor_csv)) {
-            lpseq::fail(kSameOutputFile);
-        }
-        const auto open = [&](std::ofstream& f, const std::string& path) {
-            if (path.empty()) {
-                return;
-            }
-            f.open(path);
-            if (!f) {
-                lpseq::fail(path + ": cannot write");
-            }
-        };
-        open(dual_stats, opt.dual_stats_csv);
-        open(refactor_csv, opt.refactor_csv);
-        // A dangling symlink can start resolving to a stats file we just created.
-        if (same_existing_file(opt.csv, opt.dual_stats_csv) ||
-            same_existing_file(opt.csv, opt.refactor_csv) ||
-            same_existing_file(opt.dual_stats_csv, opt.refactor_csv)) {
-            lpseq::fail(kSameOutputFile);
-        }
-    }
-
+    std::ofstream edit_csv;
     std::ofstream csv_file;
-    std::ostream* out = &std::cout;
-    if (!opt.csv.empty()) {
-        csv_file.open(opt.csv);
-        if (!csv_file) {
-            lpseq::fail(opt.csv + ": cannot write");
-        }
-        out = &csv_file;
-    }
+    open(dual_stats, opt.dual_stats_csv);
+    open(refactor_csv, opt.refactor_csv);
+    open(edit_csv, opt.edit_csv);
+    open(csv_file, opt.csv);
+    check_distinct(same_existing_file);
+
+    std::ostream* out = csv_file.is_open() ? static_cast<std::ostream*>(&csv_file) : &std::cout;
     *out << lpseq::kCsvHeader;
     if (dual_stats.is_open()) {
         dual_stats << "seq,arm,added_columns,dual_pivots,primal_pivots,primal_degenerate_pivots,"
@@ -456,13 +455,8 @@ int run(const Options& opt) {
         refactor_csv << kRefactorCsvHeader;
     }
 
-    std::ofstream edit_csv;
     EditLog log;
-    if (!opt.edit_csv.empty()) {
-        edit_csv.open(opt.edit_csv);
-        if (!edit_csv) {
-            lpseq::fail(opt.edit_csv + ": cannot write");
-        }
+    if (edit_csv.is_open()) {
         edit_csv << "after,arm,op,items,basic,seconds\n";
         log.out = &edit_csv;
     }
