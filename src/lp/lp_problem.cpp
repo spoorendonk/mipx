@@ -27,6 +27,9 @@ Index addColumn(LpProblem& problem, Real obj, Real lower, Real upper, VarType ty
     problem.col_lower.push_back(lower);
     problem.col_upper.push_back(upper);
     problem.col_type.push_back(type);
+    for (Index j = static_cast<Index>(problem.col_names.size()); j < idx; ++j) {
+        problem.col_names.push_back("C" + std::to_string(j));
+    }
     problem.col_names.push_back(name);
     problem.col_semi_lower.push_back(semi_lower);
     return idx;
@@ -37,6 +40,9 @@ Index addRow(LpProblem& problem, std::vector<Triplet>& trips, std::span<const In
     const Index row = problem.num_rows++;
     problem.row_lower.push_back(lower);
     problem.row_upper.push_back(upper);
+    for (Index i = static_cast<Index>(problem.row_names.size()); i < row; ++i) {
+        problem.row_names.push_back("R" + std::to_string(i));
+    }
     problem.row_names.push_back(name);
     for (Index k = 0; k < static_cast<Index>(indices.size()); ++k) {
         if (std::abs(values[k]) <= 1e-16)

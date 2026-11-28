@@ -1177,16 +1177,49 @@ TEST_CASE("Small nonzero SOS2 members can change the optimum", "[lp_problem][fea
 
 TEST_CASE("MPS export preserves SOS2 constraints in a lowered native model",
           "[lp_problem][features][io]") {
-    const auto lp = readMps(testDataDir() + "/mps_sos.mps");
+    LpProblem lp;
+    lp.name = "sos2";
+    lp.sense = Sense::Maximize;
+    lp.num_cols = 4;
+    lp.obj = {1.0, 0.0, 0.0, 0.5};
+    lp.col_lower.assign(4, 0.0);
+    lp.col_upper.assign(4, 1.0);
+    lp.col_type.assign(4, VarType::Continuous);
+    lp.col_names = {"endpoint"};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.matrix = SparseMatrix(1, lp.num_cols, {{0, 1, 1.0}});
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2, 3}, {}, "sos2"}};
     const auto native = linearizeModelFeatures(lp, Sos2Formulation::Native);
     const auto path = std::filesystem::temp_directory_path() /
                       ("mipx_native_sos2_" + std::to_string(::getpid()) + ".mps");
     writeMps(path.string(), native);
     const auto reread = readMps(path.string());
     std::filesystem::remove(path);
+    CHECK(std::ranges::find(reread.col_names, "endpoint") != reread.col_names.end());
+    CHECK(std::ranges::find(reread.col_names, "C3") != reread.col_names.end());
+    CHECK(std::ranges::find(reread.row_names, "R0") != reread.row_names.end());
     const auto result = solveFeatureModel(reread);
     REQUIRE(result.status == Status::Optimal);
-    CHECK_THAT(result.objective, WithinAbs(4.0, 1e-7));
+    CHECK_THAT(result.objective, WithinAbs(1.0, 1e-7));
+}
+
+TEST_CASE("Presolve stopped at its deadline returns an identity postsolve",
+          "[lp_problem][features]") {
+    LpProblem lp;
+    lp.num_cols = 1;
+    lp.obj = {1.0};
+    lp.col_lower = {2.0};
+    lp.col_upper = {2.0};
+    lp.col_type = {VarType::Continuous};
+    lp.matrix = SparseMatrix(0, lp.num_cols);
+    Presolver presolver;
+    presolver.setDeadline(Deadline::after(0.0));
+    const auto stopped = presolver.presolve(lp);
+    CHECK(stopped.num_cols == 1);
+    CHECK_FALSE(presolver.isInfeasible());
+    CHECK(presolver.postsolve({2.0}) == std::vector<Real>{2.0});
 }
 
 // ---------------------------------------------------------------------------

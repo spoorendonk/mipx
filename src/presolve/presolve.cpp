@@ -3770,6 +3770,9 @@ Index Presolver::probingPass(LpProblem& lp, const std::vector<bool>& col_removed
     config.max_rounds = options_.probing_max_rounds;
     config.max_probes_per_round = options_.probing_max_probes_per_round;
     config.time_limit = options_.probing_time_limit;
+    if (deadline_.isSet()) {
+        config.time_limit = std::min(config.time_limit, deadline_.remainingSeconds());
+    }
     // Equivalence and domination output has no consumer in presolve yet.
     config.detect_equivalences = false;
     config.detect_dominated = false;
@@ -4458,7 +4461,15 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     stats_.time_seconds =
         std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count();
 
-    return deadline_.passed() ? problem : buildReducedProblem(lp, col_removed, row_removed);
+    if (deadline_.passed()) {
+        postsolve_stack_.clear();
+        col_mapping_.resize(problem.num_cols);
+        std::iota(col_mapping_.begin(), col_mapping_.end(), 0);
+        stats_ = {};
+        infeasible_ = false;
+        return problem;
+    }
+    return buildReducedProblem(lp, col_removed, row_removed);
 }
 
 // Activity bound tightening and singleton rows write the bounds they derive
