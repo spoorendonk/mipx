@@ -149,6 +149,14 @@ Real ReliabilityBranching::safeDownCost(Index var) const {
     return downPseudoCost(var);
 }
 
+Real ReliabilityBranching::directionalScore(Real down_gain, Real up_gain) const {
+    const Real larger_gain = std::max(down_gain, up_gain);
+    if (!balanced_score_) {
+        return larger_gain;
+    }
+    return 0.8 * std::min(down_gain, up_gain) + 0.2 * larger_gain;
+}
+
 Real ReliabilityBranching::blendScore(Real frac, Real pseudo_score) {
     const Real frac_term = 0.5 - std::abs(frac - 0.5);
     const Real pseudo_term = std::log1p(std::max<Real>(0.0, pseudo_score));
@@ -191,7 +199,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
         c.down_dist = down_dist;
         c.up_dist = up_dist;
         c.reliable = isReliable(j);
-        c.pseudo_score = std::max(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
+        c.pseudo_score = directionalScore(down_dist * safeDownCost(j), up_dist * safeUpCost(j));
         c.prefilter_score = blendScore(c.frac, c.pseudo_score);
         candidates.push_back(c);
     }
@@ -307,10 +315,11 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
                 lp.setColBounds(c.var, orig_lb, orig_ub);
 
                 if (up.status == Status::TimeLimit) {
-                    // As for the down probe; its sample stands, and a down
-                    // side proven infeasible still scores the candidate.
-                    if (down_gain >= kStrongInfeasibleGain && down_gain > best_strong_score) {
-                        best_strong_score = down_gain;
+                    // The down sample stands. A gain of this size can
+                    // compete even using zero for the unobserved up gain.
+                    const Real lower_score = directionalScore(down_gain, 0.0);
+                    if (down_gain >= kStrongInfeasibleGain && lower_score > best_strong_score) {
+                        best_strong_score = lower_score;
                         best_strong = c.var;
                     }
                     break;
@@ -331,7 +340,7 @@ BranchingSelection ReliabilityBranching::select(DualSimplexSolver& lp, const LpP
             }
             --probe_budget;
 
-            const Real strong_score = std::max(down_gain, up_gain);
+            const Real strong_score = directionalScore(down_gain, up_gain);
             if (strong_score > best_strong_score) {
                 best_strong_score = strong_score;
                 best_strong = c.var;

@@ -175,6 +175,122 @@ TEST_CASE("ReliabilityBranching updates pseudocost reliability counters", "[bran
     CHECK_THAT(branching.upPseudoCost(1), Catch::Matchers::WithinAbs(4.0, 1e-12));
 }
 
+TEST_CASE("Balanced branch scoring prefers gains in both pseudocost directions", "[branching]") {
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    const std::vector<Real> primals = {0.5, 0.5};
+    DualSimplexSolver solver;
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setReliabilityThreshold(1);
+    branching.updatePseudoCost(0, false, 2.0);
+    branching.updatePseudoCost(0, true, 28.0);
+    branching.updatePseudoCost(1, false, 8.0);
+    branching.updatePseudoCost(1, true, 8.0);
+
+    BranchingTelemetry telemetry;
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry)
+              .variable == 0);
+    branching.setBalancedScore(true);
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, false, telemetry)
+              .variable == 1);
+    CHECK(telemetry.pseudocost_hits == 2);
+    CHECK(telemetry.strong_branch_probes == 0);
+}
+
+TEST_CASE("Balanced branch scoring prefers gains in both strong probes", "[branching]") {
+    LpProblem lp;
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 4;
+    lp.obj = {0.0, 0.0, 1.0, 1.0};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous, VarType::Continuous};
+    lp.col_lower = {0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, kInf, kInf};
+    lp.num_rows = 4;
+    // The two epigraph variables drive x and y to 0.5 at the root.
+    // Fixing x costs 1 down and 14 up. Fixing y costs 4 in either direction.
+    lp.row_lower = {1.0, -14.0, 4.0, -4.0};
+    lp.row_upper.assign(4, kInf);
+    lp.matrix = SparseMatrix(4, 4,
+                             std::vector<Triplet>{{0, 0, 2.0},
+                                                  {0, 2, 1.0},
+                                                  {1, 0, -28.0},
+                                                  {1, 2, 1.0},
+                                                  {2, 1, 8.0},
+                                                  {2, 3, 1.0},
+                                                  {3, 1, -8.0},
+                                                  {3, 3, 1.0}});
+
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    const auto root = solver.solve();
+    REQUIRE(root.status == Status::Optimal);
+    const auto primals = solver.getPrimalValues();
+    REQUIRE_THAT(primals[0], Catch::Matchers::WithinAbs(0.5, 1e-8));
+    REQUIRE_THAT(primals[1], Catch::Matchers::WithinAbs(0.5, 1e-8));
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    BranchingTelemetry telemetry;
+    CHECK(branching
+              .select(solver, lp, primals, lp.col_lower, lp.col_upper, root.objective, true,
+                      telemetry)
+              .variable == 0);
+    branching.reset(lp.num_cols);
+    branching.setBalancedScore(true);
+    CHECK(branching
+              .select(solver, lp, primals, lp.col_lower, lp.col_upper, root.objective, true,
+                      telemetry)
+              .variable == 1);
+    CHECK(telemetry.strong_branch_probes == 8);
+}
+
+TEST_CASE("Balanced branch scoring retains a strong down gain when the up probe stops",
+          "[branching][time_limit]") {
+    class InterruptedProbes : public DualSimplexSolver {
+    public:
+        LpResult solve() override { return results_.at(next_++); }
+
+    private:
+        std::size_t next_ = 0;
+        const std::vector<LpResult> results_ = {{Status::Optimal, 10.0},
+                                                {Status::Optimal, 10.0},
+                                                {Status::Infeasible},
+                                                {Status::TimeLimit}};
+    };
+
+    LpProblem lp;
+    lp.num_cols = 2;
+    lp.obj = {0.0, 0.0};
+    lp.col_type = {VarType::Binary, VarType::Binary};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {1.0, 1.0};
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {1.0};
+    lp.matrix = SparseMatrix(1, 2, std::vector<Triplet>{{0, 0, 1.0}, {0, 1, 1.0}});
+
+    InterruptedProbes solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    REQUIRE(solver.DualSimplexSolver::solve().status == Status::Optimal);
+
+    ReliabilityBranching branching;
+    branching.reset(lp.num_cols);
+    branching.setBalancedScore(true);
+    BranchingTelemetry telemetry;
+    const std::vector<Real> primals = {0.5, 0.5};
+    CHECK(branching.select(solver, lp, primals, lp.col_lower, lp.col_upper, 0.0, true, telemetry)
+              .variable == 1);
+    CHECK(telemetry.strong_branch_probes == 4);
+    CHECK(branching.downReliability(1) == 1);
+    CHECK(branching.upReliability(1) == 0);
+}
+
 TEST_CASE("ReliabilityBranching learns pseudocosts from solved children", "[branching]") {
     // Issue #199: a child's LP gain over its parent is a pseudocost sample.
     // No strong branching happens here at all, so any change in the

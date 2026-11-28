@@ -101,6 +101,7 @@ public:
     ReliabilityBranching() = default;
 
     void reset(Index num_cols);
+    void setBalancedScore(bool enabled) { balanced_score_ = enabled; }
     void setReliabilityThreshold(Int t) { reliability_threshold_ = std::max<Int>(1, t); }
     void setStrongBranchMaxCandidates(Int c) {
         strong_branch_max_candidates_ = std::max<Int>(1, c);
@@ -163,6 +164,7 @@ private:
 
     [[nodiscard]] Real safeUpCost(Index var) const;
     [[nodiscard]] Real safeDownCost(Index var) const;
+    [[nodiscard]] Real directionalScore(Real down_gain, Real up_gain) const;
     [[nodiscard]] static Real blendScore(Real frac, Real pseudo_score);
 
     const SymmetryManager* symmetry_manager_ = nullptr;
@@ -183,6 +185,7 @@ private:
     Int strong_branch_probe_budget_ = kDefaultStrongBranchProbeBudget;  // Directional probes.
     Int strong_branch_iter_limit_ = 60;
     Real pseudocost_fallback_ = 1.0;
+    bool balanced_score_ = false;
     static constexpr Real kStrongInfeasibleGain = 1e4;
 };
 

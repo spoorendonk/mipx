@@ -407,6 +407,9 @@ public:
     /// Turn strong branching off: branching then rests on pseudocosts alone,
     /// learned from the tree. Mainly for tests and experiments.
     void setStrongBranchingEnabled(bool enabled) { strong_branching_enabled_ = enabled; }
+    /// Give the weaker branch direction more weight in reliability branching.
+    /// Off by default, which scores a branch by its larger directional gain.
+    void setBalancedBranchScore(bool enabled) { branching_rule_.setBalancedScore(enabled); }
     /// Learn pseudocosts from the gains of solved child nodes (#199). On by
     /// default; off restores the search where only strong-branch probes feed
     /// pseudocosts, as an A/B switch for benchmarking.

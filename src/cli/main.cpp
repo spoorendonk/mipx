@@ -38,6 +38,7 @@ void printUsage(FILE* out) {
                  "[--objective-propagation|--no-objective-propagation] "
                  "[--objective-integrality|--no-objective-integrality] "
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
+                 "[--balanced-branch-score|--no-balanced-branch-score] "
                  "[--cut-strengthening|--no-cut-strengthening] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
@@ -146,6 +147,7 @@ int main(int argc, char* argv[]) {
     bool objective_propagation = false;
     bool objective_integrality = false;
     bool tree_pseudocosts = true;
+    bool balanced_branch_score = false;
     bool cut_strengthening = false;
     // Off by default in the solver; a numeric knob left unset keeps the
     // solver's own default, so a run without these flags is unchanged.
@@ -272,6 +274,10 @@ int main(int argc, char* argv[]) {
             tree_pseudocosts = true;
         } else if (arg == "--no-tree-pseudocosts") {
             tree_pseudocosts = false;
+        } else if (arg == "--balanced-branch-score") {
+            balanced_branch_score = true;
+        } else if (arg == "--no-balanced-branch-score") {
+            balanced_branch_score = false;
         } else if (arg == "--cut-strengthening") {
             cut_strengthening = true;
         } else if (arg == "--no-cut-strengthening") {
@@ -641,6 +647,7 @@ int main(int argc, char* argv[]) {
             solver.setObjectivePropagationEnabled(objective_propagation);
             solver.setObjectiveIntegralityEnabled(objective_integrality);
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
+            solver.setBalancedBranchScore(balanced_branch_score);
             solver.setCutStrengthening(cut_strengthening);
             solver.setProbingEnabled(probing_enabled);
             if (probing_rounds) {
@@ -685,14 +692,14 @@ int main(int argc, char* argv[]) {
                 "conflicts=%s tree_presolve=%s tree_presolve_min_frac=%d "
                 "tree_presolve_freq=%d tree_presolve_auto=%s tree_cuts=%s "
                 "cut_strengthening=%s objective_propagation=%s objective_integrality=%s "
-                "tree_pseudocosts=%s\n",
+                "tree_pseudocosts=%s balanced_branch_score=%s\n",
                 parallel_mode_name, static_cast<unsigned long long>(heuristic_seed), num_threads,
                 search_profile_name, conflicts_enabled ? "on" : "off",
                 tree_presolve_enabled ? "on" : "off", tree_presolve_min_frac,
                 tree_presolve_depth_frequency, tree_presolve_auto ? "on" : "off",
                 tree_cuts_enabled ? "on" : "off", cut_strengthening ? "on" : "off",
                 objective_propagation ? "on" : "off", objective_integrality ? "on" : "off",
-                tree_pseudocosts ? "on" : "off");
+                tree_pseudocosts ? "on" : "off", balanced_branch_score ? "on" : "off");
 
             if (result.status == mipx::Status::Optimal && result.gap_limit_reached) {
                 log.log("Status: Gap limit\n");
