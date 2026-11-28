@@ -206,4 +206,9 @@ private:
 /// Left child: x_j <= floor(branch_val), right child: x_j >= ceil(branch_val).
 std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val);
 
+/// Split a violated SOS2 at an interior position. Both sides keep that position.
+std::vector<BnbNode> createSos2Children(BnbNode parent, std::span<const Index> members,
+                                        std::size_t split, std::span<const Real> lower,
+                                        std::span<const Real> upper);
+
 }  // namespace mipx

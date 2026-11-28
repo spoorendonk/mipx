@@ -6,6 +6,7 @@
 #include <limits>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mipx {
@@ -60,6 +61,9 @@ struct LpProblem {
 
     Real obj_offset = 0.0;
 
+    /// Ordered SOS2 member columns retained for native MIP search after lowering.
+    std::vector<std::vector<Index>> native_sos2;
+
     /// Returns true if the problem has any integer or binary variables.
     [[nodiscard]] bool hasIntegers() const;
 };
@@ -75,6 +79,16 @@ LpProblem linearizeModelFeatures(const LpProblem& problem);
 
 /// Optionally use adjacent interval selectors for SOS2 sets.
 LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_intervals);
+
+enum class Sos2Formulation { Pairwise, AdjacentIntervals, Native };
+LpProblem linearizeModelFeatures(const LpProblem& problem, Sos2Formulation sos2_formulation);
+
+inline constexpr Real kSos2ZeroTolerance = 1e-7;
+
+/// First and last active positions in a weight-ordered set, or size() for no support.
+std::pair<std::size_t, std::size_t> sos2Support(const LpProblem& problem,
+                                                std::span<const Index> members,
+                                                std::span<const Real> values);
 
 /// Round the bounds of each Integer and Binary column in to the nearest
 /// integers inside them (within @p tol), so no reduction or search step ever

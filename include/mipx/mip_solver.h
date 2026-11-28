@@ -283,6 +283,8 @@ public:
     // Parameter setters.
     /// Use adjacent interval selectors when linearizing SOS2 sets on subsequent loads.
     void setSos2AdjacentIntervals(bool enabled) { sos2_adjacent_intervals_ = enabled; }
+    /// Branch directly on SOS2 sets on subsequent loads. Takes precedence over selectors.
+    void setSos2NativeBranching(bool enabled) { sos2_native_branching_ = enabled; }
     void setNodeLimit(Int limit) { node_limit_ = limit; }
     void setTimeLimit(double seconds) { time_limit_ = seconds; }
     void setGapTolerance(Real tol) { gap_tol_ = tol; }
@@ -600,6 +602,7 @@ private:
     /// The solve proper, on a minimization: solve() negates a maximization
     /// into one before calling it and converts the result back.
     MipResult solveMinimization();
+    MipResult confirmNativeSos2Unbounded(MipResult relaxation);
     /// One solve of the minimization; solveMinimization() checks its answer.
     MipResult solveMinimizationOnce();
 
@@ -759,6 +762,7 @@ private:
 
     // Parameters.
     bool sos2_adjacent_intervals_ = false;
+    bool sos2_native_branching_ = false;
     Int node_limit_ = 1000000;
     double time_limit_ = 3600.0;
     // Start of the current solveMinimizationOnce(): with time_limit_, the one

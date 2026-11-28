@@ -566,7 +566,7 @@ Index Presolver::removeFixedVariables(LpProblem& lp, std::vector<bool>& col_remo
     Index changes = 0;
 
     for (Index j : dirty_cols) {
-        if (col_removed[j]) {
+        if (col_removed[j] || isSos2Member(j)) {
             continue;
         }
         ++stats_.cols_examined;
@@ -808,7 +808,7 @@ Index Presolver::removeSingletonCols(LpProblem& lp, std::vector<bool>& col_remov
     Index changes = 0;
 
     for (Index j : dirty_cols) {
-        if (col_removed[j]) {
+        if (col_removed[j] || isSos2Member(j)) {
             continue;
         }
         ++stats_.cols_examined;
@@ -1014,7 +1014,8 @@ Index Presolver::substituteFreeColSingletons(LpProblem& lp, std::vector<bool>& c
     Index changes = 0;
 
     for (Index j : dirty_cols) {
-        if (col_removed[j] || col_active_nnz[j] != 1 || lp.col_type[j] != VarType::Continuous) {
+        if (col_removed[j] || isSos2Member(j) || col_active_nnz[j] != 1 ||
+            lp.col_type[j] != VarType::Continuous) {
             continue;
         }
         ++stats_.cols_examined;
@@ -1150,8 +1151,8 @@ Index Presolver::removeZeroCostSingletons(LpProblem& lp, std::vector<bool>& col_
     Index changes = 0;
 
     for (Index j : dirty_cols) {
-        if (col_removed[j] || col_active_nnz[j] != 1 || lp.col_type[j] != VarType::Continuous ||
-            lp.obj[j] != 0.0) {
+        if (col_removed[j] || isSos2Member(j) || col_active_nnz[j] != 1 ||
+            lp.col_type[j] != VarType::Continuous || lp.obj[j] != 0.0) {
             continue;
         }
         ++stats_.cols_examined;
@@ -1303,7 +1304,7 @@ Index Presolver::aggregateDoubletonEqualities(LpProblem& lp, std::vector<bool>& 
 
         auto candidateFeasible = [&](Index elim_col, Index keep_col, Real a_elim, Real a_keep,
                                      Index& score) -> bool {
-            if (std::abs(a_elim) <= kTol || std::abs(a_keep) <= kTol) {
+            if (isSos2Member(elim_col) || std::abs(a_elim) <= kTol || std::abs(a_keep) <= kTol) {
                 return false;
             }
             score = col_active_nnz[elim_col];
@@ -1661,7 +1662,8 @@ Index Presolver::aggregateImpliedFreeColumns(LpProblem& lp, std::vector<bool>& c
             continue;
         }
         for (const auto [j, a] : work_->row(i)) {
-            if (col_removed[j] || std::abs(a) <= kTol || lp.col_type[j] != VarType::Continuous) {
+            if (col_removed[j] || isSos2Member(j) || std::abs(a) <= kTol ||
+                lp.col_type[j] != VarType::Continuous) {
                 continue;
             }
             if (free_status[j] < 0) {
@@ -2167,7 +2169,7 @@ Index Presolver::removeForcingRows(LpProblem& lp, std::vector<bool>& col_removed
 
             const Real fix_value = force_to_min ? ((a > 0.0) ? lp.col_lower[j] : lp.col_upper[j])
                                                 : ((a > 0.0) ? lp.col_upper[j] : lp.col_lower[j]);
-            if (std::isinf(fix_value)) {
+            if (std::isinf(fix_value) || isSos2Member(j)) {
                 can_fix_all = false;
                 break;
             }
@@ -3195,7 +3197,7 @@ Index Presolver::removeEmptyColumns(LpProblem& lp, std::vector<bool>& col_remove
     Index changes = 0;
 
     for (Index j : dirty_cols) {
-        if (col_removed[j]) {
+        if (col_removed[j] || isSos2Member(j)) {
             continue;
         }
         ++stats_.cols_examined;
@@ -3550,8 +3552,8 @@ Index Presolver::removeParallelCols(LpProblem& lp, std::vector<bool>& col_remove
     // buckets hold one column.
     std::vector<Member> all;
     for (Index j = 0; j < lp.num_cols; ++j) {
-        if (col_removed[j] || col_active_nnz[j] == 0 || lp.col_type[j] != VarType::Continuous ||
-            lp.col_lower[j] > lp.col_upper[j]) {
+        if (col_removed[j] || isSos2Member(j) || col_active_nnz[j] == 0 ||
+            lp.col_type[j] != VarType::Continuous || lp.col_lower[j] > lp.col_upper[j]) {
             continue;
         }
         Real a = 0.0;
@@ -4080,6 +4082,13 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
     // Work on a copy.
     LpProblem lp = problem;
     orig_num_cols_ = lp.num_cols;
+    const bool native_sos2 = !lp.native_sos2.empty();
+    sos2_member_.assign(native_sos2 ? lp.num_cols : 0, false);
+    for (const auto& members : lp.native_sos2) {
+        for (Index j : members) {
+            sos2_member_[j] = true;
+        }
+    }
     // lp.matrix stays the input's; the working matrix carries every change.
     PresolveMatrix work(lp.matrix);
     struct WorkScope {
@@ -4122,8 +4131,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         return changes;
     };
 
-    const bool lp_only = std::none_of(lp.col_type.begin(), lp.col_type.end(),
-                                      [](VarType t) { return t != VarType::Continuous; });
+    const bool lp_only = !native_sos2 && !lp.hasIntegers();
     // Dominated columns read LP duals, so they run on an LP only (#376).
     const bool dominated_columns = options_.enable_dominated_columns && lp_only;
     // HiGHS runs dependent equations on an LP only, too.
@@ -4276,7 +4284,9 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
             total_changes += ch;
         }
 
-        if (options_.enable_dual_fixing) {
+        // These reductions can trade a change in one column for changes in SOS2
+        // columns, even when the column they fix is outside every set.
+        if (options_.enable_dual_fixing && !native_sos2) {
             ch = timed(stats_.dual_fixing_seconds, [&] {
                 return dualFixing(lp, col_removed, row_removed, row_active_nnz, col_active_nnz,
                                   dirty_col_list, next_dirty_rows, next_dirty_cols);
@@ -4317,8 +4327,8 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
 
         // Scan once the other reductions have stalled. Columns that appeared
         // in an eliminated equation and another row can become singletons.
-        if (options_.enable_mip_singleton_stuffing && options_.enable_dual_fixing && !lp_only &&
-            total_changes == 0 && !infeasible_) {
+        if (options_.enable_mip_singleton_stuffing && options_.enable_dual_fixing && !native_sos2 &&
+            !lp_only && total_changes == 0 && !infeasible_) {
             ch = timed(stats_.mip_singleton_stuffing_seconds, [&] {
                 return stuffMipSingletonColumns(lp, col_removed, row_removed, row_active_nnz,
                                                 col_active_nnz, next_dirty_cols);
@@ -4429,8 +4439,7 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
         }
     }
 
-    if (!infeasible_ && std::none_of(lp.col_type.begin(), lp.col_type.end(),
-                                     [](VarType t) { return t != VarType::Continuous; })) {
+    if (!infeasible_ && lp_only) {
         if (options_.enable_dominated_columns) {
             stats_.implied_row_dual_bounds = timed(stats_.dual_bounds_seconds, [&] {
                 DualBounds bounds;
@@ -4671,6 +4680,12 @@ LpProblem Presolver::buildReducedProblem(const LpProblem& lp, const std::vector<
     result.obj_offset = lp.obj_offset;
     result.num_cols = new_cols;
     result.num_rows = new_rows;
+    result.native_sos2 = lp.native_sos2;
+    for (auto& members : result.native_sos2) {
+        for (Index& j : members) {
+            j = orig_to_new[j];
+        }
+    }
 
     // Copy column data.
     result.obj.resize(new_cols);

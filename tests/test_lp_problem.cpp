@@ -5,8 +5,11 @@
 #include "test_paths.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -1013,6 +1016,137 @@ TEST_CASE("SOS2 interval selectors preserve support and tighten the LP", "[lp_pr
             CHECK_THAT(result.objective, WithinAbs(-3.0, 1e-6));
         }
     }
+}
+
+TEST_CASE("Native SOS2 matches an adjacent-window oracle with overlapping sets",
+          "[lp_problem][features]") {
+    LpProblem lp;
+    lp.num_cols = 7;
+    lp.obj = {0.0, -4.0, 0.0, -7.0, -0.5, -2.5, -1.2};
+    lp.col_lower = {2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    lp.col_upper = {2.0, 1.0, 0.0, 1.0, 1.0, 1.0, 2.0};
+    lp.col_type.assign(lp.num_cols, VarType::Continuous);
+    lp.col_type[5] = VarType::Binary;
+    lp.col_type[6] = VarType::Integer;
+    lp.num_rows = 1;
+    lp.row_lower = {-kInf};
+    lp.row_upper = {3.0};
+    lp.matrix = SparseMatrix(1, lp.num_cols, {{0, 3, 1.0}, {0, 6, 2.0}});
+    const auto type = LpProblem::SosConstraint::Type::Sos2;
+    lp.sos_constraints = {{type, {3, 2, 1}, {2.0, 1.0, 0.0}, "first"},
+                          {type, {4, 5, 3}, {1.0, 2.0, 1.0}, "second"}};
+    // The second set breaks equal weights by original column number.
+    constexpr std::array ordered = {std::array{1, 2, 3}, std::array{3, 4, 5}};
+
+    SECTION("Fixed zero in the middle still separates the endpoints") {}
+    SECTION("One branch would zero a member with a positive lower bound") {
+        lp.col_lower[1] = 0.5;
+    }
+    SECTION("Both branches would zero a member with a positive lower bound") {
+        lp.col_lower[1] = 0.5;
+        lp.col_lower[3] = 0.5;
+    }
+
+    Real expected = kInf;
+    for (Index exclude_first : {ordered[0].front(), ordered[0].back()}) {
+        for (Index exclude_second : {ordered[1].front(), ordered[1].back()}) {
+            if (lp.col_lower[exclude_first] > 0.0 || lp.col_lower[exclude_second] > 0.0) {
+                continue;
+            }
+            auto window = lp;
+            window.sos_constraints.clear();
+            window.col_upper[exclude_first] = window.col_upper[exclude_second] = 0.0;
+            const auto result = solveFeatureModel(window);
+            if (result.status == Status::Optimal) {
+                expected = std::min(expected, result.objective);
+            } else {
+                CHECK(result.status == Status::Infeasible);
+            }
+        }
+    }
+    const auto legacy = solveFeatureModel(lp);
+    CHECK(legacy.status == (expected == kInf ? Status::Infeasible : Status::Optimal));
+    if (expected != kInf) {
+        CHECK_THAT(legacy.objective, WithinAbs(expected, 1e-7));
+    }
+
+    const auto holds_support = [&](std::span<const Real> x) {
+        return std::ranges::all_of(ordered, [&](const auto& set) {
+            return std::abs(x[set.front()]) <= 1e-7 || std::abs(x[set.back()]) <= 1e-7;
+        });
+    };
+    for (Int threads : {1, 3}) {
+        for (const auto mode : {ParallelMode::Deterministic, ParallelMode::Opportunistic}) {
+            CAPTURE(threads, static_cast<int>(mode));
+            MipSolver solver;
+            solver.setVerbose(false);
+            solver.setGapTolerance(0.0);
+            solver.setNumThreads(threads);
+            solver.setParallelMode(mode);
+            solver.setSos2NativeBranching(true);
+            solver.setSos2AdjacentIntervals(true);
+            std::atomic<bool> bad_incumbent{false};
+            std::atomic<int> observed{0};
+            solver.setIncumbentObserver([&](auto x, const auto&) {
+                ++observed;
+                if (std::cmp_not_equal(x.size(), lp.num_cols) || !holds_support(x)) {
+                    bad_incumbent = true;
+                }
+            });
+            solver.load(lp);
+            const auto exact = solver.solve();
+            CHECK_FALSE(bad_incumbent.load());
+            if (expected == kInf) {
+                CHECK(exact.status == Status::Infeasible);
+                CHECK(exact.solution.empty());
+                CHECK(observed == 0);
+            } else {
+                REQUIRE(exact.status == Status::Optimal);
+                CHECK_THAT(exact.objective, WithinAbs(expected, 1e-7));
+                REQUIRE(exact.solution.size() == 7);
+                CHECK(holds_support(exact.solution));
+                CHECK_THAT(exact.solution[0], WithinAbs(2.0, 1e-7));
+                CHECK(observed > 0);
+            }
+
+            solver.setNodeLimit(2);
+            const auto limited = solver.solve();
+            CHECK(limited.nodes <= 2);
+            CHECK(limited.status != Status::Error);
+            CHECK_FALSE(bad_incumbent.load());
+            if (!limited.solution.empty()) {
+                CHECK(holds_support(limited.solution));
+            }
+        }
+    }
+}
+
+TEST_CASE("An unbounded SOS2 relaxation must have SOS2-feasible support",
+          "[lp_problem][features]") {
+    LpProblem lp;
+    lp.num_cols = 4;
+    lp.obj = {0.0, 0.0, 0.0, -1.0};
+    lp.col_lower = {0.5, 0.0, 0.0, 0.0};
+    lp.col_upper = {1.0, 1.0, 1.0, kInf};
+    lp.col_type.assign(lp.num_cols, VarType::Continuous);
+    lp.matrix = SparseMatrix(0, lp.num_cols);
+    lp.sos_constraints = {{LpProblem::SosConstraint::Type::Sos2, {0, 1, 2}, {}, "sos2"}};
+    Status expected = Status::Unbounded;
+    SECTION("A feasible support can follow the ray") {}
+    SECTION("A second nonadjacent required member rules out the ray") {
+        lp.col_lower[2] = 0.5;
+        expected = Status::Infeasible;
+    }
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setSos2NativeBranching(true);
+    solver.load(lp);
+    solver.setNodeLimit(0);
+    CHECK(solver.solve().status == Status::NodeLimit);
+    solver.setNodeLimit(1);
+    CHECK(solver.solve().status == Status::NodeLimit);
+    solver.setNodeLimit(100);
+    CHECK(solver.solve().status == expected);
 }
 
 // ---------------------------------------------------------------------------

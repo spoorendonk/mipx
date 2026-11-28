@@ -413,21 +413,17 @@ Real pseudocostNodeEstimate(const ReliabilityBranching& rule, const LpProblem& p
     return lp_bound + penalty;
 }
 
-std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val) {
-    Real floor_val = std::floor(branch_val);
-    Real ceil_val = std::ceil(branch_val);
+namespace {
 
+std::pair<BnbNode, BnbNode> initializeChildren(BnbNode parent) {
     BnbNode left;
     left.parent_id = parent.id;
     left.depth = parent.depth + 1;
     left.basis = parent.basis;
     left.estimate = parent.estimate;
     left.basis_rows = parent.basis_rows;
-    left.branch = {branch_var, floor_val, true};  // x_j <= floor(v)
-    left.branch_value = branch_val;
     left.parent_objective = parent.lp_bound;
     left.bound_changes = parent.bound_changes;
-    left.bound_changes.push_back(left.branch);
     left.local_cuts = parent.local_cuts;
 
     BnbNode right;
@@ -436,14 +432,48 @@ std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Rea
     right.basis = std::move(parent.basis);
     right.estimate = parent.estimate;
     right.basis_rows = parent.basis_rows;
-    right.branch = {branch_var, ceil_val, false};  // x_j >= ceil(v)
-    right.branch_value = branch_val;
     right.parent_objective = parent.lp_bound;
     right.bound_changes = std::move(parent.bound_changes);
-    right.bound_changes.push_back(right.branch);
     right.local_cuts = std::move(parent.local_cuts);
 
     return {std::move(left), std::move(right)};
+}
+
+}  // namespace
+
+std::pair<BnbNode, BnbNode> createChildren(BnbNode parent, Index branch_var, Real branch_val) {
+    auto [left, right] = initializeChildren(std::move(parent));
+    left.branch = {branch_var, std::floor(branch_val), true};
+    right.branch = {branch_var, std::ceil(branch_val), false};
+    left.branch_value = right.branch_value = branch_val;
+    left.bound_changes.push_back(left.branch);
+    right.bound_changes.push_back(right.branch);
+    return {std::move(left), std::move(right)};
+}
+
+std::vector<BnbNode> createSos2Children(BnbNode parent, std::span<const Index> members,
+                                        std::size_t split, std::span<const Real> lower,
+                                        std::span<const Real> upper) {
+    const Real bound = parent.lp_bound;
+    auto [left, right] = initializeChildren(std::move(parent));
+    std::vector<BnbNode> children;
+    children.reserve(2);
+    const auto addSide = [&](BnbNode& child, std::span<const Index> excluded) {
+        for (Index j : excluded) {
+            if (lower[j] > 0.0 || upper[j] < 0.0) {
+                return;
+            }
+            // Record both ends even when the node already has a zero bound:
+            // temporary local tightenings need not carry over to its children.
+            child.bound_changes.push_back({j, 0.0, true});
+            child.bound_changes.push_back({j, 0.0, false});
+        }
+        child.lp_bound = bound;
+        children.push_back(std::move(child));
+    };
+    addSide(left, members.subspan(split + 1));
+    addSide(right, members.first(split));
+    return children;
 }
 
 }  // namespace mipx

@@ -592,6 +592,12 @@ private:
 
     std::vector<Real> row_scale_;
 
+    // Native SOS2 members must keep their values and positions, even when fixed.
+    std::vector<bool> sos2_member_;
+    [[nodiscard]] bool isSos2Member(Index col) const {
+        return !sos2_member_.empty() && sos2_member_[col];
+    }
+
     static constexpr Real kTol = 1e-8;
 };
 

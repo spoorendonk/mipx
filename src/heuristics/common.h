@@ -82,6 +82,12 @@ inline bool isFeasiblePoint(const LpProblem& problem, std::span<const Real> valu
             return false;
         }
     }
+    for (const auto& members : problem.native_sos2) {
+        const auto [first, last] = sos2Support(problem, members, values);
+        if (last - first > 1) {
+            return false;
+        }
+    }
     return isRowFeasible(problem, values);
 }
 

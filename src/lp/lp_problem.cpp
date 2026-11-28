@@ -205,6 +205,12 @@ LpProblem linearizeModelFeatures(const LpProblem& problem) {
 }
 
 LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_intervals) {
+    return linearizeModelFeatures(problem, sos2_adjacent_intervals
+                                               ? Sos2Formulation::AdjacentIntervals
+                                               : Sos2Formulation::Pairwise);
+}
+
+LpProblem linearizeModelFeatures(const LpProblem& problem, Sos2Formulation sos2_formulation) {
     validateModelFeatures(problem);
 
     if (!hasAdvancedModelFeatures(problem)) {
@@ -288,9 +294,10 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_in
     }
 
     for (const auto& sos : problem.sos_constraints) {
-        const bool use_intervals =
-            sos2_adjacent_intervals && sos.type == LpProblem::SosConstraint::Type::Sos2;
-        if (use_intervals && sos.vars.size() <= 2) {
+        const auto formulation = sos.type == LpProblem::SosConstraint::Type::Sos2
+                                     ? sos2_formulation
+                                     : Sos2Formulation::Pairwise;
+        if (formulation != Sos2Formulation::Pairwise && sos.vars.size() <= 2) {
             continue;  // Every support of this set already satisfies SOS2.
         }
 
@@ -304,7 +311,15 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_in
             });
         }
 
-        if (use_intervals) {
+        if (formulation == Sos2Formulation::Native) {
+            auto& members = out.native_sos2.emplace_back();
+            members.reserve(order.size());
+            for (Index p : order) {
+                members.push_back(sos.vars[p]);
+            }
+            continue;
+        }
+        if (formulation == Sos2Formulation::AdjacentIntervals) {
             addSos2IntervalRows(out, trips, sos, order);
             continue;
         }
@@ -341,6 +356,22 @@ LpProblem linearizeModelFeatures(const LpProblem& problem, bool sos2_adjacent_in
     out.indicator_constraints.clear();
     out.matrix = SparseMatrix(out.num_rows, out.num_cols, std::move(trips));
     return out;
+}
+
+std::pair<std::size_t, std::size_t> sos2Support(const LpProblem& problem,
+                                                std::span<const Index> members,
+                                                std::span<const Real> values) {
+    std::size_t first = members.size();
+    std::size_t last = first;
+    for (std::size_t p = 0; p < members.size(); ++p) {
+        const Index j = members[p];
+        if (std::abs(values[j]) > kSos2ZeroTolerance || problem.col_lower[j] > 0.0 ||
+            problem.col_upper[j] < 0.0) {
+            first = std::min(first, p);
+            last = p;
+        }
+    }
+    return {first, last};
 }
 
 Index checkColumnBatch(Index num_rows, std::span<const Index> starts,
@@ -439,7 +470,8 @@ void removeColumns(LpProblem& problem, std::span<const Index> sorted_cols) {
     if (sorted_cols.empty()) {
         return;
     }
-    if (!problem.sos_constraints.empty() || !problem.indicator_constraints.empty()) {
+    if (!problem.sos_constraints.empty() || !problem.indicator_constraints.empty() ||
+        !problem.native_sos2.empty()) {
         throw std::invalid_argument("removeCols: SOS and indicator constraints name columns");
     }
     const Index old_cols = problem.num_cols;

@@ -1368,11 +1368,36 @@ std::optional<HeuristicSolution> runLpLightDiving(const LpProblem& problem,
     return HeuristicSolution{.values = std::move(x), .objective = obj};
 }
 
+struct Sos2Split {
+    std::span<const Index> members;
+    std::size_t position;
+};
+
+std::optional<Sos2Split> selectSos2Split(const LpProblem& problem, std::span<const Real> values) {
+    std::optional<Sos2Split> split;
+    std::size_t widest_span = 1;
+    for (const auto& members : problem.native_sos2) {
+        const auto [first, last] = sos2Support(problem, members, values);
+        const std::size_t span = last - first;
+        if (span > widest_span) {
+            widest_span = span;
+            split = Sos2Split{members, first + span / 2};
+        }
+    }
+    return split;
+}
+
 }  // namespace
 
 void MipSolver::load(const LpProblem& problem) {
     if (hasAdvancedModelFeatures(problem)) {
-        problem_ = linearizeModelFeatures(problem, sos2_adjacent_intervals_);
+        auto formulation = Sos2Formulation::Pairwise;
+        if (sos2_native_branching_) {
+            formulation = Sos2Formulation::Native;
+        } else if (sos2_adjacent_intervals_) {
+            formulation = Sos2Formulation::AdjacentIntervals;
+        }
+        problem_ = linearizeModelFeatures(problem, formulation);
     } else {
         problem_ = problem;
     }
@@ -1999,7 +2024,7 @@ void MipSolver::logProgress(Int nodes, Int open, Int lp_iters, Real incumbent, R
 bool MipSolver::enforceSymmetryBounds(std::vector<Real>& lower, std::vector<Real>& upper,
                                       std::vector<Index>* tightened_vars,
                                       double* work_units) const {
-    if (!symmetry_enabled_) {
+    if (!symmetry_enabled_ || !problem_.native_sos2.empty()) {
         return true;
     }
     const auto& fixes = symmetry_manager_.orbitalFixes();
@@ -2947,6 +2972,29 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         ++cut_stats_.tree_nodes_with_cuts;
     }
 
+    const auto solvedNode = [&]() {
+        BnbNode solved_node = std::move(node);
+        solved_node.lp_bound = node_obj_out;
+        {
+            std::lock_guard<std::mutex> lock(branching_mutex_);
+            solved_node.estimate =
+                pseudocostNodeEstimate(branching_rule_, problem_, node_primals_out, node_obj_out);
+        }
+        solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
+        if (temp_local_rows.empty()) {
+            solved_node.basis = lp.getBasis();
+        } else {
+            solved_node.basis.clear();
+        }
+        solved_node.local_cuts = std::move(node_local_cuts);
+        return solved_node;
+    };
+    if (const auto split = selectSos2Split(problem_, node_primals_out)) {
+        children_out = createSos2Children(solvedNode(), split->members, split->position,
+                                          current_lower, current_upper);
+        return !children_out.empty();
+    }
+
     // Check integer feasibility after any in-tree separation.
     Index branch_var = -1;
     Real branch_value = 0.0;
@@ -3050,28 +3098,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         branch_value = node_primals_out[branch_var];
     }
 
-    BnbNode solved_node = std::move(node);
-    solved_node.lp_bound = node_obj_out;
-    {
-        std::lock_guard<std::mutex> lock(branching_mutex_);
-        solved_node.estimate =
-            pseudocostNodeEstimate(branching_rule_, problem_, node_primals_out, node_obj_out);
-    }
-    solved_node.basis_rows = lp.numRows() - static_cast<Index>(temp_local_rows.size());
-    if (temp_local_rows.empty()) {
-        solved_node.basis = lp.getBasis();
-    } else {
-        solved_node.basis.clear();
-    }
-    solved_node.local_cuts = std::move(node_local_cuts);
-
+    BnbNode solved_node = solvedNode();
+    const Real estimate = solved_node.estimate;
     auto [left, right] = createChildren(std::move(solved_node), branch_var, branch_value);
     left.lp_bound = node_obj_out;
     right.lp_bound = node_obj_out;
     left.parent_objective = children_reference_objective;
     right.parent_objective = children_reference_objective;
-    left.estimate = solved_node.estimate;
-    right.estimate = solved_node.estimate;
+    left.estimate = right.estimate = estimate;
 
     children_out.push_back(std::move(left));
     children_out.push_back(std::move(right));
@@ -3800,9 +3834,8 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                 Real inc = persistent ? kInf : read_incumbent();
                 std::unique_lock lock(queue_mutex);
                 while (!persistent || !should_stop.load(std::memory_order_relaxed)) {
-                    if (persistent &&
-                        (atomic_nodes.load(std::memory_order_relaxed) >= node_limit_ ||
-                         elapsed() >= time_limit_)) {
+                    if (atomic_nodes.load(std::memory_order_relaxed) >= node_limit_ ||
+                        elapsed() >= time_limit_) {
                         stop_dispatch();
                         break;
                     }
@@ -3830,10 +3863,10 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
                         break;
                     }
                     node.emplace(queue.pop());
+                    node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
                     if (persistent) {
                         active_bounds[static_cast<std::size_t>(thread_id)] = node->lp_bound;
                         peak_active = std::max(peak_active, ++active_nodes);
-                        node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
                     }
                     break;
                 }
@@ -3841,10 +3874,6 @@ void MipSolver::solveParallel(const DualSimplexSolver& root_lp, NodeQueue& queue
             if (!node) {
                 break;
             }
-            if (!persistent) {
-                node_num = atomic_nodes.fetch_add(1, std::memory_order_relaxed) + 1;
-            }
-
             // Get current incumbent for pruning.
             const Real inc_snapshot = read_incumbent();
 
@@ -4138,8 +4167,16 @@ MipResult MipSolver::solve() {
 // optimum off its bound, the model is solved again without presolve in the
 // limits left, and that answer stands as it would with presolve off.
 MipResult MipSolver::solveMinimization() {
+    if (!problem_.native_sos2.empty() && node_limit_ <= 0) {
+        MipResult stopped;
+        stopped.status = Status::NodeLimit;
+        return stopped;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     MipResult result = solveMinimizationOnce();
+    if (result.status == Status::Unbounded && !problem_.native_sos2.empty()) {
+        return confirmNativeSos2Unbounded(std::move(result));
+    }
     // Without presolve the answer was never postsolved: every incumbent
     // already passed the gate, and an LP answer holds what the LP holds.
     if (!presolve_ || result.solution.empty() || isAcceptableIncumbent(result.solution)) {
@@ -4155,8 +4192,7 @@ MipResult MipSolver::solveMinimization() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     result.time_seconds = std::max(result.time_seconds, elapsed);
     if (repaired.has_value()) {
-        const bool is_mip = std::ranges::any_of(problem_.col_type,
-                                                [](VarType t) { return t != VarType::Continuous; });
+        const bool is_mip = problem_.hasIntegers() || !problem_.native_sos2.empty();
         result.solution = std::move(repaired->values);
         result.objective = repaired->objective;
         if (!is_mip && result.status == Status::Optimal) {
@@ -4222,6 +4258,49 @@ MipResult MipSolver::solveMinimization() {
         again.gap_limit_reached = again.status == Status::Optimal && again.gap > 0.0;
     }
     return again;
+}
+
+MipResult MipSolver::confirmNativeSos2Unbounded(MipResult relaxation) {
+    // The unbounded LP ray is zero on every SOS2 member, since they all have
+    // finite lower and upper bounds. An SOS-feasible MIP point can follow it
+    // (scaling the rational ray to keep integer columns integral), but the
+    // relaxation can also be unbounded when no such point exists.
+    const Int nodes_left = node_limit_ - relaxation.nodes;
+    const double time_left = time_limit_ - relaxation.time_seconds;
+    if (nodes_left <= 0 || time_left <= 0.0) {
+        relaxation.status = nodes_left <= 0 ? Status::NodeLimit : Status::TimeLimit;
+        relaxation.best_bound = -kInf;
+        return relaxation;
+    }
+    if (std::ranges::all_of(problem_.obj, [](Real c) { return c == 0.0; })) {
+        relaxation.status = Status::Error;
+        return relaxation;
+    }
+    struct RestoreObjectiveAndLimits {
+        MipSolver& solver;
+        std::vector<Real> objective;
+        Real offset;
+        Int node_limit;
+        double time_limit;
+        ~RestoreObjectiveAndLimits() {
+            solver.problem_.obj = std::move(objective);
+            solver.problem_.obj_offset = offset;
+            solver.node_limit_ = node_limit;
+            solver.time_limit_ = time_limit;
+        }
+    } restore{*this, problem_.obj, problem_.obj_offset, node_limit_, time_limit_};
+    std::ranges::fill(problem_.obj, 0.0);
+    problem_.obj_offset = 0.0;
+    node_limit_ = nodes_left;
+    time_limit_ = time_left;
+    const MipResult feasibility = solveMinimization();
+    relaxation.status = feasibility.solution.empty() ? feasibility.status : Status::Unbounded;
+    relaxation.nodes += feasibility.nodes;
+    relaxation.lp_iterations += feasibility.lp_iterations;
+    relaxation.work_units += feasibility.work_units;
+    relaxation.time_seconds += feasibility.time_seconds;
+    relaxation.best_bound = feasibility.status == Status::Infeasible ? kInf : -kInf;
+    return relaxation;
 }
 
 MipResult MipSolver::solveMinimizationOnce() {
@@ -4424,7 +4503,8 @@ MipResult MipSolver::solveMinimizationOnce() {
     if (presolve_) {
         working_problem = presolver.presolve(problem_);
         const auto& stats = presolver.stats();
-        if (stats.vars_removed > 0 || stats.rows_removed > 0) {
+        if (stats.vars_removed > 0 || stats.rows_removed > 0 ||
+            (!problem_.native_sos2.empty() && stats.bounds_tightened > 0)) {
             did_presolve = true;
             if (verbose_) {
                 log_.log(
@@ -4443,7 +4523,8 @@ MipResult MipSolver::solveMinimizationOnce() {
         working_problem = problem_;
     }
 
-    if (symmetry_enabled_) {
+    // The linear automorphism detector does not include ordered SOS2 support.
+    if (symmetry_enabled_ && working_problem.native_sos2.empty()) {
         symmetry_manager_.detect(working_problem);
         const double detect_work = symmetry_manager_.detectWorkUnits();
         symmetry_pre_work += detect_work;
@@ -4584,7 +4665,7 @@ MipResult MipSolver::solveMinimizationOnce() {
     };
 
     // If no integers, solve as LP directly.
-    if (!problem_.hasIntegers()) {
+    if (!problem_.hasIntegers() && problem_.native_sos2.empty()) {
         if (verbose_) {
             log_.log("mipx v0.3\n");
             unsigned logical = std::thread::hardware_concurrency();
@@ -5934,12 +6015,16 @@ MipResult MipSolver::solveMinimizationOnce() {
         solution_pool.submit({best_solution, incumbent}, "pre_root_stage", 0);
     }
 
-    if (isFeasibleLp(root_primals) && isFeasibleMip(root_primals)) {
+    const bool root_feasible = problem_.native_sos2.empty()
+                                   ? isFeasibleLp(root_primals) && isFeasibleMip(root_primals)
+                                   : isAcceptableIncumbent(root_primals);
+    if (root_feasible) {
         incumbent = root_bound;
         best_solution = root_primals;
         solution_pool.submit({best_solution, incumbent}, "root_lp", 0);
         if (verbose_) {
-            log_.log("Root solution is integer feasible!\n");
+            log_.log(problem_.native_sos2.empty() ? "Root solution is integer feasible!\n"
+                                                  : "Root solution is MIP feasible!\n");
         }
         root_runtime.finish();
         MipResult result;
@@ -6120,28 +6205,30 @@ MipResult MipSolver::solveMinimizationOnce() {
     root_node.basis = root_basis;
     root_node.basis_rows = lp.numRows();
 
-    Index branch_var = -1;
-    {
+    if (const auto split = selectSos2Split(problem_, root_primals)) {
+        for (auto& child : createSos2Children(std::move(root_node), split->members, split->position,
+                                              problem_.col_lower, problem_.col_upper)) {
+            queue.push(std::move(child));
+        }
+    } else {
         std::lock_guard<std::mutex> lock(branching_mutex_);
-        auto selection =
+        const auto selection =
             branching_rule_.select(lp, problem_, root_primals, problem_.col_lower,
                                    problem_.col_upper, root_bound, true, branching_stats_);
-        branch_var = selection.variable;
-    }
-
-    if (branch_var >= 0) {
-        auto [left, right] =
-            createChildren(std::move(root_node), branch_var, root_primals[branch_var]);
-        left.lp_bound = root_bound;
-        right.lp_bound = root_bound;
-        {
-            std::lock_guard<std::mutex> lock(branching_mutex_);
-            left.estimate =
+        const Index branch_var = selection.variable;
+        if (branch_var >= 0) {
+            auto [left, right] =
+                createChildren(std::move(root_node), branch_var, root_primals[branch_var]);
+            left.lp_bound = right.lp_bound = root_bound;
+            left.estimate = right.estimate =
                 pseudocostNodeEstimate(branching_rule_, problem_, root_primals, root_bound);
+            queue.push(std::move(left));
+            queue.push(std::move(right));
+        } else if (!problem_.native_sos2.empty()) {
+            // The root point failed the incumbent gate beyond integrality and SOS2.
+            // Let the tree's usual integral-node repair and branching handle it.
+            queue.push(std::move(root_node));
         }
-        right.estimate = left.estimate;
-        queue.push(std::move(left));
-        queue.push(std::move(right));
     }
 
     Int nodes_explored = 1;  // root counts

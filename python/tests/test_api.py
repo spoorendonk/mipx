@@ -82,6 +82,23 @@ def test_sos2_adjacent_intervals_can_be_selected_before_load() -> None:
         assert len(result.solution) == len(legacy.solution) - 1
 
 
+def test_native_sos2_can_be_selected_before_load() -> None:
+    path = str(data_path("mps_sos.mps"))
+    model = mipx.read_mps(path)
+    solver = mipx.MipSolver()
+    solver.set_verbose(False)
+    solver.set_sos2_native_branching(True)
+    solver.load(model)
+    for result in (
+        solver.solve(),
+        mipx.solve_file(path, sos2_native_branching=True),
+        mipx.solve_mps(path, sos2_native_branching=True),
+    ):
+        assert result.status == mipx.Status.Optimal
+        assert result.objective == pytest.approx(4.0)
+        assert len(result.solution) == model.num_cols + 3  # SOS1 selectors
+
+
 def test_read_model_detects_and_forces_format() -> None:
     model = mipx.read_model(str(data_path("lp_format.lp")))
     assert (model.num_cols, model.num_rows) == (2, 1)
