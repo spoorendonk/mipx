@@ -779,6 +779,58 @@ TEST_CASE("Regression #298: an optimum reached under bound perturbation is a ver
         INFO("column " << j);
         CHECK_THAT(x[j], WithinAbs(0.5, 1e-12));
     }
+
+    // The degeneracy counters see the same solve (#422): it starts with a
+    // degenerate primal pivot, the perturbation comes on, and dual pivots
+    // repair the primal infeasibility its removal leaves.
+    const auto& stats = solver.getDegeneracyStats();
+    CHECK(stats.dual_pivots + stats.primal_pivots + stats.retry_iterations == result.iterations);
+    CHECK(stats.dual_pivots >= 1);
+    CHECK(stats.primal_degenerate_pivots >= 1);
+    CHECK(stats.max_degenerate_streak >= 1);
+    CHECK(stats.bound_perturbation_activations >= 1);
+}
+
+// The degeneracy counters (#422) add up on a cold dual-phase solve and start
+// again with the next solve().
+TEST_CASE("DualSimplex: degeneracy stats count a cold solve's pivots",
+          "[dual_simplex][degeneracy]") {
+    // min x + 2y, x + y >= 1, x + 2y >= 1.5, x, y >= 0: the slack basis is dual
+    // feasible and primal infeasible, so the solve starts in the dual phase.
+    LpProblem lp;
+    lp.name = "two_covers";
+    lp.sense = Sense::Minimize;
+    lp.num_cols = 2;
+    lp.obj = {1.0, 2.0};
+    lp.col_lower = {0.0, 0.0};
+    lp.col_upper = {kInf, kInf};
+    lp.col_type = {VarType::Continuous, VarType::Continuous};
+    lp.num_rows = 2;
+    lp.row_lower = {1.0, 1.5};
+    lp.row_upper = {kInf, kInf};
+    lp.matrix = SparseMatrix(2, 2, {1.0, 1.0, 1.0, 2.0}, {0, 1, 0, 1}, {0, 2, 4});
+    DualSimplexSolver solver;
+    solver.setVerbose(false);
+    solver.load(lp);
+    const auto first = solver.solve();
+    REQUIRE(first.status == Status::Optimal);
+    CHECK_THAT(first.objective, WithinAbs(1.5, 1e-9));
+    const auto stats = solver.getDegeneracyStats();
+    CHECK(stats.dual_pivots + stats.primal_pivots + stats.retry_iterations == first.iterations);
+    CHECK(stats.dual_pivots > 0);
+    CHECK(stats.cost_perturbed);
+    CHECK(stats.cost_perturbation_removals >= 1);
+    CHECK(stats.bound_perturbation_activations == 0);
+
+    // A warm re-solve from the optimal basis takes no pivots and no cold-start
+    // perturbation, so the counters read zero again.
+    const auto second = solver.solve();
+    REQUIRE(second.status == Status::Optimal);
+    const auto& again = solver.getDegeneracyStats();
+    CHECK(second.iterations == 0);
+    CHECK(again.dual_pivots == 0);
+    CHECK(again.primal_pivots == 0);
+    CHECK_FALSE(again.cost_perturbed);
 }
 
 TEST_CASE("DualSimplex: singular warm-start basis recovers to valid solve",

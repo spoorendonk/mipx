@@ -719,6 +719,7 @@ LpResult DualSimplexSolver::solve() {
     // clean-up included; each pass restarts only the density history.
     row_price_stats_ = RowPriceStats{};
     dse_fallback_stats_ = DseFallbackStats{};
+    degeneracy_stats_ = DegeneracyStats{};
     basis_start_stats_ = {};
     bool checked = false;
     LpResult res = solveWithColdFallback(start, checked);
@@ -1850,6 +1851,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 obj_[j] += delta;
             }
             has_cost_perturb = true;
+            degeneracy_stats_.cost_perturbed = true;
             costs_moved = true;
             computeDuals();
         }
@@ -2130,6 +2132,8 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
 
     Index partial_price_offset = 0;
     Int degenerate_pivot_streak = 0;
+    // Consecutive zero dual steps, for DegeneracyStats only (#422).
+    Int dual_zero_step_streak = 0;
     Int empty_candidate_retry_streak = 0;
     // The row whose repair pivot (see the dual ratio test) was rejected as
     // numerically zero on fresh factors, or -1; cleared by the next basis
@@ -2453,6 +2457,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                         guard_fired_since_duals = false;
                         computeDuals();
                     }
+                    ++degeneracy_stats_.cleanup_budget_exhausted;
                     status_ = Status::Optimal;
                     break;
                 }
@@ -2478,6 +2483,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             if (!bound_perturb_active_) {
                 // First activation at level 0.
                 if (activateBoundPerturbation(0)) {
+                    ++degeneracy_stats_.bound_perturbation_activations;
                     bound_perturb_streak_mark = degenerate_pivot_streak;
                     in_cleanup_phase = false;
                     need_infeasible_rebuild = true;
@@ -2488,6 +2494,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 // level per further bound_perturbation_stall_pivots.
                 bound_perturb_streak_mark = degenerate_pivot_streak;
                 if (escalateBoundPerturbation()) {
+                    ++degeneracy_stats_.bound_perturbation_escalations;
                     need_infeasible_rebuild = true;
                 }
             }
@@ -2524,6 +2531,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             iters_since_pinf_improve = 0;
             resetPrimalFeasibleProgress();
             primal_feasible_pivots_since_refactor = 0;
+            ++degeneracy_stats_.retry_iterations;
             ++iterations_;
             continue;
         }
@@ -2731,6 +2739,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 // Optimal for the perturbed costs: restore the true costs.
                 // The primal-feasible phase below repairs any reduced cost
                 // that now has the wrong sign.
+                ++degeneracy_stats_.cost_perturbation_removals;
                 clearCostPerturbation();
                 computeDuals();
                 resetPrimalFeasibleProgress();
@@ -2862,6 +2871,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                         // Primal infeasibilities from unperturbing: allow bounded
                         // cleanup iterations to resolve them via normal dual pivots.
                         in_cleanup_phase = true;
+                        ++degeneracy_stats_.cleanup_phases;
                         cleanup_iters_remaining =
                             std::max<Int>(1, options_.bound_perturbation_cleanup_iter_limit);
                         rebuildInfeasibleSet();
@@ -2903,6 +2913,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                             computePrimals();
                             // Flips may introduce primal infeasibilities.
                             in_cleanup_phase = true;
+                            ++degeneracy_stats_.cleanup_phases;
                             cleanup_iters_remaining =
                                 std::max<Int>(1, options_.bound_perturbation_cleanup_iter_limit);
                         }
@@ -3150,6 +3161,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                         guard_fired_since_duals = true;
                     }
                     rebuildInfeasibleSet();
+                    ++degeneracy_stats_.retry_iterations;
                     ++iterations_;
                     continue;
                 }
@@ -3186,8 +3198,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 for (Index i : pivot_col_nz) {
                     updateRowInfeasibility(i);
                 }
+                ++degeneracy_stats_.primal_pivots;
                 if (primal_step_degenerate) {
                     ++degenerate_pivot_streak;
+                    ++degeneracy_stats_.primal_degenerate_pivots;
+                    degeneracy_stats_.max_degenerate_streak =
+                        std::max(degeneracy_stats_.max_degenerate_streak, degenerate_pivot_streak);
                 } else {
                     degenerate_pivot_streak = 0;
                 }
@@ -3320,8 +3336,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                 std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)),
                 pivot_col_pattern);
 
+            ++degeneracy_stats_.primal_pivots;
             if (primal_step_degenerate) {
                 ++degenerate_pivot_streak;
+                ++degeneracy_stats_.primal_degenerate_pivots;
+                degeneracy_stats_.max_degenerate_streak =
+                    std::max(degeneracy_stats_.max_degenerate_streak, degenerate_pivot_streak);
             } else {
                 degenerate_pivot_streak = 0;
             }
@@ -3680,6 +3700,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
             ++empty_candidate_retry_streak;
+            ++degeneracy_stats_.retry_iterations;
             ++iterations_;
             continue;
         }
@@ -3846,6 +3867,7 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             initDseWeights();
             rebuildInfeasibleSet();
             degenerate_pivot_streak = 0;
+            ++degeneracy_stats_.retry_iterations;
             ++iterations_;
             continue;
         }
@@ -4036,6 +4058,17 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
                     addCostShift(rv.indices[p], delta * rv.values[p]);
                 }
             }
+            if (delta != 0.0) {
+                ++degeneracy_stats_.zero_step_cost_shifts;
+            }
+        }
+        if (std::abs(theta_d) <= kDualZeroStepTol) {
+            ++degeneracy_stats_.dual_zero_steps;
+            ++dual_zero_step_streak;
+            degeneracy_stats_.max_dual_zero_step_streak =
+                std::max(degeneracy_stats_.max_dual_zero_step_streak, dual_zero_step_streak);
+        } else {
+            dual_zero_step_streak = 0;
         }
         // Only the row-price support can have alpha_k != 0, so walking it
         // instead of every nonbasic gives the same reduced costs (each k is
@@ -4249,8 +4282,12 @@ LpResult DualSimplexSolver::solveFromCurrentBasis() {
             std::span<const Real>(pivot_col.data(), static_cast<std::size_t>(num_rows_)),
             pivot_col_pattern);
 
+        ++degeneracy_stats_.dual_pivots;
         if (std::abs(theta_p) <= options_.adaptive_refactor_degenerate_pivot_tol) {
             ++degenerate_pivot_streak;
+            ++degeneracy_stats_.dual_degenerate_pivots;
+            degeneracy_stats_.max_degenerate_streak =
+                std::max(degeneracy_stats_.max_degenerate_streak, degenerate_pivot_streak);
         } else {
             degenerate_pivot_streak = 0;
         }

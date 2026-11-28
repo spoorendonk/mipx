@@ -357,6 +357,46 @@ public:
     };
     [[nodiscard]] BasisStartStats basisStartStats() const { return basis_start_stats_; }
 
+    /// Degeneracy and perturbation counters of the most recent solve() (#422),
+    /// summed over all of its passes (cold retry, unscaled clean-up included).
+    /// A pivot is degenerate when its primal step is within
+    /// adaptive_refactor_degenerate_pivot_tol of zero, the test the stall
+    /// streak behind the bound perturbation counts (a primal-phase bound flip
+    /// counts as a pivot). A dual pivot stalls the dual objective on a zero
+    /// dual step instead, which dual_zero_steps counts. dual_pivots +
+    /// primal_pivots + retry_iterations == LpResult::iterations, but for a
+    /// solve that ends in Error.
+    struct DegeneracyStats {
+        Int dual_pivots = 0;
+        Int dual_degenerate_pivots = 0;  // dual pivots with a zero primal step
+        Int dual_zero_steps = 0;         // dual pivots with a zero dual step (dual degeneracy)
+        Int max_dual_zero_step_streak = 0;
+        // Zero dual steps that moved the entering cost (a nonzero shift).
+        Int zero_step_cost_shifts = 0;
+        Int primal_pivots = 0;
+        Int primal_degenerate_pivots = 0;
+        // The longest run of degenerate_pivot_streak, the stall streak itself:
+        // in the dual phase every refactor ends it, the primal phase carries
+        // it over its routine refactors. max_dual_zero_step_streak only ends on a nonzero
+        // dual step.
+        Int max_degenerate_streak = 0;
+        // Iterations without a pivot: a refactor and retry, a ray guard's
+        // price-out, a stall restart.
+        Int retry_iterations = 0;
+        bool cost_perturbed = false;  // the cold-start cost perturbation was applied
+        // Times the cold-start perturbation, with the zero-step and dual
+        // correction shifts held with it, came off at primal feasibility. The
+        // phase-1 cost shifts coming off are not counted.
+        Int cost_perturbation_removals = 0;
+        Int bound_perturbation_activations = 0;
+        Int bound_perturbation_escalations = 0;
+        // Cleanups entered at an apparent optimum after the bound
+        // perturbation came off or nonbasics were put back on their bounds.
+        Int cleanup_phases = 0;
+        Int cleanup_budget_exhausted = 0;  // cleanups declared Optimal on an exhausted budget
+    };
+    [[nodiscard]] const DegeneracyStats& getDegeneracyStats() const { return degeneracy_stats_; }
+
 private:
     // Total number of variables = num_cols (structural) + num_rows (slacks).
     Index numVars() const { return num_cols_ + num_rows_; }
@@ -514,6 +554,8 @@ private:
     // Tolerances.
     static constexpr Real kPrimalTol = 1e-7;
     static constexpr Real kDualTol = 1e-7;
+    // A dual step this small counts as zero in DegeneracyStats (#422).
+    static constexpr Real kDualZeroStepTol = 1e-12;
     static constexpr Real kPivotTol = 1e-7;
     static constexpr Real kZeroTol = 1e-13;
     // Smallest pivot the ratio test admits when no entry reaches kPivotTol
@@ -566,6 +608,7 @@ private:
     Int bfrt_high_flip_iters_ = 0;  // consecutive iterations with high flip count
     // Adaptive Harris (#159) numerical-incident tracking, reset each solve().
     AdaptiveHarrisStats adaptive_harris_stats_{};
+    DegeneracyStats degeneracy_stats_{};
     // Hyper-sparse row-price (#131) path tracking and density history,
     // reset each solve().
     RowPriceStats row_price_stats_{};
