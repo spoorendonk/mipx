@@ -132,11 +132,33 @@ inline uint64_t rowSupportHash(const PresolveMatrix& m, Index row,
     return mixHash(h, static_cast<uint64_t>(active));
 }
 
-/// Steps `it` past entries of removed lines.
+/// Steps `it` past entries of removed lines and, optionally, stored zeros.
 template <typename It>
-void skipRemoved(It& it, const It& end, const std::vector<bool>& removed) {
-    while (it != end && removed[(*it).index]) {
+void skipRemoved(It& it, const It& end, const std::vector<bool>& removed, bool skip_zeros = false) {
+    while (it != end && (removed[(*it).index] || (skip_zeros && (*it).value == 0.0))) {
         ++it;
+    }
+}
+
+bool rowsHaveOppositePattern(const PresolveMatrix& m, Index first, Index second,
+                             const std::vector<bool>& col_removed) {
+    const auto a = m.row(first);
+    const auto b = m.row(second);
+    auto i = a.begin();
+    auto j = b.begin();
+    while (true) {
+        skipRemoved(i, a.end(), col_removed, true);
+        skipRemoved(j, b.end(), col_removed, true);
+        if (i == a.end() || j == b.end()) {
+            return i == a.end() && j == b.end();
+        }
+        const auto [col_i, ai] = *i;
+        const auto [col_j, bj] = *j;
+        if (col_i != col_j || ai != -bj) {
+            return false;
+        }
+        ++i;
+        ++j;
     }
 }
 
@@ -362,6 +384,8 @@ constexpr PresolveRuleStat kRuleStats[] = {
     {"dominated_row", &PresolveStats::dominated_row_changes, &PresolveStats::dominated_row_seconds},
     {"duplicate_row", &PresolveStats::duplicate_row_changes, &PresolveStats::duplicate_row_seconds},
     {"parallel_row", &PresolveStats::parallel_row_changes, &PresolveStats::parallel_row_seconds},
+    {"mip_opposing_row", &PresolveStats::mip_opposing_row_changes,
+     &PresolveStats::mip_opposing_row_seconds},
     {"parallel_col", &PresolveStats::parallel_col_changes, &PresolveStats::parallel_col_seconds},
     {"implied_equation", &PresolveStats::implied_equation_changes,
      &PresolveStats::implied_equation_seconds},
@@ -3557,6 +3581,72 @@ Index Presolver::removeParallelRows(LpProblem& lp, std::vector<bool>& col_remove
     return changes;
 }
 
+// a x <= b and -a x <= -b intersect at a x = b. The same columns and
+// values satisfy all original sides, so primal postsolve has no value to
+// reconstruct for this pair.
+Index Presolver::mergeMipOpposingRows(LpProblem& lp, const std::vector<bool>& col_removed,
+                                      std::vector<bool>& row_removed,
+                                      std::vector<Index>& row_active_nnz,
+                                      std::vector<Index>& col_active_nnz,
+                                      std::vector<uint8_t>& next_dirty_rows,
+                                      std::vector<uint8_t>& next_dirty_cols) {
+    std::unordered_multimap<uint64_t, Index> candidates;
+    Index changes = 0;
+    for (Index row = 0; row < lp.num_rows; ++row) {
+        const Real rhs = lp.row_upper[row];
+        if (row_removed[row] || lp.row_lower[row] != -kInf || !std::isfinite(rhs)) {
+            continue;
+        }
+
+        // Include the active support, signed coefficients and side in the
+        // lookup. Both representations of a zero side must hash alike.
+        uint64_t key = coeffBits(rhs == 0.0 ? 0.0 : rhs);
+        uint64_t opposite = coeffBits(rhs == 0.0 ? 0.0 : -rhs);
+        bool valid = true;
+        bool nonempty = false;
+        for (const auto [col, a] : work_->row(row)) {
+            if (col_removed[col] || a == 0.0) {
+                continue;
+            }
+            if (!std::isfinite(a)) {
+                valid = false;
+                break;
+            }
+            key = mixHash(mixHash(key, static_cast<uint64_t>(col)), coeffBits(a));
+            opposite = mixHash(mixHash(opposite, static_cast<uint64_t>(col)), coeffBits(-a));
+            nonempty = true;
+        }
+        if (!valid || !nonempty) {
+            continue;
+        }
+
+        const auto [first, last] = candidates.equal_range(opposite);
+        auto it = first;
+        for (; it != last; ++it) {
+            const Index keep = it->second;
+            if (lp.row_upper[keep] != -rhs ||
+                !rowsHaveOppositePattern(*work_, keep, row, col_removed)) {
+                continue;
+            }
+            lp.row_lower[keep] = lp.row_upper[keep];
+            next_dirty_rows[keep] = 1;
+            markColsInRow(*work_, keep, col_removed, next_dirty_cols);
+            removeActiveRow(*work_, row, col_removed, row_removed, row_active_nnz, col_active_nnz,
+                            next_dirty_rows, next_dirty_cols);
+            postsolve_stack_.push(PostsolveDominatedRow{row});
+            ++stats_.rows_removed;
+            ++changes;
+            break;
+        }
+        if (it == last) {
+            candidates.emplace(key, row);
+        } else {
+            candidates.erase(it);
+        }
+    }
+    return changes;
+}
+
 namespace {
 
 /// Hash of a column's active rows and of its coefficients divided by the
@@ -4483,6 +4573,15 @@ LpProblem Presolver::presolve(const LpProblem& problem) {
             });
             stats_.mip_singleton_exchange_changes += ch;
             stats_.bounds_tightened += ch;
+            total_changes += ch;
+        }
+
+        if (options_.enable_mip_opposing_rows && !lp_only && total_changes == 0 && !infeasible_) {
+            ch = timed(stats_.mip_opposing_row_seconds, [&] {
+                return mergeMipOpposingRows(lp, col_removed, row_removed, row_active_nnz,
+                                            col_active_nnz, next_dirty_rows, next_dirty_cols);
+            });
+            stats_.mip_opposing_row_changes += ch;
             total_changes += ch;
         }
 

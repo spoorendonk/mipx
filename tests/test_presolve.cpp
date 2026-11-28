@@ -2869,6 +2869,85 @@ TEST_CASE("Presolve: MIP singleton exchange needs a finite box certificate", "[p
     CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
 }
 
+TEST_CASE("Presolve: exact opposing upper rows become one MIP equation", "[presolve]") {
+    // Preserve the positions of the existing options in aggregate initializers.
+    constexpr PresolveOptions positional{true, true,  false, true,  false, true,
+                                         true, false, false, false, false, true};
+    static_assert(positional.enable_parallel_cols && positional.enable_extended_dual_fixing);
+    static_assert(!positional.enable_mip_singleton_exchange &&
+                  !positional.enable_mip_opposing_rows);
+
+    // The first row contains one extra column fixed at 2. After folding its
+    // activity into the side, the rows say sum(x) <= 1 and -sum(x) <= -1.
+    LpProblem lp = rowsModel(
+        {1, 2, 3, 4}, {0, 0, 0, 2}, {1, 1, 1, 2},
+        {{-kInf, 7, {{0, 1}, {1, 1}, {2, 1}, {3, 3}}}, {-kInf, -1, {{0, -1}, {1, -1}, {2, -1}}}});
+    lp.col_type[0] = lp.col_type[1] = lp.col_type[2] = VarType::Binary;
+    PresolveOptions options;
+    options.enable_mip_opposing_rows = true;
+    Index expected = 1;
+    Real side = 1;
+
+    SECTION("exact opposition after a fixed column is folded away") {}
+    SECTION("default off") {
+        options = PresolveOptions{};
+        expected = 0;
+    }
+    SECTION("a different active coefficient is not an exact match") {
+        lp.matrix = SparseMatrix(2, 4, {1, 1, 1, 3, -1, -2, -1}, {0, 1, 2, 3, 0, 1, 2}, {0, 4, 7});
+        expected = 0;
+    }
+    SECTION("unequal opposing sides are not an equation") {
+        lp.row_upper[1] = std::nextafter(-1.0, 0.0);
+        expected = 0;
+    }
+    SECTION("nonunit opposite scales are outside the rule") {
+        lp.matrix = SparseMatrix(2, 4, {1, 1, 1, 3, -2, -2, -2}, {0, 1, 2, 3, 0, 1, 2}, {0, 4, 7});
+        lp.row_upper[1] = -2;
+        expected = 0;
+    }
+    SECTION("two positive zero sides meet at zero") {
+        lp.matrix = SparseMatrix(2, 4, {1, 1, -1, 3, -1, -1, 1}, {0, 1, 2, 3, 0, 1, 2}, {0, 4, 7});
+        lp.row_upper = {6, 0.0};
+        side = 0;
+    }
+    SECTION("an extra stored zero leaves the active support unchanged") {
+        lp = rowsModel({1, 2, 3, 4, 0.5}, {0, 0, 0, 2, 0}, {1, 1, 1, 2, 1},
+                       {{-kInf, 7, {}}, {-kInf, -1, {}}, {-kInf, 1, {}}, {1, kInf, {}}});
+        lp.col_type.assign(5, VarType::Binary);
+        lp.col_type[3] = VarType::Continuous;
+        lp.matrix = SparseMatrix(4, 5, {1, 1, 1, 3, -1, -1, -1, 0, 1, 1, 1, 1},
+                                 {0, 1, 2, 3, 0, 1, 2, 4, 0, 4, 1, 4}, {0, 4, 8, 10, 12});
+    }
+    SECTION("an LP does not run this pass") {
+        lp.col_type.assign(4, VarType::Continuous);
+        expected = 0;
+    }
+
+    Presolver presolver;
+    presolver.setOptions(options);
+    const LpProblem reduced = presolver.presolve(lp);
+    REQUIRE_FALSE(presolver.isInfeasible());
+    CHECK(presolver.stats().mip_opposing_row_changes == expected);
+    REQUIRE(reduced.num_rows == lp.num_rows - expected);
+    if (expected != 0) {
+        CHECK(reduced.row_lower[0] == side);
+        CHECK(reduced.row_upper[0] == side);
+        CHECK(reduced.matrix.row(0).size() == 3);
+        CHECK(reduced.col_type == std::vector<VarType>(lp.num_cols - 1, VarType::Binary));
+    }
+
+    const auto full = presolveSolvePostsolve(lp, presolver, options);
+    CHECK(pointViolation(lp, full) <= 1e-9);
+    CHECK(full[3] == 2);
+    for (Index col = 0; col < lp.num_cols; ++col) {
+        if (lp.col_type[col] == VarType::Binary) {
+            CHECK_THAT(full[col], WithinAbs(std::round(full[col]), 1e-9));
+        }
+    }
+    CHECK_THAT(objectiveAt(lp, full), WithinAbs(directOptimum(lp), 1e-9));
+}
+
 TEST_CASE("Presolve: singleton column does not over-fix ranged rows", "[presolve]") {
     // min x
     // s.t. 5 <= x + y <= 10, 0 <= x <= 10, 0 <= y <= 2

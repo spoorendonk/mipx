@@ -217,8 +217,6 @@ struct PresolveStats {
     /// Continuous singleton columns fixed at their preferred endpoint by
     /// MIP singleton stuffing (#450).
     Index mip_singleton_stuffing_changes = 0;
-    /// Continuous columns fixed by a finite singleton replacement (#465).
-    Index mip_singleton_exchange_changes = 0;
     Index probing_changes = 0;
     Index probing_fixings = 0;
     Index probing_coeff_strengthenings = 0;
@@ -258,7 +256,6 @@ struct PresolveStats {
     Real aggregator_seconds = 0.0;
     Real zero_cost_singleton_seconds = 0.0;
     Real mip_singleton_stuffing_seconds = 0.0;
-    Real mip_singleton_exchange_seconds = 0.0;
     Real implied_equation_seconds = 0.0;
     Real activity_bound_tightening_seconds = 0.0;
     Real dual_fixing_seconds = 0.0;
@@ -287,6 +284,12 @@ struct PresolveStats {
     /// 1 when the factorization ran out of time and nothing was dropped.
     Index dependent_equation_timeouts = 0;
     Real dependent_equation_seconds = 0.0;
+    /// Continuous columns fixed by a finite singleton replacement (#465).
+    Index mip_singleton_exchange_changes = 0;
+    Real mip_singleton_exchange_seconds = 0.0;
+    /// Pairs of exact opposing upper rows replaced by one equation (#468).
+    Index mip_opposing_row_changes = 0;
+    Real mip_opposing_row_seconds = 0.0;
 };
 
 /// One reduction's change count and time in PresolveStats.
@@ -340,10 +343,6 @@ struct PresolveOptions {
     /// columns, in decreasing order of objective gain per unit of activity.
     /// Requires enable_dual_fixing. Off by default until benchmarked.
     bool enable_mip_singleton_stuffing = false;
-    /// Fix an expensive continuous column at its lower bound when a cheaper
-    /// continuous singleton can replace it in its only lower row (#465).
-    /// MIP only, independent of enable_dual_fixing. Off by default.
-    bool enable_mip_singleton_exchange = false;
     /// Dual fixing's cases from HiGHS's dualFixing that the cost-sign rule
     /// misses (#366): a column is fixed at a finite bound its cost does not
     /// push it away from when every row that locks it the other way holds
@@ -393,6 +392,13 @@ struct PresolveOptions {
     double probing_time_limit = 5.0;  // seconds
     /// Derive column bounds from row activities inside the reduction loop.
     bool enable_activity_bound_tightening = true;
+    /// Fix an expensive continuous column at its lower bound when a cheaper
+    /// continuous singleton can replace it in its only lower row (#465).
+    /// MIP only, independent of enable_dual_fixing. Off by default.
+    bool enable_mip_singleton_exchange = false;
+    /// In a MIP, turn exactly opposing upper-only rows into one equation.
+    /// Off by default (#468).
+    bool enable_mip_opposing_rows = false;
 };
 
 // ---- Presolver --------------------------------------------------------------
@@ -509,6 +515,11 @@ private:
                              const std::vector<Index>& dirty_rows,
                              std::vector<uint8_t>& next_dirty_rows,
                              std::vector<uint8_t>& next_dirty_cols);
+    Index mergeMipOpposingRows(LpProblem& lp, const std::vector<bool>& col_removed,
+                               std::vector<bool>& row_removed, std::vector<Index>& row_active_nnz,
+                               std::vector<Index>& col_active_nnz,
+                               std::vector<uint8_t>& next_dirty_rows,
+                               std::vector<uint8_t>& next_dirty_cols);
     Index removeParallelCols(LpProblem& lp, std::vector<bool>& col_removed,
                              const std::vector<bool>& row_removed,
                              std::vector<Index>& row_active_nnz, std::vector<Index>& col_active_nnz,

@@ -830,6 +830,9 @@ std::vector<PresolveCase> presolveCases() {
     PresolveOptions exchange = o;
     exchange.enable_mip_singleton_exchange = true;
     cases.push_back({"MIP singleton exchange (opt-in)", exchange});
+    PresolveOptions opposing_rows = o;
+    opposing_rows.enable_mip_opposing_rows = true;
+    cases.push_back({"MIP opposing rows (opt-in)", opposing_rows});
     PresolveOptions extended_dual = o;
     extended_dual.enable_extended_dual_fixing = true;
     cases.push_back({"extended dual fixing (opt-in)", extended_dual});
@@ -857,6 +860,7 @@ std::vector<PresolveCase> presolveCases() {
     all.enable_zero_cost_singletons = true;
     all.enable_mip_singleton_stuffing = true;
     all.enable_mip_singleton_exchange = true;
+    all.enable_mip_opposing_rows = true;
     all.enable_extended_dual_fixing = true;
     all.enable_dependent_equations = true;
     cases.push_back({"all opt-in but parallel columns and single equations", all});
@@ -894,6 +898,8 @@ std::vector<PresolveReduction> presolveReductions() {
         {"duplicate rows", &PresolveStats::duplicate_row_changes, always},
         {"parallel rows", &PresolveStats::parallel_row_changes,
          [](const PresolveOptions& o) { return o.enable_parallel_rows; }},
+        {"MIP opposing rows", &PresolveStats::mip_opposing_row_changes,
+         [](const PresolveOptions& o) { return o.enable_mip_opposing_rows; }},
         {"parallel columns", &PresolveStats::parallel_col_changes,
          [](const PresolveOptions& o) { return o.enable_parallel_cols; }},
         {"free column substitution", &PresolveStats::free_col_substitution_changes,
@@ -1111,6 +1117,10 @@ std::vector<LpProblem> presolveAuditModels() {
     models.push_back(makeModel(Sense::Minimize, {3, 1, 1, 5}, {1, 0, 0, 0}, {5, 6, 1, 1},
                                {C, C, B, B}, {{1, 1, 1, 0}, {1, 0, 0, 4}, {0, 0, 1, 1}},
                                {6, -kInf, 1}, {kInf, 6, kInf}));
+    // Opposing MIP rows (#468): the two inequalities enforce the same
+    // cardinality equation without changing which binary points are feasible.
+    models.push_back(makeModel(Sense::Minimize, {1, 2, 3}, {0, 0, 0}, {1, 1, 1}, {B, B, B},
+                               {{1, 1, 1}, {-1, -1, -1}}, {-kInf, -kInf}, {1, -1}));
     // Extended dual fixing (#366): x0 at zero cost with two down locks and
     // no up lock; x0 whose one down lock, a ranged row's lower side, holds at
     // x0 = 0 for any x1 >= 1; the same upward, maximizing.
