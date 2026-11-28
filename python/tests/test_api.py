@@ -155,6 +155,24 @@ def test_root_cut_propagation_can_be_enabled(tmp_path: Path, setting: str) -> No
         solver.set_root_cut_propagation_row_budget(-1)
 
 
+def test_tree_cut_propagation_can_be_enabled(tmp_path: Path) -> None:
+    path = tmp_path / "tree_cut.lp"
+    path.write_text(
+        "Minimize\n obj: 100 s + 0.75 b - y + 0.25 z\nSubject To\n"
+        " a: 3 s - 4 b >= -1\n bside: s + 4 b >= 1\n"
+        " cap: 2 y - 4 b <= 1\n wake: y + z >= 1\nBinary\n b y\nEnd\n"
+    )
+    solver = mipx.MipSolver()
+    solver.set_verbose(False)
+    solver.set_presolve(False)
+    solver.set_tree_cuts_enabled(True)
+    solver.set_tree_cut_propagation_enabled(True)
+    solver.load(mipx.read_lp(str(path)))
+    result = solver.solve()
+    assert result.status == mipx.Status.Optimal
+    assert result.objective == pytest.approx(99.75)
+
+
 def test_mip_solver_accepts_root_flow_cover_setting(tmp_path: Path) -> None:
     path = tmp_path / "flow_cover.lp"
     path.write_text(

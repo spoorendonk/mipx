@@ -467,13 +467,14 @@ bool CliqueTable::propagateWithBudget(std::span<const Real> lower, std::span<con
 
 bool CliqueTable::propagateImpl(std::span<const Real> lower, std::span<const Real> upper,
                                 std::vector<BoundUpdate>& updates, PropagationFailure* failure,
-                                Int* visits_left, Index& next) const {
+                                Int* visits_left, Index& next,
+                                std::span<const Index> selected) const {
     updates.clear();
     if (failure != nullptr) {
         *failure = {};
     }
 
-    const Index count = numCliques();
+    const Index count = selected.empty() ? numCliques() : static_cast<Index>(selected.size());
     if (next < 0 || next >= count) {
         next = 0;
     }
@@ -484,7 +485,7 @@ bool CliqueTable::propagateImpl(std::span<const Real> lower, std::span<const Rea
             }
             --*visits_left;
         }
-        const Index current = next;
+        const Index current = selected.empty() ? next : selected[next];
         next = next + 1 == count ? 0 : next + 1;
         const auto& clq = cliques_[current];
         // Find which literal (if any) is fixed to 1.

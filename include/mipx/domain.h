@@ -108,6 +108,9 @@ public:
     bool propagateWithInactiveCuts(Int& visits_left, DomainPropagationWork& work,
                                    std::span<const Cut* const> inactive, Index first_clique = 0,
                                    bool sweep_active_rows = true);
+    /// Visit newly appended rows and any active rows woken by deductions.
+    bool propagateNewRows(Index first, Int& visits_left, DomainPropagationWork& work,
+                          const Deadline* deadline = nullptr);
 
     /// Checkpoint/restore for tree search backtracking.
     void pushCheckpoint();
@@ -137,6 +140,7 @@ private:
         std::vector<bool> seen;
         Index next_unvisited_row;
         std::vector<bool> visited_rows;
+        std::optional<std::vector<Index>> incident_cliques;
 
         [[nodiscard]] Int inferenceAllowance() const {
             return std::min(shared_visits_left, inference_visits_left);
@@ -148,6 +152,10 @@ private:
     };
 
     void seedRows();
+    bool propagateBudgeted(Int& visits_left, DomainPropagationWork& work,
+                           std::span<const Cut* const> inactive, Index first_clique,
+                           bool sweep_active_rows, const Deadline* deadline,
+                           std::optional<Index> first_new_row = std::nullopt);
     bool propagateRows(Int& visits_left, InferencePass* pass = nullptr, bool sweep = true,
                        const Deadline* deadline = nullptr);
     bool propagateRow(Index row, InferencePass* pass, const Deadline* deadline);

@@ -105,9 +105,10 @@ public:
     [[nodiscard]] std::vector<Substitution> findSubstitutions(const LpProblem& problem) const;
 
 private:
+    friend class DomainPropagator;
     bool propagateImpl(std::span<const Real> lower, std::span<const Real> upper,
                        std::vector<BoundUpdate>& updates, PropagationFailure* failure,
-                       Int* visits_left, Index& next) const;
+                       Int* visits_left, Index& next, std::span<const Index> selected = {}) const;
 
     /// Greedy extension of a partial clique to a maximal clique.
     void extendClique(Clique& clique, const ConflictGraph& graph) const;

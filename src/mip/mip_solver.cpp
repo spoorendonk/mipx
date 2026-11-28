@@ -45,6 +45,14 @@ namespace mipx {
 namespace {
 
 constexpr Real kConflictActivityDecay = 0.995;
+constexpr Int kTreeCutPropagationVisits = 64;
+
+void addPropagationWork(PropagationWork& total, const PropagationWork& delta, bool retained) {
+    total.visits += delta.visits;
+    if (retained) {
+        total.tightenings += delta.tightenings;
+    }
+}
 
 // Gives the next solve of `lp` `seconds` at most; negative means no limit.
 void setLpTimeLimit(DualSimplexSolver& lp, double seconds) {
@@ -1738,6 +1746,24 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     probing_stats_.tree_implication_fixings += stats.probing_implication_fixings;
     probing_stats_.tree_implication_cutoffs += stats.probing_implication_cutoffs;
     addSos2PropagationStats(lp_stats_.tree_sos2_propagation, stats.sos2_propagation);
+    const auto& cuts = stats.cuts;
+    cut_stats_.tree_nodes_with_cuts += cuts.tree_nodes_with_cuts;
+    cut_stats_.tree_nodes_skipped += cuts.tree_nodes_skipped;
+    cut_stats_.tree_rounds += cuts.tree_rounds;
+    cut_stats_.tree_cuts_local += cuts.tree_cuts_local;
+    cut_stats_.tree_cuts_global += cuts.tree_cuts_global;
+    cut_stats_.tree_cuts_purged += cuts.tree_cuts_purged;
+    cut_stats_.tree_cuts_revived += cuts.tree_cuts_revived;
+    cut_stats_.tree_lp_delta += cuts.tree_lp_delta;
+    addPropagationWork(cut_stats_.tree_cut_propagation.rows, cuts.tree_cut_propagation.rows, true);
+    addPropagationWork(cut_stats_.tree_cut_propagation.cliques, cuts.tree_cut_propagation.cliques,
+                       true);
+    addPropagationWork(cut_stats_.tree_cut_propagation.implications,
+                       cuts.tree_cut_propagation.implications, true);
+    cut_stats_.tree_cut_propagation_resolves += cuts.tree_cut_propagation_resolves;
+    cut_stats_.tree_cut_propagation_backouts += cuts.tree_cut_propagation_backouts;
+    cut_stats_.tree_cut_propagation_budget_exhaustions +=
+        cuts.tree_cut_propagation_budget_exhaustions;
 }
 
 void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
@@ -3446,6 +3472,7 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     }
     flushRcStats();
 
+    auto& tree_cut_stats = node_stats.cuts;
     std::vector<Cut> node_local_cuts = std::move(node.local_cuts);
     if (!node_local_cuts.empty()) {
         auto& kept = node_scratch.kept_cuts;
@@ -3463,10 +3490,10 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             if (cut.age > 6) {
                 if (dist <= 1e-2) {
                     cut.age = 0;
-                    ++cut_stats_.tree_cuts_revived;
+                    ++tree_cut_stats.tree_cuts_revived;
                     kept.push_back(std::move(cut));
                 } else {
-                    ++cut_stats_.tree_cuts_purged;
+                    ++tree_cut_stats.tree_cuts_purged;
                 }
             } else {
                 kept.push_back(std::move(cut));
@@ -3475,11 +3502,14 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         node_local_cuts = std::move(kept);
     }
 
-    // In-tree cut management (serial path only): depth-gated rounds and
-    // local-vs-global cut handling.
+    // Deterministic workers may run the opt-in feedback on private LPs.
+    // Only the serial LP can publish global rows across nodes.
+    const bool serial_cuts = num_threads_ <= 1;
+    const bool propagate_tree_cuts = tree_cut_propagation_enabled_;
     bool tree_cut_ran = false;
     if (tree_cuts_enabled_ && cuts_enabled_ && cut_effort_mode_ != CutEffortMode::Off &&
-        num_threads_ <= 1 && node.depth > 0 && frac_count > 0 && problem_.num_cols <= 64) {
+        (serial_cuts || (propagate_tree_cuts && deferred_branching != nullptr)) && node.depth > 0 &&
+        frac_count > 0 && problem_.num_cols <= 64) {
         const bool aggressive = (node.depth <= 2);
         const bool conservative = (node.depth <= 8);
         const bool run_tree_rounds = aggressive || (conservative && (node.depth % 2 == 0));
@@ -3497,6 +3527,12 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
             const Int max_tree_cuts = aggressive ? 8 : 4;
             tree_separators.setMaxCutsPerFamily(max_tree_cuts);
             const Int max_rounds = aggressive ? 2 : 1;
+            const Deadline deadline = lp.getOptions().deadline;
+            if (propagate_tree_cuts) {
+                tree_separators.setDeadline(deadline);
+            }
+            Int visits_left = kTreeCutPropagationVisits;
+            std::optional<LpProblem> propagation_model;
 
             for (Int round = 0; round < max_rounds; ++round) {
                 CutPool tree_pool;
@@ -3525,21 +3561,16 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 values.clear();
                 lower.clear();
                 upper.clear();
-                // Batch positions of the rows that stay in this subtree.
-                // Recorded per row rather than counted: the promoted rows are
-                // no longer a prefix of the batch now that a cut can be barred
-                // from promotion for being local, and mistaking a global row
-                // for a local one here would leave the local row in the LP for
-                // the rest of the search.
-                std::vector<Index> local_offsets;
+                // The batch can interleave globally promoted and temporary rows.
+                std::vector<bool> promoted;
 
                 for (Index idx : top_indices) {
                     const auto& cut = tree_pool[idx];
                     // A cut a separator marked local was derived from data that
                     // only holds in this subtree (a branched bound, a local cut
                     // row), so it can never be promoted however good it looks.
-                    const bool promote_global =
-                        (!cut.local && node.depth <= 2 && cut.efficacy >= 0.15);
+                    promoted.push_back(serial_cuts && cut.isUnconditionalGlobal() &&
+                                       node.depth <= 2 && cut.efficacy >= 0.15);
 
                     starts.push_back(static_cast<Index>(col_indices.size()));
                     for (Index k = 0; k < static_cast<Index>(cut.indices.size()); ++k) {
@@ -3548,22 +3579,6 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                     }
                     lower.push_back(cut.lower);
                     upper.push_back(cut.upper);
-
-                    if (promote_global) {
-                        ++cut_stats_.tree_cuts_global;
-                        if (node_scratch.conflict_global_rows != nullptr) {
-                            appendCertificateRow(*node_scratch.conflict_global_rows, cut.indices,
-                                                 cut.values, cut.lower, cut.upper);
-                        }
-                    } else {
-                        local_offsets.push_back(static_cast<Index>(lower.size()) - 1);
-                        Cut local_cut = cut;
-                        local_cut.local = true;
-                        local_cut.age = 0;
-                        local_cut.activity = 0;
-                        node_local_cuts.push_back(std::move(local_cut));
-                        ++cut_stats_.tree_cuts_local;
-                    }
                 }
 
                 if (lower.empty()) {
@@ -3571,19 +3586,168 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
                 }
 
                 const Index base_row = lp.numRows();
+                const auto before_basis =
+                    propagate_tree_cuts ? lp.getBasis() : std::vector<BasisStatus>{};
                 lp.addRows(starts, col_indices, values, lower, upper);
-                for (Index offset : local_offsets) {
-                    temp_local_rows.push_back(base_row + offset);
+                const auto recordBatchProofRows = [&](LpProblem* global_rows,
+                                                      std::vector<Index>& local_rows) {
+                    for (Index i = 0; i < static_cast<Index>(top_indices.size()); ++i) {
+                        if (!promoted[i]) {
+                            local_rows.push_back(base_row + i);
+                        } else if (global_rows != nullptr) {
+                            const auto& cut = tree_pool[top_indices[i]];
+                            appendCertificateRow(*global_rows, cut.indices, cut.values, cut.lower,
+                                                 cut.upper);
+                        }
+                    }
+                };
+                const auto publishRows = [&] {
+                    recordBatchProofRows(node_scratch.conflict_global_rows, temp_local_rows);
+                    for (Index i = 0; i < static_cast<Index>(top_indices.size()); ++i) {
+                        if (promoted[i]) {
+                            ++tree_cut_stats.tree_cuts_global;
+                        } else {
+                            Cut local_cut = tree_pool[top_indices[i]];
+                            local_cut.local = true;
+                            local_cut.age = 0;
+                            local_cut.activity = 0;
+                            node_local_cuts.push_back(std::move(local_cut));
+                            ++tree_cut_stats.tree_cuts_local;
+                        }
+                    }
+                };
+
+                DomainPropagationWork propagation;
+                struct StagedBound {
+                    Index col;
+                    Real lower;
+                    Real upper;
+                };
+                std::vector<StagedBound> staged_bounds;
+                bool feasible = true;
+                if (propagate_tree_cuts && visits_left > 0 && !deadline.passed()) {
+                    if (!propagation_model) {
+                        auto& model = propagation_model.emplace();
+                        model.num_cols = problem_.num_cols;
+                        model.num_rows = problem_.num_rows;
+                        model.matrix = problem_.matrix;
+                        model.col_type = problem_.col_type;
+                        model.row_lower = problem_.row_lower;
+                        model.row_upper = problem_.row_upper;
+                    }
+                    auto& domain_model = *propagation_model;
+                    domain_model.col_lower = current_lower;
+                    domain_model.col_upper = current_upper;
+                    std::vector<Index> row_indices;
+                    std::vector<Real> row_values;
+                    for (Index row = domain_model.num_rows;
+                         row < lp.numRows() && !deadline.passed(); ++row) {
+                        Real row_lower;
+                        Real row_upper;
+                        lp.getRowExternal(row, row_indices, row_values, row_lower, row_upper);
+                        appendCertificateRow(domain_model, row_indices, row_values, row_lower,
+                                             row_upper);
+                    }
+                    if (!deadline.passed()) {
+                        // Branch and cutoff deductions are already in the reconstructed
+                        // domain. Keep new bounds in this node's LP and trail, outside
+                        // the global model and the independently checked proof rows.
+                        DomainPropagator dp;
+                        dp.load(domain_model);
+                        if (cliquePropagationActive()) {
+                            dp.setCliqueTable(&clique_table_);
+                        }
+                        if (implication_graph_.numImplications() > 0) {
+                            dp.setImplicationGraph(&implication_graph_);
+                        }
+                        const Int before_visits = visits_left;
+                        feasible =
+                            dp.propagateNewRows(base_row, visits_left, propagation, &deadline);
+                        node_work_out +=
+                            1e-6 * (static_cast<double>(domain_model.matrix.numNonzeros()) +
+                                    domain_model.num_rows + before_visits - visits_left);
+                        tree_cut_stats.tree_cut_propagation_budget_exhaustions += visits_left == 0;
+                        if (feasible) {
+                            for (Index j = 0; j < problem_.num_cols; ++j) {
+                                const Real lb = dp.getLower(j);
+                                const Real ub = dp.getUpper(j);
+                                if (lb <= ub && (lb > current_lower[j] || ub < current_upper[j])) {
+                                    lp.setColBounds(j, lb, ub);
+                                    staged_bounds.push_back({j, lb, ub});
+                                }
+                            }
+                        }
+                    }
+                } else if (!propagate_tree_cuts) {
+                    publishRows();
                 }
 
                 const Real prev_obj = node_obj_out;
-                auto tree_result = lp.solve();
+                LpResult tree_result;
+                tree_result.status = Status::Infeasible;
+                if (feasible) {
+                    tree_result = lp.solve();
+                    tree_cut_stats.tree_cut_propagation_resolves += !staged_bounds.empty();
+                }
                 node_iters_out += tree_result.iterations;
                 node_work_out += tree_result.work_units;
+                if (propagate_tree_cuts) {
+                    const bool retained = tree_result.status == Status::Optimal;
+                    auto& work = tree_cut_stats.tree_cut_propagation;
+                    addPropagationWork(work.rows, propagation.rows, retained);
+                    addPropagationWork(work.cliques, propagation.cliques, retained);
+                    addPropagationWork(work.implications, propagation.implications, retained);
+                    if (!retained) {
+                        ++tree_cut_stats.tree_cut_propagation_backouts;
+                        // A contradiction from a tentative domain has no checked proof.
+                        // For an LP ray, replay the branch against a temporary row
+                        // mirror with the existing cutoff scope and proof checker.
+                        bool certified = false;
+                        if (feasible && tree_result.status == Status::Infeasible && use_lp_proofs) {
+                            auto proof_rows = *node_scratch.conflict_global_rows;
+                            auto local_rows = temp_local_rows;
+                            recordBatchProofRows(&proof_rows, local_rows);
+                            certified =
+                                learnLpConflictProof(node.bound_changes, lp, proof_rows, local_rows,
+                                                     conflict_cutoff, Status::Infeasible);
+                        }
+                        for (const auto& bound : staged_bounds) {
+                            lp.setColBounds(bound.col, current_lower[bound.col],
+                                            current_upper[bound.col]);
+                        }
+                        std::vector<Index> removed(top_indices.size());
+                        std::iota(removed.begin(), removed.end(), base_row);
+                        lp.removeRows(removed);
+                        lp.setBasis(before_basis);
+                        if (certified) {
+                            tree_cut_stats.tree_nodes_with_cuts += tree_cut_ran;
+                            return false;
+                        }
+                        auto restored = lp.solve();
+                        node_iters_out += restored.iterations;
+                        node_work_out += restored.work_units;
+                        restored = resolveNodeLpWithoutVerdict(lp, restored, node_iters_out,
+                                                               node_work_out);
+                        if (restored.status != Status::Optimal) {
+                            recordNodeDroppedWithoutVerdict(prev_obj, restored.status);
+                            tree_cut_stats.tree_nodes_with_cuts += tree_cut_ran;
+                            return false;
+                        }
+                        node_obj_out = restored.objective;
+                        node_primals_out = lp.getPrimalValues();
+                        break;
+                    }
+                    publishRows();
+                    for (const auto& bound : staged_bounds) {
+                        current_lower[bound.col] = bound.lower;
+                        current_upper[bound.col] = bound.upper;
+                        touched_vars.push_back(bound.col);
+                    }
+                }
                 if (tree_result.status != Status::Optimal) {
                     if (tree_result.status == Status::Infeasible &&
                         learnCheckedLpConflict(Status::Infeasible)) {
-                        cut_stats_.tree_nodes_with_cuts += tree_cut_ran;
+                        tree_cut_stats.tree_nodes_with_cuts += tree_cut_ran;
                         return false;
                     }
                     break;
@@ -3591,26 +3755,39 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
 
                 node_obj_out = tree_result.objective;
                 node_primals_out = lp.getPrimalValues();
+                if (propagate_tree_cuts) {
+                    frac_count = 0;
+                    for (Index j = 0; j < problem_.num_cols; ++j) {
+                        if (problem_.col_type[j] != VarType::Continuous &&
+                            !isIntegral(node_primals_out[j], kIntTol)) {
+                            ++frac_count;
+                        }
+                    }
+                    int_inf_out = frac_count;
+                }
                 const Real improvement = std::abs(node_obj_out - prev_obj);
-                cut_stats_.tree_lp_delta += improvement;
-                ++cut_stats_.tree_rounds;
+                tree_cut_stats.tree_lp_delta += improvement;
+                ++tree_cut_stats.tree_rounds;
                 tree_cut_ran = true;
-                if (node_obj_out > conflict_cutoff && learnCheckedLpConflict(Status::Optimal)) {
-                    ++cut_stats_.tree_nodes_with_cuts;
+                if ((propagate_tree_cuts && cutoffNodeLp(node_obj_out)) ||
+                    (!propagate_tree_cuts && node_obj_out > conflict_cutoff &&
+                     learnCheckedLpConflict(Status::Optimal))) {
+                    ++tree_cut_stats.tree_nodes_with_cuts;
                     return false;
                 }
-                if (improvement < kCutImprovementTol) {
+                if (frac_count == 0 ||
+                    (improvement < kCutImprovementTol && staged_bounds.empty())) {
                     break;
                 }
             }
         } else {
-            ++cut_stats_.tree_nodes_skipped;
+            ++tree_cut_stats.tree_nodes_skipped;
         }
     } else if (node.depth > 0 && frac_count > 0) {
-        ++cut_stats_.tree_nodes_skipped;
+        ++tree_cut_stats.tree_nodes_skipped;
     }
     if (tree_cut_ran) {
-        ++cut_stats_.tree_nodes_with_cuts;
+        ++tree_cut_stats.tree_nodes_with_cuts;
     }
 
     const bool normalized =
@@ -7495,6 +7672,20 @@ MipResult MipSolver::solveMinimizationOnce() {
                 cut_stats_.tree_nodes_skipped, cut_stats_.tree_rounds, cut_stats_.tree_cuts_local,
                 cut_stats_.tree_cuts_global, cut_stats_.tree_cuts_purged,
                 cut_stats_.tree_cuts_revived, cut_stats_.tree_lp_delta);
+        }
+        if (tree_cut_propagation_enabled_) {
+            const auto& work = cut_stats_.tree_cut_propagation;
+            log_.log(
+                "Tree cut propagation: row_visits=%llu clique_visits=%llu "
+                "implication_visits=%llu tightenings=%llu resolves=%d backouts=%d "
+                "budget_exhaustions=%d\n",
+                static_cast<unsigned long long>(work.rows.visits),
+                static_cast<unsigned long long>(work.cliques.visits),
+                static_cast<unsigned long long>(work.implications.visits),
+                static_cast<unsigned long long>(work.rows.tightenings + work.cliques.tightenings +
+                                                work.implications.tightenings),
+                cut_stats_.tree_cut_propagation_resolves, cut_stats_.tree_cut_propagation_backouts,
+                cut_stats_.tree_cut_propagation_budget_exhaustions);
         }
         if (conflict_stats_.learned > 0 || conflict_stats_.reused > 0) {
             log_.log(

@@ -131,6 +131,11 @@ struct MipCutStats {
     Int tree_cuts_purged = 0;
     Int tree_cuts_revived = 0;
     Real tree_lp_delta = 0.0;
+    /// Visits include discarded batches. Tightenings count retained endpoints.
+    DomainPropagationWork tree_cut_propagation;
+    Int tree_cut_propagation_resolves = 0;
+    Int tree_cut_propagation_backouts = 0;
+    Int tree_cut_propagation_budget_exhaustions = 0;
     Int root_cut_bound_tightenings = 0;
     Int root_cut_bound_tightenings_backed_out = 0;
     /// Includes visits in rounds whose LP changes were backed out.
@@ -695,6 +700,8 @@ public:
         }
     }
     void setTreeCutsEnabled(bool enabled) { tree_cuts_enabled_ = enabled; }
+    /// When tree cuts are enabled, propagate them in serial and on deterministic worker LPs.
+    void setTreeCutPropagationEnabled(bool enabled) { tree_cut_propagation_enabled_ = enabled; }
     /// Objective propagation (#117): propagate c^T x <= incumbent as a row in
     /// node propagation, and re-propagate the root domain against it whenever
     /// a new incumbent lowers the cutoff. Off by default until benchmarked.
@@ -865,6 +872,7 @@ private:
         std::uint64_t probing_implication_fixings = 0;
         std::uint64_t probing_implication_cutoffs = 0;
         Sos2PropagationStats sos2_propagation;
+        MipCutStats cuts;
     };
 
     void mergeNodeWorkStats(const NodeWorkStats& stats);
@@ -1216,6 +1224,7 @@ private:
     // Serial in-tree cuts are disabled by default while correctness hardening
     // is in progress for benchmark regressions.
     bool tree_cuts_enabled_ = false;
+    bool tree_cut_propagation_enabled_ = false;
     // Off until a benchmark decides: on, it changes the default search.
     bool cut_strengthening_ = false;
     MipLpStats lp_stats_{};

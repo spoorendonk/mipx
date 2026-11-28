@@ -184,6 +184,9 @@ NB_MODULE(_core, m) {
         .def("set_verbose", &MipSolver::setVerbose, "verbose"_a)
         .def("set_presolve", &MipSolver::setPresolve, "enabled"_a)
         .def("set_cuts_enabled", &MipSolver::setCutsEnabled, "enabled"_a)
+        .def("set_tree_cuts_enabled", &MipSolver::setTreeCutsEnabled, "enabled"_a)
+        .def("set_tree_cut_propagation_enabled", &MipSolver::setTreeCutPropagationEnabled,
+             "enabled"_a)
         .def("set_root_cut_recheck", &MipSolver::setRootCutRecheck, "enabled"_a)
         .def("set_root_cut_propagation_enabled", &MipSolver::setRootCutPropagationEnabled,
              "enabled"_a)

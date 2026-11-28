@@ -578,6 +578,53 @@ TEST_CASE("Bounded inference visits pending cliques before unrelated rows", "[do
     CHECK(budget == 0);
 }
 
+TEST_CASE("New rows give inference work to affected cliques and implications", "[domain][cuts]") {
+    // A new row fixes two literals in separated cliques. Both deductions
+    // are needed to wake the active row and fix z. Another fixing was
+    // already present when this node's domain was loaded.
+    std::vector<Real> lb(15, 0);
+    lb[0] = 1;
+    const auto model =
+        makeProblem(15, 2, {{0, 7, 1}, {0, 13, 1}, {0, 14, 1}, {1, 6, 1}, {1, 12, 1}}, {1, 2},
+                    {kInf, kInf}, lb, std::vector<Real>(15, 1), std::vector(15, VarType::Binary));
+    ConflictGraph conflicts;
+    conflicts.build(model);
+    CliqueTable cliques;
+    cliques.build(model, conflicts);
+    for (Index j : {2, 6, 4, 8, 10, 12}) {
+        const Cut cut{.indices = {j, j + 1}, .values = {1, 1}, .upper = 1};
+        REQUIRE(cliques.extractFromCut(cut, model, conflicts) == 1);
+    }
+    ImplicationGraph implications;
+    implications.init(15, {0, 1});
+    REQUIRE(implications.addImplication(0, true, 1, false));
+    DomainPropagator dp;
+    dp.load(model);
+    dp.setCliqueTable(&cliques);
+    dp.setImplicationGraph(&implications);
+    Int budget = 6;
+    DomainPropagationWork work;
+    REQUIRE(dp.propagateNewRows(1, budget, work));
+    CHECK(dp.getLower(6) == 1);
+    CHECK(dp.getUpper(7) == 0);
+    CHECK(dp.getLower(12) == 1);
+    CHECK(dp.getUpper(13) == 0);
+    CHECK(dp.getLower(14) == 1);
+    CHECK(dp.getUpper(1) == 1);
+    CHECK(work.implications.visits == 0);
+    CHECK(work.rows.visits + work.cliques.visits == 6);
+    CHECK(budget == 0);
+
+    dp.load(model);
+    dp.setCliqueTable(nullptr);
+    dp.setImplicationGraph(&implications);
+    budget = 2;
+    work = {};
+    REQUIRE(dp.propagateWithInactiveCuts(budget, work, {}, 0, false));
+    CHECK(dp.getUpper(1) == 0);
+    CHECK(work.implications.visits == 1);
+}
+
 TEST_CASE("Inactive pool propagation uses satisfied global cuts and wakes active rows",
           "[domain][cuts]") {
     const auto model = makeProblem(7, 3, {{0, 0, 1}, {0, 6, 1}}, {1, -kInf, -kInf},

@@ -224,6 +224,27 @@ bool DomainPropagator::propagateRows(Int& visits_left, InferencePass* pass, bool
 
 void DomainPropagator::prioritizeChangedCliques(InferencePass& pass,
                                                 std::size_t first_change) const {
+    if (pass.incident_cliques) {
+        auto& pending = *pass.incident_cliques;
+        if (pass.cliques_left == 0) {
+            pending.clear();
+        } else {
+            pending.erase(pending.begin(), pending.begin() + pass.next_clique);
+        }
+        for (std::size_t i = first_change; i < changes_.size(); ++i) {
+            for (const bool complemented : {false, true}) {
+                const auto incident = clique_table_->cliquesOf({changes_[i].col, complemented});
+                pending.insert(pending.end(), incident.begin(), incident.end());
+            }
+        }
+        std::ranges::sort(pending);
+        const auto duplicate_tail = std::ranges::unique(pending);
+        pending.erase(duplicate_tail.begin(), duplicate_tail.end());
+        pass.next_clique = 0;
+        pass.cliques_left = static_cast<Index>(pending.size());
+        return;
+    }
+    pass.cliques_left = clique_table_->numCliques();
     for (std::size_t i = first_change; i < changes_.size(); ++i) {
         for (const bool complemented : {false, true}) {
             const auto incident = clique_table_->cliquesOf({changes_[i].col, complemented});
@@ -243,28 +264,61 @@ bool DomainPropagator::propagateWithInferenceBudget(Int& visits_left, DomainProp
 bool DomainPropagator::propagateWithInactiveCuts(Int& visits_left, DomainPropagationWork& work,
                                                  std::span<const Cut* const> inactive,
                                                  Index first_clique, bool sweep_active_rows) {
-    if (visits_left <= 0) {
+    return propagateBudgeted(visits_left, work, inactive, first_clique, sweep_active_rows, nullptr);
+}
+
+bool DomainPropagator::propagateNewRows(Index first, Int& visits_left, DomainPropagationWork& work,
+                                        const Deadline* deadline) {
+    return propagateBudgeted(visits_left, work, {}, 0, false, deadline, first);
+}
+
+bool DomainPropagator::propagateBudgeted(Int& visits_left, DomainPropagationWork& work,
+                                         std::span<const Cut* const> inactive, Index first_clique,
+                                         bool sweep_active_rows, const Deadline* deadline,
+                                         std::optional<Index> first_new_row) {
+    const auto stopped = [&] { return deadline != nullptr && deadline->passed(); };
+    if (visits_left <= 0 || stopped()) {
         return true;
     }
     const Index num_cliques = clique_table_ != nullptr ? clique_table_->numCliques() : 0;
     InferencePass pass{visits_left, visits_left / 2,
                        work,        first_clique,
                        num_cliques, {},
-                       num_rows_,   std::vector<bool>(num_rows_)};
+                       num_rows_,   std::vector<bool>(num_rows_),
+                       std::nullopt};
     if (implication_graph_ != nullptr) {
         pass.seen.resize(num_cols_);
     }
+    const bool seeded_rows = first_new_row.has_value();
     auto clique_revision = changes_.size();
-    bool feasible = propagateCliques(&pass, implication_graph_ != nullptr);
-    for (Index j = 0;
-         feasible && pass.inferenceAllowance() > 0 && j < static_cast<Index>(pass.seen.size());
+    if (seeded_rows) {
+        for (Index row = std::max<Index>(0, *first_new_row); row < num_rows_; ++row) {
+            if (!row_in_queue_[row]) {
+                queue_.push_back(row);
+                row_in_queue_[row] = true;
+            }
+        }
+        pass.incident_cliques.emplace();
+        pass.cliques_left = 0;
+        if (!propagateRows(visits_left, &pass, false, deadline)) {
+            return false;
+        }
+        if (num_cliques > 0) {
+            prioritizeChangedCliques(pass, clique_revision);
+        }
+        clique_revision = changes_.size();
+    }
+    bool feasible =
+        stopped() || propagateCliques(&pass, !seeded_rows && implication_graph_ != nullptr);
+    for (Index j = 0; !seeded_rows && feasible && pass.inferenceAllowance() > 0 &&
+                      j < static_cast<Index>(pass.seen.size()) && !stopped();
          ++j) {
         if (lower_[j] > upper_[j] - kTol) {
             feasible = checkCrossing(j) && propagateImplications(j, &pass);
         }
     }
     for (const Cut* cut : inactive) {
-        if (!feasible || visits_left <= 0 ||
+        if (!feasible || visits_left <= 0 || stopped() ||
             (sweep_active_rows && pass.inferenceAllowance() <= 0)) {
             break;
         }
@@ -278,19 +332,21 @@ bool DomainPropagator::propagateWithInactiveCuts(Int& visits_left, DomainPropaga
         }
         ++work.inactive_cuts.visits;
         feasible = propagateActivity({cut->indices, cut->values}, cut->lower, cut->upper, -1, &pass,
-                                     &work.inactive_cuts);
+                                     &work.inactive_cuts, deadline);
     }
-    while (feasible && visits_left > 0) {
+    while (feasible && visits_left > 0 && !stopped()) {
         // Exhaust woken rows and pending clique work before starting or
         // resuming a scan of unrelated rows.
-        if (!propagateRows(visits_left, &pass, false)) {
+        if (!propagateRows(visits_left, &pass, false, deadline)) {
             return false;
+        }
+        if (stopped()) {
+            break;
         }
         if (num_cliques > 0 && pass.inferenceAllowance() > 0) {
             if (changes_.size() != clique_revision) {
                 prioritizeChangedCliques(pass, clique_revision);
                 clique_revision = changes_.size();
-                pass.cliques_left = num_cliques;
             }
             if (pass.cliques_left > 0) {
                 feasible = propagateCliques(&pass);
@@ -301,7 +357,7 @@ bool DomainPropagator::propagateWithInactiveCuts(Int& visits_left, DomainPropaga
             break;
         }
         const auto before = changes_.size();
-        feasible = propagateRows(visits_left, &pass);
+        feasible = propagateRows(visits_left, &pass, true, deadline);
         if (changes_.size() == before || pass.inferenceAllowance() <= 0 || num_cliques == 0) {
             break;
         }
@@ -434,10 +490,13 @@ bool DomainPropagator::propagateCliques(InferencePass* pass, bool reserve_implic
     }
     Int visits_left = allowance;
     auto* failure_out = reasons_ ? &failure : nullptr;
+    const auto selected = pass != nullptr && pass->incident_cliques
+                              ? std::span<const Index>(*pass->incident_cliques)
+                              : std::span<const Index>{};
     const bool feasible =
         pass == nullptr ? clique_table_->propagate(lower_, upper_, updates, failure_out)
-                        : clique_table_->propagateWithBudget(lower_, upper_, updates, failure_out,
-                                                             visits_left, pass->next_clique);
+                        : clique_table_->propagateImpl(lower_, upper_, updates, failure_out,
+                                                       &visits_left, pass->next_clique, selected);
     if (pass != nullptr) {
         const Int visits = allowance - visits_left;
         pass->chargeInference(visits);

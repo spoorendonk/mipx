@@ -1008,6 +1008,110 @@ TEST_CASE("MipSolver: in-tree cut telemetry is populated", "[mip][cuts]") {
     CHECK(cut_stats.tree_rounds >= 0);
 }
 
+TEST_CASE("MipSolver: tree cut deductions stay within their node and batch",
+          "[mip][cuts][domain][parallel]") {
+    const bool reject = GENERATE(false, true);
+    const bool cover = GENERATE(false, true);
+#ifdef MIPX_HAS_TBB
+    const bool parallel = GENERATE(false, true);
+#else
+    const bool parallel = false;
+#endif
+    CAPTURE(reject, cover, parallel);
+    // The two sides on s make the root optimum branch at b=1/4, y=1.
+    // On b=0, the LP has y=1/2, and a cut fixes y=0, waking y+z>=1.
+    // The sibling b=1 needs y=1 and z=0 to attain the optimum. The Cover
+    // case uses the complementary coordinate for b and the same geometry.
+    LpProblem lp;
+    lp.num_cols = reject ? 6 : 4;
+    lp.num_rows = reject ? 6 : 4;
+    lp.obj = {cover ? -0.75 : 0.75, -1, 0.25, 100};
+    lp.col_lower = {0, 0, 0, 0};
+    lp.col_upper = {1, 1, 1, kInf};
+    lp.col_type = {VarType::Binary, VarType::Binary, VarType::Continuous, VarType::Continuous};
+    lp.row_lower = {cover ? 1 : -1.0 / 3.0, cover ? -3.0 : 1, -kInf, 1};
+    lp.row_upper = {kInf, kInf, cover ? 5.0 : 1, kInf};
+    const Real sign = cover ? -1 : 1;
+    std::vector<Triplet> entries{{0, 0, -sign * 4.0 / 3.0}, {0, 3, 1}, {1, 0, sign * 4}, {1, 3, 1},
+                                 {2, 0, -sign * 4},         {2, 1, 2}, {3, 1, 1},        {3, 2, 1}};
+    if (reject) {
+        // The free terms hide y>=1/4 at b=0 from interval propagation.
+        // The staged bounds are contradictory when the node LP re-solves.
+        lp.obj.insert(lp.obj.end(), 2, 0);
+        lp.col_type.insert(lp.col_type.end(), 2, VarType::Continuous);
+        lp.col_lower.insert(lp.col_lower.end(), 2, -kInf);
+        lp.col_upper.insert(lp.col_upper.end(), 2, kInf);
+        lp.row_lower.insert(lp.row_lower.end(), {cover ? 0 : 0.25, -kInf});
+        lp.row_upper.insert(lp.row_upper.end(), {kInf, 0});
+        entries.insert(
+            entries.end(),
+            {{4, 0, sign * 0.25}, {4, 1, 1}, {4, 4, 1}, {4, 5, -1}, {5, 4, 1}, {5, 5, -1}});
+    }
+    lp.matrix = SparseMatrix(lp.num_rows, lp.num_cols, entries);
+
+    MipSolver solver;
+    solver.setVerbose(false);
+    solver.setPresolve(false);
+    solver.setSymmetryEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setTreeCutsEnabled(true);
+    solver.setMaxCutRounds(0);
+    solver.setRootHeuristicThresholds(1, 1);
+    solver.setRootFeasibilityJumpRestarts(0);
+    solver.setNumThreads(parallel ? 2 : 1);
+    solver.setParallelMode(ParallelMode::Deterministic);
+    for (Int f = 1; f < static_cast<Int>(CutFamily::Count); ++f) {
+        const auto family = static_cast<CutFamily>(f);
+        solver.setCutFamilyEnabled(family,
+                                   family == (cover ? CutFamily::Cover : CutFamily::Gomory));
+    }
+    solver.load(lp);
+    if (!reject) {
+        REQUIRE(solver.solve().status == Status::Optimal);
+        CHECK(solver.getCutStats().tree_cut_propagation.rows.visits == 0);
+    }
+
+    solver.setTreeCutPropagationEnabled(true);
+    const auto result = solver.solve();
+    REQUIRE(result.status == Status::Optimal);
+    CHECK_THAT(result.objective, WithinAbs(cover ? 99.0 : 99.75, 1e-8));
+    REQUIRE(result.solution.size() == static_cast<std::size_t>(lp.num_cols));
+    CHECK_THAT(result.solution[0], WithinAbs(cover ? 0.0 : 1, 1e-8));
+    CHECK_THAT(result.solution[1], WithinAbs(1, 1e-8));
+    CHECK_THAT(result.solution[2], WithinAbs(0, 1e-8));
+
+    const auto cuts = solver.getCutStats();
+    CHECK(cuts.tree_cut_propagation.rows.visits > 0);
+    CHECK(cuts.tree_cut_propagation_resolves > 0);
+    if (reject) {
+        CHECK(cuts.tree_cut_propagation_backouts > 0);
+        CHECK(cuts.tree_cut_propagation.rows.tightenings == 0);
+        CHECK(cuts.tree_cuts_local + cuts.tree_cuts_global == 0);
+    } else {
+        CHECK(cuts.tree_cut_propagation_backouts == 0);
+        CHECK(cuts.tree_cut_propagation.rows.tightenings >= 2);
+        CHECK(cuts.tree_cuts_local + cuts.tree_cuts_global > 0);
+        if (parallel) {
+            CHECK(cuts.tree_cuts_global == 0);
+        } else if (cover) {
+            CHECK(cuts.tree_cuts_global > 0);
+        }
+    }
+    if (parallel) {
+        const auto replay = solver.solve();
+        REQUIRE(replay.status == Status::Optimal);
+        CHECK(replay.objective == result.objective);
+        CHECK(replay.nodes == result.nodes);
+        CHECK(replay.work_units == result.work_units);
+        const auto& repeated = solver.getCutStats();
+        CHECK(repeated.tree_cut_propagation.rows.visits == cuts.tree_cut_propagation.rows.visits);
+        CHECK(repeated.tree_cut_propagation.rows.tightenings ==
+              cuts.tree_cut_propagation.rows.tightenings);
+        CHECK(repeated.tree_cut_propagation_backouts == cuts.tree_cut_propagation_backouts);
+    }
+}
+
 TEST_CASE("MipSolver: symmetry cuts are applied when presolve is off", "[mip][symmetry]") {
     auto lp = buildSymmetryProbeMip();
 

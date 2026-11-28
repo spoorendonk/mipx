@@ -97,6 +97,7 @@ Key options:
 | `--conflict-ray-shortening` / `--no-conflict-ray-shortening` | off | Shorten serial tree no-goods when a rechecked LP ray proves infeasibility with fewer branch bounds |
 | `--pre-lp-propagation` / `--no-pre-lp-propagation` | off | Use bounded row propagation to prune contradictory child domains before simplex |
 | `--pre-lp-propagation-bounds` / `--no-pre-lp-propagation-bounds` | off | Apply bounded row deductions before simplex at depth-scheduled tree presolve nodes of all-discrete models in serial or opportunistic search |
+| `--tree-cut-propagation` | off | Requires `--tree-cuts`. Propagate newly installed cuts within a shared 64-visit node budget and re-solve on tightened bounds. The option also enables separation on private worker LPs in deterministic parallel search |
 | `--root-cut-recheck` | off | Rank uninstalled root cuts by current efficacy and fill the round quota subject to family caps |
 | `--root-cut-propagation` | off | Apply bounded row deductions from the root model and installed cuts during root cut rounds |
 | `--root-cut-inference` | off | Propagate installed rows and use retained global bounds in implied-bound separation. Also uses cliques with `--clique-table` and binary implications with `--probing` or `--systematic-probing` |

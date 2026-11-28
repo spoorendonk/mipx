@@ -48,7 +48,7 @@ void printUsage(FILE* out) {
                  "[--tree-presolve-max-depth N] "
                  "[--tree-presolve-min-frac N] "
                  "[--tree-presolve-depth-frequency N] "
-                 "[--tree-cuts|--no-tree-cuts] "
+                 "[--tree-cuts|--no-tree-cuts] [--tree-cut-propagation] "
                  "[--objective-propagation|--no-objective-propagation] "
                  "[--objective-integrality|--no-objective-integrality] "
                  "[--tree-pseudocosts|--no-tree-pseudocosts] "
@@ -203,6 +203,7 @@ int main(int argc, char* argv[]) {
     mipx::Int tree_presolve_min_frac = 8;
     mipx::Int tree_presolve_depth_frequency = 3;
     bool tree_cuts_enabled = false;
+    bool tree_cut_propagation = false;
     bool objective_propagation = false;
     bool objective_integrality = false;
     bool tree_pseudocosts = true;
@@ -366,6 +367,8 @@ int main(int argc, char* argv[]) {
                 std::max<mipx::Int>(1, static_cast<mipx::Int>(std::atoll(argv[++i])));
         } else if (arg == "--tree-cuts") {
             tree_cuts_enabled = true;
+        } else if (arg == "--tree-cut-propagation") {
+            tree_cut_propagation = true;
         } else if (arg == "--help" || arg == "-h") {
             printUsage(stdout);
             return 0;
@@ -956,6 +959,7 @@ int main(int argc, char* argv[]) {
             solver.setTreePresolveControls(tree_presolve_max_depth, tree_presolve_min_frac,
                                            tree_presolve_depth_frequency);
             solver.setTreeCutsEnabled(tree_cuts_enabled);
+            solver.setTreeCutPropagationEnabled(tree_cut_propagation);
             solver.setObjectivePropagationEnabled(objective_propagation);
             solver.setObjectiveIntegralityEnabled(objective_integrality);
             solver.setTreePseudocostsEnabled(tree_pseudocosts);
