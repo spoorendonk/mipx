@@ -466,6 +466,7 @@ RootHeuristicOutcome HeuristicRuntime::runRootPortfolio(const RootHeuristicConte
             feasjump.setMaxIterations(config_.root_feasjump_max_iterations);
             feasjump.setMaxRestarts(config_.root_feasjump_max_restarts);
             auto hsol = feasjump.run(ctx.problem, ctx.lp, ctx.primals, incumbent);
+            out.feasjump_passes = feasjump.lastPassCount();
             if (accept("feasjump", hsol)) {
                 ++stats_.improvements;
                 ++out.feasjump_improvements;

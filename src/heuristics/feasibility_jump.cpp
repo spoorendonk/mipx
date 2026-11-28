@@ -43,6 +43,7 @@ Real rowViolation(Real act, Real lb, Real ub) {
 std::optional<HeuristicSolution> FeasibilityJumpHeuristic::run(
     const LpProblem& problem, [[maybe_unused]] DualSimplexSolver& lp, std::span<const Real> primals,
     Real incumbent) {
+    last_pass_count_ = 0;
     const Index n = problem.num_cols;
     const Index m = problem.num_rows;
     if (n == 0) {
@@ -77,6 +78,7 @@ std::optional<HeuristicSolution> FeasibilityJumpHeuristic::run(
     std::optional<HeuristicSolution> best;
 
     for (Int restart = 0; restart < max_restarts_; ++restart) {
+        ++last_pass_count_;
         // Constraint weights (Berthold-Salvagnin weight escalation).
         std::vector<Real> weight(m, 1.0);
 

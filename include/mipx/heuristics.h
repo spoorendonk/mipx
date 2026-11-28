@@ -336,6 +336,7 @@ class FeasibilityJumpHeuristic : public Heuristic {
 public:
     void setMaxIterations(Int iters) { max_iterations_ = iters; }
     void setMaxRestarts(Int restarts) { max_restarts_ = restarts; }
+    [[nodiscard]] Int lastPassCount() const { return last_pass_count_; }
 
     std::optional<HeuristicSolution> run(const LpProblem& problem, DualSimplexSolver& lp,
                                          std::span<const Real> primals, Real incumbent) override;
@@ -345,6 +346,7 @@ public:
 private:
     Int max_iterations_ = 500;
     Int max_restarts_ = 4;
+    Int last_pass_count_ = 0;
 };
 
 // ---------------------------------------------------------------------------

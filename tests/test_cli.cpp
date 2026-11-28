@@ -267,7 +267,7 @@ TEST_CASE("CLI: a MIP stopped before any incumbent reports no objective", "[cli]
     CHECK_FALSE(run.mentions("Objective: 0"));
 }
 
-TEST_CASE("CLI: zero root feasibility-jump restarts skips the call", "[cli][heuristics]") {
+TEST_CASE("CLI: the root feasibility-jump pass limit reaches the heuristic", "[cli][heuristics]") {
     const std::string base =
         "'" + testDataDir() + "/no_incumbent_mip.lp' --no-presolve --no-cuts --node-limit 1 ";
     const auto by_default = runSolver(base);
@@ -281,6 +281,9 @@ TEST_CASE("CLI: zero root feasibility-jump restarts skips the call", "[cli][heur
     CHECK(by_default.mentions("feasjump=1/0"));
     CHECK(one.mentions("feasjump=1/0"));
     CHECK(disabled.mentions("feasjump=0/0"));
+    CHECK(by_default.mentions("feasjump_passes=4"));
+    CHECK(one.mentions("feasjump_passes=1"));
+    CHECK(disabled.mentions("feasjump_passes=0"));
 
     for (const char* invalid : {"-1", "5", "1x", "99999999999999999999"}) {
         INFO(invalid);

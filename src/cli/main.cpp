@@ -352,9 +352,9 @@ int main(int argc, char* argv[]) {
             const auto end = value.data() + value.size();
             const auto [parsed, ec] = std::from_chars(value.data(), end, restarts);
             if (ec != std::errc{} || parsed != end || restarts < 0 ||
-                restarts > mipx::MipSolver::kDefaultRootFeasibilityJumpRestarts) {
+                restarts > mipx::HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts) {
                 std::fprintf(stderr, "--root-feasjump-restarts requires an integer from 0 to %d\n",
-                             mipx::MipSolver::kDefaultRootFeasibilityJumpRestarts);
+                             mipx::HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts);
                 return 1;
             }
             root_feasjump_restarts = restarts;

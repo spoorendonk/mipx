@@ -125,8 +125,9 @@ struct HeuristicRuntimeConfig {
     Int root_local_branching_min_binary_vars = 8;
 
     // New heuristic config.
+    static constexpr Int kDefaultRootFeasibilityJumpRestarts = 4;
     Int root_feasjump_max_iterations = 500;
-    Int root_feasjump_max_restarts = 4;
+    Int root_feasjump_max_restarts = kDefaultRootFeasibilityJumpRestarts;
     Int root_crossover_subproblem_iter_limit = 40;
     Int root_crossover_min_fixed_vars = 4;
     Int root_proximity_subproblem_iter_limit = 40;
@@ -175,6 +176,7 @@ struct RootHeuristicOutcome {
     Int localbranching_improvements = 0;
     Int feasjump_calls = 0;
     Int feasjump_improvements = 0;
+    Int feasjump_passes = 0;
     Int crossover_calls = 0;
     Int crossover_improvements = 0;
     Int proximity_calls = 0;

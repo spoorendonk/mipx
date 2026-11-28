@@ -10,6 +10,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -1551,6 +1552,15 @@ void MipSolver::mergeRcFixingStatsDelta(const RcFixingStats& delta) {
     rc_fixing_stats_.tree_local_fixings += delta.tree_local_fixings;
     rc_fixing_stats_.tree_local_tightenings += delta.tree_local_tightenings;
     rc_fixing_stats_.propagation_triggers += delta.propagation_triggers;
+}
+
+void MipSolver::setRootFeasibilityJumpRestarts(Int restarts) {
+    if (restarts < 0 || restarts > HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts) {
+        throw std::invalid_argument(
+            "Root feasibility-jump passes must be between 0 and " +
+            std::to_string(HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts));
+    }
+    root_feasjump_max_restarts_ = restarts;
 }
 
 HeuristicRuntimeConfig MipSolver::makeHeuristicRuntimeConfig() const {
@@ -5972,7 +5982,7 @@ MipResult MipSolver::solveMinimizationOnce() {
             "zir=%d/%d shift=%d/%d randround=%d/%d clique=%d/%d "
             "propcomp=%d/%d feasjump=%d/%d undercover=%d/%d rc=%d/%d "
             "crossover=%d/%d proximity=%d/%d oneopt=%d/%d twoopt=%d/%d "
-            "work=%.3f\n",
+            "work=%.3f feasjump_passes=%d\n",
             root_int_inf, runtime_config.root_max_int_inf, root_int_vars,
             runtime_config.root_max_int_vars, root_heur_outcome.calls,
             root_heur_outcome.improvements, root_heur_outcome.rounding_calls,
@@ -5994,7 +6004,8 @@ MipResult MipSolver::solveMinimizationOnce() {
             root_heur_outcome.crossover_improvements, root_heur_outcome.proximity_calls,
             root_heur_outcome.proximity_improvements, root_heur_outcome.oneopt_calls,
             root_heur_outcome.oneopt_improvements, root_heur_outcome.twoopt_calls,
-            root_heur_outcome.twoopt_improvements, root_heur_outcome.work_units);
+            root_heur_outcome.twoopt_improvements, root_heur_outcome.work_units,
+            root_heur_outcome.feasjump_passes);
     }
 
     const bool root_basis_dirty = root_heur_outcome.basis_dirty;

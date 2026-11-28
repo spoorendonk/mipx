@@ -377,12 +377,9 @@ public:
         root_heuristic_max_int_inf_ = std::max<Int>(1, max_int_inf);
         root_heuristic_max_int_vars_ = std::max<Int>(1, max_int_vars);
     }
-    static constexpr Int kDefaultRootFeasibilityJumpRestarts = 4;
-    /// Cap root feasibility-jump passes at 0 through the default. Zero skips the call.
-    void setRootFeasibilityJumpRestarts(Int restarts) {
-        root_feasjump_max_restarts_ =
-            std::clamp<Int>(restarts, 0, kDefaultRootFeasibilityJumpRestarts);
-    }
+    /// Limit root feasibility-jump passes, including the initial pass. Zero skips the call.
+    /// Throws std::invalid_argument outside [0, default], so the control only reduces the budget.
+    void setRootFeasibilityJumpRestarts(Int restarts);
     void setPreRootLpFreeEnabled(bool enabled) { pre_root_lp_free_enabled_ = enabled; }
     void setPreRootLpFreeWorkBudget(double max_work_units) {
         pre_root_lp_free_work_budget_ = std::max(1.0, max_work_units);
@@ -782,7 +779,7 @@ private:
     uint64_t heuristic_seed_ = 1;
     Int root_heuristic_max_int_inf_ = kRootHeuristicMaxIntInf;
     Int root_heuristic_max_int_vars_ = kRootHeuristicMaxIntVars;
-    Int root_feasjump_max_restarts_ = kDefaultRootFeasibilityJumpRestarts;
+    Int root_feasjump_max_restarts_ = HeuristicRuntimeConfig::kDefaultRootFeasibilityJumpRestarts;
     bool pre_root_lp_free_enabled_ = false;
     bool pre_root_lp_free_early_stop_ = true;
     Int pre_root_lp_free_max_rounds_ = 24;

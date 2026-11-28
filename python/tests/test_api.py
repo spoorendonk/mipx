@@ -76,6 +76,20 @@ def test_read_mps_unchanged_for_valid_mps() -> None:
     assert result.status == mipx.Status.Infeasible
 
 
+def test_root_feasibility_jump_pass_limit() -> None:
+    solver = mipx.MipSolver()
+    solver.set_verbose(False)
+    solver.load(mipx.read_mps(str(data_path("cli_features.mps"))))
+    for passes in (0, 1, 4):
+        solver.set_root_feasibility_jump_restarts(passes)
+        result = solver.solve()
+        assert result.status == mipx.Status.Optimal
+        assert result.objective == pytest.approx(-22.0)
+    for passes in (-1, 5):
+        with pytest.raises(ValueError, match="Root feasibility-jump passes"):
+            solver.set_root_feasibility_jump_restarts(passes)
+
+
 @pytest.mark.parametrize(
     "call",
     [
