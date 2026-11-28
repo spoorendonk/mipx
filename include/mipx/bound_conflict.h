@@ -21,6 +21,12 @@ struct LearnedBoundConflict {
 [[nodiscard]] std::optional<LearnedBoundConflict> analyzeBoundConflict(
     const BoundReasonTrail& trail, bool find_reconvergence = false);
 
+/// Check a recorded contradiction using the global model and only the given
+/// branch premises. Reject local rows, cutoff-dependent reasons and opaque inputs.
+[[nodiscard]] bool checkGlobalBoundContradiction(const LpProblem& model,
+                                                 const BoundReasonTrail& trail,
+                                                 std::span<const BranchDecision> premises);
+
 /// Recheck a reconvergence clause using only the global model and return its
 /// binary inequality if the forbidden assignment can be ruled out.
 [[nodiscard]] std::optional<Cut> checkedReconvergenceCut(std::span<const BranchDecision> forbidden,

@@ -1573,6 +1573,7 @@ double MipSolver::timeLeft() const {
 bool MipSolver::runRootProbing() {
     probing_stats_ = {};
     probing_stats_.enabled = true;
+    probing_stats_.systematic = systematic_probing_enabled_;
 
     ProbingConfig config;
     config.max_rounds = probing_max_rounds_;
@@ -1584,11 +1585,19 @@ bool MipSolver::runRootProbing() {
     config.detect_dominated = false;
     config.learn_vubs = true;
     config.learn_implications = true;
+    if (systematic_probing_enabled_) {
+        config.max_probes_per_round = systematic_probing_max_pairs_;
+        config.systematic_rows_per_branch = systematic_probing_rows_per_branch_;
+        config.time_limit = timeLeft();
+        config.learn_vubs = false;
+    }
 
     ProbingEngine engine;
     auto stats = engine.probe(problem_, implication_graph_, vb_store_, config);
 
     probing_stats_.variables_probed = stats.variables_probed;
+    probing_stats_.branches_probed = stats.branches_probed;
+    probing_stats_.row_visits = stats.row_visits;
     probing_stats_.fixings_found = stats.fixings_found;
     probing_stats_.implications_found = stats.implications_found;
     probing_stats_.vubs_found = stats.vubs_found;
@@ -1596,6 +1605,17 @@ bool MipSolver::runRootProbing() {
     probing_stats_.equivalences_found = stats.equivalences_found;
     probing_stats_.rounds = stats.rounds;
     probing_stats_.time_seconds = stats.time_seconds;
+    if (conflicts_enabled_ && num_threads_ <= 1) {
+        // The pass visits each branch once, with an empty pool at the root.
+        for (const auto& branch : engine.checkedConflicts()) {
+            auto clause = acquireConflictClause();
+            clause.literals.push_back(branch);
+            clause.lbd = 1;
+            ++probing_stats_.checked_conflicts_published;
+            ++conflict_stats_.bound_conflicts_learned;
+            publishConflict(std::move(clause), ConflictSource::BoundInfeasible);
+        }
+    }
 
     // Probing proved infeasibility (both branches of some probe were
     // infeasible). This deduction is sound because propagation only tightens
@@ -1626,6 +1646,35 @@ bool MipSolver::runRootProbing() {
     }
 
     return false;
+}
+
+bool MipSolver::applyProbingImplications(DualSimplexSolver& lp, std::vector<Real>& lower,
+                                         std::vector<Real>& upper, std::vector<Index>& touched,
+                                         NodeWorkStats& stats) const {
+    // The path bounds are already installed. New fixings extend the same
+    // list, so they wake their own implications and are restored at the next node.
+    for (std::size_t i = 0; i < touched.size(); ++i) {
+        const Index col = touched[i];
+        if (lower[col] < 1.0 && upper[col] > 0.0) {
+            continue;
+        }
+        for (const auto& [target, value] : implication_graph_.implications(col, lower[col] >= 1)) {
+            const Real bound = value ? 1.0 : 0.0;
+            if (lower[target] > bound || upper[target] < bound) {
+                ++stats.probing_implication_cutoffs;
+                return false;
+            }
+            if (lower[target] == bound && upper[target] == bound) {
+                continue;
+            }
+            lower[target] = bound;
+            upper[target] = bound;
+            lp.setColBounds(target, bound, bound);
+            touched.push_back(target);
+            ++stats.probing_implication_fixings;
+        }
+    }
+    return true;
 }
 
 bool MipSolver::hasLpLightCapability() const {
@@ -1682,6 +1731,8 @@ void MipSolver::mergeNodeWorkStats(const NodeWorkStats& stats) {
     lp_stats_.pre_lp_propagation_calls += stats.pre_lp_propagation_calls;
     lp_stats_.pre_lp_propagation_pruned += stats.pre_lp_propagation_pruned;
     lp_stats_.pre_lp_propagation_fixings += stats.pre_lp_propagation_fixings;
+    probing_stats_.tree_implication_fixings += stats.probing_implication_fixings;
+    probing_stats_.tree_implication_cutoffs += stats.probing_implication_cutoffs;
     addSos2PropagationStats(lp_stats_.tree_sos2_propagation, stats.sos2_propagation);
 }
 
@@ -2674,6 +2725,13 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
         touched_vars.push_back(j);
     }
 
+    const auto before_implications = touched_vars.size();
+    if (systematic_probing_enabled_ && implication_graph_.numImplications() > 0 &&
+        !applyProbingImplications(lp, current_lower, current_upper, touched_vars, node_stats)) {
+        return false;
+    }
+    const bool probing_implication_tightened = touched_vars.size() > before_implications;
+
     // Carry the root-derived global reduced-cost fixings into this node's bound
     // vectors. This is a replay of recorded bound changes, not a recomputation:
     // no reduced costs are consulted here. Bounds looser than the global record
@@ -2840,7 +2898,8 @@ bool MipSolver::processNode(DualSimplexSolver& lp, BnbNode& node, Real incumbent
     if (pre_lp_tightenings > 0 && !applySos2Bounds()) {
         return false;
     }
-    const bool pre_lp_tightened = pre_lp_tightenings > 0 || bound_conflict_tightened;
+    const bool pre_lp_tightened =
+        pre_lp_tightenings > 0 || bound_conflict_tightened || probing_implication_tightened;
 
     // Set basis for warm-start.
     t0 = std::chrono::steady_clock::now();
@@ -4861,6 +4920,9 @@ MipResult MipSolver::solveMinimization() {
     const bool native_sos2 = !problem_.native_sos2.empty();
     if (native_sos2 && (node_limit_ <= 0 || time_limit_ <= 0.0)) {
         lp_stats_ = {};
+        probing_stats_ = {};
+        implication_graph_ = {};
+        vb_store_ = {};
         MipResult stopped;
         stopped.status = time_limit_ <= 0.0 ? Status::TimeLimit : Status::NodeLimit;
         stopped.best_bound = -kInf;
@@ -5020,6 +5082,8 @@ MipResult MipSolver::solveMinimizationOnce() {
     symmetry_stats_ = {};
     exact_refinement_stats_ = {};
     probing_stats_ = {};
+    implication_graph_ = {};
+    vb_store_ = {};
     clique_stats_ = {};
     conflict_graph_ = ConflictGraph{};
     clique_table_ = CliqueTable{};
@@ -5466,9 +5530,15 @@ MipResult MipSolver::solveMinimizationOnce() {
     total_work += clique_stats_.build_time_seconds;  // Approximate work measure.
 
     // Root probing: discover implications, variable bounds, and fixings.
-    if (probing_enabled_ && !discrete_vars.empty()) {
+    if ((probing_enabled_ || systematic_probing_enabled_) && !discrete_vars.empty()) {
+        if (!using_transformed_problem) {
+            saved_root_lower = problem_.col_lower;
+            saved_root_upper = problem_.col_upper;
+        }
         const bool probing_infeasible = runRootProbing();
-        total_work += probing_stats_.time_seconds;  // Approximate work measure.
+        total_work += systematic_probing_enabled_
+                          ? static_cast<double>(probing_stats_.row_visits) * 1e-6
+                          : probing_stats_.time_seconds;
         if (probing_infeasible) {
             MipResult result;
             result.status = Status::Infeasible;
@@ -6632,8 +6702,10 @@ MipResult MipSolver::solveMinimizationOnce() {
                     root_certificate_problem = problem_;
                     root_certificate_problem_ptr = &root_certificate_problem;
                 }
-                saved_root_lower = problem_.col_lower;
-                saved_root_upper = problem_.col_upper;
+                if (saved_root_lower.empty()) {
+                    saved_root_lower = problem_.col_lower;
+                    saved_root_upper = problem_.col_upper;
+                }
             }
             t0 = std::chrono::steady_clock::now();
             Int cuts_added =

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "mipx/branch_decision.h"
 #include "mipx/core.h"
 #include "mipx/implication_graph.h"
 #include "mipx/variable_bounds.h"
 
+#include <array>
+#include <cstdint>
 #include <vector>
 
 namespace mipx {
@@ -15,6 +18,8 @@ class DomainPropagator;
 /// Statistics collected during probing.
 struct ProbingStats {
     Int variables_probed = 0;
+    std::array<Int, 2> branches_probed{};
+    std::uint64_t row_visits = 0;  // Measured in systematic mode.
     Int fixings_found = 0;
     Int implications_found = 0;
     Int vubs_found = 0;
@@ -37,6 +42,9 @@ struct ProbingConfig {
     bool learn_vubs = true;            // Learn VUBs/VLBs from probing.
     bool learn_implications = true;    // Learn binary implications.
     double time_limit = 30.0;          // Time limit in seconds.
+    // A positive row cap selects the systematic pass. Both branches receive
+    // this allowance, and max_probes_per_round caps the complete pairs.
+    Int systematic_rows_per_branch = 0;
 };
 
 /// Root probing engine.
@@ -62,6 +70,11 @@ public:
     /// Get variable fixings discovered during the last probe run.
     /// Each entry is (variable_index, fixed_value: 0.0 or 1.0).
     [[nodiscard]] const std::vector<std::pair<Index, Real>>& fixings() const { return fixings_; }
+
+    /// Forbidden branches independently checked against the root model.
+    [[nodiscard]] const std::vector<BranchDecision>& checkedConflicts() const {
+        return checked_conflicts_;
+    }
 
     /// Get variable equivalences discovered during the last probe run.
     [[nodiscard]] const std::vector<VariableEquivalence>& equivalences() const {
@@ -95,6 +108,7 @@ private:
     void detectDominated(const ImplicationGraph& graph, ProbingStats& stats);
 
     std::vector<std::pair<Index, Real>> fixings_;
+    std::vector<BranchDecision> checked_conflicts_;
     std::vector<VariableEquivalence> equivalences_;
     std::vector<std::pair<Index, Index>> dominated_;
 

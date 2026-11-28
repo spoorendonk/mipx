@@ -1,5 +1,6 @@
 #include "mipx/probing.h"
 
+#include "mipx/bound_conflict.h"
 #include "mipx/domain.h"
 #include "mipx/lp_problem.h"
 
@@ -13,6 +14,7 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
                                   VariableBoundStore& vb_store, const ProbingConfig& config) {
     ProbingStats stats;
     fixings_.clear();
+    checked_conflicts_.clear();
     equivalences_.clear();
     dominated_.clear();
 
@@ -20,16 +22,20 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
     auto elapsed = [&]() -> double {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
+    const bool systematic = config.systematic_rows_per_branch > 0;
+    if (systematic && std::ranges::any_of(problem.col_type, [](VarType type) {
+            return type == VarType::SemiContinuous || type == VarType::SemiInteger;
+        })) {
+        return stats;
+    }
 
     // Collect binary variables.
     std::vector<Index> binary_vars;
     binary_vars.reserve(static_cast<std::size_t>(problem.num_cols));
     for (Index j = 0; j < problem.num_cols; ++j) {
-        if (isBinaryColumn(problem, j)) {
-            // Only probe variables that aren't already fixed.
-            if (problem.col_upper[j] - problem.col_lower[j] > kTol) {
-                binary_vars.push_back(j);
-            }
+        if (isBinaryColumn(problem, j) && problem.col_upper[j] - problem.col_lower[j] > kTol &&
+            (!systematic || (problem.col_lower[j] == 0.0 && problem.col_upper[j] == 1.0))) {
+            binary_vars.push_back(j);
         }
     }
 
@@ -44,10 +50,11 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
 
     // Create domain propagator once and reuse across all probes.
     DomainPropagator dp;
-    dp.load(problem);
+    dp.load(problem, systematic);
 
     // Multiple rounds of probing to discover cascading implications.
-    for (Int round = 0; round < config.max_rounds; ++round) {
+    const Int max_rounds = systematic ? 1 : config.max_rounds;
+    for (Int round = 0; round < max_rounds; ++round) {
         ++stats.rounds;
         Int fixings_before = stats.fixings_found;
         Int implications_before = stats.implications_found;
@@ -79,8 +86,10 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
 
             // Reset propagator to base state and apply known fixings.
             dp.pushCheckpoint();
-            for (const auto& [fvar, fval] : fixings_) {
-                dp.setBound(fvar, fval, fval);
+            if (!systematic) {
+                for (const auto& [fvar, fval] : fixings_) {
+                    dp.setBound(fvar, fval, fval);
+                }
             }
 
             if (!probeVariable(var, problem, dp, graph, vb_store, stats, config)) {
@@ -104,6 +113,11 @@ ProbingStats ProbingEngine::probe(const LpProblem& problem, ImplicationGraph& gr
             stats.implications_found == implications_before) {
             break;  // No progress, stop early.
         }
+    }
+
+    if (systematic) {
+        stats.time_seconds = elapsed();
+        return stats;
     }
 
     // Post-probing: detect equivalences and dominated variables.
@@ -141,63 +155,64 @@ bool ProbingEngine::probeVariable(Index var, const LpProblem& problem, DomainPro
     ++stats.variables_probed;
 
     // Save base bounds for VUB/VLB learning.
-    std::vector<Real> base_lower(static_cast<std::size_t>(problem.num_cols));
-    std::vector<Real> base_upper(static_cast<std::size_t>(problem.num_cols));
-    for (Index j = 0; j < problem.num_cols; ++j) {
-        base_lower[j] = dp.getLower(j);
-        base_upper[j] = dp.getUpper(j);
+    std::vector<Real> base_lower;
+    std::vector<Real> base_upper;
+    if (config.learn_vubs) {
+        base_lower.reserve(problem.num_cols);
+        base_upper.reserve(problem.num_cols);
+        for (Index j = 0; j < problem.num_cols; ++j) {
+            base_lower.push_back(dp.getLower(j));
+            base_upper.push_back(dp.getUpper(j));
+        }
     }
 
-    // Probe var=0. Propagate as far as the propagator's budget goes: probing
-    // finds cascading implications and fixings through it, and a row that
-    // tightens without end (#242) only yields fewer of them.
-    dp.pushCheckpoint();
-    dp.setBound(var, 0.0, 0.0);
-    bool feasible_at_0 = dp.propagate();
-
-    if (feasible_at_0) {
-        if (config.learn_implications) {
-            learnImplications(var, false, problem, dp, graph, stats);
+    // A partial propagation pass can still yield valid bound deductions.
+    // A failed systematic branch needs a checked proof to yield a fixing.
+    std::array<bool, 2> infeasible{};
+    for (const bool value : {false, true}) {
+        dp.pushCheckpoint();
+        ++stats.branches_probed[value];
+        const Real bound = value ? 1.0 : 0.0;
+        bool feasible;
+        if (config.systematic_rows_per_branch > 0) {
+            const BranchDecision branch{var, bound, !value, 1};
+            dp.setBranchBound(var, !value, bound, branch.level);
+            Int rows_left = config.systematic_rows_per_branch;
+            feasible = dp.propagateWithRowBudget(rows_left);
+            stats.row_visits += config.systematic_rows_per_branch - rows_left;
+            if (!feasible &&
+                checkGlobalBoundContradiction(problem, *dp.boundReasons(), std::span{&branch, 1})) {
+                checked_conflicts_.push_back(branch);
+                infeasible[value] = true;
+            }
+        } else {
+            dp.setBound(var, bound, bound);
+            feasible = dp.propagate();
+            infeasible[value] = !feasible;
         }
-        if (config.learn_vubs) {
-            learnVariableBounds(var, false, problem, dp, vb_store, base_lower, base_upper, stats);
+        if (feasible) {
+            if (config.learn_implications) {
+                learnImplications(var, value, problem, dp, graph, stats);
+            }
+            if (config.learn_vubs) {
+                learnVariableBounds(var, value, problem, dp, vb_store, base_lower, base_upper,
+                                    stats);
+            }
+        } else {
+            ++stats.infeasible_probes;
         }
-    } else {
-        ++stats.infeasible_probes;
+        dp.popCheckpoint();
     }
-    dp.popCheckpoint();
-
-    // Probe var=1. Propagate to fixpoint (see var=0 above).
-    dp.pushCheckpoint();
-    dp.setBound(var, 1.0, 1.0);
-    bool feasible_at_1 = dp.propagate();
-
-    if (feasible_at_1) {
-        if (config.learn_implications) {
-            learnImplications(var, true, problem, dp, graph, stats);
-        }
-        if (config.learn_vubs) {
-            learnVariableBounds(var, true, problem, dp, vb_store, base_lower, base_upper, stats);
-        }
-    } else {
-        ++stats.infeasible_probes;
-    }
-    dp.popCheckpoint();
 
     // If one direction is infeasible, the variable is fixed.
-    if (!feasible_at_0 && feasible_at_1) {
-        fixings_.push_back({var, 1.0});
-        ++stats.fixings_found;
-        return false;
-    }
-    if (feasible_at_0 && !feasible_at_1) {
-        fixings_.push_back({var, 0.0});
-        ++stats.fixings_found;
-        return false;
-    }
-    if (!feasible_at_0 && !feasible_at_1) {
+    if (infeasible[0] && infeasible[1]) {
         // Both directions infeasible - problem is proven infeasible.
         stats.infeasible = true;
+        return false;
+    }
+    if (infeasible[0] || infeasible[1]) {
+        fixings_.emplace_back(var, infeasible[0] ? 1.0 : 0.0);
+        ++stats.fixings_found;
         return false;
     }
 

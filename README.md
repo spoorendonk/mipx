@@ -109,6 +109,8 @@ Key options:
 | `--quiet` | off | Suppress progress output |
 | `--probing` / `--no-probing` | off | Root probing in the solver (fixings, implications, variable bounds) |
 | `--probing-rounds <n>` / `--probing-probes <n>` / `--probing-time <s>` | 3 / 10000 / 30 | Its budget: rounds, probes per round, seconds |
+| `--systematic-probing` / `--no-systematic-probing` | off | Use a single checked root probing pass in column order. Learn binary fixings and implications and publish checked conflicts in serial search. Takes precedence over `--probing` |
+| `--systematic-probing-pairs <n>` / `--systematic-probing-rows <n>` | 128 / 10000 | Cap complete binary probe pairs and row visits per branch |
 | `--presolve-probing` / `--no-presolve-probing` | off | Probing pass inside presolve |
 | `--presolve-probing-rounds <n>` / `--presolve-probing-probes <n>` / `--presolve-probing-time <s>` | 2 / 5000 / 5 | Its budget, per presolve call |
 | `--clique-table` / `--no-clique-table` | off | Root conflict graph and clique table (propagation, clique cuts) |

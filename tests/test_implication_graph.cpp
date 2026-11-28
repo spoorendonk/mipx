@@ -1,6 +1,8 @@
+#include "mipx/bound_conflict.h"
 #include "mipx/domain.h"
 #include "mipx/implication_graph.h"
 #include "mipx/lp_problem.h"
+#include "mipx/mip_solver.h"
 #include "mipx/probing.h"
 #include "mipx/variable_bounds.h"
 
@@ -761,4 +763,127 @@ TEST_CASE("Probing: proves infeasibility when both branches fail", "[probing]") 
 
     auto stats = engine.probe(prob, graph, vb_store);
     CHECK(stats.infeasible);
+}
+
+TEST_CASE("Systematic probing publishes unique global facts and uses them in the tree",
+          "[probing][mip]") {
+    // The first row has a fractional LP optimum and forbids x=y=1.
+    // The second row makes z=1 infeasible even though z starts unfixed.
+    auto model = makeProblem(3, 2, {{0, 0, 2.0}, {0, 1, 2.0}, {1, 2, 2.0}}, {-kInf, -kInf},
+                             {3.0, 1.0}, {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0},
+                             {VarType::Binary, VarType::Integer, VarType::Binary});
+    model.obj = {-1.0, -1.0, -0.25};
+
+    ImplicationGraph graph;
+    VariableBoundStore vb_store;
+    ProbingEngine engine;
+    ProbingConfig config;
+    config.max_probes_per_round = 2;
+    config.learn_vubs = false;
+    config.time_limit = kInf;
+    config.systematic_rows_per_branch = 1;
+    const auto limited = engine.probe(model, graph, vb_store, config);
+    CHECK(limited.branches_probed == std::array{2, 2});
+    CHECK(limited.row_visits == 4);
+    CHECK(engine.checkedConflicts().empty());
+    CHECK(engine.fixings().empty());
+
+    config.max_probes_per_round = 3;
+    const auto full = engine.probe(model, graph, vb_store, config);
+    CHECK(full.branches_probed == std::array{3, 3});
+    CHECK(full.row_visits == 6);
+    CHECK(full.implications_found == 2);  // One implication and its contrapositive.
+    CHECK(graph.numImplications() == full.implications_found);
+    REQUIRE(engine.fixings().size() == 1);
+    CHECK(engine.fixings().front() == std::pair{2, 0.0});
+    REQUIRE(engine.checkedConflicts().size() == 1);
+    const auto& forbidden = engine.checkedConflicts().front();
+    CHECK(forbidden.variable == 2);
+    CHECK_FALSE(forbidden.is_upper);
+    CHECK(forbidden.bound == 1.0);
+
+    Real enumerated_optimum = kInf;
+    for (unsigned mask = 0; mask < 8; ++mask) {
+        const std::array bits{bool(mask & 1), bool(mask & 2), bool(mask & 4)};
+        if (2 * bits[0] + 2 * bits[1] > 3 || 2 * bits[2] > 1) {
+            continue;
+        }
+        enumerated_optimum = std::min(enumerated_optimum, -bits[0] - bits[1] - 0.25 * bits[2]);
+        for (Index col : graph.binaryVars()) {
+            for (const auto& [target, value] : graph.implications(col, bits[col])) {
+                CHECK(bits[target] == value);
+            }
+        }
+        for (const auto& [col, value] : engine.fixings()) {
+            CHECK(bits[col] == value);
+        }
+        const Real value = bits[forbidden.variable];
+        CHECK_FALSE((forbidden.is_upper ? value <= forbidden.bound : value >= forbidden.bound));
+    }
+
+    MipSolver solver;
+    solver.setPresolve(false);
+    solver.setCutsEnabled(false);
+    solver.setStrongBranchingEnabled(false);
+    solver.setSymmetryEnabled(false);
+    solver.setTreePresolveEnabled(false);
+    solver.setObjectiveIntegralityEnabled(false);
+    solver.setSystematicProbingMaxPairs(3);
+    solver.setSystematicProbingRowsPerBranch(1);
+    solver.load(model);
+    const auto check_result = [&](const MipResult& result) {
+        REQUIRE(result.status == Status::Optimal);
+        CHECK(result.objective == enumerated_optimum);
+        CHECK(result.best_bound == enumerated_optimum);
+        REQUIRE(result.solution.size() == 3);
+        CHECK(result.solution[0] + result.solution[1] == 1.0);
+        CHECK(result.solution[2] == 0.0);
+    };
+
+    check_result(solver.solve());
+    CHECK_FALSE(solver.getProbingStats().enabled);
+    solver.setSystematicProbingEnabled(true);
+    for (int run = 0; run < 2; ++run) {
+        check_result(solver.solve());
+        const auto& stats = solver.getProbingStats();
+        CHECK(stats.systematic);
+        CHECK(stats.branches_probed == full.branches_probed);
+        CHECK(stats.row_visits == full.row_visits);
+        CHECK(stats.implications_found == full.implications_found);
+        CHECK(stats.fixings_found == 1);
+        CHECK(stats.checked_conflicts_published == 1);
+        CHECK(stats.tree_implication_fixings > 0);
+    }
+    solver.setSystematicProbingEnabled(false);
+    check_result(solver.solve());
+    CHECK(solver.getImplicationGraph().numImplications() == 0);
+    CHECK(solver.getProbingStats().checked_conflicts_published == 0);
+    CHECK(solver.getProbingStats().tree_implication_fixings == 0);
+}
+
+TEST_CASE("Global contradiction checking rejects local rows and objective cutoffs", "[probing]") {
+    auto model = makeProblem(1, 1, {{0, 0, 2.0}}, {-kInf}, {1.0}, {0.0}, {1.0}, {VarType::Binary});
+    const std::array premises{BranchDecision{0, 1.0, false, 1}};
+    DomainPropagator dp;
+    dp.load(model, true);
+    dp.setBranchBound(0, false, 1.0, 1);
+    REQUIRE_FALSE(dp.propagate());
+    CHECK(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
+    CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), {}));
+
+    dp.load(model, true, 0);
+    dp.setBranchBound(0, false, 1.0, 1);
+    REQUIRE_FALSE(dp.propagate());
+    CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
+
+    model.row_upper[0] = kInf;
+    model.obj[0] = 1.0;
+    ObjectivePropagator objective;
+    objective.load(model);
+    dp.load(model, true);
+    dp.setObjectiveCutoff(&objective, 0.5);
+    dp.setBranchBound(0, false, 1.0, 1);
+    REQUIRE_FALSE(dp.propagate());
+    CHECK(dp.objectiveInfeasible());
+    CHECK_FALSE(checkGlobalBoundContradiction(model, *dp.boundReasons(), premises));
 }

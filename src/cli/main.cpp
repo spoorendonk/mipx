@@ -61,6 +61,8 @@ void printUsage(FILE* out) {
                  "[--sos2-propagation] "
                  "[--probing|--no-probing] [--probing-rounds N] [--probing-probes N] "
                  "[--probing-time S] "
+                 "[--systematic-probing|--no-systematic-probing] "
+                 "[--systematic-probing-pairs N] [--systematic-probing-rows N] "
                  "[--presolve-probing|--no-presolve-probing] [--presolve-probing-rounds N] "
                  "[--presolve-probing-probes N] [--presolve-probing-time S] "
                  "[--clique-table|--no-clique-table] "
@@ -208,6 +210,9 @@ int main(int argc, char* argv[]) {
     std::optional<mipx::Int> probing_rounds;
     std::optional<mipx::Int> probing_probes;
     std::optional<double> probing_time;
+    bool systematic_probing = false;
+    std::optional<mipx::Int> systematic_probing_pairs;
+    std::optional<mipx::Int> systematic_probing_rows;
     bool presolve_probing = false;
     std::optional<mipx::Int> presolve_probing_rounds;
     std::optional<mipx::Int> presolve_probing_probes;
@@ -342,6 +347,22 @@ int main(int argc, char* argv[]) {
             probing_probes = static_cast<mipx::Int>(std::atoll(argv[++i]));
         } else if (arg == "--probing-time" && i + 1 < argc) {
             probing_time = std::atof(argv[++i]);
+        } else if (arg == "--systematic-probing") {
+            systematic_probing = true;
+        } else if (arg == "--no-systematic-probing") {
+            systematic_probing = false;
+        } else if ((arg == "--systematic-probing-pairs" || arg == "--systematic-probing-rows") &&
+                   i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const auto end = value.data() + value.size();
+            mipx::Int count = 0;
+            const auto [parsed, ec] = std::from_chars(value.data(), end, count);
+            if (ec != std::errc{} || parsed != end || count <= 0) {
+                std::fprintf(stderr, "%s requires a positive integer\n", arg.c_str());
+                return 1;
+            }
+            (arg == "--systematic-probing-pairs" ? systematic_probing_pairs
+                                                 : systematic_probing_rows) = count;
         } else if (arg == "--presolve-probing") {
             presolve_probing = true;
         } else if (arg == "--no-presolve-probing") {
@@ -854,6 +875,13 @@ int main(int argc, char* argv[]) {
             if (probing_time) {
                 solver.setProbingTimeLimit(*probing_time);
             }
+            solver.setSystematicProbingEnabled(systematic_probing);
+            if (systematic_probing_pairs) {
+                solver.setSystematicProbingMaxPairs(*systematic_probing_pairs);
+            }
+            if (systematic_probing_rows) {
+                solver.setSystematicProbingRowsPerBranch(*systematic_probing_rows);
+            }
             solver.setCliqueTableEnabled(clique_table_enabled);
             if (plunge_depth || plunge_bound_quotient) {
                 // The setter takes both; whichever was not given keeps the
@@ -972,6 +1000,17 @@ int main(int argc, char* argv[]) {
                     stats.lp_combined_proofs_learned, stats.bound_conflicts_learned,
                     stats.reconvergence_cuts_added, stats.branch_score_overrides,
                     solver.getSearchStats().conflict_restarts);
+            }
+            if (systematic_probing) {
+                const auto& stats = solver.getProbingStats();
+                log.log(
+                    "Systematic probing: down=%d up=%d rows=%llu fixings=%d implications=%d "
+                    "conflicts=%d tree_fixings=%llu tree_cutoffs=%llu\n",
+                    stats.branches_probed[0], stats.branches_probed[1],
+                    static_cast<unsigned long long>(stats.row_visits), stats.fixings_found,
+                    stats.implications_found, stats.checked_conflicts_published,
+                    static_cast<unsigned long long>(stats.tree_implication_fixings),
+                    static_cast<unsigned long long>(stats.tree_implication_cutoffs));
             }
             if (print_det_heur_gate) {
                 log.log("Deterministic tree heuristic gate openings: %llu\n",

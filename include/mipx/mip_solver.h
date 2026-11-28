@@ -25,6 +25,7 @@
 #include "mipx/variable_bounds.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -309,6 +310,12 @@ struct MipExactRefinementStats {
 struct MipProbingStats {
     bool enabled = false;
     Int variables_probed = 0;
+    bool systematic = false;
+    std::array<Int, 2> branches_probed{};
+    std::uint64_t row_visits = 0;
+    Int checked_conflicts_published = 0;
+    std::uint64_t tree_implication_fixings = 0;
+    std::uint64_t tree_implication_cutoffs = 0;
     Int fixings_found = 0;
     Int implications_found = 0;
     Int vubs_found = 0;
@@ -686,6 +693,14 @@ public:
     void setProbingMaxProbesPerRound(Int probes) {
         probing_max_probes_per_round_ = std::max<Int>(1, probes);
     }
+    /// Replace the legacy root probing pass with one bounded, checked pass.
+    void setSystematicProbingEnabled(bool enabled) { systematic_probing_enabled_ = enabled; }
+    void setSystematicProbingMaxPairs(Int pairs) {
+        systematic_probing_max_pairs_ = std::max<Int>(1, pairs);
+    }
+    void setSystematicProbingRowsPerBranch(Int rows) {
+        systematic_probing_rows_per_branch_ = std::max<Int>(1, rows);
+    }
     const MipProbingStats& getProbingStats() const { return probing_stats_; }
     /// Enable the root conflict graph / clique table. When on, cliques drive
     /// node domain propagation and maximal-clique separation at the root.
@@ -726,10 +741,15 @@ private:
         Int pre_lp_propagation_calls = 0;
         Int pre_lp_propagation_pruned = 0;
         Int pre_lp_propagation_fixings = 0;
+        std::uint64_t probing_implication_fixings = 0;
+        std::uint64_t probing_implication_cutoffs = 0;
         Sos2PropagationStats sos2_propagation;
     };
 
     void mergeNodeWorkStats(const NodeWorkStats& stats);
+    bool applyProbingImplications(DualSimplexSolver& lp, std::vector<Real>& lower,
+                                  std::vector<Real>& upper, std::vector<Index>& touched,
+                                  NodeWorkStats& stats) const;
 
     struct NodeScratch {
         std::vector<Int> var_epoch;
@@ -1105,6 +1125,9 @@ private:
 
     // Probing infrastructure.
     bool probing_enabled_ = false;
+    bool systematic_probing_enabled_ = false;
+    Int systematic_probing_max_pairs_ = 128;
+    Int systematic_probing_rows_per_branch_ = 10000;
     Int probing_max_rounds_ = 3;
     double probing_time_limit_ = 30.0;
     Int probing_max_probes_per_round_ = ProbingConfig{}.max_probes_per_round;

@@ -165,14 +165,18 @@ bool checksRow(const LpProblem& model, const BoundReasonTrail& trail, Index row,
            checksRowSide(model, trail, row, supports, opposite, false);
 }
 
-bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail,
-                     const BoundReason& step) {
+bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail, const BoundReason& step,
+                     std::span<const BranchDecision> premises) {
     const auto& endpoint = step.endpoint;
     switch (step.source) {
         case BoundReasonSource::Model:
+            return endpoint.value == (endpoint.is_upper ? model.col_upper[endpoint.col]
+                                                        : model.col_lower[endpoint.col]);
         case BoundReasonSource::Branch:
-            // The replay starts with only model bounds and the cut's premises.
-            return true;
+            return std::ranges::any_of(premises, [&](const BranchDecision& premise) {
+                return premise.variable == endpoint.col && premise.is_upper == endpoint.is_upper &&
+                       premise.bound == endpoint.value;
+            });
         case BoundReasonSource::Row: {
             auto opposite = endpoint;
             opposite.is_upper = !endpoint.is_upper;
@@ -209,9 +213,10 @@ bool checksDeduction(const LpProblem& model, const BoundReasonTrail& trail,
     }
 }
 
-bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail) {
+bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail,
+                         std::span<const BranchDecision> premises) {
     const auto& failure = trail.contradiction();
-    if (!failure) {
+    if (!failure || failure->scope.node_local || failure->scope.cutoff != kInf) {
         return false;
     }
     std::vector<BoundReasonId> pending;
@@ -236,7 +241,8 @@ bool checksContradiction(const LpProblem& model, const BoundReasonTrail& trail) 
         pending.pop_back();
         if (checked.insert(id).second) {
             const auto& step = trail.reason(id);
-            if (!checksDeduction(model, trail, step)) {
+            if (step.scope.node_local || step.scope.cutoff != kInf ||
+                !checksDeduction(model, trail, step, premises)) {
                 return false;
             }
             for (const auto support : step.supports.ids()) {
@@ -354,6 +360,16 @@ std::optional<LearnedBoundConflict> analyzeConflict(const BoundReasonTrail& trai
 
 }  // namespace
 
+bool checkGlobalBoundContradiction(const LpProblem& model, const BoundReasonTrail& trail,
+                                   std::span<const BranchDecision> premises) {
+    if (std::ranges::any_of(model.col_type, [](VarType type) {
+            return type == VarType::SemiContinuous || type == VarType::SemiInteger;
+        })) {
+        return false;
+    }
+    return checksContradiction(model, trail, premises);
+}
+
 std::optional<LearnedBoundConflict> analyzeBoundConflict(const BoundReasonTrail& trail,
                                                          bool find_reconvergence) {
     const auto& contradiction = trail.contradiction();
@@ -409,7 +425,7 @@ std::optional<Cut> checkedReconvergenceCut(std::span<const BranchDecision> forbi
     if (!replay.contradiction() && verifier.propagate()) {
         return std::nullopt;
     }
-    if (!checksContradiction(global_model, replay)) {
+    if (!checksContradiction(global_model, replay, sorted)) {
         return std::nullopt;
     }
     return cut;
